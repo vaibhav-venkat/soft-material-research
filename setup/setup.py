@@ -10,8 +10,8 @@ from hoomd.md.external import wall
 from hoomd.md.force import Custom
 
 # Parameters
-N_vertex = 250
-N_abp = 100
+N_vertex = 500
+N_abp = 200
 
 sigma_vertex = 0.05
 sigma_abp = 1.0
@@ -131,7 +131,7 @@ bond_force.params["bonds"] = dict(
     # l_min = sigma_vertex,
     l_c1=3.9999 * sigma_vertex,
     l_c0=4.0001 * sigma_vertex,
-    l_max=10 * sigma_vertex,
+    l_max=100 * sigma_vertex,
 )
 
 
@@ -164,18 +164,18 @@ lj.r_cut[("abp", "abp")] = 0.0
 
 integrator.forces.append(lj)
 
-# Active force for ABPs
-active = hoomd.md.force.Active(filter=hoomd.filter.Type(["abp"]))
-active.use_orientation = True
-active.active_force["abp"] = (v0 * gamma, 0.0, 0.0)  # will be rotated
-active.active_torque["abp"] = (0.0, 0.0, 0.0)
-integrator.forces.append(active)
+# # Active force for ABPs
+# active = hoomd.md.force.Active(filter=hoomd.filter.Type(["abp"]))
+# active.use_orientation = True
+# active.active_force["abp"] = (v0 * gamma, 0.0, 0.0)  # will be rotated
+# active.active_torque["abp"] = (0.0, 0.0, 0.0)
+# integrator.forces.append(active)
 
-# Rotational diffusion updater
-rot_diff = active.create_diffusion_updater(
-    trigger=hoomd.trigger.Periodic(1), rotational_diffusion=1.0 / tau
-)
-sim.operations += rot_diff
+# # Rotational diffusion updater
+# rot_diff = active.create_diffusion_updater(
+#     trigger=hoomd.trigger.Periodic(1), rotational_diffusion=1.0 / tau
+# )
+# sim.operations += rot_diff
 
 
 # Perimeter conservation (2D perimeter; 3D area conservation)
@@ -229,8 +229,8 @@ class PerimeterConservation(Custom):
 # integrator.forces.append(perimeter_conservation)
 
 # --- Output ---
-filename = "perimeter-conserved-2D-vesicle_CPU_harmonic_bonds-active.gsd"
-# filename = "perimeter-conserved-2D-vesicle_CPU_harmonic_bonds-passive.gsd"
+# filename = "perimeter-conserved-2D-vesicle_CPU_harmonic_bonds-active.gsd"
+filename = "perimeter-conserved-2D-vesicle_CPU_harmonic_bonds-passive.gsd"
 gsd_writer = hoomd.write.GSD(
     filename=filename,
     trigger=hoomd.trigger.Periodic(5000),
@@ -240,5 +240,6 @@ gsd_writer = hoomd.write.GSD(
 sim.operations.writers.append(gsd_writer)
 
 print("Running simulation...")
-sim.run(1000000)
+num_runs = 2000000
+sim.run(num_runs)
 print("Done.")

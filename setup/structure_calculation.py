@@ -4,7 +4,6 @@ import gsd.hoomd
 import matplotlib.pyplot as plt
 import numpy as np
 import numpy.typing as npt
-from scipy.interpolate import interp1d
 
 # Constants
 FILENAME_ACTIVE = "perimeter-conserved-2D-vesicle_CPU_harmonic_bonds-active.gsd"
@@ -53,10 +52,12 @@ def calculate(
 
         theta_sort_indices = np.argsort(theta)
         r_sorted = r[theta_sort_indices]
-        # unused `theta_sorted`
-        # theta_sorted = theta[theta_sort_indices]
+        theta_sorted = theta[theta_sort_indices]
 
-        h_k = np.fft.fft(r_sorted)
+        # Interpolate radial profile onto uniform angular grid
+        r_interp, _ = interpolate_radial_profile_on_grid(r_sorted, theta_sorted)
+
+        h_k = np.fft.fft(r_interp)
         structure_factor = np.abs(h_k) ** 2
 
         if frame_idx >= equilibrium_frames:
@@ -146,6 +147,42 @@ def plot_two(
         plt.savefig(filename)
 
 
+def extract_scaling_factor(
+    avg_structure_factor: npt.NDArray[np.float64], k: np.ndarray
+) -> float:
+    intermediate_k_indices = np.where((k >= 0.2) & (k <= 1.0))
+    k_intermediate = k[intermediate_k_indices]
+    structure_intermediate = avg_structure_factor[intermediate_k_indices]
+
+    log_structure_factor = np.log(structure_intermediate)
+    log_k = np.log(k_intermediate)
+    slope, _ = np.polyfit(log_k, log_structure_factor, 1)
+
+    return slope
+
+
+def interpolate_radial_profile_on_grid(
+    radial_profile: npt.NDArray[np.float64],
+    angular_coordinates: npt.NDArray[np.float64],
+    n_points: int | None = None,
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+    if n_points is None:
+        n_points = len(radial_profile)
+
+    new_angle_grid = np.linspace(0, 2 * np.pi, n_points, endpoint=False)
+
+    extended_angular_coordinates = np.append(
+        angular_coordinates, angular_coordinates[0] + 2 * np.pi
+    )
+    extended_radial_profile = np.append(radial_profile, radial_profile[0])
+
+    interpolated_radial_profile = np.interp(
+        new_angle_grid, extended_angular_coordinates, extended_radial_profile
+    )
+
+    return interpolated_radial_profile, new_angle_grid
+
+
 # sample code.
 
 s1, k1 = calculate(FILENAME_ACTIVE, SIGMA_VERTEX, EQUILIBRIUM_FRAMES, VERTEX_TYPE)
@@ -153,5 +190,11 @@ s2, k2 = calculate(FILENAME_PASSIVE, SIGMA_VERTEX, EQUILIBRIUM_FRAMES, VERTEX_TY
 
 if s1 is not None and k1 is not None and s2 is not None and k2 is not None:
     plot_two(s1, k1, "Active", s2, k2, "Passive", filename="comparison.png")
+
+    scaling_factor_s1 = extract_scaling_factor(s1, k1)
+    print(f"Scaling factor for s1 (Active): {scaling_factor_s1}")
+    scaling_factor_s2 = extract_scaling_factor(s2, k2)
+    print(f"Scaling factor for s2 (Passive): {scaling_factor_s2}")
+
 else:
     print("Error during calculation")
