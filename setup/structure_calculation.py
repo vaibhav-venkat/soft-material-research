@@ -49,6 +49,7 @@ def calculate(
 
         r = np.sqrt(centered_x**2 + centered_y**2)
         theta = np.arctan2(centered_y, centered_x)
+        theta = np.where(theta < 0, theta + 2 * np.pi, theta)
 
         theta_sort_indices = np.argsort(theta)
         r_sorted = r[theta_sort_indices]

@@ -30,7 +30,7 @@ kT = 1.0
 dt = 0.000001
 gamma = 1
 
-k_bond = 2500
+k_bond = 1
 k_bend = 2 * 20
 v0 = 20
 tau = 1
