@@ -11,55 +11,44 @@ from hoomd.md.force import Custom
 
 # Parameters
 N_vertex = 250
-N_abp = 100
-
+N_abp = 1000
+ACTIVE = False
 sigma_vertex = 0.05
 sigma_abp = 1.0
 min_dist = 0.5 * (sigma_vertex + sigma_abp)
 l0 = 4 * sigma_vertex
 delta = 0.5 * l0  # buffer for cutoff range
-ACTIVE = True
-R_vertex = 0.5 * N_vertex * l0 / np.pi
-D0 = R_vertex * 2
 
+L = (N_vertex + 1) * l0
 
-R_abp = 0.3
-# R_vertex, R_abp not particle radius but radial distance
 
 kT = 1.0
-dt = 0.000001
+dt = 0.0000001
 gamma = 1
 
-# k_bond = 15000
-k_bond = 1
-k_bend = 40
+k_bond = 15000
+# k_bond = 1
+k_bend = 2 * 20
 v0 = 20
 tau = 1
-
-print(v0 * tau / D0)
-# assert False
-
-P0 = N_vertex * l0
-k_p = 100
 
 seed = 42
 np.random.seed(seed)
 
-# ---- Create vertex ring ----
-theta = np.linspace(0, 2 * np.pi, N_vertex, endpoint=False)
-vertex_pos = np.array(
-    [(R_vertex * np.cos(t), R_vertex * np.sin(t), 0.0) for t in theta]
-)
-P0 = 2 * np.pi * R_vertex
 
-# ---- Place ABPs inside ring ----
-abp_pos = []
-while len(abp_pos) < N_abp:
-    r = R_vertex * np.sqrt(np.random.rand()) * 0.9
-    angle = 2 * np.pi * np.random.rand()
-    x, y = r * np.cos(angle), r * np.sin(angle)
-    if np.min(np.linalg.norm(vertex_pos[:, :2] - [x, y], axis=1)) > min_dist:
-        abp_pos.append((x, y, 0.0))
+vertex_pos = np.array(
+    [(0.0, y, 0.0) for y in np.linspace(-L / 2, L / 2, N_vertex, endpoint=False)]
+)
+
+# abp_pos = np.array([(x, y, 0.0) for x, y in (np.random.rand(N_abp, 2) - 1/2) * L])
+abp_pos = np.array(
+    [
+        ((sigma_vertex + sigma_abp) / 2 * 2 ** (1 / 6) + 0.1, y, 0.0)
+        for y in (np.random.rand(N_abp) - 1 / 2) * L
+    ]
+)
+# abp_pos[:, 0][np.abs(abp_pos[:, 0]) <  (sigma_vertex + sigma_abp)/2] += 3 * (sigma_vertex + sigma_abp)
+abp_pos[: int(N_abp / 2), 0] *= -1
 
 # Combine
 positions = np.vstack((vertex_pos, abp_pos))
@@ -81,7 +70,14 @@ frame.particles.types = types
 frame.particles.typeid = typeid
 frame.particles.diameter = diameters
 frame.particles.moment_inertia = [(0, 0, 1)] * N_particles
-frame.configuration.box = [D0 * 2, D0 * 2, 0, 0, 0, 0]  # Lz=0 for 2D
+frame.configuration.box = [
+    1.1 * (sigma_vertex + 2 * sigma_abp) * 2 ** (1 / 6),
+    L,
+    0,
+    0,
+    0,
+    0,
+]  # Lz=0 for 2D
 
 # Bonds (close ring)
 bonds = [(i, (i + 1) % N_vertex) for i in range(N_vertex)]
@@ -129,9 +125,9 @@ bond_force.params["bonds"] = dict(
     k_b=k_bond,
     l_min=0,
     # l_min = sigma_vertex,
-    l_c1=3.9999 * sigma_vertex,
-    l_c0=4.0001 * sigma_vertex,
-    l_max=10 * sigma_vertex,
+    l_c1=2.0 * sigma_vertex,
+    l_c0=6.0 * sigma_vertex,
+    l_max=100 * sigma_vertex,
 )
 
 
@@ -230,12 +226,12 @@ class PerimeterConservation(Custom):
 
 # --- Output ---
 if ACTIVE:
-    filename = "perimeter-conserved-2D-vesicle_CPU_harmonic_bonds-active.gsd"
+    fn = "perimeter-conserved-2D-membrane_CPU_harmonic_bonds-active.gsd"
 else:
-    filename = "perimeter-conserved-2D-vesicle_CPU_harmonic_bonds-passive.gsd"
+    fn = "perimeter-conserved-2D-membrane_CPU_harmonic_bonds-passive.gsd"
 gsd_writer = hoomd.write.GSD(
-    filename=filename,
-    trigger=hoomd.trigger.Periodic(5000),
+    filename=fn,
+    trigger=hoomd.trigger.Periodic(10000),
     filter=hoomd.filter.All(),
     mode="wb",
 )
