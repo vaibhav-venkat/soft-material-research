@@ -10,15 +10,15 @@ from hoomd.md.external import wall
 from hoomd.md.force import Custom
 
 # Parameters
-N_vertex = 500
-N_abp = 200
-ACTIVE = True
+N_vertex = 250
+N_abp = 100
+
 sigma_vertex = 0.05
 sigma_abp = 1.0
 min_dist = 0.5 * (sigma_vertex + sigma_abp)
 l0 = 4 * sigma_vertex
 delta = 0.5 * l0  # buffer for cutoff range
-
+ACTIVE = True
 R_vertex = 0.5 * N_vertex * l0 / np.pi
 D0 = R_vertex * 2
 
@@ -30,8 +30,9 @@ kT = 1.0
 dt = 0.000001
 gamma = 1
 
+# k_bond = 15000
 k_bond = 1
-k_bend = 2 * 20
+k_bend = 40
 v0 = 20
 tau = 1
 
@@ -130,7 +131,7 @@ bond_force.params["bonds"] = dict(
     # l_min = sigma_vertex,
     l_c1=3.9999 * sigma_vertex,
     l_c0=4.0001 * sigma_vertex,
-    l_max=100 * sigma_vertex,
+    l_max=10 * sigma_vertex,
 )
 
 
@@ -162,7 +163,6 @@ lj.r_cut[("vertex", "abp")] = 2 ** (1 / 6) * (sigma_vertex + sigma_abp) / 2
 lj.r_cut[("abp", "abp")] = 0.0
 
 integrator.forces.append(lj)
-
 if ACTIVE:
     # Active force for ABPs
     active = hoomd.md.force.Active(filter=hoomd.filter.Type(["abp"]))
@@ -242,6 +242,5 @@ gsd_writer = hoomd.write.GSD(
 sim.operations.writers.append(gsd_writer)
 
 print("Running simulation...")
-num_runs = 1000000
-sim.run(num_runs)
+sim.run(1000000)
 print("Done.")

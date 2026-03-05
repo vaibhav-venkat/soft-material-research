@@ -23,12 +23,12 @@ L = (N_vertex + 1) * l0
 
 
 kT = 1.0
-dt = 0.000001
+dt = 0.0000001
 gamma = 1
 
 # k_bond = 15000
 k_bond = 1
-k_bend = 20
+k_bend = 2 * 20
 v0 = 20
 tau = 1
 
@@ -125,9 +125,9 @@ bond_force.params["bonds"] = dict(
     k_b=k_bond,
     l_min=0,
     # l_min = sigma_vertex,
-    l_c1=3.9999 * sigma_vertex,
-    l_c0=4.0001 * sigma_vertex,
-    l_max=10 * sigma_vertex,
+    l_c1=2.0 * sigma_vertex,
+    l_c0=6.0 * sigma_vertex,
+    l_max=100 * sigma_vertex,
 )
 
 
@@ -159,9 +159,8 @@ lj.r_cut[("vertex", "abp")] = 2 ** (1 / 6) * (sigma_vertex + sigma_abp) / 2
 lj.r_cut[("abp", "abp")] = 0.0
 
 integrator.forces.append(lj)
-
-# Active force for ABPs
 if ACTIVE:
+    # Active force for ABPs
     active = hoomd.md.force.Active(filter=hoomd.filter.Type(["abp"]))
     active.use_orientation = True
     active.active_force["abp"] = (v0 * gamma, 0.0, 0.0)  # will be rotated
