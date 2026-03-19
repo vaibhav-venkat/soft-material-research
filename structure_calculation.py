@@ -21,12 +21,6 @@ EQUILIBRIUM_FRAMES = 10
 VERTEX_TYPE = 0
 
 
-def _ordinal(n: int) -> str:
-    if 10 <= (n % 100) <= 20:
-        suffix = "th"
-    else:
-        suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
-    return f"{n}{suffix}"
 
 
 def plot_N_abp(
