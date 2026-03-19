@@ -1,0 +1,2 @@
+[tool.ty.environment]
+python = "/opt/homebrew/anaconda3/envs/omar-group"

@@ -1,7 +1,8 @@
 from abc import ABC, abstractmethod
-
 import numpy as np
 import numpy.typing as npt
+
+FloatArray = npt.NDArray[np.dtype[np.float64]]
 
 
 def interpolate_periodic(
