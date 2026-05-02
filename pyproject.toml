@@ -1,2 +1,2 @@
 [tool.ty.environment]
-python = "/opt/homebrew/anaconda3/envs/omar-group"
+python = "/opt/homebrew/anaconda3/envs/strucs_and_funcs"

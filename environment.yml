@@ -1,0 +1,14 @@
+name: strucs_and_funcs
+channels:
+  - conda-forge
+  - defaults
+
+dependencies:
+  - python=3.14
+  - hoomd=6.1.1
+  - gsd=4.2.0
+  - numpy=2.4.2
+  - matplotlib=3.10.8
+  - pip
+  - setuptools
+  - wheel

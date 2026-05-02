@@ -1,4 +1,6 @@
 # ideal 2D vesicle (from modified parameter version) + perimeter conservation
+from pathlib import Path
+
 import gsd.hoomd
 import hoomd
 import hoomd.md
@@ -7,6 +9,8 @@ from hoomd import update
 from hoomd.custom import Action
 from hoomd.md.external import wall
 from hoomd.md.force import Custom
+
+PROJECT_DIR = Path(__file__).resolve().parent
 
 # Parameters
 N_vertex = 5 * 250
@@ -99,13 +103,14 @@ frame.angles.types = ["harmonic"]
 frame.angles.typeid = [0] * len(angles)
 frame.angles.group = angles
 
-with gsd.hoomd.open(name="initial-abp-vesicle.gsd", mode="w") as f:
+initial_gsd = PROJECT_DIR / "initial-abp-vesicle.gsd"
+with gsd.hoomd.open(name=str(initial_gsd), mode="w") as f:
     f.append(frame)
 
 # ---- Simulation ----
 cpu = hoomd.device.CPU()
 sim = hoomd.Simulation(device=cpu, seed=seed)
-sim.create_state_from_gsd("initial-abp-vesicle.gsd")
+sim.create_state_from_gsd(str(initial_gsd))
 
 integrator = hoomd.md.Integrator(dt=dt)
 sim.operations.integrator = integrator
@@ -222,7 +227,7 @@ if ACTIVE:
 else:
     filename = "perimeter-conserved-2D-vesicle_CPU_harmonic_bonds-passive.gsd"
 gsd_writer = hoomd.write.GSD(
-    filename=filename,
+    filename=str(PROJECT_DIR / filename),
     trigger=hoomd.trigger.Periodic(5000),
     filter=hoomd.filter.All(),
     mode="wb",

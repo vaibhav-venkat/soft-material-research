@@ -1,22 +1,40 @@
-from analysis import (
-    ANALYZERS,
-    Membrane,
-    ModeAnalyzer,
-    Vesicle,
-    calculate,
-    extract_scaling_factor,
-    get_analyzer,
-    interpolate_periodic,
-    plot,
-    plot_two,
-)
+from pathlib import Path
+
 import matplotlib.pyplot as plt
 import numpy as np
 
-FN_ACTIVE_VESICLE = "perimeter-conserved-2D-vesicle_CPU_harmonic_bonds-active.gsd"
-FN_PASSIVE_VESICLE = "perimeter-conserved-2D-vesicle_CPU_harmonic_bonds-passive.gsd"
-FN_ACTIVE_MEMBRANE = "perimeter-conserved-2D-membrane_CPU_harmonic_bonds-active.gsd"
-FN_PASSIVE_MEMBRANE = "perimeter-conserved-2D-membrane_CPU_harmonic_bonds-passive.gsd"
+if __package__:
+    from active_passive_calc.analysis import (
+        ANALYZERS,
+        Membrane,
+        ModeAnalyzer,
+        Vesicle,
+        calculate,
+        extract_scaling_factor,
+        get_analyzer,
+        interpolate_periodic,
+        plot,
+        plot_two,
+    )
+else:
+    from analysis import (
+        ANALYZERS,
+        Membrane,
+        ModeAnalyzer,
+        Vesicle,
+        calculate,
+        extract_scaling_factor,
+        get_analyzer,
+        interpolate_periodic,
+        plot,
+        plot_two,
+    )
+
+PROJECT_DIR = Path(__file__).resolve().parent
+FN_ACTIVE_VESICLE = PROJECT_DIR / "perimeter-conserved-2D-vesicle_CPU_harmonic_bonds-active.gsd"
+FN_PASSIVE_VESICLE = PROJECT_DIR / "perimeter-conserved-2D-vesicle_CPU_harmonic_bonds-passive.gsd"
+FN_ACTIVE_MEMBRANE = PROJECT_DIR / "perimeter-conserved-2D-membrane_CPU_harmonic_bonds-active.gsd"
+FN_PASSIVE_MEMBRANE = PROJECT_DIR / "perimeter-conserved-2D-membrane_CPU_harmonic_bonds-passive.gsd"
 EQUILIBRIUM_FRAMES = 10
 VERTEX_TYPE = 0
 
@@ -38,7 +56,7 @@ def plot_N_abp(
     plotted_count = 0
 
     for idx in range(1, n + 1):
-        file_name = (
+        file_name = PROJECT_DIR / (
             f"perimeter-conserved-2D-membrane_CPU_harmonic_bonds-active-{idx}.gsd"
         )
         avg_structure_factor, k = calculate(
@@ -102,13 +120,13 @@ __all__ = [
     "FN_PASSIVE_MEMBRANE",
     "EQUILIBRIUM_FRAMES",
     "VERTEX_TYPE",
-    "plot_active_membrane_structure_factors_by_n",
+    "plot_N_abp",
 ]
 
 if __name__ == "__main__":
     MODE = "membrane"
 
-    plot_N_abp(4, filename="images/N_abp_plot.png")
+    plot_N_abp(4, filename=PROJECT_DIR / "images" / "N_abp_plot.png")
     # if MODE == "vesicle":
     #     fn_active = FN_ACTIVE_VESICLE
     #     fn_passive = FN_PASSIVE_VESICLE

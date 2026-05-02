@@ -1,4 +1,5 @@
 from typing import cast
+from pathlib import Path
 
 import gsd.hoomd
 import numpy as np
@@ -8,14 +9,14 @@ from .analyzers import get_analyzer, interpolate_periodic
 
 
 def calculate(
-    filename: str,
+    filename: str | Path,
     sigma_vertex: float,
     equilibrium_frames: int,
     vertex_type: int,
     mode: str = "vesicle",
 ) -> tuple[npt.NDArray[np.float64] | None, np.ndarray | None]:
     analyzer = get_analyzer(mode, sigma_vertex)
-    file: gsd.hoomd.HOOMDTrajectory = gsd.hoomd.open(name=filename, mode="r")
+    file: gsd.hoomd.HOOMDTrajectory = gsd.hoomd.open(name=str(filename), mode="r")
 
     n_grid: int | None = None
     k: np.ndarray | None = None
