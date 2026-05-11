@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import numpy as np
+
 if __package__:
     from hexatic.analysis import (
         compute_hexatic_order_trajectory,
@@ -31,12 +33,22 @@ EQUILIBRIUM_FRAME = 10
 NEIGHBORS = 6
 DISTRIBUTION_BINS = 50
 VELOCITY_COMPONENT = 0
+N_PARTICLES = 1000
+RHO = 0.2
+SIGMA = 1.0
+VOLUME = N_PARTICLES / RHO
+CAVITY_RADIUS = 1.4 * (VOLUME * 3.0 / 4.0 / np.pi) ** (1.0 / 3.0)
+CUTOFF = 2.0 ** (1.0 / 6.0) * SIGMA
+SHELL_THICKNESS = 0.05 * SIGMA
+SHELL_DELTA = CUTOFF + SHELL_THICKNESS
 
 
 def main() -> None:
     steps, psi = compute_hexatic_order_trajectory(
         IN_GSD,
         n_neighbors=NEIGHBORS,
+        cavity_radius=CAVITY_RADIUS,
+        shell_delta=SHELL_DELTA,
     )
     save_hexatic_text(HEXATIC_TXT, steps, psi)
 
@@ -49,6 +61,7 @@ def main() -> None:
         frame_indices,
         min_frame=EQUILIBRIUM_FRAME,
         bins=DISTRIBUTION_BINS,
+        exclude_zeros=True,
     )
     save_distribution_text(
         DISTRIBUTION_TXT,
@@ -60,7 +73,7 @@ def main() -> None:
     plot_hexatic_distribution(
         bin_centers,
         probability_density,
-        title=f"Hexatic order distribution, frames > {EQUILIBRIUM_FRAME}",
+        title=f"Hexatic order distribution, shell particles, frames > {EQUILIBRIUM_FRAME}",
         filename=FIGURE_FILE,
     )
 
@@ -72,16 +85,23 @@ def main() -> None:
     )
 
     selected_psi_abs = psi_abs[frame_indices > EQUILIBRIUM_FRAME]
+    nonzero_selected_psi_abs = np.count_nonzero(selected_psi_abs)
+    distribution_psi_abs = selected_psi_abs[selected_psi_abs > 0.0]
     print(f"Loaded {psi.shape[0]} frames and {psi.shape[1]} particles.")
+    print(f"Used cavity radius R={CAVITY_RADIUS:.6f}.")
+    print(f"Used wall repulsion cutoff={CUTOFF:.6f}.")
+    print(f"Used shell thickness={SHELL_THICKNESS:.6f}.")
+    print(f"Used radial cutoff Delta={SHELL_DELTA:.6f}.")
     print(f"Wrote hexatic order to {HEXATIC_TXT}.")
     print(f"Wrote distribution to {DISTRIBUTION_TXT}.")
     print(f"Wrote plot to {FIGURE_FILE}.")
     print(f"Wrote OVITO file to {OUT_GSD}.")
     print(
-        "Distribution frames"
-        f"min={selected_psi_abs.min():.6f}, "
-        f"mean={selected_psi_abs.mean():.6f}, "
-        f"max={selected_psi_abs.max():.6f}"
+        "Distribution frames shell-only "
+        f"min={distribution_psi_abs.min():.6f}, "
+        f"mean={distribution_psi_abs.mean():.6f}, "
+        f"max={distribution_psi_abs.max():.6f}, "
+        f"nonzero={nonzero_selected_psi_abs}"
     )
 
 

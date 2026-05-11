@@ -1,5 +1,7 @@
 from .hexatic import (
+    cavity_shell_mask,
     compute_hexatic_order_frame,
+    compute_hexatic_order_frame_near_cavity,
     compute_hexatic_order_trajectory,
     hexatic_abs_matrix_from_table,
     hexatic_probability_distribution,
@@ -17,7 +19,9 @@ __all__ = [
     "sphere_normals",
     "local_tangent_basis",
     "nearest_neighbors",
+    "cavity_shell_mask",
     "compute_hexatic_order_frame",
+    "compute_hexatic_order_frame_near_cavity",
     "compute_hexatic_order_trajectory",
     "save_hexatic_text",
     "load_hexatic_text",

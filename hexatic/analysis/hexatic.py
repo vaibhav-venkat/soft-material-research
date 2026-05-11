@@ -78,7 +78,7 @@ def nearest_neighbors(
     positions = _validate_positions(positions)
 
     n_particles = positions.shape[0]
-    assert n_particles >= n_neighbors
+    assert n_particles > n_neighbors
 
     position_norms = np.sum(positions * positions, axis=1)
     distances_sq = (
@@ -105,10 +105,22 @@ def compute_hexatic_order_frame(
     positions: np.ndarray,
     n_neighbors: int = 6,
     center: np.ndarray | None = None,
+    cavity_radius: float | None = None,
+    shell_delta: float | None = None,
 ) -> tuple[ComplexArray, IntArray]:
     """Compute hexatic order for every particle in a frame"""
 
     positions = _validate_positions(positions)
+    if cavity_radius is not None or shell_delta is not None:
+        assert cavity_radius is not None and shell_delta is not None
+        return compute_hexatic_order_frame_near_cavity(
+            positions,
+            cavity_radius=cavity_radius,
+            shell_delta=shell_delta,
+            n_neighbors=n_neighbors,
+            center=center,
+        )
+
     neighbors = nearest_neighbors(positions, n_neighbors)
     normals = sphere_normals(positions, center)
     psi = np.empty(positions.shape[0], dtype=np.complex128)
@@ -130,10 +142,65 @@ def compute_hexatic_order_frame(
     return psi, neighbors
 
 
+def cavity_shell_mask(
+    positions: np.ndarray,
+    cavity_radius: float,
+    shell_delta: float,
+    center: np.ndarray | None = None,
+) -> npt.NDArray[np.bool_]:
+    """Return particles w/ radius r_i > R - Delta"""
+
+    positions = _validate_positions(positions)
+    center_arr = _validate_center(center)
+    assert cavity_radius > 0.0
+    assert shell_delta > 0.0
+
+    radii = np.linalg.norm(positions - center_arr, axis=1)
+    return radii > cavity_radius - shell_delta
+
+
+def compute_hexatic_order_frame_near_cavity(
+    positions: np.ndarray,
+    cavity_radius: float,
+    shell_delta: float,
+    n_neighbors: int = 6,
+    center: np.ndarray | None = None,
+) -> tuple[ComplexArray, IntArray]:
+    """Compute hexatic order only for particles close to the cavity wall"""
+
+    positions = _validate_positions(positions)
+    shell_mask = cavity_shell_mask(
+        positions,
+        cavity_radius=cavity_radius,
+        shell_delta=shell_delta,
+        center=center,
+    )
+    shell_indices = np.flatnonzero(shell_mask)
+
+    n_particles = positions.shape[0]
+    psi = np.zeros(n_particles, dtype=np.complex128)
+    neighbors = np.full((n_particles, n_neighbors), -1, dtype=np.int64)
+
+    if len(shell_indices) <= n_neighbors:
+        return psi, neighbors
+
+    shell_psi, shell_neighbors = compute_hexatic_order_frame(
+        positions[shell_indices],
+        n_neighbors=n_neighbors,
+        center=center,
+    )
+    psi[shell_indices] = shell_psi
+    neighbors[shell_indices] = shell_indices[shell_neighbors]
+
+    return psi, neighbors
+
+
 def compute_hexatic_order_trajectory(
     filename: str | Path,
     n_neighbors: int = 6,
     center: np.ndarray | None = None,
+    cavity_radius: float | None = None,
+    shell_delta: float | None = None,
 ) -> tuple[IntArray, ComplexArray]:
     """Compute hexatic order for every frame"""
 
@@ -155,6 +222,8 @@ def compute_hexatic_order_trajectory(
                 positions,
                 n_neighbors=n_neighbors,
                 center=center,
+                cavity_radius=cavity_radius,
+                shell_delta=shell_delta,
             )
             psi_frames.append(psi)
             steps.append(int(frame.configuration.step))
@@ -248,6 +317,7 @@ def hexatic_probability_distribution(
     frame_indices: np.ndarray,
     min_frame: int = 10,
     bins: int = 50,
+    exclude_zeros: bool = False,
 ) -> tuple[FloatArray, FloatArray, IntArray]:
     """Return the probability density of psi for frames after cutoff"""
 
@@ -256,6 +326,8 @@ def hexatic_probability_distribution(
     assert values.shape == frames.shape
 
     selected = values[frames > min_frame]
+    if exclude_zeros:
+        selected = selected[selected > 0.0]
     assert selected.size != 0
 
     selected = np.clip(selected, 0.0, 1.0)
