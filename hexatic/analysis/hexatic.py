@@ -101,6 +101,28 @@ def nearest_neighbors(
     return neighbor_indices.astype(np.int64, copy=False)
 
 
+def count_neighbors_within_radius(
+    positions: np.ndarray,
+    radius: float,
+) -> IntArray:
+    """Count neighbors within a fixed 3D distance cutoff for each particle."""
+
+    positions = _validate_positions(positions)
+    assert radius > 0.0
+
+    position_norms = np.sum(positions * positions, axis=1)
+    distances_sq = (
+        position_norms[:, np.newaxis]
+        + position_norms[np.newaxis, :]
+        - 2.0 * positions @ positions.T
+    )
+    np.maximum(distances_sq, 0.0, out=distances_sq)
+    np.fill_diagonal(distances_sq, np.inf)
+
+    counts = np.count_nonzero(distances_sq <= radius**2, axis=1)
+    return counts.astype(np.int64, copy=False)
+
+
 def compute_hexatic_order_frame(
     positions: np.ndarray,
     n_neighbors: int = 6,
@@ -195,6 +217,37 @@ def compute_hexatic_order_frame_near_cavity(
     return psi, neighbors
 
 
+def compute_neighbor_counts_frame_near_cavity(
+    positions: np.ndarray,
+    cavity_radius: float,
+    shell_delta: float,
+    neighbor_radius: float,
+    center: np.ndarray | None = None,
+) -> IntArray:
+    """Count fixed-radius neighbors for surface particles only."""
+
+    positions = _validate_positions(positions)
+    shell_mask = cavity_shell_mask(
+        positions,
+        cavity_radius=cavity_radius,
+        shell_delta=shell_delta,
+        center=center,
+    )
+    shell_indices = np.flatnonzero(shell_mask)
+
+    counts = np.zeros(positions.shape[0], dtype=np.int64)
+    if len(shell_indices) == 0:
+        return counts
+
+    shell_counts = count_neighbors_within_radius(
+        positions[shell_indices],
+        radius=neighbor_radius,
+    )
+    counts[shell_indices] = shell_counts
+
+    return counts
+
+
 def compute_hexatic_order_trajectory(
     filename: str | Path,
     n_neighbors: int = 6,
@@ -232,6 +285,43 @@ def compute_hexatic_order_trajectory(
     return np.asarray(steps, dtype=np.int64), np.vstack(psi_frames)
 
 
+def compute_neighbor_counts_trajectory(
+    filename: str | Path,
+    neighbor_radius: float,
+    cavity_radius: float,
+    shell_delta: float,
+    center: np.ndarray | None = None,
+) -> tuple[IntArray, IntArray]:
+    """Count surface neighbors for every frame"""
+
+    steps: list[int] = []
+    count_frames: list[IntArray] = []
+    n_particles: int | None = None
+
+    with gsd.hoomd.open(name=str(filename), mode="r") as trajectory:
+        for frame in trajectory:
+            particles = frame.particles
+            assert particles.position is not None
+
+            positions = _validate_positions(particles.position)
+            if n_particles is None:
+                n_particles = positions.shape[0]
+            assert positions.shape[0] == n_particles
+
+            counts = compute_neighbor_counts_frame_near_cavity(
+                positions,
+                cavity_radius=cavity_radius,
+                shell_delta=shell_delta,
+                neighbor_radius=neighbor_radius,
+                center=center,
+            )
+            count_frames.append(counts)
+            steps.append(int(frame.configuration.step))
+
+    assert count_frames is not None
+    return np.asarray(steps, dtype=np.int64), np.vstack(count_frames)
+
+
 def save_hexatic_text(
     filename: str | Path,
     steps: np.ndarray,
@@ -264,6 +354,38 @@ def save_hexatic_text(
         data,
         fmt=("%d", "%d", "%d", "%.18e", "%.18e", "%.18e"),
         header="frame step particle psi_real psi_imag psi_abs",
+    )
+
+
+def save_neighbor_count_text(
+    filename: str | Path,
+    steps: np.ndarray,
+    neighbor_counts: np.ndarray,
+) -> None:
+    """Save fixed-radius neighbor counts as a long-form text table."""
+
+    steps = np.asarray(steps, dtype=np.int64)
+    neighbor_counts = np.asarray(neighbor_counts, dtype=np.int64)
+    assert neighbor_counts.ndim == 2 and steps.shape == (neighbor_counts.shape[0],)
+
+    n_frames, n_particles = neighbor_counts.shape
+    frame_col = np.repeat(np.arange(n_frames, dtype=np.int64), n_particles)
+    step_col = np.repeat(steps, n_particles)
+    particle_col = np.tile(np.arange(n_particles, dtype=np.int64), n_frames)
+    data = np.column_stack(
+        (
+            frame_col,
+            step_col,
+            particle_col,
+            neighbor_counts.reshape(-1),
+        )
+    )
+
+    np.savetxt(
+        filename,
+        data,
+        fmt=("%d", "%d", "%d", "%d"),
+        header="frame step particle neighbor_count",
     )
 
 
@@ -377,10 +499,14 @@ def write_hexatic_velocity_gsd(
     output_gsd: str | Path,
     hexatic_txt: str | Path,
     component: int = 0,
+    neighbor_counts: np.ndarray | None = None,
+    neighbor_component: int = 1,
 ) -> None:
     """Write .gsd file with psi as the velocity"""
 
     assert component in (0, 1, 2)
+    assert neighbor_component in (0, 1, 2)
+    assert component != neighbor_component or neighbor_counts is None
 
     input_path = Path(input_gsd)
     output_path = Path(output_gsd)
@@ -399,6 +525,9 @@ def write_hexatic_velocity_gsd(
             n_frames=n_frames,
             n_particles=n_particles,
         )
+        if neighbor_counts is not None:
+            neighbor_counts = np.asarray(neighbor_counts, dtype=np.float64)
+            assert neighbor_counts.shape == (n_frames, n_particles)
 
         with gsd.hoomd.open(name=str(output_path), mode="w") as destination:
             for frame_idx, frame in enumerate(source):
@@ -407,5 +536,9 @@ def write_hexatic_velocity_gsd(
                 new_frame = copy.deepcopy(frame)
                 velocity = np.zeros((n_particles, 3), dtype=np.float32)
                 velocity[:, component] = hexatic_abs[frame_idx].astype(np.float32)
+                if neighbor_counts is not None:
+                    velocity[:, neighbor_component] = neighbor_counts[frame_idx].astype(
+                        np.float32
+                    )
                 new_frame.particles.velocity = velocity
                 destination.append(new_frame)

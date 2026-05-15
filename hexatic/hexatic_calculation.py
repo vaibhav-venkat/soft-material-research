@@ -4,28 +4,33 @@ import numpy as np
 
 if __package__:
     from hexatic.analysis import (
+        compute_neighbor_counts_trajectory,
         compute_hexatic_order_trajectory,
         hexatic_probability_distribution,
         load_hexatic_text,
         plot_hexatic_distribution,
         save_distribution_text,
         save_hexatic_text,
+        save_neighbor_count_text,
         write_hexatic_velocity_gsd,
     )
 else:
     from analysis import (
+        compute_neighbor_counts_trajectory,
         compute_hexatic_order_trajectory,
         hexatic_probability_distribution,
         load_hexatic_text,
         plot_hexatic_distribution,
         save_distribution_text,
         save_hexatic_text,
+        save_neighbor_count_text,
         write_hexatic_velocity_gsd,
     )
 
 PROJECT_DIR = Path(__file__).resolve().parent
 IN_GSD = PROJECT_DIR / "trajectory.gsd"
 HEXATIC_TXT = PROJECT_DIR / "hexatic_order.txt"
+NEIGHBOR_COUNT_TXT = PROJECT_DIR / "surface_neighbor_counts.txt"
 DISTRIBUTION_TXT = PROJECT_DIR / "hexatic_order_distribution.txt"
 FIGURE_FILE = PROJECT_DIR / "images" / "hexatic_order_distribution.png"
 OUT_GSD = PROJECT_DIR / "trajectory_hexatic_velocity.gsd"
@@ -33,12 +38,15 @@ EQUILIBRIUM_FRAME = 10
 NEIGHBORS = 6
 DISTRIBUTION_BINS = 50
 VELOCITY_COMPONENT = 0
+NEIGHBOR_COUNT_COMPONENT = 1
 N_PARTICLES = 1000
 RHO = 0.2
 SIGMA = 1.0
 VOLUME = N_PARTICLES / RHO
 CAVITY_RADIUS = 1.4 * (VOLUME * 3.0 / 4.0 / np.pi) ** (1.0 / 3.0)
 CUTOFF = 2.0 ** (1.0 / 6.0) * SIGMA
+# NEIGHBOR_COUNT_RADIUS = 2.0 ** (7.0 / 6.0) * SIGMA
+NEIGHBOR_COUNT_RADIUS = 2 ** (4.0/6.0)  * SIGMA
 SHELL_THICKNESS = 0.05 * SIGMA
 SHELL_DELTA = CUTOFF + SHELL_THICKNESS
 
@@ -51,6 +59,15 @@ def main() -> None:
         shell_delta=SHELL_DELTA,
     )
     save_hexatic_text(HEXATIC_TXT, steps, psi)
+
+    count_steps, neighbor_counts = compute_neighbor_counts_trajectory(
+        IN_GSD,
+        neighbor_radius=NEIGHBOR_COUNT_RADIUS,
+        cavity_radius=CAVITY_RADIUS,
+        shell_delta=SHELL_DELTA,
+    )
+    assert np.array_equal(count_steps, steps)
+    save_neighbor_count_text(NEIGHBOR_COUNT_TXT, steps, neighbor_counts)
 
     hexatic_table = load_hexatic_text(HEXATIC_TXT)
     frame_indices = hexatic_table[:, 0].astype(int)
@@ -73,7 +90,7 @@ def main() -> None:
     plot_hexatic_distribution(
         bin_centers,
         probability_density,
-        title=f"Hexatic order distribution, shell particles, frames > {EQUILIBRIUM_FRAME}",
+        title=f"hexatic distribution, frames > {EQUILIBRIUM_FRAME}",
         filename=FIGURE_FILE,
     )
 
@@ -82,26 +99,41 @@ def main() -> None:
         OUT_GSD,
         HEXATIC_TXT,
         component=VELOCITY_COMPONENT,
+        neighbor_counts=neighbor_counts,
+        neighbor_component=NEIGHBOR_COUNT_COMPONENT,
     )
 
     selected_psi_abs = psi_abs[frame_indices > EQUILIBRIUM_FRAME]
     nonzero_selected_psi_abs = np.count_nonzero(selected_psi_abs)
     distribution_psi_abs = selected_psi_abs[selected_psi_abs > 0.0]
+    selected_neighbor_counts = neighbor_counts[EQUILIBRIUM_FRAME + 1 :].reshape(-1)
+    shell_neighbor_counts = selected_neighbor_counts[selected_psi_abs > 0.0]
     print(f"Loaded {psi.shape[0]} frames and {psi.shape[1]} particles.")
     print(f"Used cavity radius R={CAVITY_RADIUS:.6f}.")
     print(f"Used wall repulsion cutoff={CUTOFF:.6f}.")
+    print(f"Used neighbor-count radius={NEIGHBOR_COUNT_RADIUS:.6f}.")
     print(f"Used shell thickness={SHELL_THICKNESS:.6f}.")
     print(f"Used radial cutoff Delta={SHELL_DELTA:.6f}.")
     print(f"Wrote hexatic order to {HEXATIC_TXT}.")
+    print(f"Wrote neighbor counts to {NEIGHBOR_COUNT_TXT}.")
     print(f"Wrote distribution to {DISTRIBUTION_TXT}.")
     print(f"Wrote plot to {FIGURE_FILE}.")
     print(f"Wrote OVITO file to {OUT_GSD}.")
+    print(f"OVITO velocity.x stores |psi_6|.")
+    print(f"OVITO velocity.y stores surface neighbor count.")
     print(
-        "Distribution frames shell-only "
+        "Distribution frames on shell"
         f"min={distribution_psi_abs.min():.6f}, "
         f"mean={distribution_psi_abs.mean():.6f}, "
         f"max={distribution_psi_abs.max():.6f}, "
         f"nonzero={nonzero_selected_psi_abs}"
+    )
+    print(
+        "Surface neighbor counts on shell"
+        f"min={shell_neighbor_counts.min()}, "
+        f"mean={shell_neighbor_counts.mean():.6f}, "
+        f"max={shell_neighbor_counts.max()}, "
+        f"particles={len(shell_neighbor_counts)}"
     )
 
 

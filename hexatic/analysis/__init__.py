@@ -1,8 +1,11 @@
 from .hexatic import (
     cavity_shell_mask,
+    compute_neighbor_counts_frame_near_cavity,
+    compute_neighbor_counts_trajectory,
     compute_hexatic_order_frame,
     compute_hexatic_order_frame_near_cavity,
     compute_hexatic_order_trajectory,
+    count_neighbors_within_radius,
     hexatic_abs_matrix_from_table,
     hexatic_probability_distribution,
     load_hexatic_text,
@@ -10,6 +13,7 @@ from .hexatic import (
     nearest_neighbors,
     save_distribution_text,
     save_hexatic_text,
+    save_neighbor_count_text,
     sphere_normals,
     write_hexatic_velocity_gsd,
 )
@@ -19,7 +23,10 @@ __all__ = [
     "sphere_normals",
     "local_tangent_basis",
     "nearest_neighbors",
+    "count_neighbors_within_radius",
     "cavity_shell_mask",
+    "compute_neighbor_counts_frame_near_cavity",
+    "compute_neighbor_counts_trajectory",
     "compute_hexatic_order_frame",
     "compute_hexatic_order_frame_near_cavity",
     "compute_hexatic_order_trajectory",
@@ -28,6 +35,7 @@ __all__ = [
     "hexatic_abs_matrix_from_table",
     "hexatic_probability_distribution",
     "save_distribution_text",
+    "save_neighbor_count_text",
     "write_hexatic_velocity_gsd",
     "plot_hexatic_distribution",
 ]
