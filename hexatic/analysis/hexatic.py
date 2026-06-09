@@ -26,6 +26,42 @@ def _validate_center(center: np.ndarray | None) -> FloatArray:
     return arr
 
 
+def _minimum_image_x(
+    vectors: np.ndarray,
+    box_length_x: float | None = None,
+) -> FloatArray:
+    """Apply minimum-image wrapping"""
+
+    arr = np.asarray(vectors, dtype=np.float64)
+    if box_length_x is None:
+        return arr
+
+    assert box_length_x > 0.0
+    wrapped = arr.copy()
+    wrapped[..., 0] -= box_length_x * np.round(wrapped[..., 0] / box_length_x)
+    return wrapped
+
+
+def _pairwise_distances_sq(
+    positions: np.ndarray,
+    box_length_x: float | None = None,
+) -> FloatArray:
+    """Return pairwise squared distances"""
+
+    positions = _validate_positions(positions)
+    dx = positions[:, 0, np.newaxis] - positions[np.newaxis, :, 0]
+    if box_length_x is not None:
+        assert box_length_x > 0.0
+        dx -= box_length_x * np.round(dx / box_length_x)
+
+    dy = positions[:, 1, np.newaxis] - positions[np.newaxis, :, 1]
+    dz = positions[:, 2, np.newaxis] - positions[np.newaxis, :, 2]
+    distances_sq = dx * dx + dy * dy + dz * dz
+    np.maximum(distances_sq, 0.0, out=distances_sq)
+    np.fill_diagonal(distances_sq, np.inf)
+    return distances_sq
+
+
 def sphere_normals(
     positions: np.ndarray,
     center: np.ndarray | None = None,
@@ -42,14 +78,43 @@ def sphere_normals(
     return radial_vectors / radii[:, np.newaxis]
 
 
+def cylinder_radial_distances(
+    positions: np.ndarray,
+    center: np.ndarray | None = None,
+) -> FloatArray:
+    """Return radial distance from the x-axis"""
+
+    positions = _validate_positions(positions)
+    center_arr = _validate_center(center)
+    yz_vectors = positions[:, 1:3] - center_arr[1:3]
+    return np.linalg.norm(yz_vectors, axis=1)
+
+
+def cylinder_normals(
+    positions: np.ndarray,
+    center: np.ndarray | None = None,
+) -> FloatArray:
+    """Return outward cylinder normals orthogonal to the x axis."""
+
+    positions = _validate_positions(positions)
+    center_arr = _validate_center(center)
+    yz_vectors = positions[:, 1:3] - center_arr[1:3]
+    radii = np.linalg.norm(yz_vectors, axis=1)
+
+    assert np.all(radii > 0.0)
+    normals = np.zeros_like(positions, dtype=np.float64)
+    normals[:, 1:3] = yz_vectors / radii[:, np.newaxis]
+    return normals
+
+
 def local_tangent_basis(normal: np.ndarray) -> tuple[FloatArray, FloatArray]:
-    """Build a orthonormal tangent basis for the normal"""
+    """Build an orthonormal tangent basis for the normal."""
 
     normal_arr = np.asarray(normal, dtype=np.float64)
     assert normal_arr.shape == (3,)
 
     normal_norm = np.linalg.norm(normal_arr)
-    assert normal_norm >= 0.0
+    assert normal_norm > 0.0
 
     unit_normal = normal_arr / normal_norm
     reference = np.array([0.0, 0.0, 1.0])
@@ -58,36 +123,88 @@ def local_tangent_basis(normal: np.ndarray) -> tuple[FloatArray, FloatArray]:
 
     e1 = np.cross(reference, unit_normal)
     e1_norm = np.linalg.norm(e1)
-    assert e1_norm >= 0.0
+    assert e1_norm > 0.0
     e1 = e1 / e1_norm
 
     e2 = np.cross(unit_normal, e1)
     e2_norm = np.linalg.norm(e2)
-    assert e2_norm >= 0.0
+    assert e2_norm > 0.0
     e2 = e2 / e2_norm
 
     return e1, e2
 
 
+def local_cylinder_tangent_basis(normal: np.ndarray) -> tuple[FloatArray, FloatArray]:
+    """Return tangent axes for a cylinder"""
+
+    normal_arr = np.asarray(normal, dtype=np.float64)
+    assert normal_arr.shape == (3,)
+
+    normal_norm = np.linalg.norm(normal_arr)
+    assert normal_norm > 0.0
+
+    unit_normal = normal_arr / normal_norm
+    axis = np.array([1.0, 0.0, 0.0])
+    assert abs(float(np.dot(unit_normal, axis))) < 1e-12
+
+    e1 = axis
+    e2 = np.cross(unit_normal, e1)
+    e2_norm = np.linalg.norm(e2)
+    assert e2_norm > 0.0
+    e2 = e2 / e2_norm
+
+    return e1, e2
+
+
+def _hexatic_from_neighbors(
+    positions: np.ndarray,
+    neighbors: np.ndarray,
+    normals: np.ndarray,
+    box_length_x: float | None = None,
+    cylinder_basis: bool = False,
+) -> ComplexArray:
+    """Compute psi_6."""
+
+    positions = _validate_positions(positions)
+    neighbors = np.asarray(neighbors, dtype=np.int64)
+    normals = _validate_positions(normals)
+    assert neighbors.ndim == 2 and neighbors.shape[0] == positions.shape[0]
+    assert normals.shape == positions.shape
+
+    psi = np.empty(positions.shape[0], dtype=np.complex128)
+    for particle_idx, neighbor_ids in enumerate(neighbors):
+        normal = normals[particle_idx]
+        if cylinder_basis:
+            e1, e2 = local_cylinder_tangent_basis(normal)
+        else:
+            e1, e2 = local_tangent_basis(normal)
+
+        bonds = positions[neighbor_ids] - positions[particle_idx]
+        bonds = _minimum_image_x(bonds, box_length_x=box_length_x)
+        normal_components = bonds @ normal
+        tangent_bonds = bonds - normal_components[:, np.newaxis] * normal
+
+        x_coords = tangent_bonds @ e1
+        y_coords = tangent_bonds @ e2
+        theta = np.arctan2(y_coords, x_coords)
+        psi[particle_idx] = np.mean(np.exp(6j * theta))
+
+    return psi
+
+
 def nearest_neighbors(
     positions: np.ndarray,
     n_neighbors: int = 6,
+    box_length_x: float | None = None,
 ) -> IntArray:
-    """Return indices of the n closest particles"""
+    """Return indices of the n closest particles."""
 
     positions = _validate_positions(positions)
 
     n_particles = positions.shape[0]
     assert n_particles > n_neighbors
 
-    position_norms = np.sum(positions * positions, axis=1)
-    distances_sq = (
-        position_norms[:, np.newaxis]
-        + position_norms[np.newaxis, :]
-        - 2.0 * positions @ positions.T
-    )
-    np.maximum(distances_sq, 0.0, out=distances_sq)
-    np.fill_diagonal(distances_sq, np.inf)
+    distances_sq = _pairwise_distances_sq(positions, box_length_x=box_length_x)
 
     neighbor_indices = np.argpartition(
         distances_sq, kth=n_neighbors - 1, axis=1
@@ -104,20 +221,14 @@ def nearest_neighbors(
 def count_neighbors_within_radius(
     positions: np.ndarray,
     radius: float,
+    box_length_x: float | None = None,
 ) -> IntArray:
-    """Count neighbors within a fixed 3D distance cutoff for each particle."""
+    """Count neighbors within a 3D distance cutoff."""
 
     positions = _validate_positions(positions)
     assert radius > 0.0
 
-    position_norms = np.sum(positions * positions, axis=1)
-    distances_sq = (
-        position_norms[:, np.newaxis]
-        + position_norms[np.newaxis, :]
-        - 2.0 * positions @ positions.T
-    )
-    np.maximum(distances_sq, 0.0, out=distances_sq)
-    np.fill_diagonal(distances_sq, np.inf)
+    distances_sq = _pairwise_distances_sq(positions, box_length_x=box_length_x)
 
     counts = np.count_nonzero(distances_sq <= radius**2, axis=1)
     return counts.astype(np.int64, copy=False)
@@ -145,21 +256,7 @@ def compute_hexatic_order_frame(
 
     neighbors = nearest_neighbors(positions, n_neighbors)
     normals = sphere_normals(positions, center)
-    psi = np.empty(positions.shape[0], dtype=np.complex128)
-
-    for particle_idx, neighbor_ids in enumerate(neighbors):
-        normal = normals[particle_idx]
-        e1, e2 = local_tangent_basis(normal)
-
-        bonds = positions[neighbor_ids] - positions[particle_idx]
-        normal_components = bonds @ normal
-        # Tangent-plane projection of the 3D bond vector.
-        tangent_bonds = bonds - normal_components[:, np.newaxis] * normal
-
-        x_coords = tangent_bonds @ e1
-        y_coords = tangent_bonds @ e2
-        theta = np.arctan2(y_coords, x_coords)
-        psi[particle_idx] = np.mean(np.exp(6j * theta))
+    psi = _hexatic_from_neighbors(positions, neighbors, normals)
 
     return psi, neighbors
 
@@ -179,6 +276,22 @@ def cavity_shell_mask(
 
     radii = np.linalg.norm(positions - center_arr, axis=1)
     return radii > cavity_radius - shell_delta
+
+
+def cylinder_shell_mask(
+    positions: np.ndarray,
+    cylinder_radius: float,
+    shell_delta: float,
+    center: np.ndarray | None = None,
+) -> npt.NDArray[np.bool_]:
+    """Return particles with yz r_i > R - Delta."""
+
+    positions = _validate_positions(positions)
+    assert cylinder_radius > 0.0
+    assert shell_delta > 0.0
+
+    radii = cylinder_radial_distances(positions, center=center)
+    return radii > cylinder_radius - shell_delta
 
 
 def compute_hexatic_order_frame_near_cavity(
@@ -217,6 +330,53 @@ def compute_hexatic_order_frame_near_cavity(
     return psi, neighbors
 
 
+def compute_hexatic_order_frame_on_cylinder(
+    positions: np.ndarray,
+    cylinder_radius: float,
+    shell_delta: float,
+    n_neighbors: int = 6,
+    center: np.ndarray | None = None,
+    box_length_x: float | None = None,
+) -> tuple[ComplexArray, IntArray]:
+    """Compute hexatic order for particles on a cylindrical surface."""
+
+    positions = _validate_positions(positions)
+    shell_mask = cylinder_shell_mask(
+        positions,
+        cylinder_radius=cylinder_radius,
+        shell_delta=shell_delta,
+        center=center,
+    )
+    shell_indices = np.flatnonzero(shell_mask)
+
+    n_particles = positions.shape[0]
+    psi = np.zeros(n_particles, dtype=np.complex128)
+    neighbors = np.full((n_particles, n_neighbors), -1, dtype=np.int64)
+
+    if len(shell_indices) <= n_neighbors:
+        return psi, neighbors
+
+    shell_positions = positions[shell_indices]
+    shell_neighbors = nearest_neighbors(
+        shell_positions,
+        n_neighbors=n_neighbors,
+        box_length_x=box_length_x,
+    )
+    shell_normals = cylinder_normals(shell_positions, center=center)
+    shell_psi = _hexatic_from_neighbors(
+        shell_positions,
+        shell_neighbors,
+        shell_normals,
+        box_length_x=box_length_x,
+        cylinder_basis=True,
+    )
+
+    psi[shell_indices] = shell_psi
+    neighbors[shell_indices] = shell_indices[shell_neighbors]
+
+    return psi, neighbors
+
+
 def compute_neighbor_counts_frame_near_cavity(
     positions: np.ndarray,
     cavity_radius: float,
@@ -242,6 +402,39 @@ def compute_neighbor_counts_frame_near_cavity(
     shell_counts = count_neighbors_within_radius(
         positions[shell_indices],
         radius=neighbor_radius,
+    )
+    counts[shell_indices] = shell_counts
+
+    return counts
+
+
+def compute_neighbor_counts_frame_on_cylinder(
+    positions: np.ndarray,
+    cylinder_radius: float,
+    shell_delta: float,
+    neighbor_radius: float,
+    center: np.ndarray | None = None,
+    box_length_x: float | None = None,
+) -> IntArray:
+    """Count fixed-radius neighbors for cylinder surface particles only."""
+
+    positions = _validate_positions(positions)
+    shell_mask = cylinder_shell_mask(
+        positions,
+        cylinder_radius=cylinder_radius,
+        shell_delta=shell_delta,
+        center=center,
+    )
+    shell_indices = np.flatnonzero(shell_mask)
+
+    counts = np.zeros(positions.shape[0], dtype=np.int64)
+    if len(shell_indices) == 0:
+        return counts
+
+    shell_counts = count_neighbors_within_radius(
+        positions[shell_indices],
+        radius=neighbor_radius,
+        box_length_x=box_length_x,
     )
     counts[shell_indices] = shell_counts
 
@@ -285,6 +478,43 @@ def compute_hexatic_order_trajectory(
     return np.asarray(steps, dtype=np.int64), np.vstack(psi_frames)
 
 
+def compute_hexatic_order_cylinder_trajectory(
+    filename: str | Path,
+    cylinder_radius: float,
+    shell_delta: float,
+    n_neighbors: int = 6,
+    center: np.ndarray | None = None,
+) -> tuple[IntArray, ComplexArray]:
+    """Compute cylinder-surface hexatic order for every frame."""
+
+    steps: list[int] = []
+    psi_frames: list[ComplexArray] = []
+    n_particles: int | None = None
+
+    with gsd.hoomd.open(name=str(filename), mode="r") as trajectory:
+        for frame in trajectory:
+            particles = frame.particles
+            assert particles.position is not None
+
+            positions = _validate_positions(particles.position)
+            if n_particles is None:
+                n_particles = positions.shape[0]
+            assert positions.shape[0] == n_particles
+
+            psi, _ = compute_hexatic_order_frame_on_cylinder(
+                positions,
+                cylinder_radius=cylinder_radius,
+                shell_delta=shell_delta,
+                n_neighbors=n_neighbors,
+                center=center,
+                box_length_x=float(frame.configuration.box[0]),
+            )
+            psi_frames.append(psi)
+            steps.append(int(frame.configuration.step))
+
+    return np.asarray(steps, dtype=np.int64), np.vstack(psi_frames)
+
+
 def compute_neighbor_counts_trajectory(
     filename: str | Path,
     neighbor_radius: float,
@@ -319,6 +549,43 @@ def compute_neighbor_counts_trajectory(
             steps.append(int(frame.configuration.step))
 
     assert count_frames is not None
+    return np.asarray(steps, dtype=np.int64), np.vstack(count_frames)
+
+
+def compute_neighbor_counts_cylinder_trajectory(
+    filename: str | Path,
+    neighbor_radius: float,
+    cylinder_radius: float,
+    shell_delta: float,
+    center: np.ndarray | None = None,
+) -> tuple[IntArray, IntArray]:
+    """Count cylinder-surface neighbors for every frame."""
+
+    steps: list[int] = []
+    count_frames: list[IntArray] = []
+    n_particles: int | None = None
+
+    with gsd.hoomd.open(name=str(filename), mode="r") as trajectory:
+        for frame in trajectory:
+            particles = frame.particles
+            assert particles.position is not None
+
+            positions = _validate_positions(particles.position)
+            if n_particles is None:
+                n_particles = positions.shape[0]
+            assert positions.shape[0] == n_particles
+
+            counts = compute_neighbor_counts_frame_on_cylinder(
+                positions,
+                cylinder_radius=cylinder_radius,
+                shell_delta=shell_delta,
+                neighbor_radius=neighbor_radius,
+                center=center,
+                box_length_x=float(frame.configuration.box[0]),
+            )
+            count_frames.append(counts)
+            steps.append(int(frame.configuration.step))
+
     return np.asarray(steps, dtype=np.int64), np.vstack(count_frames)
 
 
@@ -501,12 +768,19 @@ def write_hexatic_velocity_gsd(
     component: int = 0,
     neighbor_counts: np.ndarray | None = None,
     neighbor_component: int = 1,
+    disclination_charges: np.ndarray | None = None,
+    charge_component: int = 2,
 ) -> None:
     """Write .gsd file with psi as the velocity"""
 
     assert component in (0, 1, 2)
     assert neighbor_component in (0, 1, 2)
+    assert charge_component in (0, 1, 2)
     assert component != neighbor_component or neighbor_counts is None
+    assert component != charge_component or disclination_charges is None
+    assert neighbor_component != charge_component or (
+        neighbor_counts is None or disclination_charges is None
+    )
 
     input_path = Path(input_gsd)
     output_path = Path(output_gsd)
@@ -528,6 +802,9 @@ def write_hexatic_velocity_gsd(
         if neighbor_counts is not None:
             neighbor_counts = np.asarray(neighbor_counts, dtype=np.float64)
             assert neighbor_counts.shape == (n_frames, n_particles)
+        if disclination_charges is not None:
+            disclination_charges = np.asarray(disclination_charges, dtype=np.float64)
+            assert disclination_charges.shape == (n_frames, n_particles)
 
         with gsd.hoomd.open(name=str(output_path), mode="w") as destination:
             for frame_idx, frame in enumerate(source):
@@ -540,5 +817,9 @@ def write_hexatic_velocity_gsd(
                     velocity[:, neighbor_component] = neighbor_counts[frame_idx].astype(
                         np.float32
                     )
+                if disclination_charges is not None:
+                    velocity[:, charge_component] = disclination_charges[
+                        frame_idx
+                    ].astype(np.float32)
                 new_frame.particles.velocity = velocity
                 destination.append(new_frame)
