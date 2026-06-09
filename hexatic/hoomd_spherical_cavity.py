@@ -1,9 +1,10 @@
-import hoomd
-import gsd.hoomd
-import numpy as np
 import itertools
 import math
 from pathlib import Path
+
+import gsd.hoomd
+import hoomd
+import numpy as np
 
 PROJECT_DIR = Path(__file__).resolve().parent
 
@@ -20,28 +21,43 @@ tauR = 1
 
 np.random.seed(seed)
 
-spacing = rho**(-1/3)
+spacing = rho ** (-1 / 3)
 K = math.ceil(N ** (1 / 3))
 L = K * spacing
 x = np.linspace(-L / 2, L / 2, K, endpoint=False)
-position = np.asarray(list(itertools.product(x, repeat=3))) + np.array([spacing, spacing, spacing]) / 2
+position = (
+    np.asarray(list(itertools.product(x, repeat=3)))
+    + np.array([spacing, spacing, spacing]) / 2
+)
 
 frame = gsd.hoomd.Frame()
 frame.particles.N = N
 frame.particles.position = position
-frame.particles.diameter = [sigma * 2.**(1. / 6.)] * N
+frame.particles.diameter = [sigma * 2.0 ** (1.0 / 6.0)] * N
 # set orientation & MoI
 frame.particles.moment_inertia = [(1, 1, 1)] * N
 orientation = 2.0 * np.pi * np.random.rand(N)
 phi = 2.0 * np.pi * np.random.rand(N)
 theta = 1.0 * np.pi * np.random.rand(N)
-orient_quat = [(np.cos(orientation[i] / 2),
-                np.sin(orientation[i] / 2) * np.sin(theta[i]) * np.cos(phi[i]),
-                np.sin(orientation[i] / 2) * np.sin(theta[i]) * np.sin(phi[i]),
-                np.sin(orientation[i] / 2) * np.cos(theta[i])) for i in range(N)]
+orient_quat = [
+    (
+        np.cos(orientation[i] / 2),
+        np.sin(orientation[i] / 2) * np.sin(theta[i]) * np.cos(phi[i]),
+        np.sin(orientation[i] / 2) * np.sin(theta[i]) * np.sin(phi[i]),
+        np.sin(orientation[i] / 2) * np.cos(theta[i]),
+    )
+    for i in range(N)
+]
 frame.particles.orientation = orient_quat
 frame.particles.typeid = [0] * N
-frame.configuration.box = [V**(1/3) * 2, V**(1/3) * 2, V**(1/3) * 2, 0, 0, 0]
+frame.configuration.box = [
+    V ** (1 / 3) * 2,
+    V ** (1 / 3) * 2,
+    V ** (1 / 3) * 2,
+    0,
+    0,
+    0,
+]
 frame.particles.types = ["A"]
 
 
@@ -69,7 +85,7 @@ lj.params[("A", "A")] = dict(epsilon=50 * gamma * U0 * sigma, sigma=sigma)
 lj.r_cut[("A", "A")] = 2 ** (1.0 / 6.0) * sigma
 integrator.forces.append(lj)
 
-walls = [hoomd.wall.Sphere(radius=1.4 * (V * 3 / 4 / np.pi)**(1/3))]
+walls = [hoomd.wall.Sphere(radius=1.4 * (V * 3 / 4 / np.pi) ** (1 / 3))]
 lj2 = hoomd.md.external.wall.LJ(walls=walls)
 lj2.params["A"] = {
     "sigma": sigma,
@@ -81,17 +97,16 @@ lj2.params["A"] = {
 integrator.forces.append(lj2)
 
 
-active = hoomd.md.force.Active(filter=hoomd.filter.Type(['A']))
+active = hoomd.md.force.Active(filter=hoomd.filter.Type(["A"]))
 active.use_orientation = True
-active.active_force['A'] = (gamma * U0, 0.0, 0.0)  # will be rotated
-active.active_torque['A'] = (0.0, 0.0, 0.0)
+active.active_force["A"] = (gamma * U0, 0.0, 0.0)  # will be rotated
+active.active_torque["A"] = (0.0, 0.0, 0.0)
 integrator.forces.append(active)
 
 
 # Rotational diffusion updater
 rot_diff = active.create_diffusion_updater(
-    trigger=hoomd.trigger.Periodic(10),
-    rotational_diffusion=1/tauR
+    trigger=hoomd.trigger.Periodic(10), rotational_diffusion=1 / tauR
 )
 sim.operations += rot_diff
 
