@@ -28,12 +28,15 @@ else:
     )
 
 PROJECT_DIR = Path(__file__).resolve().parent
-IN_GSD = PROJECT_DIR / "trajectory.gsd"
-HEXATIC_TXT = PROJECT_DIR / "hexatic_order.txt"
-NEIGHBOR_COUNT_TXT = PROJECT_DIR / "surface_neighbor_counts.txt"
-DISTRIBUTION_TXT = PROJECT_DIR / "hexatic_order_distribution.txt"
-FIGURE_FILE = PROJECT_DIR / "images" / "hexatic_order_distribution.png"
-OUT_GSD = PROJECT_DIR / "trajectory_hexatic_velocity.gsd"
+OUTPUT_DIR = PROJECT_DIR / "output"
+SPHERE_OUTPUT_DIR = OUTPUT_DIR / "sphere"
+IMAGE_OUTPUT_DIR = OUTPUT_DIR / "images"
+IN_GSD = SPHERE_OUTPUT_DIR / "trajectory.gsd"
+HEXATIC_TXT = SPHERE_OUTPUT_DIR / "hexatic_order.txt"
+NEIGHBOR_COUNT_TXT = SPHERE_OUTPUT_DIR / "surface_neighbor_counts.txt"
+DISTRIBUTION_TXT = SPHERE_OUTPUT_DIR / "hexatic_order_distribution.txt"
+FIGURE_FILE = IMAGE_OUTPUT_DIR / "hexatic_order_distribution.png"
+OUT_GSD = SPHERE_OUTPUT_DIR / "trajectory_hexatic_velocity.gsd"
 EQUILIBRIUM_FRAME = 10
 NEIGHBORS = 6
 DISTRIBUTION_BINS = 50

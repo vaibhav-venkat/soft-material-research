@@ -616,6 +616,7 @@ def save_hexatic_text(
         )
     )
 
+    Path(filename).parent.mkdir(parents=True, exist_ok=True)
     np.savetxt(
         filename,
         data,
@@ -648,6 +649,7 @@ def save_neighbor_count_text(
         )
     )
 
+    Path(filename).parent.mkdir(parents=True, exist_ok=True)
     np.savetxt(
         filename,
         data,
@@ -753,6 +755,7 @@ def save_distribution_text(
     )
 
     data = np.column_stack((bin_centers, probability_density, counts))
+    Path(filename).parent.mkdir(parents=True, exist_ok=True)
     np.savetxt(
         filename,
         data,
@@ -785,6 +788,7 @@ def write_hexatic_velocity_gsd(
     input_path = Path(input_gsd)
     output_path = Path(output_gsd)
     assert input_path.resolve() != output_path.resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     table = load_hexatic_text(hexatic_txt)
 

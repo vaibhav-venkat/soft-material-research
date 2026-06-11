@@ -28,12 +28,15 @@ else:
     )
 
 PROJECT_DIR = Path(__file__).resolve().parent
-IN_GSD = PROJECT_DIR / "trajectory_cylinder.gsd"
-HEXATIC_TXT = PROJECT_DIR / "cylinder_hexatic_order.txt"
-NEIGHBOR_COUNT_TXT = PROJECT_DIR / "cylinder_surface_neighbor_counts.txt"
-DISTRIBUTION_TXT = PROJECT_DIR / "cylinder_hexatic_order_distribution.txt"
-FIGURE_FILE = PROJECT_DIR / "images" / "cylinder_hexatic_order_distribution.png"
-OUT_GSD = PROJECT_DIR / "trajectory_cylinder_hexatic_velocity.gsd"
+OUTPUT_DIR = PROJECT_DIR / "output"
+CYLINDER_OUTPUT_DIR = OUTPUT_DIR / "cylinder"
+IMAGE_OUTPUT_DIR = OUTPUT_DIR / "images"
+IN_GSD = CYLINDER_OUTPUT_DIR / "trajectory_cylinder.gsd"
+HEXATIC_TXT = CYLINDER_OUTPUT_DIR / "cylinder_hexatic_order.txt"
+NEIGHBOR_COUNT_TXT = CYLINDER_OUTPUT_DIR / "cylinder_surface_neighbor_counts.txt"
+DISTRIBUTION_TXT = CYLINDER_OUTPUT_DIR / "cylinder_hexatic_order_distribution.txt"
+FIGURE_FILE = IMAGE_OUTPUT_DIR / "cylinder_hexatic_order_distribution.png"
+OUT_GSD = CYLINDER_OUTPUT_DIR / "trajectory_cylinder_hexatic_velocity.gsd"
 
 EQUILIBRIUM_FRAME = 10
 NEIGHBORS = 6
@@ -67,6 +70,15 @@ def disclination_charges_from_counts(
 
 
 def main() -> None:
+
+    print(f"Used cylinder radius R={CYLINDER_RADIUS:.6f}.")
+    print(f"Used wall repulsion cutoff={WALL_CUTOFF:.6f}.")
+    print(f"Used radial shell cutoff Delta={SHELL_DELTA:.6f}.")
+    print(
+        "Allowed neighbor-count radius range="
+        f"({MIN_NEIGHBOR_COUNT_RADIUS:.6f}, {MAX_NEIGHBOR_COUNT_RADIUS:.6f})."
+    )
+    print(f"Used neighbor-count radius={NEIGHBOR_COUNT_RADIUS:.6f}.")
     steps, psi = compute_hexatic_order_cylinder_trajectory(
         IN_GSD,
         cylinder_radius=CYLINDER_RADIUS,
@@ -130,14 +142,6 @@ def main() -> None:
     surface_neighbor_counts = neighbor_counts[EQUILIBRIUM_FRAME + 1 :][surface_mask]
     surface_charges = disclination_charges[EQUILIBRIUM_FRAME + 1 :][surface_mask]
 
-    print(f"Used cylinder radius R={CYLINDER_RADIUS:.6f}.")
-    print(f"Used wall repulsion cutoff={WALL_CUTOFF:.6f}.")
-    print(f"Used radial shell cutoff Delta={SHELL_DELTA:.6f}.")
-    print(
-        "Allowed neighbor-count radius range="
-        f"({MIN_NEIGHBOR_COUNT_RADIUS:.6f}, {MAX_NEIGHBOR_COUNT_RADIUS:.6f})."
-    )
-    print(f"Used neighbor-count radius={NEIGHBOR_COUNT_RADIUS:.6f}.")
     print(f"Wrote hexatic order to {HEXATIC_TXT}.")
     print(f"Wrote neighbor counts to {NEIGHBOR_COUNT_TXT}.")
     print(f"Wrote distribution to {DISTRIBUTION_TXT}.")

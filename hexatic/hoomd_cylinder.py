@@ -3,6 +3,10 @@ import gsd.hoomd
 import numpy as np
 import itertools
 import math
+from pathlib import Path
+
+PROJECT_DIR = Path(__file__).resolve().parent
+CYLINDER_OUTPUT_DIR = PROJECT_DIR / "output" / "cylinder"
 
 N = 4000
 rho = 0.2
@@ -81,12 +85,14 @@ frame.configuration.box = [Lx, L, L, 0, 0, 0]
 frame.particles.types = ["A"]
 
 
-with gsd.hoomd.open(name="initial_mesh.gsd", mode="w") as f:
+CYLINDER_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+initial_gsd = CYLINDER_OUTPUT_DIR / "initial_mesh.gsd"
+with gsd.hoomd.open(name=str(initial_gsd), mode="w") as f:
     f.append(frame)
 
 CPU = hoomd.device.CPU()
 sim = hoomd.Simulation(device=CPU, seed=seed)
-state = sim.create_state_from_gsd(filename="initial_mesh.gsd")
+state = sim.create_state_from_gsd(filename=str(initial_gsd))
 
 integrator = hoomd.md.Integrator(dt=1e-6)
 sim.operations.integrator = integrator
@@ -132,7 +138,9 @@ rot_diff = active.create_diffusion_updater(
 sim.operations += rot_diff
 
 gsd_writer = hoomd.write.GSD(
-    filename="trajectory_cylinder.gsd", trigger=hoomd.trigger.Periodic(int(1e5)), mode="wb"
+    filename=str(CYLINDER_OUTPUT_DIR / "trajectory_cylinder.gsd"),
+    trigger=hoomd.trigger.Periodic(int(1e5)),
+    mode="wb",
 )
 # gsd_writer = hoomd.write.GSD(
 #     filename="trajectory.gsd", trigger=hoomd.trigger.Periodic(1), mode="wb"

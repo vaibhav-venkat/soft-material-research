@@ -38,5 +38,6 @@ def plot_hexatic_distribution(
     if filename is None:
         plt.show()
     else:
+        Path(filename).parent.mkdir(parents=True, exist_ok=True)
         plt.savefig(filename, dpi=200)
         plt.close()

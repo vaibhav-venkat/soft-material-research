@@ -7,6 +7,7 @@ import hoomd
 import numpy as np
 
 PROJECT_DIR = Path(__file__).resolve().parent
+SPHERE_OUTPUT_DIR = PROJECT_DIR / "output" / "sphere"
 
 N = 1000
 rho = 0.2
@@ -61,7 +62,8 @@ frame.configuration.box = [
 frame.particles.types = ["A"]
 
 
-initial_gsd = PROJECT_DIR / "initial_mesh.gsd"
+SPHERE_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+initial_gsd = SPHERE_OUTPUT_DIR / "initial_mesh.gsd"
 with gsd.hoomd.open(name=str(initial_gsd), mode="w") as f:
     f.append(frame)
 
@@ -111,7 +113,7 @@ rot_diff = active.create_diffusion_updater(
 sim.operations += rot_diff
 
 gsd_writer = hoomd.write.GSD(
-    filename=str(PROJECT_DIR / "trajectory.gsd"),
+    filename=str(SPHERE_OUTPUT_DIR / "trajectory.gsd"),
     trigger=hoomd.trigger.Periodic(int(1e5)),
     mode="wb",
 )
