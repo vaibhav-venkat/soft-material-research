@@ -3,6 +3,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import numpy.typing as npt
 
+__all__ = ["plot_hexatic_distribution"]
+
 
 def plot_hexatic_distribution(
     bin_centers: npt.NDArray[np.float64],

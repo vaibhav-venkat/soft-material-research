@@ -3,29 +3,9 @@ from pathlib import Path
 import numpy as np
 
 if __package__:
-    from hexatic.analysis import (
-        compute_hexatic_order_cylinder_trajectory,
-        compute_neighbor_counts_cylinder_trajectory,
-        hexatic_probability_distribution,
-        load_hexatic_text,
-        plot_hexatic_distribution,
-        save_distribution_text,
-        save_hexatic_text,
-        save_neighbor_count_text,
-        write_hexatic_velocity_gsd,
-    )
+    from hexatic import analysis as hx
 else:
-    from analysis import (
-        compute_hexatic_order_cylinder_trajectory,
-        compute_neighbor_counts_cylinder_trajectory,
-        hexatic_probability_distribution,
-        load_hexatic_text,
-        plot_hexatic_distribution,
-        save_distribution_text,
-        save_hexatic_text,
-        save_neighbor_count_text,
-        write_hexatic_velocity_gsd,
-    )
+    import analysis as hx
 
 PROJECT_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = PROJECT_DIR / "output"
@@ -71,6 +51,12 @@ def disclination_charges_from_counts(
 
 def main() -> None:
 
+    calculator = hx.CylinderHexaticCalculator(
+        cylinder_radius=CYLINDER_RADIUS,
+        shell_delta=SHELL_DELTA,
+        n_neighbors=NEIGHBORS,
+    )
+
     print(f"Used cylinder radius R={CYLINDER_RADIUS:.6f}.")
     print(f"Used wall repulsion cutoff={WALL_CUTOFF:.6f}.")
     print(f"Used radial shell cutoff Delta={SHELL_DELTA:.6f}.")
@@ -79,53 +65,45 @@ def main() -> None:
         f"({MIN_NEIGHBOR_COUNT_RADIUS:.6f}, {MAX_NEIGHBOR_COUNT_RADIUS:.6f})."
     )
     print(f"Used neighbor-count radius={NEIGHBOR_COUNT_RADIUS:.6f}.")
-    steps, psi = compute_hexatic_order_cylinder_trajectory(
-        IN_GSD,
-        cylinder_radius=CYLINDER_RADIUS,
-        shell_delta=SHELL_DELTA,
-        n_neighbors=NEIGHBORS,
-    )
+    steps, psi = calculator.compute_hexatic_order_trajectory(IN_GSD)
     print(f"Loaded {psi.shape[0]} frames and {psi.shape[1]} particles.")
 
-    save_hexatic_text(HEXATIC_TXT, steps, psi)
+    hx.save_hexatic_text(HEXATIC_TXT, steps, psi)
 
-    count_steps, neighbor_counts = compute_neighbor_counts_cylinder_trajectory(
+    count_steps, neighbor_counts = calculator.compute_neighbor_counts_trajectory(
         IN_GSD,
         neighbor_radius=NEIGHBOR_COUNT_RADIUS,
-        cylinder_radius=CYLINDER_RADIUS,
-        shell_delta=SHELL_DELTA,
     )
     assert np.array_equal(count_steps, steps)
-    save_neighbor_count_text(NEIGHBOR_COUNT_TXT, steps, neighbor_counts)
+    hx.save_neighbor_count_text(NEIGHBOR_COUNT_TXT, steps, neighbor_counts)
 
     disclination_charges = disclination_charges_from_counts(neighbor_counts, psi)
 
-    hexatic_table = load_hexatic_text(HEXATIC_TXT)
+    hexatic_table = hx.load_hexatic_text(HEXATIC_TXT)
     frame_indices = hexatic_table[:, 0].astype(int)
     psi_abs = hexatic_table[:, 5]
 
-    bin_centers, probability_density, counts = hexatic_probability_distribution(
+    bin_centers, probability_density, counts = hx.hexatic_probability_distribution(
         psi_abs,
         frame_indices,
         min_frame=EQUILIBRIUM_FRAME,
         bins=DISTRIBUTION_BINS,
         exclude_zeros=True,
     )
-    save_distribution_text(
+    hx.save_distribution_text(
         DISTRIBUTION_TXT,
         bin_centers,
         probability_density,
         counts,
     )
-    Path(FIGURE_FILE).parent.mkdir(parents=True, exist_ok=True)
-    plot_hexatic_distribution(
+    hx.plot_hexatic_distribution(
         bin_centers,
         probability_density,
         title=f"cylinder hexatic distribution, frames > {EQUILIBRIUM_FRAME}",
         filename=FIGURE_FILE,
     )
 
-    write_hexatic_velocity_gsd(
+    hx.write_hexatic_velocity_gsd(
         IN_GSD,
         OUT_GSD,
         HEXATIC_TXT,

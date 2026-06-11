@@ -3,29 +3,9 @@ from pathlib import Path
 import numpy as np
 
 if __package__:
-    from hexatic.analysis import (
-        compute_neighbor_counts_trajectory,
-        compute_hexatic_order_trajectory,
-        hexatic_probability_distribution,
-        load_hexatic_text,
-        plot_hexatic_distribution,
-        save_distribution_text,
-        save_hexatic_text,
-        save_neighbor_count_text,
-        write_hexatic_velocity_gsd,
-    )
+    from hexatic import analysis as hx
 else:
-    from analysis import (
-        compute_neighbor_counts_trajectory,
-        compute_hexatic_order_trajectory,
-        hexatic_probability_distribution,
-        load_hexatic_text,
-        plot_hexatic_distribution,
-        save_distribution_text,
-        save_hexatic_text,
-        save_neighbor_count_text,
-        write_hexatic_velocity_gsd,
-    )
+    import analysis as hx
 
 PROJECT_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = PROJECT_DIR / "output"
@@ -55,49 +35,46 @@ SHELL_DELTA = CUTOFF + SHELL_THICKNESS
 
 
 def main() -> None:
-    steps, psi = compute_hexatic_order_trajectory(
-        IN_GSD,
-        n_neighbors=NEIGHBORS,
+    calculator = hx.SphereHexaticCalculator(
         cavity_radius=CAVITY_RADIUS,
         shell_delta=SHELL_DELTA,
+        n_neighbors=NEIGHBORS,
     )
-    save_hexatic_text(HEXATIC_TXT, steps, psi)
+    steps, psi = calculator.compute_hexatic_order_trajectory(IN_GSD)
+    hx.save_hexatic_text(HEXATIC_TXT, steps, psi)
 
-    count_steps, neighbor_counts = compute_neighbor_counts_trajectory(
+    count_steps, neighbor_counts = calculator.compute_neighbor_counts_trajectory(
         IN_GSD,
         neighbor_radius=NEIGHBOR_COUNT_RADIUS,
-        cavity_radius=CAVITY_RADIUS,
-        shell_delta=SHELL_DELTA,
     )
     assert np.array_equal(count_steps, steps)
-    save_neighbor_count_text(NEIGHBOR_COUNT_TXT, steps, neighbor_counts)
+    hx.save_neighbor_count_text(NEIGHBOR_COUNT_TXT, steps, neighbor_counts)
 
-    hexatic_table = load_hexatic_text(HEXATIC_TXT)
+    hexatic_table = hx.load_hexatic_text(HEXATIC_TXT)
     frame_indices = hexatic_table[:, 0].astype(int)
     psi_abs = hexatic_table[:, 5]
 
-    bin_centers, probability_density, counts = hexatic_probability_distribution(
+    bin_centers, probability_density, counts = hx.hexatic_probability_distribution(
         psi_abs,
         frame_indices,
         min_frame=EQUILIBRIUM_FRAME,
         bins=DISTRIBUTION_BINS,
         exclude_zeros=True,
     )
-    save_distribution_text(
+    hx.save_distribution_text(
         DISTRIBUTION_TXT,
         bin_centers,
         probability_density,
         counts,
     )
-    Path(FIGURE_FILE).parent.mkdir(parents=True, exist_ok=True)
-    plot_hexatic_distribution(
+    hx.plot_hexatic_distribution(
         bin_centers,
         probability_density,
         title=f"hexatic distribution, frames > {EQUILIBRIUM_FRAME}",
         filename=FIGURE_FILE,
     )
 
-    write_hexatic_velocity_gsd(
+    hx.write_hexatic_velocity_gsd(
         IN_GSD,
         OUT_GSD,
         HEXATIC_TXT,

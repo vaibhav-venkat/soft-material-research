@@ -2,6 +2,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import numpy.typing as npt
 
+__all__ = ["plot", "plot_two"]
+
 
 def plot(
     avg_structure_factor: npt.NDArray[np.float64],

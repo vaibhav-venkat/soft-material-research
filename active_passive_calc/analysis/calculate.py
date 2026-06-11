@@ -7,6 +7,8 @@ import numpy.typing as npt
 
 from .analyzers import get_analyzer, interpolate_periodic
 
+__all__ = ["calculate", "extract_scaling_factor"]
+
 
 def calculate(
     filename: str | Path,
