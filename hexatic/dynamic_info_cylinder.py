@@ -1,4 +1,6 @@
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterator
 
 import gsd.hoomd
 import matplotlib.pyplot as plt
@@ -11,6 +13,67 @@ if __package__:
 else:
     import analysis as hx
     from constants import cylinder
+
+CYLINDER = cylinder.ANALYSIS
+CYLINDER_PATHS = cylinder.PATHS
+
+
+@dataclass(frozen=True)
+class NeighborCountMatrix:
+    steps: np.ndarray
+    counts: np.ndarray
+
+    def __iter__(self) -> Iterator[np.ndarray]:
+        yield self.steps
+        yield self.counts
+
+
+@dataclass(frozen=True)
+class CenterOfMassSeries:
+    steps: np.ndarray
+    x_centers: np.ndarray
+    theta_centers: np.ndarray
+
+    def __iter__(self) -> Iterator[np.ndarray]:
+        yield self.steps
+        yield self.x_centers
+        yield self.theta_centers
+
+
+@dataclass(frozen=True)
+class DisclinationCenterOfMassSeries:
+    steps: np.ndarray
+    plus_x_centers: np.ndarray
+    plus_theta_centers: np.ndarray
+    minus_x_centers: np.ndarray
+    minus_theta_centers: np.ndarray
+
+    def __iter__(self) -> Iterator[np.ndarray]:
+        yield self.steps
+        yield self.plus_x_centers
+        yield self.plus_theta_centers
+        yield self.minus_x_centers
+        yield self.minus_theta_centers
+
+
+@dataclass(frozen=True)
+class DislocationSummarySeries:
+    steps: np.ndarray
+    x_centers: np.ndarray
+    theta_centers: np.ndarray
+    dislocation_counts: np.ndarray
+    plus_disclination_counts: np.ndarray
+    minus_disclination_counts: np.ndarray
+    net_disclination_charges: np.ndarray
+
+    def __iter__(self) -> Iterator[np.ndarray]:
+        yield self.steps
+        yield self.x_centers
+        yield self.theta_centers
+        yield self.dislocation_counts
+        yield self.plus_disclination_counts
+        yield self.minus_disclination_counts
+        yield self.net_disclination_charges
 
 
 def _copy_masked_particle_property(source, destination, name: str, mask: np.ndarray) -> None:
@@ -47,10 +110,10 @@ def _format_theta_axis(theta_axis) -> None:
 
 def _center_of_mass_or_nan(
     coords: np.ndarray,
-    box_length_x: float = cylinder.LX
-) -> tuple[float, float]:
+    box_length_x: float | None = cylinder.LX,
+) -> hx.CenterOfMass:
     if coords.size == 0:
-        return np.nan, np.nan
+        return hx.CenterOfMass(x=np.nan, theta=np.nan)
     return hx.get_center_of_mass_x_theta(
         coords,
         periodic_x=box_length_x is not None,
@@ -60,7 +123,7 @@ def _center_of_mass_or_nan(
 
 def load_neighbor_count_matrix(
     filename: str | Path,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> NeighborCountMatrix:
     table = np.loadtxt(filename, dtype=np.int64)
     if table.ndim == 1:
         table = table[np.newaxis, :]
@@ -86,14 +149,14 @@ def load_neighbor_count_matrix(
         steps[frame_idx] = frame_steps[0]
 
     assert np.all(counts >= 0)
-    return steps, counts
+    return NeighborCountMatrix(steps=steps, counts=counts)
 
 
 def write_dynamic_values_gsd(
     input_gsd: str | Path,
     output_gsd: str | Path,
-    cylinder_radius: float = cylinder.CYLINDER_RADIUS,
-    wall_cutoff: float = cylinder.WALL_CUTOFF,
+    cylinder_radius: float = CYLINDER.cylinder_radius,
+    wall_cutoff: float = CYLINDER.wall_cutoff,
 ) -> None:
     output_path = Path(output_gsd)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -104,7 +167,7 @@ def write_dynamic_values_gsd(
                 particles = frame.particles
                 assert particles.position is not None
 
-                dynamic_values, shell_mask = hx.get_dynamic_values(
+                dynamic_values = hx.get_dynamic_values(
                     particles.position,
                     contain_all=True,
                     cylinder_radius=cylinder_radius,
@@ -113,9 +176,9 @@ def write_dynamic_values_gsd(
                 new_frame = gsd.hoomd.Frame()
                 new_frame.configuration.step = frame.configuration.step
                 new_frame.configuration.box = frame.configuration.box
-                new_frame.particles.N = dynamic_values.shape[0]
-                new_frame.particles.position = dynamic_values.astype(np.float32)
-                new_frame.particles.velocity = dynamic_values.astype(np.float32)
+                new_frame.particles.N = dynamic_values.coords.shape[0]
+                new_frame.particles.position = dynamic_values.coords.astype(np.float32)
+                new_frame.particles.velocity = dynamic_values.coords.astype(np.float32)
                 if particles.types is None:
                     new_frame.particles.types = ["A"]
                 else:
@@ -123,12 +186,12 @@ def write_dynamic_values_gsd(
 
                 if particles.typeid is None:
                     new_frame.particles.typeid = np.zeros(
-                        dynamic_values.shape[0],
+                        dynamic_values.coords.shape[0],
                         dtype=np.uint32,
                     )
                 else:
                     new_frame.particles.typeid = np.asarray(particles.typeid)[
-                        shell_mask
+                        dynamic_values.shell_mask
                     ].copy()
 
                 for name in (
@@ -145,7 +208,7 @@ def write_dynamic_values_gsd(
                         particles,
                         new_frame.particles,
                         name,
-                        shell_mask,
+                        dynamic_values.shell_mask,
                     )
 
                 destination.append(new_frame)
@@ -153,7 +216,7 @@ def write_dynamic_values_gsd(
 
 def center_of_mass_series(
     input_gsd: str | Path,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> CenterOfMassSeries:
     """Computer the center of mass of the cylinder system w.r.t x and theta"""
     steps: list[int] = []
     x_centers: list[float] = []
@@ -163,38 +226,38 @@ def center_of_mass_series(
         for frame in source:
             particles = frame.particles
             assert particles.position is not None
-            dynamic_values, shell_mask = hx.get_dynamic_values(
+            dynamic_values = hx.get_dynamic_values(
                 particles.position,
                 contain_all=False,
-                cylinder_radius=cylinder.CYLINDER_RADIUS,
-                cutoff=cylinder.WALL_CUTOFF,
+                cylinder_radius=CYLINDER.cylinder_radius,
+                cutoff=CYLINDER.wall_cutoff,
             )
             box_length_x = float(frame.configuration.box[0])
-            x_center, theta_center = _center_of_mass_or_nan(
-                dynamic_values,
+            center = _center_of_mass_or_nan(
+                dynamic_values.coords,
                 box_length_x=box_length_x,
             )
             steps.append(int(frame.configuration.step))
-            x_centers.append(x_center)
-            theta_centers.append(theta_center)
+            x_centers.append(center.x)
+            theta_centers.append(center.theta)
 
-    return (
-        np.asarray(steps, dtype=np.int64),
-        np.asarray(x_centers, dtype=np.float64),
-        np.asarray(theta_centers, dtype=np.float64),
+    return CenterOfMassSeries(
+        steps=np.asarray(steps, dtype=np.int64),
+        x_centers=np.asarray(x_centers, dtype=np.float64),
+        theta_centers=np.asarray(theta_centers, dtype=np.float64),
     )
 
 
 def plot_center_of_mass_series(
-    input_gsd: str | Path = cylinder.IN_GSD,
-    filename: str | Path | None = cylinder.COM_PLOT,
+    input_gsd: str | Path = CYLINDER_PATHS.in_gsd,
+    filename: str | Path | None = CYLINDER_PATHS.com_plot,
 ) -> None:
-    steps, x_centers, theta_centers = center_of_mass_series(input_gsd)
+    series = center_of_mass_series(input_gsd)
 
     fig, x_axis = plt.subplots(figsize=(9, 5))
     x_line = x_axis.plot(
-        steps,
-        x_centers,
+        series.steps,
+        series.x_centers,
         color="tab:blue",
         label="x center of mass",
     )
@@ -204,8 +267,8 @@ def plot_center_of_mass_series(
 
     theta_axis = x_axis.twinx()
     theta_line = theta_axis.plot(
-        steps,
-        theta_centers,
+        series.steps,
+        series.theta_centers,
         color="tab:orange",
         label="theta center of mass",
     )
@@ -229,9 +292,9 @@ def plot_center_of_mass_series(
 
 def disclination_center_of_mass_series(
     input_gsd: str | Path,
-    neighbor_count_txt: str | Path = cylinder.NEIGHBOR_COUNT_TXT,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    neighbor_steps, neighbor_counts = load_neighbor_count_matrix(neighbor_count_txt)
+    neighbor_count_txt: str | Path = CYLINDER_PATHS.neighbor_count_txt,
+) -> DisclinationCenterOfMassSeries:
+    neighbor_data = load_neighbor_count_matrix(neighbor_count_txt)
     steps: list[int] = []
     plus_x_centers: list[float] = []
     plus_theta_centers: list[float] = []
@@ -242,67 +305,64 @@ def disclination_center_of_mass_series(
         for frame_idx, frame in enumerate(source):
             particles = frame.particles
             assert particles.position is not None
-            assert frame_idx < neighbor_counts.shape[0]
-            assert int(frame.configuration.step) == int(neighbor_steps[frame_idx])
+            assert frame_idx < neighbor_data.counts.shape[0]
+            assert int(frame.configuration.step) == int(neighbor_data.steps[frame_idx])
 
-            dynamic_values, shell_mask = hx.get_dynamic_values(
+            dynamic_values = hx.get_dynamic_values(
                 particles.position,
                 contain_all=False,
-                cylinder_radius=cylinder.CYLINDER_RADIUS,
-                cutoff=cylinder.WALL_CUTOFF,
+                cylinder_radius=CYLINDER.cylinder_radius,
+                cutoff=CYLINDER.wall_cutoff,
             )
-            shell_charges = cylinder.NEIGHBORS - neighbor_counts[frame_idx, shell_mask]
+            shell_charges = (
+                CYLINDER.neighbors
+                - neighbor_data.counts[frame_idx, dynamic_values.shell_mask]
+            )
             box_length_x = float(frame.configuration.box[0])
 
-            plus_x, plus_theta = _center_of_mass_or_nan(
-                dynamic_values[shell_charges == 1],
+            plus_center = _center_of_mass_or_nan(
+                dynamic_values.coords[shell_charges == 1],
                 box_length_x=box_length_x,
             )
-            minus_x, minus_theta = _center_of_mass_or_nan(
-                dynamic_values[shell_charges == -1],
+            minus_center = _center_of_mass_or_nan(
+                dynamic_values.coords[shell_charges == -1],
                 box_length_x=box_length_x,
             )
 
             steps.append(int(frame.configuration.step))
-            plus_x_centers.append(plus_x)
-            plus_theta_centers.append(plus_theta)
-            minus_x_centers.append(minus_x)
-            minus_theta_centers.append(minus_theta)
+            plus_x_centers.append(plus_center.x)
+            plus_theta_centers.append(plus_center.theta)
+            minus_x_centers.append(minus_center.x)
+            minus_theta_centers.append(minus_center.theta)
 
-    return (
-        np.asarray(steps, dtype=np.int64),
-        np.asarray(plus_x_centers, dtype=np.float64),
-        np.asarray(plus_theta_centers, dtype=np.float64),
-        np.asarray(minus_x_centers, dtype=np.float64),
-        np.asarray(minus_theta_centers, dtype=np.float64),
+    return DisclinationCenterOfMassSeries(
+        steps=np.asarray(steps, dtype=np.int64),
+        plus_x_centers=np.asarray(plus_x_centers, dtype=np.float64),
+        plus_theta_centers=np.asarray(plus_theta_centers, dtype=np.float64),
+        minus_x_centers=np.asarray(minus_x_centers, dtype=np.float64),
+        minus_theta_centers=np.asarray(minus_theta_centers, dtype=np.float64),
     )
 
 
 def plot_disclination_center_of_mass_series(
-    input_gsd: str | Path = cylinder.IN_GSD,
-    neighbor_count_txt: str | Path = cylinder.NEIGHBOR_COUNT_TXT,
-    filename: str | Path | None = cylinder.DISCLINATION_COM_PLOT,
+    input_gsd: str | Path = CYLINDER_PATHS.in_gsd,
+    neighbor_count_txt: str | Path = CYLINDER_PATHS.neighbor_count_txt,
+    filename: str | Path | None = CYLINDER_PATHS.disclination_com_plot,
 ) -> None:
-    (
-        steps,
-        plus_x_centers,
-        plus_theta_centers,
-        minus_x_centers,
-        minus_theta_centers,
-    ) = disclination_center_of_mass_series(input_gsd, neighbor_count_txt)
+    series = disclination_center_of_mass_series(input_gsd, neighbor_count_txt)
 
     fig, x_axis = plt.subplots(figsize=(12, 6))
     plus_x_line = x_axis.plot(
-        steps,
-        plus_x_centers,
+        series.steps,
+        series.plus_x_centers,
         color="#1f77b4",
         linewidth=1.8,
         alpha=0.9,
         label="+1 x COM",
     )
     minus_x_line = x_axis.plot(
-        steps,
-        minus_x_centers,
+        series.steps,
+        series.minus_x_centers,
         color="#1f77b4",
         linestyle="--",
         linewidth=1.8,
@@ -316,16 +376,16 @@ def plot_disclination_center_of_mass_series(
 
     theta_axis = x_axis.twinx()
     plus_theta_line = theta_axis.plot(
-        steps,
-        plus_theta_centers,
+        series.steps,
+        series.plus_theta_centers,
         color="#ff7f0e",
         linewidth=1.8,
         alpha=0.9,
         label="+1 theta COM",
     )
     minus_theta_line = theta_axis.plot(
-        steps,
-        minus_theta_centers,
+        series.steps,
+        series.minus_theta_centers,
         color="#ff7f0e",
         linestyle="--",
         linewidth=1.8,
@@ -359,17 +419,9 @@ def plot_disclination_center_of_mass_series(
 
 def dislocation_summary_series(
     input_gsd: str | Path,
-    neighbor_count_txt: str | Path = cylinder.NEIGHBOR_COUNT_TXT,
-) -> tuple[
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-]:
-    neighbor_steps, neighbor_counts = load_neighbor_count_matrix(neighbor_count_txt)
+    neighbor_count_txt: str | Path = CYLINDER_PATHS.neighbor_count_txt,
+) -> DislocationSummarySeries:
+    neighbor_data = load_neighbor_count_matrix(neighbor_count_txt)
     steps: list[int] = []
     dislocation_x_centers: list[float] = []
     dislocation_theta_centers: list[float] = []
@@ -382,64 +434,67 @@ def dislocation_summary_series(
         for frame_idx, frame in enumerate(source):
             particles = frame.particles
             assert particles.position is not None
-            assert frame_idx < neighbor_counts.shape[0]
-            assert int(frame.configuration.step) == int(neighbor_steps[frame_idx])
+            assert frame_idx < neighbor_data.counts.shape[0]
+            assert int(frame.configuration.step) == int(neighbor_data.steps[frame_idx])
 
-            dynamic_values, shell_mask = hx.get_dynamic_values(
+            dynamic_values = hx.get_dynamic_values(
                 particles.position,
                 contain_all=False,
-                cylinder_radius=cylinder.CYLINDER_RADIUS,
-                cutoff=cylinder.WALL_CUTOFF,
+                cylinder_radius=CYLINDER.cylinder_radius,
+                cutoff=CYLINDER.wall_cutoff,
             )
-            shell_charges = cylinder.NEIGHBORS - neighbor_counts[frame_idx, shell_mask]
+            shell_charges = (
+                CYLINDER.neighbors
+                - neighbor_data.counts[frame_idx, dynamic_values.shell_mask]
+            )
 
             charges = np.zeros(particles.position.shape[0], dtype=np.int64)
-            charges[shell_mask] = shell_charges
+            charges[dynamic_values.shell_mask] = shell_charges
             dislocation_particles = hx.identify_dislocation_particles_frame(
                 particles.position,
                 charges,
-                pair_distance=cylinder.DISLOCATION_PAIR_DISTANCE,
+                pair_distance=CYLINDER.dislocation_pair_distance,
                 box_length_x=float(frame.configuration.box[0]),
             )
-            shell_dislocations = dislocation_particles[shell_mask] == 1
-            x_center, theta_center = _center_of_mass_or_nan(
-                dynamic_values[shell_dislocations],
+            shell_dislocations = dislocation_particles[dynamic_values.shell_mask] == 1
+            center = _center_of_mass_or_nan(
+                dynamic_values.coords[shell_dislocations],
                 box_length_x=float(frame.configuration.box[0]),
             )
 
             steps.append(int(frame.configuration.step))
-            dislocation_x_centers.append(x_center)
-            dislocation_theta_centers.append(theta_center)
+            dislocation_x_centers.append(center.x)
+            dislocation_theta_centers.append(center.theta)
             dislocation_counts.append(int(np.count_nonzero(shell_dislocations)))
             plus_disclination_counts.append(int(np.count_nonzero(shell_charges == 1)))
             minus_disclination_counts.append(int(np.count_nonzero(shell_charges == -1)))
             net_disclination_charges.append(int(np.sum(shell_charges)))
 
-    return (
-        np.asarray(steps, dtype=np.int64),
-        np.asarray(dislocation_x_centers, dtype=np.float64),
-        np.asarray(dislocation_theta_centers, dtype=np.float64),
-        np.asarray(dislocation_counts, dtype=np.int64),
-        np.asarray(plus_disclination_counts, dtype=np.int64),
-        np.asarray(minus_disclination_counts, dtype=np.int64),
-        np.asarray(net_disclination_charges, dtype=np.int64),
+    return DislocationSummarySeries(
+        steps=np.asarray(steps, dtype=np.int64),
+        x_centers=np.asarray(dislocation_x_centers, dtype=np.float64),
+        theta_centers=np.asarray(dislocation_theta_centers, dtype=np.float64),
+        dislocation_counts=np.asarray(dislocation_counts, dtype=np.int64),
+        plus_disclination_counts=np.asarray(plus_disclination_counts, dtype=np.int64),
+        minus_disclination_counts=np.asarray(minus_disclination_counts, dtype=np.int64),
+        net_disclination_charges=np.asarray(net_disclination_charges, dtype=np.int64),
     )
 
 
 def plot_dislocation_center_of_mass_series(
-    input_gsd: str | Path = cylinder.IN_GSD,
-    neighbor_count_txt: str | Path = cylinder.NEIGHBOR_COUNT_TXT,
-    filename: str | Path | None = cylinder.DISLOCATION_COM_PLOT,
+    input_gsd: str | Path = CYLINDER_PATHS.in_gsd,
+    neighbor_count_txt: str | Path = CYLINDER_PATHS.neighbor_count_txt,
+    filename: str | Path | None = CYLINDER_PATHS.dislocation_com_plot,
 ) -> None:
-    steps, x_centers, theta_centers, _, _, _, _ = dislocation_summary_series(
+    series = dislocation_summary_series(
         input_gsd,
         neighbor_count_txt,
     )
 
     fig, x_axis = plt.subplots(figsize=(10, 5))
     x_line = x_axis.plot(
-        steps,
-        x_centers,
+        series.steps,
+        series.x_centers,
         color="tab:blue",
         label="dislocation x COM",
     )
@@ -450,8 +505,8 @@ def plot_dislocation_center_of_mass_series(
 
     theta_axis = x_axis.twinx()
     theta_line = theta_axis.plot(
-        steps,
-        theta_centers,
+        series.steps,
+        series.theta_centers,
         color="tab:orange",
         label="dislocation theta COM",
     )
@@ -474,19 +529,19 @@ def plot_dislocation_center_of_mass_series(
 
 
 def plot_dislocation_count_series(
-    input_gsd: str | Path = cylinder.IN_GSD,
-    neighbor_count_txt: str | Path = cylinder.NEIGHBOR_COUNT_TXT,
-    filename: str | Path | None = cylinder.DISLOCATION_COUNT_PLOT,
+    input_gsd: str | Path = CYLINDER_PATHS.in_gsd,
+    neighbor_count_txt: str | Path = CYLINDER_PATHS.neighbor_count_txt,
+    filename: str | Path | None = CYLINDER_PATHS.dislocation_count_plot,
 ) -> None:
-    steps, _, _, dislocation_counts, _, _, _ = dislocation_summary_series(
+    series = dislocation_summary_series(
         input_gsd,
         neighbor_count_txt,
     )
 
     fig, axis = plt.subplots(figsize=(10, 5))
     axis.plot(
-        steps,
-        dislocation_counts,
+        series.steps,
+        series.dislocation_counts,
         color="tab:purple",
         label="dislocation particles",
     )
@@ -507,25 +562,25 @@ def plot_dislocation_count_series(
 
 
 def plot_disclination_count_series(
-    input_gsd: str | Path = cylinder.IN_GSD,
-    neighbor_count_txt: str | Path = cylinder.NEIGHBOR_COUNT_TXT,
-    filename: str | Path | None = cylinder.DISCLINATION_COUNT_PLOT,
+    input_gsd: str | Path = CYLINDER_PATHS.in_gsd,
+    neighbor_count_txt: str | Path = CYLINDER_PATHS.neighbor_count_txt,
+    filename: str | Path | None = CYLINDER_PATHS.disclination_count_plot,
 ) -> None:
-    steps, _, _, _, plus_counts, minus_counts, _ = dislocation_summary_series(
+    series = dislocation_summary_series(
         input_gsd,
         neighbor_count_txt,
     )
 
     fig, axis = plt.subplots(figsize=(10, 5))
     axis.plot(
-        steps,
-        plus_counts,
+        series.steps,
+        series.plus_disclination_counts,
         color="tab:orange",
         label="+1 disclinations",
     )
     axis.plot(
-        steps,
-        minus_counts,
+        series.steps,
+        series.minus_disclination_counts,
         color="tab:red",
         linestyle="--",
         label="-1 disclinations",
@@ -547,19 +602,19 @@ def plot_disclination_count_series(
 
 
 def plot_net_disclination_charge_series(
-    input_gsd: str | Path = cylinder.IN_GSD,
-    neighbor_count_txt: str | Path = cylinder.NEIGHBOR_COUNT_TXT,
-    filename: str | Path | None = cylinder.NET_CHARGE_PLOT,
+    input_gsd: str | Path = CYLINDER_PATHS.in_gsd,
+    neighbor_count_txt: str | Path = CYLINDER_PATHS.neighbor_count_txt,
+    filename: str | Path | None = CYLINDER_PATHS.net_charge_plot,
 ) -> None:
-    steps, _, _, _, _, _, net_charges = dislocation_summary_series(
+    series = dislocation_summary_series(
         input_gsd,
         neighbor_count_txt,
     )
 
     fig, axis = plt.subplots(figsize=(10, 5))
     axis.plot(
-        steps,
-        net_charges,
+        series.steps,
+        series.net_disclination_charges,
         color="tab:green",
         label=r"net charge $\sum_i(6 - n_i)$",
     )
@@ -581,40 +636,46 @@ def plot_net_disclination_charge_series(
 
 
 def main() -> None:
-    write_dynamic_values_gsd(cylinder.IN_GSD, cylinder.DYNAMIC_VALUES_GSD)
-    plot_center_of_mass_series(cylinder.IN_GSD, cylinder.COM_PLOT)
+    write_dynamic_values_gsd(CYLINDER_PATHS.in_gsd, CYLINDER_PATHS.dynamic_values_gsd)
+    plot_center_of_mass_series(CYLINDER_PATHS.in_gsd, CYLINDER_PATHS.com_plot)
     plot_disclination_center_of_mass_series(
-        cylinder.IN_GSD,
-        cylinder.NEIGHBOR_COUNT_TXT,
-        cylinder.DISCLINATION_COM_PLOT,
+        CYLINDER_PATHS.in_gsd,
+        CYLINDER_PATHS.neighbor_count_txt,
+        CYLINDER_PATHS.disclination_com_plot,
     )
     plot_dislocation_center_of_mass_series(
-        cylinder.IN_GSD,
-        cylinder.NEIGHBOR_COUNT_TXT,
-        cylinder.DISLOCATION_COM_PLOT,
+        CYLINDER_PATHS.in_gsd,
+        CYLINDER_PATHS.neighbor_count_txt,
+        CYLINDER_PATHS.dislocation_com_plot,
     )
     plot_dislocation_count_series(
-        cylinder.IN_GSD,
-        cylinder.NEIGHBOR_COUNT_TXT,
-        cylinder.DISLOCATION_COUNT_PLOT,
+        CYLINDER_PATHS.in_gsd,
+        CYLINDER_PATHS.neighbor_count_txt,
+        CYLINDER_PATHS.dislocation_count_plot,
     )
     plot_disclination_count_series(
-        cylinder.IN_GSD,
-        cylinder.NEIGHBOR_COUNT_TXT,
-        cylinder.DISCLINATION_COUNT_PLOT,
+        CYLINDER_PATHS.in_gsd,
+        CYLINDER_PATHS.neighbor_count_txt,
+        CYLINDER_PATHS.disclination_count_plot,
     )
     plot_net_disclination_charge_series(
-        cylinder.IN_GSD,
-        cylinder.NEIGHBOR_COUNT_TXT,
-        cylinder.NET_CHARGE_PLOT,
+        CYLINDER_PATHS.in_gsd,
+        CYLINDER_PATHS.neighbor_count_txt,
+        CYLINDER_PATHS.net_charge_plot,
     )
-    print(f"Wrote OVITO dynamic values file to {cylinder.DYNAMIC_VALUES_GSD}.")
-    print(f"Wrote center-of-mass plot to {cylinder.COM_PLOT}.")
-    print(f"Wrote disclination center-of-mass plot to {cylinder.DISCLINATION_COM_PLOT}.")
-    print(f"Wrote dislocation center-of-mass plot to {cylinder.DISLOCATION_COM_PLOT}.")
-    print(f"Wrote dislocation count plot to {cylinder.DISLOCATION_COUNT_PLOT}.")
-    print(f"Wrote disclination count plot to {cylinder.DISCLINATION_COUNT_PLOT}.")
-    print(f"Wrote net disclination charge plot to {cylinder.NET_CHARGE_PLOT}.")
+    print(f"Wrote OVITO dynamic values file to {CYLINDER_PATHS.dynamic_values_gsd}.")
+    print(f"Wrote center-of-mass plot to {CYLINDER_PATHS.com_plot}.")
+    print(
+        "Wrote disclination center-of-mass plot to "
+        f"{CYLINDER_PATHS.disclination_com_plot}."
+    )
+    print(
+        "Wrote dislocation center-of-mass plot to "
+        f"{CYLINDER_PATHS.dislocation_com_plot}."
+    )
+    print(f"Wrote dislocation count plot to {CYLINDER_PATHS.dislocation_count_plot}.")
+    print(f"Wrote disclination count plot to {CYLINDER_PATHS.disclination_count_plot}.")
+    print(f"Wrote net disclination charge plot to {CYLINDER_PATHS.net_charge_plot}.")
     print("OVITO position.x stores x")
     print("OVITO position.y stores theta")
     print("OVITO position.z stores r")

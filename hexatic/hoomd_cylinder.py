@@ -9,19 +9,23 @@ if __package__:
 else:
     from constants import cylinder
 
-N = cylinder.REQUESTED_N_PARTICLES
-V = N / cylinder.RHO
-xrat = cylinder.X_RATIO
+paths = cylinder.PATHS
+analysis = cylinder.ANALYSIS
+simulation = cylinder.SIMULATION
+
+N = simulation.requested_n_particles
+V = N / simulation.rho
+xrat = simulation.x_ratio
 L = (V / xrat)**(1/3)
 Lx = xrat * L
 K = math.ceil((N / xrat)** (1 / 3))
 Kx = xrat * K
-l = cylinder.RHO**(-1/3)/xrat
+l = simulation.rho**(-1/3)/xrat
 lx = xrat * l
 
 N = Kx * K**2
 
-np.random.seed(cylinder.SEED)
+np.random.seed(simulation.seed)
 
 # spacing = rho**(-1/3)
 # K = math.ceil(N ** (1 / 3))
@@ -49,9 +53,9 @@ position = generate_lattice(
     Kx,
     K,
     K,
-    cylinder.LATTICE_SPACING,
-    cylinder.LATTICE_SPACING,
-    cylinder.LATTICE_SPACING,
+    simulation.lattice_spacing,
+    simulation.lattice_spacing,
+    simulation.lattice_spacing,
 )
 
 print(N)
@@ -61,7 +65,7 @@ print(np.min(position, axis=0))
 Lx = np.max(position, axis=0)[0]*2 + 2
 L = 0.4 * Lx
 print(Lx/2, L/2, L/2)
-print(cylinder.CYLINDER_RADIUS)
+print(analysis.cylinder_radius)
 print(np.max(np.sqrt(position[:, 2]**2 + position[:, 1]**2)))
 # assert False
 
@@ -69,7 +73,7 @@ print(np.max(np.sqrt(position[:, 2]**2 + position[:, 1]**2)))
 frame = gsd.hoomd.Frame()
 frame.particles.N = N
 frame.particles.position = position
-frame.particles.diameter = [cylinder.PARTICLE_DIAMETER] * N
+frame.particles.diameter = [analysis.particle_diameter] * N
 # set orientation & MoI
 frame.particles.moment_inertia = [(1, 1, 1)] * N
 orientation = 2.0 * np.pi * np.random.rand(N)
@@ -85,15 +89,15 @@ frame.configuration.box = [Lx, L, L, 0, 0, 0]
 frame.particles.types = ["A"]
 
 
-cylinder.INITIAL_GSD.parent.mkdir(parents=True, exist_ok=True)
-with gsd.hoomd.open(name=str(cylinder.INITIAL_GSD), mode="w") as f:
+paths.initial_gsd.parent.mkdir(parents=True, exist_ok=True)
+with gsd.hoomd.open(name=str(paths.initial_gsd), mode="w") as f:
     f.append(frame)
 
 CPU = hoomd.device.CPU()
-sim = hoomd.Simulation(device=CPU, seed=cylinder.SEED)
-state = sim.create_state_from_gsd(filename=str(cylinder.INITIAL_GSD))
+sim = hoomd.Simulation(device=CPU, seed=simulation.seed)
+state = sim.create_state_from_gsd(filename=str(paths.initial_gsd))
 
-integrator = hoomd.md.Integrator(dt=cylinder.TIMESTEP)
+integrator = hoomd.md.Integrator(dt=simulation.timestep)
 sim.operations.integrator = integrator
 filter_all = hoomd.filter.All()
 
@@ -106,16 +110,16 @@ cell = hoomd.md.nlist.Cell(buffer=0.4)
 
 lj = hoomd.md.pair.LJ(nlist=cell)
 lj.params[("A", "A")] = dict(
-    epsilon=50 * cylinder.GAMMA * cylinder.U0 * cylinder.SIGMA,
-    sigma=cylinder.SIGMA,
+    epsilon=50 * simulation.gamma * simulation.u0 * analysis.sigma,
+    sigma=analysis.sigma,
 )
-lj.r_cut[("A", "A")] = cylinder.WALL_CUTOFF
+lj.r_cut[("A", "A")] = analysis.wall_cutoff
 integrator.forces.append(lj)
 
 # walls = [hoomd.wall.Sphere(radius=1.4 * (V * 3 / 4 / np.pi)**(1/3))]
 walls = [
     hoomd.wall.Cylinder(
-        radius=cylinder.CYLINDER_RADIUS,
+        radius=analysis.cylinder_radius,
         axis=(1, 0, 0),
         inside=True,
         open=True,
@@ -123,9 +127,9 @@ walls = [
 ]
 lj2 = hoomd.md.external.wall.LJ(walls=walls)
 lj2.params["A"] = {
-    "sigma": cylinder.SIGMA,
-    "epsilon": 50 * cylinder.GAMMA * cylinder.U0 * cylinder.SIGMA,
-    "r_cut": cylinder.WALL_CUTOFF,
+    "sigma": analysis.sigma,
+    "epsilon": 50 * simulation.gamma * simulation.u0 * analysis.sigma,
+    "r_cut": analysis.wall_cutoff,
 }
 
 
@@ -134,21 +138,21 @@ integrator.forces.append(lj2)
 
 active = hoomd.md.force.Active(filter=hoomd.filter.Type(['A']))
 active.use_orientation = True
-active.active_force['A'] = (cylinder.GAMMA * cylinder.U0, 0.0, 0.0)  # will be rotated
+active.active_force['A'] = (simulation.gamma * simulation.u0, 0.0, 0.0)  # will be rotated
 active.active_torque['A'] = (0.0, 0.0, 0.0)
 integrator.forces.append(active)
 
 
 # Rotational diffusion updater
 rot_diff = active.create_diffusion_updater(
-    trigger=hoomd.trigger.Periodic(cylinder.ROTATIONAL_DIFFUSION_PERIOD),
-    rotational_diffusion=1 / cylinder.TAU_R,
+    trigger=hoomd.trigger.Periodic(simulation.rotational_diffusion_period),
+    rotational_diffusion=1 / simulation.tau_r,
 )
 sim.operations += rot_diff
 
 gsd_writer = hoomd.write.GSD(
-    filename=str(cylinder.IN_GSD),
-    trigger=hoomd.trigger.Periodic(cylinder.TRAJECTORY_WRITE_PERIOD),
+    filename=str(paths.in_gsd),
+    trigger=hoomd.trigger.Periodic(simulation.trajectory_write_period),
     mode="wb",
 )
 # gsd_writer = hoomd.write.GSD(
@@ -156,5 +160,5 @@ gsd_writer = hoomd.write.GSD(
 # )
 sim.operations.writers.append(gsd_writer)
 
-sim.run(cylinder.RUN_STEPS)
+sim.run(simulation.run_steps)
 # sim.run(10)

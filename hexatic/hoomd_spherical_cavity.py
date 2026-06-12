@@ -10,10 +10,14 @@ if __package__:
 else:
     from constants import sphere
 
-np.random.seed(sphere.SEED)
+paths = sphere.PATHS
+analysis = sphere.ANALYSIS
+simulation = sphere.SIMULATION
 
-spacing = sphere.RHO ** (-1 / 3)
-K = math.ceil(sphere.N_PARTICLES ** (1 / 3))
+np.random.seed(simulation.seed)
+
+spacing = simulation.rho ** (-1 / 3)
+K = math.ceil(simulation.n_particles ** (1 / 3))
 L = K * spacing
 x = np.linspace(-L / 2, L / 2, K, endpoint=False)
 position = (
@@ -22,14 +26,14 @@ position = (
 )
 
 frame = gsd.hoomd.Frame()
-frame.particles.N = sphere.N_PARTICLES
+frame.particles.N = simulation.n_particles
 frame.particles.position = position
-frame.particles.diameter = [sphere.PARTICLE_DIAMETER] * sphere.N_PARTICLES
+frame.particles.diameter = [analysis.particle_diameter] * simulation.n_particles
 # set orientation & MoI
-frame.particles.moment_inertia = [(1, 1, 1)] * sphere.N_PARTICLES
-orientation = 2.0 * np.pi * np.random.rand(sphere.N_PARTICLES)
-phi = 2.0 * np.pi * np.random.rand(sphere.N_PARTICLES)
-theta = 1.0 * np.pi * np.random.rand(sphere.N_PARTICLES)
+frame.particles.moment_inertia = [(1, 1, 1)] * simulation.n_particles
+orientation = 2.0 * np.pi * np.random.rand(simulation.n_particles)
+phi = 2.0 * np.pi * np.random.rand(simulation.n_particles)
+theta = 1.0 * np.pi * np.random.rand(simulation.n_particles)
 orient_quat = [
     (
         np.cos(orientation[i] / 2),
@@ -37,14 +41,14 @@ orient_quat = [
         np.sin(orientation[i] / 2) * np.sin(theta[i]) * np.sin(phi[i]),
         np.sin(orientation[i] / 2) * np.cos(theta[i]),
     )
-    for i in range(sphere.N_PARTICLES)
+    for i in range(simulation.n_particles)
 ]
 frame.particles.orientation = orient_quat
-frame.particles.typeid = [0] * sphere.N_PARTICLES
+frame.particles.typeid = [0] * simulation.n_particles
 frame.configuration.box = [
-    sphere.VOLUME ** (1 / 3) * 2,
-    sphere.VOLUME ** (1 / 3) * 2,
-    sphere.VOLUME ** (1 / 3) * 2,
+    analysis.volume ** (1 / 3) * 2,
+    analysis.volume ** (1 / 3) * 2,
+    analysis.volume ** (1 / 3) * 2,
     0,
     0,
     0,
@@ -52,15 +56,15 @@ frame.configuration.box = [
 frame.particles.types = ["A"]
 
 
-sphere.INITIAL_GSD.parent.mkdir(parents=True, exist_ok=True)
-with gsd.hoomd.open(name=str(sphere.INITIAL_GSD), mode="w") as f:
+paths.initial_gsd.parent.mkdir(parents=True, exist_ok=True)
+with gsd.hoomd.open(name=str(paths.initial_gsd), mode="w") as f:
     f.append(frame)
 
 CPU = hoomd.device.CPU()
-sim = hoomd.Simulation(device=CPU, seed=sphere.SEED)
-state = sim.create_state_from_gsd(filename=str(sphere.INITIAL_GSD))
+sim = hoomd.Simulation(device=CPU, seed=simulation.seed)
+state = sim.create_state_from_gsd(filename=str(paths.initial_gsd))
 
-integrator = hoomd.md.Integrator(dt=sphere.TIMESTEP)
+integrator = hoomd.md.Integrator(dt=simulation.timestep)
 sim.operations.integrator = integrator
 filter_all = hoomd.filter.All()
 
@@ -73,18 +77,18 @@ cell = hoomd.md.nlist.Cell(buffer=0.4)
 
 lj = hoomd.md.pair.LJ(nlist=cell)
 lj.params[("A", "A")] = dict(
-    epsilon=50 * sphere.GAMMA * sphere.U0 * sphere.SIGMA,
-    sigma=sphere.SIGMA,
+    epsilon=50 * simulation.gamma * simulation.u0 * analysis.sigma,
+    sigma=analysis.sigma,
 )
-lj.r_cut[("A", "A")] = sphere.CUTOFF
+lj.r_cut[("A", "A")] = analysis.cutoff
 integrator.forces.append(lj)
 
-walls = [hoomd.wall.Sphere(radius=sphere.CAVITY_RADIUS)]
+walls = [hoomd.wall.Sphere(radius=analysis.cavity_radius)]
 lj2 = hoomd.md.external.wall.LJ(walls=walls)
 lj2.params["A"] = {
-    "sigma": sphere.SIGMA,
-    "epsilon": 50 * sphere.GAMMA * sphere.U0 * sphere.SIGMA,
-    "r_cut": sphere.CUTOFF,
+    "sigma": analysis.sigma,
+    "epsilon": 50 * simulation.gamma * simulation.u0 * analysis.sigma,
+    "r_cut": analysis.cutoff,
 }
 
 
@@ -93,23 +97,23 @@ integrator.forces.append(lj2)
 
 active = hoomd.md.force.Active(filter=hoomd.filter.Type(["A"]))
 active.use_orientation = True
-active.active_force["A"] = (sphere.GAMMA * sphere.U0, 0.0, 0.0)  # will be rotated
+active.active_force["A"] = (simulation.gamma * simulation.u0, 0.0, 0.0)  # will be rotated
 active.active_torque["A"] = (0.0, 0.0, 0.0)
 integrator.forces.append(active)
 
 
 # Rotational diffusion updater
 rot_diff = active.create_diffusion_updater(
-    trigger=hoomd.trigger.Periodic(sphere.ROTATIONAL_DIFFUSION_PERIOD),
-    rotational_diffusion=1 / sphere.TAU_R,
+    trigger=hoomd.trigger.Periodic(simulation.rotational_diffusion_period),
+    rotational_diffusion=1 / simulation.tau_r,
 )
 sim.operations += rot_diff
 
 gsd_writer = hoomd.write.GSD(
-    filename=str(sphere.IN_GSD),
-    trigger=hoomd.trigger.Periodic(sphere.TRAJECTORY_WRITE_PERIOD),
+    filename=str(paths.in_gsd),
+    trigger=hoomd.trigger.Periodic(simulation.trajectory_write_period),
     mode="wb",
 )
 sim.operations.writers.append(gsd_writer)
 
-sim.run(sphere.RUN_STEPS)
+sim.run(simulation.run_steps)

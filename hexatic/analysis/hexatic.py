@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 import copy
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterator
 import gsd.hoomd
 import numpy as np
 import numpy.typing as npt
@@ -10,6 +12,91 @@ import numpy.typing as npt
 FloatArray = npt.NDArray[np.float64]
 ComplexArray = npt.NDArray[np.complex128]
 IntArray = npt.NDArray[np.int64]
+
+
+@dataclass(frozen=True)
+class HexaticFrame:
+    psi: ComplexArray
+    neighbors: IntArray
+
+    def __iter__(self) -> Iterator[np.ndarray]:
+        yield self.psi
+        yield self.neighbors
+
+
+@dataclass(frozen=True)
+class HexaticTrajectory:
+    steps: IntArray
+    psi: ComplexArray
+
+    def __iter__(self) -> Iterator[np.ndarray]:
+        yield self.steps
+        yield self.psi
+
+
+@dataclass(frozen=True)
+class NeighborCountTrajectory:
+    steps: IntArray
+    counts: IntArray
+
+    def __iter__(self) -> Iterator[np.ndarray]:
+        yield self.steps
+        yield self.counts
+
+
+@dataclass(frozen=True)
+class ProbabilityDistribution:
+    bin_centers: FloatArray
+    probability_density: FloatArray
+    counts: IntArray
+
+    def __iter__(self) -> Iterator[np.ndarray]:
+        yield self.bin_centers
+        yield self.probability_density
+        yield self.counts
+
+
+@dataclass(frozen=True)
+class DynamicValues:
+    coords: FloatArray
+    shell_mask: npt.NDArray[np.bool_]
+
+    def __iter__(self) -> Iterator[np.ndarray]:
+        yield self.coords
+        yield self.shell_mask
+
+
+@dataclass(frozen=True)
+class CenterOfMass:
+    x: float
+    theta: float
+
+    def __iter__(self) -> Iterator[float]:
+        yield self.x
+        yield self.theta
+
+
+@dataclass(frozen=True)
+class HexaticVelocityFields:
+    component: int = 0
+    neighbor_counts: np.ndarray | None = None
+    neighbor_component: int = 1
+    disclination_charges: np.ndarray | None = None
+    charge_component: int = 2
+    dislocation_particles: np.ndarray | None = None
+
+    def validate_components(self) -> None:
+        assert self.component in (0, 1, 2)
+        assert self.neighbor_component in (0, 1, 2)
+        assert self.charge_component in (0, 1, 2)
+        assert self.component != self.neighbor_component or self.neighbor_counts is None
+        assert (
+            self.component != self.charge_component
+            or self.disclination_charges is None
+        )
+        assert self.neighbor_component != self.charge_component or (
+            self.neighbor_counts is None or self.disclination_charges is None
+        )
 
 
 def _validate_positions(positions: np.ndarray) -> FloatArray:
@@ -241,7 +328,7 @@ def compute_hexatic_order_frame(
     center: np.ndarray | None = None,
     cavity_radius: float | None = None,
     shell_delta: float | None = None,
-) -> tuple[ComplexArray, IntArray]:
+) -> HexaticFrame:
     """Compute hexatic order for every particle in a frame"""
 
     positions = _validate_positions(positions)
@@ -259,7 +346,7 @@ def compute_hexatic_order_frame(
     normals = sphere_normals(positions, center)
     psi = _hexatic_from_neighbors(positions, neighbors, normals)
 
-    return psi, neighbors
+    return HexaticFrame(psi=psi, neighbors=neighbors)
 
 
 def cavity_shell_mask(
@@ -295,26 +382,25 @@ def cylinder_shell_mask(
     return radii > cylinder_radius - shell_delta
 
 
+@dataclass
 class SurfaceHexaticCalculator(ABC):
     """Shell calculations"""
 
     cylinder_basis = False
+    surface_radius: float
+    shell_delta: float
+    n_neighbors: int = 6
+    center: np.ndarray | None = None
 
-    def __init__(
-        self,
-        surface_radius: float,
-        shell_delta: float,
-        n_neighbors: int = 6,
-        center: np.ndarray | None = None,
-    ) -> None:
-        assert surface_radius > 0.0
-        assert shell_delta > 0.0
-        assert n_neighbors > 0
+    def __post_init__(self) -> None:
+        assert self.surface_radius > 0.0
+        assert self.shell_delta > 0.0
+        assert self.n_neighbors > 0
 
-        self.surface_radius = float(surface_radius)
-        self.shell_delta = float(shell_delta)
-        self.n_neighbors = int(n_neighbors)
-        self.center = _validate_center(center)
+        self.surface_radius = float(self.surface_radius)
+        self.shell_delta = float(self.shell_delta)
+        self.n_neighbors = int(self.n_neighbors)
+        self.center = _validate_center(self.center)
 
     @abstractmethod
     def shell_mask(self, positions: np.ndarray) -> npt.NDArray[np.bool_]:
@@ -333,7 +419,7 @@ class SurfaceHexaticCalculator(ABC):
         self,
         positions: np.ndarray,
         box_length_x: float | None = None,
-    ) -> tuple[ComplexArray, IntArray]:
+    ) -> HexaticFrame:
         """Compute psi_6 for particles selected by this surface geometry."""
 
         positions = _validate_positions(positions)
@@ -344,7 +430,7 @@ class SurfaceHexaticCalculator(ABC):
         neighbors = np.full((n_particles, self.n_neighbors), -1, dtype=np.int64)
 
         if len(shell_indices) <= self.n_neighbors:
-            return psi, neighbors
+            return HexaticFrame(psi=psi, neighbors=neighbors)
 
         shell_positions = positions[shell_indices]
         shell_neighbors = nearest_neighbors(
@@ -364,7 +450,7 @@ class SurfaceHexaticCalculator(ABC):
         psi[shell_indices] = shell_psi
         neighbors[shell_indices] = shell_indices[shell_neighbors]
 
-        return psi, neighbors
+        return HexaticFrame(psi=psi, neighbors=neighbors)
 
     def compute_neighbor_counts_frame(
         self,
@@ -393,7 +479,7 @@ class SurfaceHexaticCalculator(ABC):
     def compute_hexatic_order_trajectory(
         self,
         filename: str | Path,
-    ) -> tuple[IntArray, ComplexArray]:
+    ) -> HexaticTrajectory:
         """Compute surface hexatic order for every frame."""
 
         steps: list[int] = []
@@ -417,13 +503,16 @@ class SurfaceHexaticCalculator(ABC):
                 psi_frames.append(psi)
                 steps.append(int(frame.configuration.step))
 
-        return np.asarray(steps, dtype=np.int64), np.vstack(psi_frames)
+        return HexaticTrajectory(
+            steps=np.asarray(steps, dtype=np.int64),
+            psi=np.vstack(psi_frames),
+        )
 
     def compute_neighbor_counts_trajectory(
         self,
         filename: str | Path,
         neighbor_radius: float,
-    ) -> tuple[IntArray, IntArray]:
+    ) -> NeighborCountTrajectory:
         """Count fixed-radius surface neighbors for every frame."""
 
         steps: list[int] = []
@@ -448,9 +537,13 @@ class SurfaceHexaticCalculator(ABC):
                 count_frames.append(counts)
                 steps.append(int(frame.configuration.step))
 
-        return np.asarray(steps, dtype=np.int64), np.vstack(count_frames)
+        return NeighborCountTrajectory(
+            steps=np.asarray(steps, dtype=np.int64),
+            counts=np.vstack(count_frames),
+        )
 
 
+@dataclass(init=False)
 class SphereHexaticCalculator(SurfaceHexaticCalculator):
     """Spherical cavity calculations"""
 
@@ -481,6 +574,7 @@ class SphereHexaticCalculator(SurfaceHexaticCalculator):
         return sphere_normals(positions, center=self.center)
 
 
+@dataclass(init=False)
 class CylinderHexaticCalculator(SurfaceHexaticCalculator):
     """Cylinder calculations"""
 
@@ -522,7 +616,7 @@ def compute_hexatic_order_frame_near_cavity(
     shell_delta: float,
     n_neighbors: int = 6,
     center: np.ndarray | None = None,
-) -> tuple[ComplexArray, IntArray]:
+) -> HexaticFrame:
     """Compute hexatic order only for particles close to the cavity wall"""
 
     calculator = SphereHexaticCalculator(
@@ -541,7 +635,7 @@ def compute_hexatic_order_frame_on_cylinder(
     n_neighbors: int = 6,
     center: np.ndarray | None = None,
     box_length_x: float | None = None,
-) -> tuple[ComplexArray, IntArray]:
+) -> HexaticFrame:
     """Compute hexatic order for particles on a cylindrical surface."""
 
     calculator = CylinderHexaticCalculator(
@@ -601,7 +695,7 @@ def compute_hexatic_order_trajectory(
     center: np.ndarray | None = None,
     cavity_radius: float | None = None,
     shell_delta: float | None = None,
-) -> tuple[IntArray, ComplexArray]:
+) -> HexaticTrajectory:
     """Compute hexatic order for every frame"""
 
     if cavity_radius is not None or shell_delta is not None:
@@ -639,7 +733,10 @@ def compute_hexatic_order_trajectory(
             steps.append(int(frame.configuration.step))
 
     assert psi_frames is not None
-    return np.asarray(steps, dtype=np.int64), np.vstack(psi_frames)
+    return HexaticTrajectory(
+        steps=np.asarray(steps, dtype=np.int64),
+        psi=np.vstack(psi_frames),
+    )
 
 
 def compute_hexatic_order_cylinder_trajectory(
@@ -648,7 +745,7 @@ def compute_hexatic_order_cylinder_trajectory(
     shell_delta: float,
     n_neighbors: int = 6,
     center: np.ndarray | None = None,
-) -> tuple[IntArray, ComplexArray]:
+) -> HexaticTrajectory:
     """Compute cylinder-surface hexatic order for every frame."""
 
     calculator = CylinderHexaticCalculator(
@@ -666,7 +763,7 @@ def compute_neighbor_counts_trajectory(
     cavity_radius: float,
     shell_delta: float,
     center: np.ndarray | None = None,
-) -> tuple[IntArray, IntArray]:
+) -> NeighborCountTrajectory:
     """Count surface neighbors for every frame"""
 
     calculator = SphereHexaticCalculator(
@@ -686,7 +783,7 @@ def compute_neighbor_counts_cylinder_trajectory(
     cylinder_radius: float,
     shell_delta: float,
     center: np.ndarray | None = None,
-) -> tuple[IntArray, IntArray]:
+) -> NeighborCountTrajectory:
     """Count cylinder-surface neighbors for every frame."""
 
     calculator = CylinderHexaticCalculator(
@@ -821,7 +918,7 @@ def hexatic_probability_distribution(
     min_frame: int = 10,
     bins: int = 50,
     exclude_zeros: bool = False,
-) -> tuple[FloatArray, FloatArray, IntArray]:
+) -> ProbabilityDistribution:
     """Return the probability density of psi for frames after cutoff"""
 
     values = np.asarray(hexatic_abs, dtype=np.float64).reshape(-1)
@@ -843,10 +940,10 @@ def hexatic_probability_distribution(
     counts, _ = np.histogram(selected, bins=edges)
     centers = 0.5 * (edges[:-1] + edges[1:])
 
-    return (
-        centers.astype(np.float64, copy=False),
-        density.astype(np.float64, copy=False),
-        counts.astype(np.int64, copy=False),
+    return ProbabilityDistribution(
+        bin_centers=centers.astype(np.float64, copy=False),
+        probability_density=density.astype(np.float64, copy=False),
+        counts=counts.astype(np.int64, copy=False),
     )
 
 
@@ -950,14 +1047,15 @@ def write_hexatic_velocity_gsd(
 ) -> None:
     """Write .gsd file with psi as the velocity"""
 
-    assert component in (0, 1, 2)
-    assert neighbor_component in (0, 1, 2)
-    assert charge_component in (0, 1, 2)
-    assert component != neighbor_component or neighbor_counts is None
-    assert component != charge_component or disclination_charges is None
-    assert neighbor_component != charge_component or (
-        neighbor_counts is None or disclination_charges is None
+    fields = HexaticVelocityFields(
+        component=component,
+        neighbor_counts=neighbor_counts,
+        neighbor_component=neighbor_component,
+        disclination_charges=disclination_charges,
+        charge_component=charge_component,
+        dislocation_particles=dislocation_particles,
     )
+    fields.validate_components()
 
     input_path = Path(input_gsd)
     output_path = Path(output_gsd)
@@ -977,14 +1075,20 @@ def write_hexatic_velocity_gsd(
             n_frames=n_frames,
             n_particles=n_particles,
         )
-        if neighbor_counts is not None:
-            neighbor_counts = np.asarray(neighbor_counts, dtype=np.float64)
+        if fields.neighbor_counts is not None:
+            neighbor_counts = np.asarray(fields.neighbor_counts, dtype=np.float64)
             assert neighbor_counts.shape == (n_frames, n_particles)
-        if disclination_charges is not None:
-            disclination_charges = np.asarray(disclination_charges, dtype=np.float64)
+        if fields.disclination_charges is not None:
+            disclination_charges = np.asarray(
+                fields.disclination_charges,
+                dtype=np.float64,
+            )
             assert disclination_charges.shape == (n_frames, n_particles)
-        if dislocation_particles is not None:
-            dislocation_particles = np.asarray(dislocation_particles, dtype=np.float64)
+        if fields.dislocation_particles is not None:
+            dislocation_particles = np.asarray(
+                fields.dislocation_particles,
+                dtype=np.float64,
+            )
             assert dislocation_particles.shape == (n_frames, n_particles)
 
         with gsd.hoomd.open(name=str(output_path), mode="w") as destination:
@@ -993,17 +1097,19 @@ def write_hexatic_velocity_gsd(
 
                 new_frame = copy.deepcopy(frame)
                 velocity = np.zeros((n_particles, 3), dtype=np.float32)
-                velocity[:, component] = hexatic_abs[frame_idx].astype(np.float32)
-                if neighbor_counts is not None:
-                    velocity[:, neighbor_component] = neighbor_counts[frame_idx].astype(
-                        np.float32
-                    )
-                if disclination_charges is not None:
-                    velocity[:, charge_component] = disclination_charges[
+                velocity[:, fields.component] = hexatic_abs[frame_idx].astype(
+                    np.float32
+                )
+                if fields.neighbor_counts is not None:
+                    velocity[:, fields.neighbor_component] = neighbor_counts[
+                        frame_idx
+                    ].astype(np.float32)
+                if fields.disclination_charges is not None:
+                    velocity[:, fields.charge_component] = disclination_charges[
                         frame_idx
                     ].astype(np.float32)
                 new_frame.particles.velocity = velocity
-                if dislocation_particles is not None:
+                if fields.dislocation_particles is not None:
                     orientation = new_frame.particles.orientation
                     if orientation is None:
                         orientation = np.zeros((n_particles, 4), dtype=np.float32)
@@ -1034,7 +1140,7 @@ def get_dynamic_values(
     contain_all: bool,
     cylinder_radius: float,
     cutoff: float,
-) -> tuple[FloatArray, npt.NDArray[np.bool_]]:
+) -> DynamicValues:
     """
     Get the values of each particles position in the cylinder: (x, theta, radius)
     contain_all : bool
@@ -1052,7 +1158,7 @@ def get_dynamic_values(
     else:
         shell_mask = (radii > cylinder_radius - cutoff) & (radii < cylinder_radius)
 
-    return coords[shell_mask], shell_mask
+    return DynamicValues(coords=coords[shell_mask], shell_mask=shell_mask)
 
 
 def get_center_of_mass_x_theta(
@@ -1060,7 +1166,7 @@ def get_center_of_mass_x_theta(
     circular: bool = True,
     periodic_x: bool = False,
     box_length_x: float | None = None,
-) -> tuple[float, float]:
+) -> CenterOfMass:
     """Return COM in x and theta for coords with columns (x, theta, ...)."""
 
     coords = np.asarray(coords, dtype=np.float64)
@@ -1085,7 +1191,7 @@ def get_center_of_mass_x_theta(
     else:
         theta_center = float(np.mean(theta))
 
-    return x_center, theta_center
+    return CenterOfMass(x=x_center, theta=theta_center)
 
 
 _EXCLUDED_EXPORTS = {
@@ -1094,7 +1200,9 @@ _EXCLUDED_EXPORTS = {
     "abstractmethod",
     "annotations",
     "copy",
+    "dataclass",
     "gsd",
+    "Iterator",
     "np",
     "npt",
 }
