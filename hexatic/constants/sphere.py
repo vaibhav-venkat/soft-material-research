@@ -1,0 +1,40 @@
+import math
+
+try:
+    from .project import IMAGE_OUTPUT_DIR, SPHERE_OUTPUT_DIR
+except ImportError:
+    from constants.project import IMAGE_OUTPUT_DIR, SPHERE_OUTPUT_DIR
+
+IN_GSD = SPHERE_OUTPUT_DIR / "trajectory.gsd"
+INITIAL_GSD = SPHERE_OUTPUT_DIR / "initial_mesh.gsd"
+HEXATIC_TXT = SPHERE_OUTPUT_DIR / "hexatic_order.txt"
+NEIGHBOR_COUNT_TXT = SPHERE_OUTPUT_DIR / "surface_neighbor_counts.txt"
+DISTRIBUTION_TXT = SPHERE_OUTPUT_DIR / "hexatic_order_distribution.txt"
+FIGURE_FILE = IMAGE_OUTPUT_DIR / "hexatic_order_distribution.png"
+OUT_GSD = SPHERE_OUTPUT_DIR / "trajectory_hexatic_velocity.gsd"
+
+EQUILIBRIUM_FRAME = 10
+NEIGHBORS = 6
+DISTRIBUTION_BINS = 50
+VELOCITY_COMPONENT = 0
+NEIGHBOR_COUNT_COMPONENT = 1
+
+N_PARTICLES = 1000
+RHO = 0.2
+SIGMA = 1.0
+VOLUME = N_PARTICLES / RHO
+CAVITY_RADIUS = 1.4 * (VOLUME * 3.0 / 4.0 / math.pi) ** (1.0 / 3.0)
+CUTOFF = 2.0 ** (1.0 / 6.0) * SIGMA
+PARTICLE_DIAMETER = SIGMA * 2.0 ** (1.0 / 6.0)
+NEIGHBOR_COUNT_RADIUS = 2.0 ** (4.0 / 6.0) * SIGMA
+SHELL_THICKNESS = 0.05 * SIGMA
+SHELL_DELTA = CUTOFF + SHELL_THICKNESS
+SEED = 1
+KT = 1
+GAMMA = 1
+U0 = 100
+TAU_R = 1
+TIMESTEP = 1e-6
+ROTATIONAL_DIFFUSION_PERIOD = 10
+TRAJECTORY_WRITE_PERIOD = int(1e5)
+RUN_STEPS = int(1e7)

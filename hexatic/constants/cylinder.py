@@ -1,0 +1,44 @@
+try:
+    from .project import CYLINDER_OUTPUT_DIR, IMAGE_OUTPUT_DIR
+except ImportError:
+    from constants.project import CYLINDER_OUTPUT_DIR, IMAGE_OUTPUT_DIR
+
+IN_GSD = CYLINDER_OUTPUT_DIR / "trajectory_cylinder.gsd"
+INITIAL_GSD = CYLINDER_OUTPUT_DIR / "initial_mesh.gsd"
+HEXATIC_TXT = CYLINDER_OUTPUT_DIR / "cylinder_hexatic_order.txt"
+NEIGHBOR_COUNT_TXT = CYLINDER_OUTPUT_DIR / "cylinder_surface_neighbor_counts.txt"
+DISTRIBUTION_TXT = CYLINDER_OUTPUT_DIR / "cylinder_hexatic_order_distribution.txt"
+FIGURE_FILE = IMAGE_OUTPUT_DIR / "cylinder_hexatic_order_distribution.png"
+OUT_GSD = CYLINDER_OUTPUT_DIR / "trajectory_cylinder_hexatic_velocity.gsd"
+DYNAMIC_VALUES_GSD = CYLINDER_OUTPUT_DIR / "trajectory_cylinder_dynamic_values.gsd"
+COM_PLOT = IMAGE_OUTPUT_DIR / "cylinder_center_of_mass_x_theta.png"
+
+EQUILIBRIUM_FRAME = 10
+NEIGHBORS = 6
+DISTRIBUTION_BINS = 50
+HEXATIC_COMPONENT = 0
+NEIGHBOR_COUNT_COMPONENT = 1
+DISCLINATION_CHARGE_COMPONENT = 2
+
+SIGMA = 1.0
+CYLINDER_RADIUS = 10.0 * 2.0 ** (1.0 / 6.0)
+WALL_CUTOFF = 2.0 ** (1.0 / 6.0) * SIGMA
+PARTICLE_DIAMETER = SIGMA * 2.0 ** (1.0 / 6.0)
+MIN_NEIGHBOR_COUNT_RADIUS = WALL_CUTOFF
+MAX_NEIGHBOR_COUNT_RADIUS = 2.0 ** (7.0 / 6.0) * SIGMA
+SHELL_DELTA = WALL_CUTOFF
+NEIGHBOR_COUNT_RADIUS = 1.7 * SIGMA
+
+REQUESTED_N_PARTICLES = 4000
+RHO = 0.2
+X_RATIO = 4
+SEED = 1
+KT = 1
+GAMMA = 1
+U0 = 100
+TAU_R = 1
+TIMESTEP = 1e-6
+ROTATIONAL_DIFFUSION_PERIOD = 10
+TRAJECTORY_WRITE_PERIOD = int(1e5)
+RUN_STEPS = int(1e7)
+LATTICE_SPACING = 2.0 ** (1.0 / 6.0) + 0.5

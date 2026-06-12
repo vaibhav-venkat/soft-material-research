@@ -814,6 +814,7 @@ def hexatic_abs_matrix_from_table(
     return matrix
 
 
+
 def hexatic_probability_distribution(
     hexatic_abs: np.ndarray,
     frame_indices: np.ndarray,
@@ -938,6 +939,59 @@ def write_hexatic_velocity_gsd(
                     ].astype(np.float32)
                 new_frame.particles.velocity = velocity
                 destination.append(new_frame)
+
+
+# 6/11 new stuff
+
+def get_new_coords(positions: np.ndarray) -> np.ndarray:
+    positions = _validate_positions(positions)
+    x_positions = positions[:, 0]
+    radii = np.sqrt(positions[:, 1]**2 + positions[:, 2]**2)
+    theta = np.mod(np.arctan2(positions[:, 1], positions[:, 2]), 2 * np.pi)
+    return np.column_stack((x_positions, theta, radii))
+
+
+def get_dynamic_values(
+    positions: np.ndarray,
+    contain_all: bool,
+    cylinder_radius: float,
+    cutoff: float,
+) -> tuple[FloatArray, npt.NDArray[np.bool_]]:
+    """
+    Get the values of each particles position in the cylinder: (x, theta, radius)
+    contain_all : bool
+        If True, all particles are included regardless of their radius.
+        If False, only particles within a set cutoff are included, R - cutoff < r < R
+    """
+    positions = _validate_positions(positions)
+    assert cylinder_radius > 0.0
+    assert cutoff > 0.0
+
+    coords = get_new_coords(positions)
+    radii = coords[:, 2]
+    if contain_all:
+        shell_mask = np.ones_like(radii, dtype=np.bool_)
+    else:
+        shell_mask = (radii > cylinder_radius - cutoff) & (radii < cylinder_radius)
+
+    return coords[shell_mask], shell_mask
+
+
+def get_center_of_mass_x_theta(coords: np.ndarray, circular: bool = True) -> tuple[float, float]:
+
+    x_center = float(np.mean(coords[:, 0]))
+    theta = coords[:, 1]
+    if circular:
+        theta_center = float(
+            np.mod(
+                np.arctan2(np.mean(np.sin(theta)), np.mean(np.cos(theta))),
+                2 * np.pi,
+            )
+        )
+    else:
+        theta_center = float(np.mean(theta))
+
+    return x_center, theta_center
 
 
 _EXCLUDED_EXPORTS = {
