@@ -941,7 +941,6 @@ def write_hexatic_velocity_gsd(
                 destination.append(new_frame)
 
 
-# 6/11 new stuff
 
 def get_new_coords(positions: np.ndarray) -> np.ndarray:
     positions = _validate_positions(positions)
