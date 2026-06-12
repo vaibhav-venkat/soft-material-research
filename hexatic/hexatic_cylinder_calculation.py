@@ -52,6 +52,11 @@ def main() -> None:
     hx.save_neighbor_count_text(cylinder.NEIGHBOR_COUNT_TXT, steps, neighbor_counts)
 
     disclination_charges = disclination_charges_from_counts(neighbor_counts, psi)
+    dislocation_particles = hx.identify_dislocation_particles_trajectory(
+        cylinder.IN_GSD,
+        disclination_charges,
+        pair_distance=cylinder.DISLOCATION_PAIR_DISTANCE,
+    )
 
     hexatic_table = hx.load_hexatic_text(cylinder.HEXATIC_TXT)
     frame_indices = hexatic_table[:, 0].astype(int)
@@ -86,6 +91,10 @@ def main() -> None:
         neighbor_component=cylinder.NEIGHBOR_COUNT_COMPONENT,
         disclination_charges=disclination_charges,
         charge_component=cylinder.DISCLINATION_CHARGE_COMPONENT,
+        dislocation_particles=dislocation_particles,
+        dislocation_moment_inertia_component=(
+            cylinder.DISLOCATION_MOMENT_INERTIA_COMPONENT
+        ),
     )
 
     selected_psi_abs = psi_abs[frame_indices > cylinder.EQUILIBRIUM_FRAME]
@@ -97,6 +106,9 @@ def main() -> None:
     surface_charges = disclination_charges[
         cylinder.EQUILIBRIUM_FRAME + 1 :
     ][surface_mask]
+    surface_dislocations = dislocation_particles[
+        cylinder.EQUILIBRIUM_FRAME + 1 :
+    ][surface_mask]
 
     print(f"Wrote hexatic order to {cylinder.HEXATIC_TXT}.")
     print(f"Wrote neighbor counts to {cylinder.NEIGHBOR_COUNT_TXT}.")
@@ -106,6 +118,13 @@ def main() -> None:
     print("OVITO velocity.x stores |psi_6|.")
     print("OVITO velocity.y stores surface neighbor count.")
     print("OVITO velocity.z stores disclination charge q = 6 - neighbor_count.")
+    print(
+        "OVITO particles_moment_inertia.1 stores dislocation flag."
+    )
+    print(
+        "Used dislocation pair distance="
+        f"{cylinder.DISLOCATION_PAIR_DISTANCE:.6f}."
+    )
     print(
         "Distribution frames on shell "
         f"min={distribution_psi_abs.min():.6f}, "
@@ -125,6 +144,10 @@ def main() -> None:
         f"q=+1 count={np.count_nonzero(surface_charges == 1)}, "
         f"q=0 count={np.count_nonzero(surface_charges == 0)}, "
         f"q=-1 count={np.count_nonzero(surface_charges == -1)}"
+    )
+    print(
+        "Dislocation-paired shell "
+        f"count={np.count_nonzero(surface_dislocations)}"
     )
 
 

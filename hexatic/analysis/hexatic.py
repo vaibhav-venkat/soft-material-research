@@ -876,6 +876,67 @@ def save_distribution_text(
     )
 
 
+def identify_dislocation_particles_frame(
+    positions: np.ndarray,
+    disclination_charges: np.ndarray,
+    pair_distance: float,
+    box_length_x: float | None = None,
+) -> IntArray:
+    positions = _validate_positions(positions)
+    charges = np.asarray(disclination_charges, dtype=np.int64)
+    assert charges.shape == (positions.shape[0],)
+    assert pair_distance > 0.0
+
+    plus_indices = np.flatnonzero(charges == 1)
+    minus_indices = np.flatnonzero(charges == -1)
+    dislocation_particles = np.zeros(positions.shape[0], dtype=np.int64)
+
+    if len(plus_indices) == 0 or len(minus_indices) == 0:
+        return dislocation_particles
+
+    vectors = positions[minus_indices][np.newaxis, :, :] - positions[
+        plus_indices
+    ][:, np.newaxis, :]
+    vectors = _minimum_image_x(vectors, box_length_x=box_length_x)
+    distances_sq = np.sum(vectors * vectors, axis=2)
+    paired_plus, paired_minus = np.nonzero(distances_sq <= pair_distance**2)
+
+    dislocation_particles[plus_indices[paired_plus]] = 1
+    dislocation_particles[minus_indices[paired_minus]] = 1
+    return dislocation_particles
+
+
+def identify_dislocation_particles_trajectory(
+    input_gsd: str | Path,
+    disclination_charges: np.ndarray,
+    pair_distance: float,
+) -> IntArray:
+    input_path = Path(input_gsd)
+    charges = np.asarray(disclination_charges, dtype=np.int64)
+    assert charges.ndim == 2
+    assert pair_distance > 0.0
+
+    dislocation_frames: list[IntArray] = []
+    with gsd.hoomd.open(name=str(input_path), mode="r") as trajectory:
+        assert len(trajectory) == charges.shape[0]
+        for frame_idx, frame in enumerate(trajectory):
+            particles = frame.particles
+            assert particles.position is not None
+
+            positions = _validate_positions(particles.position)
+            assert positions.shape[0] == charges.shape[1]
+            dislocation_frames.append(
+                identify_dislocation_particles_frame(
+                    positions,
+                    charges[frame_idx],
+                    pair_distance=pair_distance,
+                    box_length_x=float(frame.configuration.box[0]),
+                )
+            )
+
+    return np.vstack(dislocation_frames)
+
+
 def write_hexatic_velocity_gsd(
     input_gsd: str | Path,
     output_gsd: str | Path,
@@ -885,12 +946,15 @@ def write_hexatic_velocity_gsd(
     neighbor_component: int = 1,
     disclination_charges: np.ndarray | None = None,
     charge_component: int = 2,
+    dislocation_particles: np.ndarray | None = None,
+    dislocation_moment_inertia_component: int = 0,
 ) -> None:
     """Write .gsd file with psi as the velocity"""
 
     assert component in (0, 1, 2)
     assert neighbor_component in (0, 1, 2)
     assert charge_component in (0, 1, 2)
+    assert dislocation_moment_inertia_component in (0, 1, 2)
     assert component != neighbor_component or neighbor_counts is None
     assert component != charge_component or disclination_charges is None
     assert neighbor_component != charge_component or (
@@ -921,6 +985,9 @@ def write_hexatic_velocity_gsd(
         if disclination_charges is not None:
             disclination_charges = np.asarray(disclination_charges, dtype=np.float64)
             assert disclination_charges.shape == (n_frames, n_particles)
+        if dislocation_particles is not None:
+            dislocation_particles = np.asarray(dislocation_particles, dtype=np.float64)
+            assert dislocation_particles.shape == (n_frames, n_particles)
 
         with gsd.hoomd.open(name=str(output_path), mode="w") as destination:
             for frame_idx, frame in enumerate(source):
@@ -938,6 +1005,20 @@ def write_hexatic_velocity_gsd(
                         frame_idx
                     ].astype(np.float32)
                 new_frame.particles.velocity = velocity
+                if dislocation_particles is not None:
+                    moment_inertia = new_frame.particles.moment_inertia
+                    if moment_inertia is None:
+                        moment_inertia = np.zeros((n_particles, 3), dtype=np.float32)
+                    else:
+                        moment_inertia = np.asarray(
+                            moment_inertia,
+                            dtype=np.float32,
+                        ).copy()
+                    assert moment_inertia.shape == (n_particles, 3)
+                    moment_inertia[
+                        :, dislocation_moment_inertia_component
+                    ] = dislocation_particles[frame_idx].astype(np.float32)
+                    new_frame.particles.moment_inertia = moment_inertia
                 destination.append(new_frame)
 
 
@@ -976,9 +1057,25 @@ def get_dynamic_values(
     return coords[shell_mask], shell_mask
 
 
-def get_center_of_mass_x_theta(coords: np.ndarray, circular: bool = True) -> tuple[float, float]:
+def get_center_of_mass_x_theta(
+    coords: np.ndarray,
+    circular: bool = True,
+    periodic_x: bool = False,
+    box_length_x: float | None = None,
+) -> tuple[float, float]:
+    """Return COM in x and theta for coords with columns (x, theta, ...)."""
 
-    x_center = float(np.mean(coords[:, 0]))
+    coords = np.asarray(coords, dtype=np.float64)
+    assert coords.ndim == 2 and coords.shape[1] >= 2
+
+    if periodic_x:
+        assert box_length_x is not None and box_length_x > 0.0
+        x_angle = 2.0 * np.pi * coords[:, 0] / box_length_x
+        mean_x_angle = np.arctan2(np.mean(np.sin(x_angle)), np.mean(np.cos(x_angle)))
+        x_center = float(mean_x_angle * box_length_x / (2.0 * np.pi))
+    else:
+        x_center = float(np.mean(coords[:, 0]))
+
     theta = coords[:, 1]
     if circular:
         theta_center = float(
