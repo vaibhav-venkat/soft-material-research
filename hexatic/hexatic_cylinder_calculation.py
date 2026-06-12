@@ -92,9 +92,6 @@ def main() -> None:
         disclination_charges=disclination_charges,
         charge_component=cylinder.DISCLINATION_CHARGE_COMPONENT,
         dislocation_particles=dislocation_particles,
-        dislocation_moment_inertia_component=(
-            cylinder.DISLOCATION_MOMENT_INERTIA_COMPONENT
-        ),
     )
 
     selected_psi_abs = psi_abs[frame_indices > cylinder.EQUILIBRIUM_FRAME]
@@ -119,7 +116,7 @@ def main() -> None:
     print("OVITO velocity.y stores surface neighbor count.")
     print("OVITO velocity.z stores disclination charge q = 6 - neighbor_count.")
     print(
-        "OVITO particles_moment_inertia.1 stores dislocation flag."
+        "OVITO orientation.x stores dislocation flag."
     )
     print(
         "Used dislocation pair distance="

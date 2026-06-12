@@ -947,14 +947,12 @@ def write_hexatic_velocity_gsd(
     disclination_charges: np.ndarray | None = None,
     charge_component: int = 2,
     dislocation_particles: np.ndarray | None = None,
-    dislocation_moment_inertia_component: int = 0,
 ) -> None:
     """Write .gsd file with psi as the velocity"""
 
     assert component in (0, 1, 2)
     assert neighbor_component in (0, 1, 2)
     assert charge_component in (0, 1, 2)
-    assert dislocation_moment_inertia_component in (0, 1, 2)
     assert component != neighbor_component or neighbor_counts is None
     assert component != charge_component or disclination_charges is None
     assert neighbor_component != charge_component or (
@@ -1006,19 +1004,19 @@ def write_hexatic_velocity_gsd(
                     ].astype(np.float32)
                 new_frame.particles.velocity = velocity
                 if dislocation_particles is not None:
-                    moment_inertia = new_frame.particles.moment_inertia
-                    if moment_inertia is None:
-                        moment_inertia = np.zeros((n_particles, 3), dtype=np.float32)
+                    orientation = new_frame.particles.orientation
+                    if orientation is None:
+                        orientation = np.zeros((n_particles, 4), dtype=np.float32)
                     else:
-                        moment_inertia = np.asarray(
-                            moment_inertia,
+                        orientation = np.asarray(
+                            orientation,
                             dtype=np.float32,
                         ).copy()
-                    assert moment_inertia.shape == (n_particles, 3)
-                    moment_inertia[
-                        :, dislocation_moment_inertia_component
+                    assert orientation.shape == (n_particles, 4)
+                    orientation[
+                        :, 0
                     ] = dislocation_particles[frame_idx].astype(np.float32)
-                    new_frame.particles.moment_inertia = moment_inertia
+                    new_frame.particles.orientation = orientation
                 destination.append(new_frame)
 
 
