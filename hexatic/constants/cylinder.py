@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from pathlib import Path
 
 try:
     from .project import CYLINDER_OUTPUT_DIR, IMAGE_OUTPUT_DIR
@@ -19,29 +18,29 @@ U0 = 100
 TAU_R = 1
 TIMESTEP = 1e-6
 ROTATIONAL_DIFFUSION_PERIOD = 10
-TRAJECTORY_WRITE_PERIOD = int(1e5)
+TRAJECTORY_WRITE_PERIOD = int(1e4)
 
-RUN_STEPS = int(1e7)
+RUN_STEPS = int(1e6)
 LATTICE_SPACING = 2.0 ** (1.0 / 6.0) + 0.5
 
 
 @dataclass(frozen=True)
 class CylinderPaths:
-    disc_image_dir: Path = IMAGE_OUTPUT_DIR / "disc"
-    in_gsd: Path = CYLINDER_OUTPUT_DIR / "trajectory_cylinder.gsd"
-    initial_gsd: Path = CYLINDER_OUTPUT_DIR / "initial_mesh.gsd"
-    hexatic_txt: Path = CYLINDER_OUTPUT_DIR / "cylinder_hexatic_order.txt"
-    neighbor_count_txt: Path = CYLINDER_OUTPUT_DIR / "cylinder_surface_neighbor_counts.txt"
-    distribution_txt: Path = CYLINDER_OUTPUT_DIR / "cylinder_hexatic_order_distribution.txt"
-    figure_file: Path = IMAGE_OUTPUT_DIR / "cylinder_hexatic_order_distribution.png"
-    out_gsd: Path = CYLINDER_OUTPUT_DIR / "trajectory_cylinder_hexatic_velocity.gsd"
-    dynamic_values_gsd: Path = CYLINDER_OUTPUT_DIR / "trajectory_cylinder_dynamic_values.gsd"
-    com_plot: Path = IMAGE_OUTPUT_DIR / "cylinder_center_of_mass_x_theta.png"
-    disclination_com_plot: Path = IMAGE_OUTPUT_DIR / "cylinder_disclination_com_x_theta.png"
-    dislocation_com_plot: Path = disc_image_dir / "dislocation_center_of_mass_x_theta.png"
-    dislocation_count_plot: Path = disc_image_dir / "dislocation_count.png"
-    disclination_count_plot: Path = disc_image_dir / "disclination_count.png"
-    net_charge_plot: Path = disc_image_dir / "net_disclination_charge.png"
+    disc_image_dir = IMAGE_OUTPUT_DIR / "disc"
+    in_gsd = CYLINDER_OUTPUT_DIR / "trajectory_cylinder.gsd"
+    initial_gsd = CYLINDER_OUTPUT_DIR / "initial_mesh.gsd"
+    hexatic_txt = CYLINDER_OUTPUT_DIR / "cylinder_hexatic_order.txt"
+    neighbor_count_txt = CYLINDER_OUTPUT_DIR / "cylinder_surface_neighbor_counts.txt"
+    distribution_txt = CYLINDER_OUTPUT_DIR / "cylinder_hexatic_order_distribution.txt"
+    figure_file = IMAGE_OUTPUT_DIR / "cylinder_hexatic_order_distribution.png"
+    out_gsd = CYLINDER_OUTPUT_DIR / "trajectory_cylinder_hexatic_velocity.gsd"
+    dynamic_values_gsd = CYLINDER_OUTPUT_DIR / "trajectory_cylinder_dynamic_values.gsd"
+    com_plot = IMAGE_OUTPUT_DIR / "cylinder_center_of_mass_x_theta.png"
+    disclination_com_plot = IMAGE_OUTPUT_DIR / "cylinder_disclination_com_x_theta.png"
+    dislocation_com_plot = disc_image_dir / "dislocation_center_of_mass_x_theta.png"
+    dislocation_count_plot = disc_image_dir / "dislocation_count.png"
+    disclination_count_plot = disc_image_dir / "disclination_count.png"
+    net_charge_plot = disc_image_dir / "net_disclination_charge.png"
 
 
 @dataclass(frozen=True)
