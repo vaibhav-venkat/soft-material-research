@@ -23,6 +23,7 @@ ACTIVE_FIELD_X_BINS = 100
 ACTIVE_FIELD_THETA_BINS = 72
 ACTIVE_FLUX_PLOT_X_BINS = 32
 ACTIVE_FLUX_PLOT_THETA_BINS = 18
+ACTIVE_RADIAL_BIN_WIDTH = CYLINDER.particle_diameter
 ACTIVE_MOVIE_FPS = 8
 ACTIVE_DATA_DIR = Path(CYLINDER_PATHS.in_gsd).parent
 ACTIVE_IMAGE_DIR = Path(CYLINDER_PATHS.com_plot).parent / "active"
@@ -41,6 +42,7 @@ class ActiveMatterFields:
     polar_mean: np.ndarray
     polar_cylindrical: np.ndarray
     flux_cylindrical: np.ndarray
+    force_density: np.ndarray
     force_density_cylindrical: np.ndarray
 
 
@@ -168,6 +170,74 @@ def _radial_integral_mean(
     x_edges: np.ndarray,
     theta_edges: np.ndarray,
     box_length_x: float,
+    radial_bin_width: float = ACTIVE_RADIAL_BIN_WIDTH,
+    average_particles: bool = True,
+) -> np.ndarray:
+    values = np.asarray(values, dtype=np.float64)
+    x_bins = len(x_edges) - 1
+    theta_bins = len(theta_edges) - 1
+    assert radial_bin_width > 0.0
+
+    radial_min = 0.0
+    radial_max = CYLINDER.cylinder_radius
+    radial_span = radial_max - radial_min
+    assert radial_span > 0.0
+    n_radial_bins = int(np.ceil(radial_span / radial_bin_width))
+    radial_edges = radial_min + radial_bin_width * np.arange(n_radial_bins + 1)
+    radial_edges[-1] = radial_max
+    radial_widths = np.diff(radial_edges)
+
+    valid = (coords[:, 2] >= radial_min) & (coords[:, 2] <= radial_max)
+    coords = coords[valid]
+    values = values[valid]
+
+    x_indices = _x_bin_indices(coords[:, 0], box_length_x, x_bins)
+    theta_indices = _theta_bin_indices(coords[:, 1], theta_bins)
+    radial_indices = np.searchsorted(radial_edges, coords[:, 2], side="right") - 1
+    radial_indices = np.clip(radial_indices, 0, n_radial_bins - 1)
+    counts = np.zeros((x_bins, theta_bins, n_radial_bins), dtype=np.float64)
+    np.add.at(counts, (x_indices, theta_indices, radial_indices), 1.0)
+
+    if values.ndim == 1:
+        sums = np.zeros((x_bins, theta_bins, n_radial_bins), dtype=np.float64)
+        np.add.at(sums, (x_indices, theta_indices, radial_indices), values)
+        radial_values = sums
+        if average_particles:
+            radial_values = np.divide(
+                sums,
+                counts,
+                out=np.zeros_like(sums),
+                where=counts > 0,
+            )
+        return np.sum(radial_values * radial_widths, axis=2) / radial_span
+
+    sums = np.zeros(
+        (x_bins, theta_bins, n_radial_bins, values.shape[1]),
+        dtype=np.float64,
+    )
+    for component in range(values.shape[1]):
+        np.add.at(
+            sums[..., component],
+            (x_indices, theta_indices, radial_indices),
+            values[:, component],
+        )
+    radial_values = sums
+    if average_particles:
+        radial_values = np.divide(
+            sums,
+            counts[..., np.newaxis],
+            out=np.zeros_like(sums),
+            where=counts[..., np.newaxis] > 0,
+        )
+    return np.sum(radial_values * radial_widths[:, np.newaxis], axis=2) / radial_span
+
+
+def _xytheta_mean(
+    coords: np.ndarray,
+    values: np.ndarray,
+    x_edges: np.ndarray,
+    theta_edges: np.ndarray,
+    box_length_x: float,
 ) -> np.ndarray:
     values = np.asarray(values, dtype=np.float64)
     x_bins = len(x_edges) - 1
@@ -193,28 +263,19 @@ def _radial_integral_mean(
     )
 
 
-def _radial_integral_sum(
+def _xytheta_occupied(
     coords: np.ndarray,
-    values: np.ndarray,
     x_edges: np.ndarray,
     theta_edges: np.ndarray,
     box_length_x: float,
 ) -> np.ndarray:
-    values = np.asarray(values, dtype=np.float64)
     x_bins = len(x_edges) - 1
     theta_bins = len(theta_edges) - 1
     x_indices = _x_bin_indices(coords[:, 0], box_length_x, x_bins)
     theta_indices = _theta_bin_indices(coords[:, 1], theta_bins)
-
-    if values.ndim == 1:
-        sums = np.zeros((x_bins, theta_bins), dtype=np.float64)
-        np.add.at(sums, (x_indices, theta_indices), values)
-        return sums
-
-    sums = np.zeros((x_bins, theta_bins, values.shape[1]), dtype=np.float64)
-    for component in range(values.shape[1]):
-        np.add.at(sums[..., component], (x_indices, theta_indices), values[:, component])
-    return sums
+    counts = np.zeros((x_bins, theta_bins), dtype=np.int64)
+    np.add.at(counts, (x_indices, theta_indices), 1)
+    return counts > 0
 
 
 def _color_limits(values: np.ndarray) -> tuple[float, float]:
@@ -299,13 +360,22 @@ def _coarse_vector_density_grid(
         fields.coords.shape[1],
         dtype=np.bool_,
     )
-    vector_grid = _radial_integral_sum(
-        fields.coords[frame_idx, mask],
-        vectors[frame_idx, mask],
-        x_edges,
-        theta_edges,
-        x_span,
-    )
+    if shell_only:
+        vector_grid = _xytheta_mean(
+            fields.coords[frame_idx, mask],
+            vectors[frame_idx, mask],
+            x_edges,
+            theta_edges,
+            x_span,
+        )
+    else:
+        vector_grid = _radial_integral_mean(
+            fields.coords[frame_idx],
+            vectors[frame_idx],
+            x_edges,
+            theta_edges,
+            x_span,
+        )
     x_grid, theta_grid = np.meshgrid(x_centers, theta_centers, indexing="ij")
     return x_grid, theta_grid, vector_grid, x_span
 
@@ -332,6 +402,10 @@ def active_matter_field_series(
         polar_mean = np.zeros((n_frames, n_particles, 3), dtype=np.float64)
         polar_cylindrical = np.zeros((n_frames, n_particles, 3), dtype=np.float64)
         flux_cylindrical = np.zeros((n_frames, n_particles, 3), dtype=np.float64)
+        force_density_values = np.zeros(
+            (n_frames, n_particles, 3),
+            dtype=np.float64,
+        )
         force_density_cylindrical = np.zeros(
             (n_frames, n_particles, 3),
             dtype=np.float64,
@@ -372,6 +446,7 @@ def active_matter_field_series(
             shell_masks[frame_idx] = dynamic_values.shell_mask
             rho[frame_idx] = pocket_rho.astype(np.float64)
             polar_mean[frame_idx] = np.nan_to_num(pocket_polar_mean, nan=0.0)
+            force_density_values[frame_idx] = force_density
             polar_cylindrical[frame_idx] = _cylindrical_components(
                 polar_mean[frame_idx],
                 frame_coords[:, 1],
@@ -399,6 +474,7 @@ def active_matter_field_series(
         polar_mean=polar_mean,
         polar_cylindrical=polar_cylindrical,
         flux_cylindrical=flux_cylindrical,
+        force_density=force_density_values,
         force_density_cylindrical=force_density_cylindrical,
     )
 
@@ -424,6 +500,7 @@ def save_active_matter_fields(
         polar_mean=fields.polar_mean,
         polar_cylindrical=fields.polar_cylindrical,
         flux_cylindrical=fields.flux_cylindrical,
+        force_density=fields.force_density,
         force_density_cylindrical=fields.force_density_cylindrical,
     )
 
@@ -581,7 +658,7 @@ def plot_polar_radial_integral(
     fig.colorbar(quiver, ax=axis, label="r-averaged |polar mean in x-theta|")
     axis.set_xlabel("x")
     _format_theta_axis(axis)
-    axis.set_title(f"Integrated averaged polar mean, step {fields.steps[frame_idx]}")
+    axis.set_title(f"Radially averaged polar mean, step {fields.steps[frame_idx]}")
     fig.tight_layout()
     fig.savefig(output_path, dpi=200)
     plt.close(fig)
@@ -672,8 +749,8 @@ def plot_flux_shell(
         fields,
         fields.flux_cylindrical,
         filename,
-        "Outer-shell flux density",
-        r"$|\sum_i \dot{\mathbf{r}}_i|$",
+        "Outer-shell flux mean",
+        r"$|\langle\dot{\mathbf{r}}\rangle|$",
         shell_only=True,
         frame_index=frame_index,
     )
@@ -688,8 +765,8 @@ def plot_flux_radial_integral(
         fields,
         fields.flux_cylindrical,
         filename,
-        "Radially integrated flux density",
-        r"$|\int dr\sum_i \dot{\mathbf{r}}_i|$",
+        "Radially averaged flux mean",
+        r"$|R^{-1}\int dr\,\langle\dot{\mathbf{r}}\rangle_r|$",
         shell_only=False,
         frame_index=frame_index,
     )
@@ -704,8 +781,8 @@ def plot_force_density_shell(
         fields,
         fields.force_density_cylindrical,
         filename,
-        "Outer-shell force density",
-        r"$|\gamma^{-1}\sum_i \mathbf{F}_i|$",
+        "Outer-shell force mean",
+        r"$|\langle\gamma^{-1}\mathbf{F}\rangle|$",
         shell_only=True,
         frame_index=frame_index,
         cmap="cividis",
@@ -721,11 +798,145 @@ def plot_force_density_radial_integral(
         fields,
         fields.force_density_cylindrical,
         filename,
-        "Radially integrated force density",
-        r"$|\int dr\,\gamma^{-1}\sum_i \mathbf{F}_i|$",
+        "Radially averaged force mean",
+        r"$|R^{-1}\int dr\,\langle\gamma^{-1}\mathbf{F}\rangle_r|$",
         shell_only=False,
         frame_index=frame_index,
         cmap="cividis",
+    )
+
+
+def _component_pair_mean(values: np.ndarray) -> np.ndarray:
+    if len(values) == 0:
+        return np.asarray([np.nan, np.nan], dtype=np.float64)
+    return np.asarray(
+        [
+            np.mean(values[:, 0]),
+            np.mean(values[:, 2]),
+        ],
+        dtype=np.float64,
+    )
+
+
+def _radially_averaged_component_pair(
+    fields: ActiveMatterFields,
+    values: np.ndarray,
+    frame_idx: int,
+) -> np.ndarray:
+    x_span = fields.x_edges[-1] - fields.x_edges[0]
+    grid = _radial_integral_mean(
+        fields.coords[frame_idx],
+        values[frame_idx],
+        fields.x_edges,
+        fields.theta_edges,
+        x_span,
+    )
+    occupied = _xytheta_occupied(
+        fields.coords[frame_idx],
+        fields.x_edges,
+        fields.theta_edges,
+        x_span,
+    )
+    if not np.any(occupied):
+        return np.asarray([np.nan, np.nan], dtype=np.float64)
+    return np.asarray(
+        [
+            np.mean(grid[..., 0][occupied]),
+            np.mean(grid[..., 2][occupied]),
+        ],
+        dtype=np.float64,
+    )
+
+
+def _active_component_series(
+    fields: ActiveMatterFields,
+    radial_average: bool,
+) -> np.ndarray:
+    series = np.full((len(fields.steps), 6), np.nan, dtype=np.float64)
+    for frame_idx in range(len(fields.steps)):
+        if radial_average:
+            polar_pair = _radially_averaged_component_pair(
+                fields,
+                fields.polar_cylindrical,
+                frame_idx,
+            )
+            flux_pair = _radially_averaged_component_pair(
+                fields,
+                fields.flux_cylindrical,
+                frame_idx,
+            )
+            force_pair = _radially_averaged_component_pair(
+                fields,
+                fields.force_density_cylindrical,
+                frame_idx,
+            )
+        else:
+            mask = fields.shell_mask[frame_idx]
+            polar_pair = _component_pair_mean(fields.polar_cylindrical[frame_idx, mask])
+            flux_pair = _component_pair_mean(fields.flux_cylindrical[frame_idx, mask])
+            force_pair = _component_pair_mean(
+                fields.force_density_cylindrical[frame_idx, mask]
+            )
+
+        series[frame_idx] = np.concatenate((polar_pair, flux_pair, force_pair))
+    return series
+
+
+def _plot_active_component_series(
+    fields: ActiveMatterFields,
+    filename: str | Path,
+    radial_average: bool,
+) -> None:
+    output_path = Path(filename)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    series = _active_component_series(fields, radial_average=radial_average)
+    title_prefix = "Radially averaged" if radial_average else "Outer-shell"
+    groups = (
+        ("P", 0, 1),
+        ("J", 2, 3),
+        ("F", 4, 5),
+    )
+
+    fig, axes = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
+    for axis, (name, x_col, theta_col) in zip(axes, groups):
+        axis.plot(
+            fields.steps,
+            series[:, x_col],
+            color="tab:blue",
+            label=f"{name}_x",
+        )
+        axis.plot(
+            fields.steps,
+            series[:, theta_col],
+            color="tab:orange",
+            linestyle="--",
+            label=rf"{name}_\theta",
+        )
+        axis.set_ylabel(name)
+        axis.grid(True, ls="--", alpha=0.35)
+        axis.legend(loc="best")
+
+    axes[-1].set_xlabel("Simulation step")
+    fig.suptitle(f"{title_prefix} active component means")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+
+
+def plot_active_component_series(
+    fields: ActiveMatterFields,
+    image_dir: str | Path = ACTIVE_IMAGE_DIR,
+) -> None:
+    image_path = Path(image_dir)
+    _plot_active_component_series(
+        fields,
+        image_path / "active_components_shell.png",
+        radial_average=False,
+    )
+    _plot_active_component_series(
+        fields,
+        image_path / "active_components_radial_integral.png",
+        radial_average=True,
     )
 
 
@@ -868,7 +1079,7 @@ def _draw_polar_radial_integral(
     fig.colorbar(quiver, ax=axis, label="r-averaged |polar mean in x-theta|")
     axis.set_xlabel("x")
     _format_theta_axis(axis)
-    axis.set_title(f"Integrated averaged polar mean, step {fields.steps[frame_idx]}")
+    axis.set_title(f"Radially averaged polar mean, step {fields.steps[frame_idx]}")
 
 
 def plot_active_matter_movies(
@@ -920,8 +1131,8 @@ def plot_active_matter_movies(
             fig,
             axis,
             frame_idx,
-            "Outer-shell flux density",
-            r"$|\sum_i \dot{\mathbf{r}}_i|$",
+            "Outer-shell flux mean",
+            r"$|\langle\dot{\mathbf{r}}\rangle|$",
             shell_only=True,
             cmap="plasma",
         ),
@@ -936,8 +1147,8 @@ def plot_active_matter_movies(
             fig,
             axis,
             frame_idx,
-            "Radially integrated flux density",
-            r"$|\int dr\sum_i \dot{\mathbf{r}}_i|$",
+            "Radially averaged flux mean",
+            r"$|R^{-1}\int dr\,\langle\dot{\mathbf{r}}\rangle_r|$",
             shell_only=False,
             cmap="plasma",
         ),
@@ -952,8 +1163,8 @@ def plot_active_matter_movies(
             fig,
             axis,
             frame_idx,
-            "Outer-shell force density",
-            r"$|\gamma^{-1}\sum_i \mathbf{F}_i|$",
+            "Outer-shell force mean",
+            r"$|\langle\gamma^{-1}\mathbf{F}\rangle|$",
             shell_only=True,
             cmap="cividis",
         ),
@@ -968,8 +1179,8 @@ def plot_active_matter_movies(
             fig,
             axis,
             frame_idx,
-            "Radially integrated force density",
-            r"$|\int dr\,\gamma^{-1}\sum_i \mathbf{F}_i|$",
+            "Radially averaged force mean",
+            r"$|R^{-1}\int dr\,\langle\gamma^{-1}\mathbf{F}\rangle_r|$",
             shell_only=False,
             cmap="cividis",
         ),
@@ -1011,6 +1222,7 @@ def plot_active_matter_fields(
         image_path / "active_force_density_radial_integral.png",
         frame_index,
     )
+    plot_active_component_series(fields, image_dir=image_dir)
 
 
 def write_active_matter_field_outputs(
@@ -1035,7 +1247,8 @@ def write_active_matter_field_outputs(
         Path(data_dir) / "active_matter_fields.npz",
         pocket_radius=pocket_radius,
     )
-    plot_active_matter_fields(fields, image_dir=image_dir, frame_index=frame_index)
     if write_movies:
         plot_active_matter_movies(fields, image_dir=image_dir, fps=movie_fps)
+    else:
+        plot_active_matter_fields(fields, image_dir=image_dir, frame_index=frame_index)
     return fields
