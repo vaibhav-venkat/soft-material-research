@@ -703,6 +703,5 @@ def main() -> None:
     print("OVITO position.z stores r")
     print("OVITO velocity duplicates position")
 
-
 if __name__ == "__main__":
     main()

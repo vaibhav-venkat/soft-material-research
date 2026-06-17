@@ -49,6 +49,7 @@ CYLINDER_PATHS = cylinder.PATHS
 CYLINDER_SIM = cylinder.SIMULATION
 CHIRALITY_DATA_DIR = Path(CYLINDER_PATHS.in_gsd).parent
 CHIRALITY_IMAGE_DIR = Path(CYLINDER_PATHS.com_plot).parent / "chirality"
+DISCLINATION_CHIRALITY_IMAGE_DIR = CHIRALITY_IMAGE_DIR / "disclinations"
 
 
 @dataclass(frozen=True)
@@ -123,6 +124,41 @@ def _image_array(particles, n_particles: int) -> np.ndarray | None:
     if images.shape != (n_particles, 3):
         return None
     return images
+
+
+def _load_neighbor_count_matrix(filename: str | Path) -> NeighborCountMatrix:
+    table = np.loadtxt(filename, dtype=np.int64)
+    if table.ndim == 1:
+        table = table[np.newaxis, :]
+    assert table.ndim == 2 and table.shape[1] >= 4
+
+    frame_indices = table[:, 0]
+    step_values = table[:, 1]
+    particle_indices = table[:, 2]
+    neighbor_counts = table[:, 3]
+
+    n_frames = int(frame_indices.max()) + 1
+    n_particles = int(particle_indices.max()) + 1
+    flat_indices = frame_indices * n_particles + particle_indices
+    assert np.unique(flat_indices).size == flat_indices.size
+
+    steps = np.full(n_frames, -1, dtype=np.int64)
+    counts = np.full((n_frames, n_particles), -1, dtype=np.int64)
+    counts[frame_indices, particle_indices] = neighbor_counts
+    for frame_idx in range(n_frames):
+        frame_steps = np.unique(step_values[frame_indices == frame_idx])
+        assert frame_steps.size == 1
+        steps[frame_idx] = frame_steps[0]
+
+    assert np.all(counts >= 0)
+    return NeighborCountMatrix(steps=steps, counts=counts)
+
+
+def _cylinder_shell_mask(radii: np.ndarray) -> np.ndarray:
+    return (
+        (radii > CYLINDER.cylinder_radius - CYLINDER.wall_cutoff)
+        & (radii < CYLINDER.cylinder_radius)
+    )
 
 
 def _weighted_mean(values: np.ndarray, weights: np.ndarray, mask: np.ndarray) -> float:
@@ -799,6 +835,7 @@ def save_chirality_fields(
 def plot_chirality_global(
     fields: ChiralityFields,
     image_dir: str | Path = CHIRALITY_IMAGE_DIR,
+    title: str = "Cylinder chirality diagnostics",
 ) -> None:
     metric_index = {name: idx for idx, name in enumerate(fields.metric_names)}
     output_path = Path(image_dir) / "chirality_global_timeseries.png"
@@ -851,7 +888,7 @@ def plot_chirality_global(
         axis.grid(True, linestyle="--", alpha=0.35)
     axes[4].axhline(0.0, color="0.35", linewidth=0.9)
     axes[4].grid(True, linestyle="--", alpha=0.35)
-    fig.suptitle("Cylinder chirality diagnostics")
+    fig.suptitle(title)
     fig.tight_layout()
     fig.savefig(output_path, dpi=200)
     plt.close(fig)
@@ -1109,13 +1146,118 @@ def write_chirality_xtheta_movies(
         )
 
 
+def _geometric_config_from_chirality_config(
+    config: ChiralityConfig,
+) -> GeometricChiralityConfig:
+    return GeometricChiralityConfig(
+        radial_bin_width=config.radial_bin_width,
+        movie_fps=config.movie_fps,
+    )
+
+
+def _disclination_charge_label(charge: int) -> str:
+    assert charge in (-1, 1)
+    return "plus_1" if charge == 1 else "minus_1"
+
+
+def _disclination_particle_masks(
+    input_gsd: str | Path,
+    neighbor_count_txt: str | Path,
+    charge: int,
+) -> np.ndarray:
+    assert charge in (-1, 1)
+    neighbor_data = _load_neighbor_count_matrix(neighbor_count_txt)
+
+    with gsd.hoomd.open(name=str(input_gsd), mode="r") as source:
+        assert len(source) == neighbor_data.counts.shape[0]
+        n_frames = len(source)
+        n_particles = int(source[0].particles.N)
+        assert neighbor_data.counts.shape[1] == n_particles
+        masks = np.zeros((n_frames, n_particles), dtype=bool)
+
+        for frame_idx, frame in enumerate(source):
+            particles = frame.particles
+            assert particles.position is not None
+            assert int(particles.N) == n_particles
+            assert int(frame.configuration.step) == int(neighbor_data.steps[frame_idx])
+
+            coords = _cylinder_coords(np.asarray(particles.position, dtype=np.float64))
+            charges = CYLINDER.neighbors - neighbor_data.counts[frame_idx]
+            masks[frame_idx] = _cylinder_shell_mask(coords[:, 2]) & (charges == charge)
+
+    return masks
+
+
+def write_disclination_chirality_outputs(
+    input_gsd: str | Path = CYLINDER_PATHS.in_gsd,
+    neighbor_count_txt: str | Path = CYLINDER_PATHS.neighbor_count_txt,
+    data_dir: str | Path = CHIRALITY_DATA_DIR,
+    image_dir: str | Path = DISCLINATION_CHIRALITY_IMAGE_DIR,
+    config: ChiralityConfig = ChiralityConfig(limit_disclination=True),
+    write_movies: bool = True,
+) -> dict[int, ChiralityFields]:
+    fields_by_charge: dict[int, ChiralityFields] = {}
+    data_path = Path(data_dir) / "chirality_disclinations"
+    image_path = Path(image_dir)
+
+    for charge in (1, -1):
+        label = _disclination_charge_label(charge)
+        particle_masks = _disclination_particle_masks(
+            input_gsd,
+            neighbor_count_txt,
+            charge,
+        )
+        fields = compute_chirality_fields(
+            input_gsd,
+            config=config,
+            particle_masks=particle_masks,
+        )
+        save_chirality_fields(
+            fields,
+            data_path / f"{label}_chirality_fields.npz",
+            config=config,
+        )
+
+        charge_image_dir = image_path / label
+        plot_chirality_global(
+            fields,
+            image_dir=charge_image_dir,
+            title=f"Cylinder {charge:+d} disclination chirality diagnostics",
+        )
+        plot_chirality_radial_heatmaps(
+            fields,
+            image_dir=charge_image_dir,
+            min_count=config.min_count,
+        )
+        if write_movies:
+            write_chirality_xtheta_movies(
+                fields,
+                image_dir=charge_image_dir,
+                min_count=config.xtheta_min_count,
+                fps=config.movie_fps,
+            )
+        fields_by_charge[charge] = fields
+
+    return fields_by_charge
+
+
 def write_chirality_outputs(
     input_gsd: str | Path = CYLINDER_PATHS.in_gsd,
     data_dir: str | Path = CHIRALITY_DATA_DIR,
     image_dir: str | Path = CHIRALITY_IMAGE_DIR,
     config: ChiralityConfig = ChiralityConfig(),
     write_movies: bool = True,
-) -> ChiralityFields:
+) -> ChiralityFields | dict[int, ChiralityFields]:
+    if config.limit_disclination:
+        return write_disclination_chirality_outputs(
+            input_gsd=input_gsd,
+            neighbor_count_txt=CYLINDER_PATHS.neighbor_count_txt,
+            data_dir=data_dir,
+            image_dir=Path(image_dir) / "disclinations",
+            config=config,
+            write_movies=write_movies,
+        )
+
     fields = compute_chirality_fields(input_gsd, config=config)
     save_chirality_fields(
         fields,
