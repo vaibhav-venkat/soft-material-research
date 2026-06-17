@@ -218,11 +218,66 @@ def save_cartesian_flux_comparison(
     )
 
 
+def _cylindrical_plot_points(points: np.ndarray) -> np.ndarray:
+    radii = np.sqrt(points[:, 1] ** 2 + points[:, 2] ** 2)
+    theta = np.mod(np.arctan2(points[:, 1], points[:, 2]), 2.0 * np.pi)
+    return np.column_stack((points[:, 0], radii, theta))
+
+
+def _cylindrical_plot_vectors(points: np.ndarray, vectors: np.ndarray) -> np.ndarray:
+    radii = np.sqrt(points[:, 1] ** 2 + points[:, 2] ** 2)
+    theta = np.mod(np.arctan2(points[:, 1], points[:, 2]), 2.0 * np.pi)
+    sin_theta = np.sin(theta)
+    cos_theta = np.cos(theta)
+    radial = vectors[:, 1] * sin_theta + vectors[:, 2] * cos_theta
+    azimuthal = vectors[:, 1] * cos_theta - vectors[:, 2] * sin_theta
+    angular = np.divide(
+        azimuthal,
+        radii,
+        out=np.zeros_like(azimuthal, dtype=np.float64),
+        where=radii > 0.0,
+    )
+    return np.column_stack((vectors[:, 0], radial, angular))
+
+
+def _plot_coordinates(
+    points: np.ndarray,
+    vectors: np.ndarray,
+    coordinate_system: str,
+) -> tuple[np.ndarray, np.ndarray, tuple[str, str, str], tuple[str, str, str]]:
+    if coordinate_system == "xyz":
+        return points, vectors, ("x", "y", "z"), ("Jx", "Jy", "Jz")
+    if coordinate_system == "xrtheta":
+        return (
+            _cylindrical_plot_points(points),
+            _cylindrical_plot_vectors(points, vectors),
+            ("x", "r", "theta"),
+            ("Jx", "Jr", "Jtheta/r"),
+        )
+    raise ValueError("coordinate_system must be 'xyz' or 'xrtheta'.")
+
+
+def _normalize_coordinate_system(coordinate_system: str) -> str:
+    normalized = (
+        coordinate_system.lower()
+        .replace(" ", "")
+        .replace("_", "")
+        .replace(",", "")
+        .replace("-", "")
+    )
+    if normalized == "xyz":
+        return "xyz"
+    if normalized in {"xrtheta", "xrthetacoordinates"}:
+        return "xrtheta"
+    raise ValueError("coordinate_system must be 'xyz' or 'xrtheta'.")
+
+
 def _plot_flux_density_3d(
     comparison: CartesianFluxComparison,
     vectors: np.ndarray,
     filename: str | Path,
     title: str,
+    coordinate_system: str,
     max_vectors: int = 900,
 ) -> None:
     output_path = Path(filename)
@@ -231,9 +286,13 @@ def _plot_flux_density_3d(
     points = comparison.grid_points
     magnitudes = np.linalg.norm(vectors, axis=1)
     valid = np.isfinite(magnitudes) & (comparison.rho_density > 0.0)
-    plot_points = points[valid]
-    plot_vectors = vectors[valid]
+    plot_points, plot_vectors, axis_labels, component_labels = _plot_coordinates(
+        points[valid],
+        vectors[valid],
+        coordinate_system,
+    )
     plot_magnitudes = magnitudes[valid]
+    all_points = _plot_coordinates(points, vectors, coordinate_system)[0]
 
     if len(plot_points) > max_vectors:
         indices = np.linspace(0, len(plot_points) - 1, max_vectors).astype(np.int64)
@@ -249,9 +308,9 @@ def _plot_flux_density_3d(
     if len(plot_points) == 0:
         traces.append(
             go.Scatter3d(
-                x=points[:, 0],
-                y=points[:, 1],
-                z=points[:, 2],
+                x=all_points[:, 0],
+                y=all_points[:, 1],
+                z=all_points[:, 2],
                 mode="markers",
                 marker={"size": 2, "color": "lightgray", "opacity": 0.25},
                 name="empty cylinder grid",
@@ -300,23 +359,37 @@ def _plot_flux_density_3d(
                 name="flux density vectors",
                 customdata=np.column_stack((vector_magnitudes, vector_values)),
                 hovertemplate=(
-                    "x=%{x:.3g}<br>y=%{y:.3g}<br>z=%{z:.3g}"
+                    f"{axis_labels[0]}=%{{x:.3g}}"
+                    f"<br>{axis_labels[1]}=%{{y:.3g}}"
+                    f"<br>{axis_labels[2]}=%{{z:.3g}}"
                     "<br>|J|=%{customdata[0]:.3g}"
-                    "<br>Jx=%{customdata[1]:.3g}"
-                    "<br>Jy=%{customdata[2]:.3g}"
-                    "<br>Jz=%{customdata[3]:.3g}<extra></extra>"
+                    f"<br>{component_labels[0]}=%{{customdata[1]:.3g}}"
+                    f"<br>{component_labels[1]}=%{{customdata[2]:.3g}}"
+                    f"<br>{component_labels[2]}=%{{customdata[3]:.3g}}<extra></extra>"
                 ),
             )
         )
 
     radius = CYLINDER.cylinder_radius
+    axis_ranges = [
+        [float(np.min(all_points[:, 0])), float(np.max(all_points[:, 0]))],
+        [float(np.min(all_points[:, 1])), float(np.max(all_points[:, 1]))],
+        [float(np.min(all_points[:, 2])), float(np.max(all_points[:, 2]))],
+    ]
+    if coordinate_system == "xyz":
+        axis_ranges[1] = [-radius, radius]
+        axis_ranges[2] = [-radius, radius]
+    else:
+        axis_ranges[1] = [0.0, radius]
+        axis_ranges[2] = [0.0, 2.0 * np.pi]
+
     fig = go.Figure(data=traces)
     fig.update_layout(
         title=title,
         scene={
-            "xaxis": {"title": "x", "range": [float(np.min(points[:, 0])), float(np.max(points[:, 0]))]},
-            "yaxis": {"title": "y", "range": [-radius, radius]},
-            "zaxis": {"title": "z", "range": [-radius, radius]},
+            "xaxis": {"title": axis_labels[0], "range": axis_ranges[0]},
+            "yaxis": {"title": axis_labels[1], "range": axis_ranges[1]},
+            "zaxis": {"title": axis_labels[2], "range": axis_ranges[2]},
             "aspectmode": "data",
         },
         margin={"l": 0, "r": 0, "b": 0, "t": 45},
@@ -328,17 +401,25 @@ def _plot_flux_density_3d(
 def plot_cartesian_flux_comparison(
     comparison: CartesianFluxComparison,
     image_dir: str | Path = ACTIVE_IMAGE_DIR,
+    coordinate_system: str = "xyz",
 ) -> None:
-    image_path = Path(image_dir) / "flux" / "cartesian"
+    coordinate_system = _normalize_coordinate_system(coordinate_system)
+    filename_suffix = "xyz" if coordinate_system == "xyz" else "xrtheta"
+    image_path = Path(image_dir) / "flux" / filename_suffix
     _plot_flux_density_3d(
         comparison,
         comparison.instantaneous_flux_density,
-        image_path / "active_flux_density_instantaneous_xyz.html",
-        f"Instantaneous flux density, step {comparison.step}",
+        image_path / f"active_flux_density_instantaneous_{filename_suffix}.html",
+        f"Instantaneous flux density ({coordinate_system}), step {comparison.step}",
+        coordinate_system,
     )
     _plot_flux_density_3d(
         comparison,
         comparison.finite_difference_flux_density,
-        image_path / "active_flux_density_finite_difference_xyz.html",
-        f"Finite-difference flux density, step {comparison.step} to {comparison.next_step}",
+        image_path / f"active_flux_density_finite_difference_{filename_suffix}.html",
+        (
+            f"Finite-difference flux density ({coordinate_system}), "
+            f"step {comparison.step} to {comparison.next_step}"
+        ),
+        coordinate_system,
     )

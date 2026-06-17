@@ -46,6 +46,7 @@ def write_active_matter_field_outputs(
     dx: float = ACTIVE_GRID_DX,
     dy: float = ACTIVE_GRID_DY,
     dz: float = ACTIVE_GRID_DZ,
+    coordinate_system: str = "xyz",
 ) -> CartesianFluxComparison:
     comparison = compute_cartesian_flux_comparison(
         input_gsd,
@@ -55,5 +56,9 @@ def write_active_matter_field_outputs(
         dz=dz,
         frame_index=frame_index if frame_index != -1 else -2,
     )
-    plot_cartesian_flux_comparison(comparison, image_dir=image_dir)
+    plot_cartesian_flux_comparison(
+        comparison,
+        image_dir=image_dir,
+        coordinate_system=coordinate_system,
+    )
     return comparison
