@@ -13,7 +13,7 @@ from .config import (
 from .fields import active_matter_field_series, save_active_matter_fields
 from .movies import plot_active_matter_movies
 from .radial_px import plot_radial_px_fields
-from .vector_plots import plot_active_component_series
+from .vector_plots import plot_active_component_series, plot_active_x_balance_series
 
 
 def plot_active_matter_fields(
@@ -21,6 +21,7 @@ def plot_active_matter_fields(
     image_dir: str | Path = ACTIVE_IMAGE_DIR,
 ) -> None:
     plot_active_component_series(fields, image_dir=image_dir)
+    plot_active_x_balance_series(fields, image_dir=image_dir)
     plot_radial_px_fields(fields, image_dir=image_dir)
 
 

@@ -9,7 +9,11 @@ from .scalar_plots import (
     _draw_rho_radial_integral,
     _draw_rho_shell,
 )
-from .vector_plots import _draw_vector_density, plot_active_component_series
+from .vector_plots import (
+    _draw_vector_density,
+    plot_active_component_series,
+    plot_active_x_balance_series,
+)
 
 
 def plot_active_matter_movies(
@@ -21,13 +25,13 @@ def plot_active_matter_movies(
     plot_radial_px_fields(fields, image_dir=image_dir)
     _write_movie(
         fields,
-        image_path / "active_rho_shell.mp4",
+        image_path / "rho" / "active_rho_shell.mp4",
         lambda fig, axis, frame_idx: _draw_rho_shell(fields, fig, axis, frame_idx),
         fps=fps,
     )
     _write_movie(
         fields,
-        image_path / "active_rho_radial_integral.mp4",
+        image_path / "rho" / "active_rho_radial_integral.mp4",
         lambda fig, axis, frame_idx: _draw_rho_radial_integral(
             fields,
             fig,
@@ -38,13 +42,13 @@ def plot_active_matter_movies(
     )
     _write_movie(
         fields,
-        image_path / "active_polar_shell.mp4",
+        image_path / "polar" / "active_polar_shell.mp4",
         lambda fig, axis, frame_idx: _draw_polar_shell(fields, fig, axis, frame_idx),
         fps=fps,
     )
     _write_movie(
         fields,
-        image_path / "active_polar_radial_integral.mp4",
+        image_path / "polar" / "active_polar_radial_integral.mp4",
         lambda fig, axis, frame_idx: _draw_polar_radial_integral(
             fields,
             fig,
@@ -55,7 +59,7 @@ def plot_active_matter_movies(
     )
     _write_movie(
         fields,
-        image_path / "active_flux_shell.mp4",
+        image_path / "flux" / "active_flux_shell.mp4",
         lambda fig, axis, frame_idx: _draw_vector_density(
             fields,
             fields.flux_cylindrical,
@@ -71,7 +75,7 @@ def plot_active_matter_movies(
     )
     _write_movie(
         fields,
-        image_path / "active_flux_radial_integral.mp4",
+        image_path / "flux" / "active_flux_radial_integral.mp4",
         lambda fig, axis, frame_idx: _draw_vector_density(
             fields,
             fields.flux_cylindrical,
@@ -87,7 +91,7 @@ def plot_active_matter_movies(
     )
     _write_movie(
         fields,
-        image_path / "active_force_density_shell.mp4",
+        image_path / "force_density" / "active_force_density_shell.mp4",
         lambda fig, axis, frame_idx: _draw_vector_density(
             fields,
             fields.force_density_cylindrical,
@@ -103,7 +107,7 @@ def plot_active_matter_movies(
     )
     _write_movie(
         fields,
-        image_path / "active_force_density_radial_integral.mp4",
+        image_path / "force_density" / "active_force_density_radial_integral.mp4",
         lambda fig, axis, frame_idx: _draw_vector_density(
             fields,
             fields.force_density_cylindrical,
@@ -119,20 +123,21 @@ def plot_active_matter_movies(
     )
     _write_radial_px_movie(
         fields,
-        image_path / "active_px_radius_mean.mp4",
+        image_path / "px_radius" / "active_px_radius_mean.mp4",
         statistic="mean",
         fps=fps,
     )
     _write_radial_px_movie(
         fields,
-        image_path / "active_px_radius_mean_abs.mp4",
+        image_path / "px_radius" / "active_px_radius_mean_abs.mp4",
         statistic="mean_abs",
         fps=fps,
     )
     _write_radial_px_movie(
         fields,
-        image_path / "active_px_radius_sum.mp4",
+        image_path / "px_radius" / "active_px_radius_sum.mp4",
         statistic="sum",
         fps=fps,
     )
     plot_active_component_series(fields, image_dir=image_dir)
+    plot_active_x_balance_series(fields, image_dir=image_dir)

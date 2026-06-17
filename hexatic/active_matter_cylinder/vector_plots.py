@@ -18,6 +18,7 @@ from .config import (
     ACTIVE_FLUX_PLOT_X_BINS,
     ACTIVE_IMAGE_DIR,
     CYLINDER,
+    CYLINDER_SIM,
     ActiveMatterFields,
 )
 
@@ -283,18 +284,76 @@ def _plot_active_component_series(
     plt.close(fig)
 
 
+def _plot_active_x_balance_series(
+    fields: ActiveMatterFields,
+    filename: str | Path,
+    radial_average: bool,
+) -> None:
+    output_path = Path(filename)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    series = _active_component_series(fields, radial_average=radial_average)
+    title_prefix = "Radially averaged" if radial_average else "Outer-shell"
+
+    fig, axis = plt.subplots(figsize=(10, 5))
+    axis.plot(
+        fields.steps,
+        CYLINDER_SIM.u0 * series[:, 0],
+        color="tab:blue",
+        label=r"$U_0 P_x$",
+    )
+    axis.plot(
+        fields.steps,
+        series[:, 4],
+        color="tab:orange",
+        label=r"$F_x/\gamma$",
+    )
+    axis.plot(
+        fields.steps,
+        -series[:, 2],
+        color="tab:green",
+        label=r"$-J_x$",
+    )
+    axis.axhline(0.0, color="0.45", linewidth=1.0)
+    axis.set_xlabel("Simulation step")
+    axis.set_ylabel("x component")
+    axis.set_title(f"{title_prefix} active x-component balance")
+    axis.grid(True, ls="--", alpha=0.35)
+    axis.legend(loc="best")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+
+
 def plot_active_component_series(
     fields: ActiveMatterFields,
     image_dir: str | Path = ACTIVE_IMAGE_DIR,
 ) -> None:
     image_path = Path(image_dir)
+    component_path = image_path / "components"
     _plot_active_component_series(
         fields,
-        image_path / "active_components_shell.png",
+        component_path / "active_components_shell.png",
         radial_average=False,
     )
     _plot_active_component_series(
         fields,
-        image_path / "active_components_radial_integral.png",
+        component_path / "active_components_radial_integral.png",
+        radial_average=True,
+    )
+
+
+def plot_active_x_balance_series(
+    fields: ActiveMatterFields,
+    image_dir: str | Path = ACTIVE_IMAGE_DIR,
+) -> None:
+    image_path = Path(image_dir) / "x_balance"
+    _plot_active_x_balance_series(
+        fields,
+        image_path / "active_x_balance_shell.png",
+        radial_average=False,
+    )
+    _plot_active_x_balance_series(
+        fields,
+        image_path / "active_x_balance_radial_integral.png",
         radial_average=True,
     )

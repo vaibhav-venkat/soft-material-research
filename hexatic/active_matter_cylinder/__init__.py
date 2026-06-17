@@ -58,8 +58,10 @@ from .scalar_plots import (
 from .vector_plots import (
     _active_component_series,
     _draw_vector_density,
+    _plot_active_x_balance_series,
     _plot_vector_density,
     plot_active_component_series,
+    plot_active_x_balance_series,
     plot_flux_radial_integral,
     plot_flux_shell,
     plot_force_density_radial_integral,

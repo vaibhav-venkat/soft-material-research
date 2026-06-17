@@ -184,7 +184,7 @@ def plot_radial_px_fields(
     fields: ActiveMatterFields,
     image_dir: str | Path = ACTIVE_IMAGE_DIR,
 ) -> None:
-    image_path = Path(image_dir)
+    image_path = Path(image_dir) / "px_radius"
     _plot_radial_px_heatmap(
         fields,
         image_path / "active_px_radius_mean_heatmap.png",
