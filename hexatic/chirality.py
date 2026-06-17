@@ -21,6 +21,10 @@ if __package__:
         _x_edges_and_centers,
     )
     from hexatic.constants import cylinder
+    from hexatic.chirality_geometric import (
+        GeometricChiralityConfig,
+        write_geometric_chirality_outputs,
+    )
 else:
     from active_matter_cylinder import (
         ACTIVE_MOVIE_FPS,
@@ -34,6 +38,10 @@ else:
         _x_edges_and_centers,
     )
     from constants import cylinder
+    from chirality_geometric import (
+        GeometricChiralityConfig,
+        write_geometric_chirality_outputs,
+    )
 
 
 CYLINDER = cylinder.ANALYSIS
@@ -49,11 +57,12 @@ class ChiralityConfig:
     n_x_bins: int = 100
     n_theta_bins: int = 72
     lag_frames: tuple[int, ...] = (5,)
-    min_count: int = 1
+    min_count: int = 4
     xtheta_min_count: int = 1
     screw_min_screw_rate: float = 0
     radius_epsilon: float = 1e-12
     movie_fps: int = ACTIVE_MOVIE_FPS
+    limit_disclination: bool = False
 
 
 @dataclass(frozen=True)
@@ -73,6 +82,12 @@ class ChiralityFields:
     radial_counts: np.ndarray
     xtheta_values: np.ndarray
     xtheta_counts: np.ndarray
+
+
+@dataclass(frozen=True)
+class NeighborCountMatrix:
+    steps: np.ndarray
+    counts: np.ndarray
 
 
 def _radius_edges_and_centers(radial_bin_width: float) -> tuple[np.ndarray, np.ndarray]:
@@ -489,6 +504,7 @@ def _plot_or_mark_undefined(
 def compute_chirality_fields(
     input_gsd: str | Path,
     config: ChiralityConfig = ChiralityConfig(),
+    particle_masks: np.ndarray | None = None,
 ) -> ChiralityFields:
     metric_names, metric_labels = _metric_names_and_labels(config.lag_frames)
     n_metrics = len(metric_names)
@@ -534,6 +550,10 @@ def compute_chirality_fields(
             box_lengths_x[frame_idx] = float(frame.configuration.box[0])
             steps[frame_idx] = int(frame.configuration.step)
 
+    if particle_masks is not None:
+        particle_masks = np.asarray(particle_masks, dtype=bool)
+        assert particle_masks.shape == (n_frames, n_particles)
+
     images_for_unwrap = image_values if has_images else None
     x_unwrapped = _unwrapped_x(positions, images_for_unwrap, box_lengths_x)
     theta_unwrapped = np.unwrap(coords[:, :, 1], axis=0)
@@ -575,6 +595,8 @@ def compute_chirality_fields(
             & np.isfinite(radii)
             & np.all(np.isfinite(frame_velocities), axis=1)
         )
+        if particle_masks is not None:
+            valid = valid & particle_masks[frame_idx]
 
         theta_dot = np.full(n_particles, np.nan, dtype=np.float64)
         cross = z * vy - y * vz
@@ -1113,4 +1135,11 @@ def write_chirality_outputs(
             min_count=config.xtheta_min_count,
             fps=config.movie_fps,
         )
+    write_geometric_chirality_outputs(
+        input_gsd,
+        data_dir=data_dir,
+        image_dir=Path(image_dir) / "geometric",
+        config=_geometric_config_from_chirality_config(config),
+        write_movies=write_movies,
+    )
     return fields

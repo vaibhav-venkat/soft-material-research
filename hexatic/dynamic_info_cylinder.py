@@ -13,12 +13,12 @@ if __package__:
         ACTIVE_DATA_DIR,
         write_active_matter_field_outputs,
     )
-    from hexatic.chirality import CHIRALITY_DATA_DIR, write_chirality_outputs
+    from hexatic.chirality import CHIRALITY_DATA_DIR, write_chirality_outputs, ChiralityConfig
     from hexatic.constants import cylinder
 else:
     import analysis as hx
     from active_matter_cylinder import ACTIVE_DATA_DIR, write_active_matter_field_outputs
-    from chirality import CHIRALITY_DATA_DIR, write_chirality_outputs
+    from chirality import CHIRALITY_DATA_DIR, write_chirality_outputs, ChiralityConfig
     from constants import cylinder
 
 CYLINDER = cylinder.ANALYSIS
@@ -683,19 +683,20 @@ def main() -> None:
     #     CYLINDER_PATHS.net_charge_plot,
     # )
     # print(f"Wrote net disclination charge plot to {CYLINDER_PATHS.net_charge_plot}.")
-    # write_active_matter_field_outputs(
-    #     CYLINDER_PATHS.in_gsd,
-    # )
-    # print(
-    #     "Wrote active matter fields to "
-    #     f"{ACTIVE_DATA_DIR / 'active_matter_fields.npz'}."
-    # )
-    write_chirality_outputs(
+    write_active_matter_field_outputs(
         CYLINDER_PATHS.in_gsd,
     )
     print(
-        "Wrote chirality fields to "
-        f"{CHIRALITY_DATA_DIR / 'chirality_fields.npz'}."
+        "Wrote active matter fields to "
+        f"{ACTIVE_DATA_DIR / 'active_matter_fields.npz'}."
+    )
+    write_chirality_outputs(
+        CYLINDER_PATHS.in_gsd,
+        config = ChiralityConfig(limit_disclination=True)
+    )
+    print(
+        "Wrote disclination chirality fields to "
+        f"{CHIRALITY_DATA_DIR / 'chirality_disclinations'}."
     )
     print("OVITO position.x stores x")
     print("OVITO position.y stores theta")
