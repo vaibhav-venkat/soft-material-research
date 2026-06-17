@@ -4,6 +4,9 @@ from .config import (
     ACTIVE_FIELD_X_BINS,
     ACTIVE_FLUX_PLOT_THETA_BINS,
     ACTIVE_FLUX_PLOT_X_BINS,
+    ACTIVE_GRID_DX,
+    ACTIVE_GRID_DY,
+    ACTIVE_GRID_DZ,
     ACTIVE_IMAGE_DIR,
     ACTIVE_MOVIE_FPS,
     ACTIVE_RADIAL_BIN_WIDTH,
@@ -13,6 +16,12 @@ from .config import (
     CYLINDER_SIM,
     LOCAL_POCKET_RADIUS,
     ActiveMatterFields,
+    CartesianFluxComparison,
+)
+from .cartesian_flux import (
+    compute_cartesian_flux_comparison,
+    plot_cartesian_flux_comparison,
+    save_cartesian_flux_comparison,
 )
 from .common import (
     _active_direction_from_quaternion,
@@ -25,6 +34,7 @@ from .common import (
     _logged_particle_array,
     _minimum_image_delta,
     _pocket_fields,
+    _pocket_vector_density,
     _radial_integral_mean,
     _theta_bin_indices,
     _theta_edges_and_centers,

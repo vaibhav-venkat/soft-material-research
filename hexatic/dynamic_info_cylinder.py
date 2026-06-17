@@ -10,14 +10,14 @@ import numpy as np
 if __package__:
     from hexatic import analysis as hx
     from hexatic.active_matter_cylinder import (
-        ACTIVE_DATA_DIR,
+        ACTIVE_IMAGE_DIR,
         write_active_matter_field_outputs,
     )
     from hexatic.chirality import CHIRALITY_DATA_DIR, write_chirality_outputs, ChiralityConfig
     from hexatic.constants import cylinder
 else:
     import analysis as hx
-    from active_matter_cylinder import ACTIVE_DATA_DIR, write_active_matter_field_outputs
+    from active_matter_cylinder import ACTIVE_IMAGE_DIR, write_active_matter_field_outputs
     from chirality import CHIRALITY_DATA_DIR, write_chirality_outputs, ChiralityConfig
     from constants import cylinder
 
@@ -645,59 +645,59 @@ def plot_net_disclination_charge_series(
 def main() -> None:
     write_dynamic_values_gsd(CYLINDER_PATHS.in_gsd, CYLINDER_PATHS.dynamic_values_gsd)
     print(f"Wrote OVITO dynamic values file to {CYLINDER_PATHS.dynamic_values_gsd}.")
-    plot_center_of_mass_series(CYLINDER_PATHS.in_gsd, CYLINDER_PATHS.com_plot)
-    print(f"Wrote center-of-mass plot to {CYLINDER_PATHS.com_plot}.")
-    plot_disclination_center_of_mass_series(
-        CYLINDER_PATHS.in_gsd,
-        CYLINDER_PATHS.neighbor_count_txt,
-        CYLINDER_PATHS.disclination_com_plot,
-    )
-    print(
-        "Wrote disclination center-of-mass plot to "
-        f"{CYLINDER_PATHS.disclination_com_plot}."
-    )
-    plot_dislocation_center_of_mass_series(
-        CYLINDER_PATHS.in_gsd,
-        CYLINDER_PATHS.neighbor_count_txt,
-        CYLINDER_PATHS.dislocation_com_plot,
-    )
-    print(
-        "Wrote dislocation center-of-mass plot to "
-        f"{CYLINDER_PATHS.dislocation_com_plot}."
-    )
-    plot_dislocation_count_series(
-        CYLINDER_PATHS.in_gsd,
-        CYLINDER_PATHS.neighbor_count_txt,
-        CYLINDER_PATHS.dislocation_count_plot,
-    )
-    print(f"Wrote dislocation count plot to {CYLINDER_PATHS.dislocation_count_plot}.")
-    plot_disclination_count_series(
-        CYLINDER_PATHS.in_gsd,
-        CYLINDER_PATHS.neighbor_count_txt,
-        CYLINDER_PATHS.disclination_count_plot,
-    )
-    print(f"Wrote disclination count plot to {CYLINDER_PATHS.disclination_count_plot}.")
-    plot_net_disclination_charge_series(
-        CYLINDER_PATHS.in_gsd,
-        CYLINDER_PATHS.neighbor_count_txt,
-        CYLINDER_PATHS.net_charge_plot,
-    )
-    print(f"Wrote net disclination charge plot to {CYLINDER_PATHS.net_charge_plot}.")
+    # plot_center_of_mass_series(CYLINDER_PATHS.in_gsd, CYLINDER_PATHS.com_plot)
+    # print(f"Wrote center-of-mass plot to {CYLINDER_PATHS.com_plot}.")
+    # plot_disclination_center_of_mass_series(
+    #     CYLINDER_PATHS.in_gsd,
+    #     CYLINDER_PATHS.neighbor_count_txt,
+    #     CYLINDER_PATHS.disclination_com_plot,
+    # )
+    # print(
+    #     "Wrote disclination center-of-mass plot to "
+    #     f"{CYLINDER_PATHS.disclination_com_plot}."
+    # )
+    # plot_dislocation_center_of_mass_series(
+    #     CYLINDER_PATHS.in_gsd,
+    #     CYLINDER_PATHS.neighbor_count_txt,
+    #     CYLINDER_PATHS.dislocation_com_plot,
+    # )
+    # print(
+    #     "Wrote dislocation center-of-mass plot to "
+    #     f"{CYLINDER_PATHS.dislocation_com_plot}."
+    # )
+    # plot_dislocation_count_series(
+    #     CYLINDER_PATHS.in_gsd,
+    #     CYLINDER_PATHS.neighbor_count_txt,
+    #     CYLINDER_PATHS.dislocation_count_plot,
+    # )
+    # print(f"Wrote dislocation count plot to {CYLINDER_PATHS.dislocation_count_plot}.")
+    # plot_disclination_count_series(
+    #     CYLINDER_PATHS.in_gsd,
+    #     CYLINDER_PATHS.neighbor_count_txt,
+    #     CYLINDER_PATHS.disclination_count_plot,
+    # )
+    # print(f"Wrote disclination count plot to {CYLINDER_PATHS.disclination_count_plot}.")
+    # plot_net_disclination_charge_series(
+    #     CYLINDER_PATHS.in_gsd,
+    #     CYLINDER_PATHS.neighbor_count_txt,
+    #     CYLINDER_PATHS.net_charge_plot,
+    # )
+    # print(f"Wrote net disclination charge plot to {CYLINDER_PATHS.net_charge_plot}.")
     write_active_matter_field_outputs(
         CYLINDER_PATHS.in_gsd,
     )
     print(
-        "Wrote active matter fields to "
-        f"{ACTIVE_DATA_DIR / 'active_matter_fields.npz'}."
+        "Wrote active matter flux density plots to "
+        f"{ACTIVE_IMAGE_DIR / 'flux' / 'cartesian'}."
     )
-    write_chirality_outputs(
-        CYLINDER_PATHS.in_gsd,
-        config = ChiralityConfig(limit_disclination=True)
-    )
-    print(
-        "Wrote disclination chirality fields to "
-        f"{CHIRALITY_DATA_DIR / 'chirality_disclinations'}."
-    )
+    # write_chirality_outputs(
+    #     CYLINDER_PATHS.in_gsd,
+    #     config = ChiralityConfig(limit_disclination=True)
+    # )
+    # print(
+    #     "Wrote disclination chirality fields to "
+    #     f"{CHIRALITY_DATA_DIR / 'chirality_disclinations'}."
+    # )
     print("OVITO position.x stores x")
     print("OVITO position.y stores theta")
     print("OVITO position.z stores r")

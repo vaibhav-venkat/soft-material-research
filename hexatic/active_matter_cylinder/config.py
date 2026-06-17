@@ -19,6 +19,9 @@ ACTIVE_FLUX_PLOT_X_BINS = 32
 ACTIVE_FLUX_PLOT_THETA_BINS = 18
 ACTIVE_RADIAL_BIN_WIDTH = CYLINDER.particle_diameter
 ACTIVE_RADIAL_MIN_MEAN_COUNT = 1
+ACTIVE_GRID_DX = CYLINDER.particle_diameter
+ACTIVE_GRID_DY = CYLINDER.particle_diameter
+ACTIVE_GRID_DZ = CYLINDER.particle_diameter
 ACTIVE_MOVIE_FPS = 8
 ACTIVE_DATA_DIR = Path(CYLINDER_PATHS.in_gsd).parent
 ACTIVE_IMAGE_DIR = Path(CYLINDER_PATHS.com_plot).parent / "active"
@@ -41,3 +44,20 @@ class ActiveMatterFields:
     flux_cylindrical: np.ndarray
     force_density: np.ndarray
     force_density_cylindrical: np.ndarray
+
+
+@dataclass(frozen=True)
+class CartesianFluxComparison:
+    step: int
+    next_step: int
+    frame_index: int
+    dt: float
+    pocket_radius: float
+    delta_volume: float
+    grid_spacing: np.ndarray
+    grid_points: np.ndarray
+    rho_density: np.ndarray
+    polar_density: np.ndarray
+    force_density: np.ndarray
+    instantaneous_flux_density: np.ndarray
+    finite_difference_flux_density: np.ndarray

@@ -13,6 +13,7 @@ from .common import (
     _cylindrical_components,
     _logged_particle_array,
     _pocket_fields,
+    _pocket_vector_density,
     _theta_edges_and_centers,
     _x_edges_and_centers,
 )
@@ -81,21 +82,33 @@ def active_matter_field_series(
                 cylinder_radius=CYLINDER.cylinder_radius,
                 cutoff=CYLINDER.wall_cutoff,
             )
-            pocket_rho, _, pocket_polar_mean = _pocket_fields(
+            pocket_rho, _, pocket_polar_density = _pocket_fields(
                 positions,
                 directions,
                 box_length_x,
                 pocket_radius,
             )
-            force_density = forces[:, :3] / CYLINDER_SIM.gamma
-            velocities = CYLINDER_SIM.u0 * directions + force_density
+            force_velocity = forces[:, :3] / CYLINDER_SIM.gamma
+            velocities = CYLINDER_SIM.u0 * directions + force_velocity
+            pocket_force_density = _pocket_vector_density(
+                positions,
+                force_velocity,
+                box_length_x,
+                pocket_radius,
+            )
+            pocket_flux_density = _pocket_vector_density(
+                positions,
+                velocities,
+                box_length_x,
+                pocket_radius,
+            )
 
             coords[frame_idx] = frame_coords
             shell_masks[frame_idx] = dynamic_values.shell_mask
             rho[frame_idx] = pocket_rho.astype(np.float64)
             active_direction[frame_idx] = directions
-            polar_mean[frame_idx] = np.nan_to_num(pocket_polar_mean, nan=0.0)
-            force_density_values[frame_idx] = force_density
+            polar_mean[frame_idx] = np.nan_to_num(pocket_polar_density, nan=0.0)
+            force_density_values[frame_idx] = pocket_force_density
             direction_cylindrical[frame_idx] = _cylindrical_components(
                 directions,
                 frame_coords[:, 1],
@@ -105,11 +118,11 @@ def active_matter_field_series(
                 frame_coords[:, 1],
             )
             flux_cylindrical[frame_idx] = _cylindrical_components(
-                velocities,
+                pocket_flux_density,
                 frame_coords[:, 1],
             )
             force_density_cylindrical[frame_idx] = _cylindrical_components(
-                force_density,
+                pocket_force_density,
                 frame_coords[:, 1],
             )
             steps.append(int(frame.configuration.step))

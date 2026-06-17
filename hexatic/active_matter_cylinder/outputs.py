@@ -1,6 +1,9 @@
 from pathlib import Path
 
 from .config import (
+    ACTIVE_GRID_DX,
+    ACTIVE_GRID_DY,
+    ACTIVE_GRID_DZ,
     ACTIVE_DATA_DIR,
     ACTIVE_FIELD_THETA_BINS,
     ACTIVE_FIELD_X_BINS,
@@ -9,6 +12,11 @@ from .config import (
     CYLINDER_PATHS,
     LOCAL_POCKET_RADIUS,
     ActiveMatterFields,
+    CartesianFluxComparison,
+)
+from .cartesian_flux import (
+    compute_cartesian_flux_comparison,
+    plot_cartesian_flux_comparison,
 )
 from .fields import active_matter_field_series, save_active_matter_fields
 from .movies import plot_active_matter_movies
@@ -35,19 +43,17 @@ def write_active_matter_field_outputs(
     frame_index: int = -1,
     write_movies: bool = True,
     movie_fps: int = ACTIVE_MOVIE_FPS,
-) -> ActiveMatterFields:
-    fields = active_matter_field_series(
+    dx: float = ACTIVE_GRID_DX,
+    dy: float = ACTIVE_GRID_DY,
+    dz: float = ACTIVE_GRID_DZ,
+) -> CartesianFluxComparison:
+    comparison = compute_cartesian_flux_comparison(
         input_gsd,
         pocket_radius=pocket_radius,
-        n_x_bins=n_x_bins,
-        n_theta_bins=n_theta_bins,
+        dx=dx,
+        dy=dy,
+        dz=dz,
+        frame_index=frame_index if frame_index != -1 else -2,
     )
-    save_active_matter_fields(
-        fields,
-        Path(data_dir) / "active_matter_fields.npz",
-        pocket_radius=pocket_radius,
-    )
-    if write_movies:
-        plot_active_matter_movies(fields, image_dir=image_dir, fps=movie_fps)
-    plot_active_matter_fields(fields, image_dir=image_dir)
-    return fields
+    plot_cartesian_flux_comparison(comparison, image_dir=image_dir)
+    return comparison

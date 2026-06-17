@@ -158,6 +158,7 @@ sim.operations += rot_diff
 
 logger = hoomd.logging.Logger(categories=["particle"])
 logger.add(lj, quantities=["forces", "virials"])
+logger.add(lj2, quantities=["forces", "virials"])
 
 gsd_writer = hoomd.write.GSD(
     filename=str(paths.in_gsd),

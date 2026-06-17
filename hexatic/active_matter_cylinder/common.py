@@ -33,25 +33,27 @@ def _active_direction_from_quaternion(orientation: np.ndarray) -> np.ndarray:
 def _logged_particle_array(frame, quantity: str, n_particles: int) -> np.ndarray:
     log = getattr(frame, "log", None)
     if not log:
-        raise ValueError(f"GSD frame has no logger data; expected LJ {quantity}.")
+        raise ValueError(f"GSD frame has no logger data; expected {quantity}.")
 
     quantity_lower = quantity.lower()
-    candidates: list[tuple[str, np.ndarray]] = []
+    candidates: list[np.ndarray] = []
     for key, value in log.items():
         key_lower = str(key).lower()
         array = np.asarray(value)
         if quantity_lower in key_lower and array.shape[:1] == (n_particles,):
-            candidates.append((str(key), array))
+            candidates.append(array)
 
     if not candidates:
         available = ", ".join(str(key) for key in log)
         raise ValueError(
-            f"Could not find logged per-particle LJ {quantity}. "
+            f"Could not find logged per-particle {quantity}. "
             f"Available logger keys: {available}"
         )
 
-    candidates.sort(key=lambda item: ("lj" not in item[0].lower(), item[0]))
-    return np.asarray(candidates[0][1], dtype=np.float64)
+    total = np.zeros_like(np.asarray(candidates[0], dtype=np.float64))
+    for array in candidates:
+        total += np.asarray(array, dtype=np.float64)
+    return total
 
 
 def _minimum_image_delta(values: np.ndarray, period: float) -> np.ndarray:
@@ -94,9 +96,10 @@ def _pocket_fields(
     block_size: int = 256,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     n_particles = len(positions)
-    rho = np.zeros(n_particles, dtype=np.int64)
+    rho = np.zeros(n_particles, dtype=np.float64)
     polar_sum = np.zeros((n_particles, 3), dtype=np.float64)
     cutoff_sq = pocket_radius * pocket_radius
+    delta_volume = 4.0 * np.pi * pocket_radius**3 / 3.0
 
     for start in range(0, n_particles, block_size):
         stop = min(start + block_size, n_particles)
@@ -106,13 +109,30 @@ def _pocket_fields(
         rho[start:stop] = np.count_nonzero(pocket_mask, axis=1)
         polar_sum[start:stop] = pocket_mask.astype(np.float64) @ directions
 
-    polar_mean = np.divide(
-        polar_sum,
-        rho[:, np.newaxis],
-        out=np.zeros_like(polar_sum),
-        where=rho[:, np.newaxis] > 0,
-    )
-    return rho, polar_sum, polar_mean
+    return rho / delta_volume, polar_sum / delta_volume, polar_sum / delta_volume
+
+
+def _pocket_vector_density(
+    positions: np.ndarray,
+    vectors: np.ndarray,
+    box_length_x: float,
+    pocket_radius: float,
+    block_size: int = 256,
+) -> np.ndarray:
+    vectors = np.asarray(vectors, dtype=np.float64)
+    assert vectors.ndim == 2 and vectors.shape[0] == len(positions)
+    cutoff_sq = pocket_radius * pocket_radius
+    delta_volume = 4.0 * np.pi * pocket_radius**3 / 3.0
+    vector_density = np.zeros_like(vectors, dtype=np.float64)
+
+    for start in range(0, len(positions), block_size):
+        stop = min(start + block_size, len(positions))
+        deltas = positions[start:stop, np.newaxis, :] - positions[np.newaxis, :, :]
+        deltas[..., 0] = _minimum_image_delta(deltas[..., 0], box_length_x)
+        pocket_mask = np.sum(deltas * deltas, axis=2) <= cutoff_sq
+        vector_density[start:stop] = pocket_mask.astype(np.float64) @ vectors
+
+    return vector_density / delta_volume
 
 
 def _cylindrical_components(vectors: np.ndarray, theta: np.ndarray) -> np.ndarray:
