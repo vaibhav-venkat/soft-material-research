@@ -8,3 +8,6 @@
 *.npz
 *.mp4
 *.zip
+# pixi environments
+.pixi/*
+!.pixi/config.toml
