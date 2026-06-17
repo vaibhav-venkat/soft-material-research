@@ -23,6 +23,7 @@ if __package__:
     from hexatic.constants import cylinder
     from hexatic.chirality_geometric import (
         GeometricChiralityConfig,
+        GeometricChiralityFields,
         write_geometric_chirality_outputs,
     )
 else:
@@ -40,6 +41,7 @@ else:
     from constants import cylinder
     from chirality_geometric import (
         GeometricChiralityConfig,
+        GeometricChiralityFields,
         write_geometric_chirality_outputs,
     )
 
@@ -1241,6 +1243,40 @@ def write_disclination_chirality_outputs(
     return fields_by_charge
 
 
+def write_disclination_geometric_chirality_outputs(
+    input_gsd: str | Path = CYLINDER_PATHS.in_gsd,
+    neighbor_count_txt: str | Path = CYLINDER_PATHS.neighbor_count_txt,
+    data_dir: str | Path = CHIRALITY_DATA_DIR,
+    image_dir: str | Path = CHIRALITY_IMAGE_DIR,
+    config: GeometricChiralityConfig = GeometricChiralityConfig(),
+    write_movies: bool = True,
+) -> dict[int, GeometricChiralityFields]:
+    fields_by_charge: dict[int, GeometricChiralityFields] = {}
+    data_path = Path(data_dir) / "chirality_disclinations" / "geometric"
+    image_path = Path(image_dir) / "disclinations" / "geometric"
+
+    for charge in (1, -1):
+        label = _disclination_charge_label(charge)
+        particle_masks = _disclination_particle_masks(
+            input_gsd,
+            neighbor_count_txt,
+            charge,
+        )
+        fields_by_charge[charge] = write_geometric_chirality_outputs(
+            input_gsd,
+            data_dir=data_path,
+            image_dir=image_path / label,
+            config=config,
+            write_movies=write_movies,
+            particle_masks=particle_masks,
+            data_filename=f"{label}_geometric_chirality_fields.npz",
+            plot_title=f"Cylinder {charge:+d} disclination geometric chirality diagnostics",
+            radial_title=f"Cylinder {charge:+d} disclination geometric chirality by radius",
+        )
+
+    return fields_by_charge
+
+
 def write_chirality_outputs(
     input_gsd: str | Path = CYLINDER_PATHS.in_gsd,
     data_dir: str | Path = CHIRALITY_DATA_DIR,
@@ -1249,7 +1285,7 @@ def write_chirality_outputs(
     write_movies: bool = True,
 ) -> ChiralityFields | dict[int, ChiralityFields]:
     if config.limit_disclination:
-        return write_disclination_chirality_outputs(
+        fields = write_disclination_chirality_outputs(
             input_gsd=input_gsd,
             neighbor_count_txt=CYLINDER_PATHS.neighbor_count_txt,
             data_dir=data_dir,
@@ -1257,6 +1293,23 @@ def write_chirality_outputs(
             config=config,
             write_movies=write_movies,
         )
+        geometric_config = _geometric_config_from_chirality_config(config)
+        write_geometric_chirality_outputs(
+            input_gsd,
+            data_dir=data_dir,
+            image_dir=Path(image_dir) / "geometric",
+            config=geometric_config,
+            write_movies=write_movies,
+        )
+        write_disclination_geometric_chirality_outputs(
+            input_gsd=input_gsd,
+            neighbor_count_txt=CYLINDER_PATHS.neighbor_count_txt,
+            data_dir=data_dir,
+            image_dir=image_dir,
+            config=geometric_config,
+            write_movies=write_movies,
+        )
+        return fields
 
     fields = compute_chirality_fields(input_gsd, config=config)
     save_chirality_fields(
@@ -1281,6 +1334,14 @@ def write_chirality_outputs(
         input_gsd,
         data_dir=data_dir,
         image_dir=Path(image_dir) / "geometric",
+        config=_geometric_config_from_chirality_config(config),
+        write_movies=write_movies,
+    )
+    write_disclination_geometric_chirality_outputs(
+        input_gsd=input_gsd,
+        neighbor_count_txt=CYLINDER_PATHS.neighbor_count_txt,
+        data_dir=data_dir,
+        image_dir=image_dir,
         config=_geometric_config_from_chirality_config(config),
         write_movies=write_movies,
     )

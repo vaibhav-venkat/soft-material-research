@@ -645,44 +645,44 @@ def plot_net_disclination_charge_series(
 def main() -> None:
     write_dynamic_values_gsd(CYLINDER_PATHS.in_gsd, CYLINDER_PATHS.dynamic_values_gsd)
     print(f"Wrote OVITO dynamic values file to {CYLINDER_PATHS.dynamic_values_gsd}.")
-    # plot_center_of_mass_series(CYLINDER_PATHS.in_gsd, CYLINDER_PATHS.com_plot)
-    # print(f"Wrote center-of-mass plot to {CYLINDER_PATHS.com_plot}.")
-    # plot_disclination_center_of_mass_series(
-    #     CYLINDER_PATHS.in_gsd,
-    #     CYLINDER_PATHS.neighbor_count_txt,
-    #     CYLINDER_PATHS.disclination_com_plot,
-    # )
-    # print(
-    #     "Wrote disclination center-of-mass plot to "
-    #     f"{CYLINDER_PATHS.disclination_com_plot}."
-    # )
-    # plot_dislocation_center_of_mass_series(
-    #     CYLINDER_PATHS.in_gsd,
-    #     CYLINDER_PATHS.neighbor_count_txt,
-    #     CYLINDER_PATHS.dislocation_com_plot,
-    # )
-    # print(
-    #     "Wrote dislocation center-of-mass plot to "
-    #     f"{CYLINDER_PATHS.dislocation_com_plot}."
-    # )
-    # plot_dislocation_count_series(
-    #     CYLINDER_PATHS.in_gsd,
-    #     CYLINDER_PATHS.neighbor_count_txt,
-    #     CYLINDER_PATHS.dislocation_count_plot,
-    # )
-    # print(f"Wrote dislocation count plot to {CYLINDER_PATHS.dislocation_count_plot}.")
-    # plot_disclination_count_series(
-    #     CYLINDER_PATHS.in_gsd,
-    #     CYLINDER_PATHS.neighbor_count_txt,
-    #     CYLINDER_PATHS.disclination_count_plot,
-    # )
-    # print(f"Wrote disclination count plot to {CYLINDER_PATHS.disclination_count_plot}.")
-    # plot_net_disclination_charge_series(
-    #     CYLINDER_PATHS.in_gsd,
-    #     CYLINDER_PATHS.neighbor_count_txt,
-    #     CYLINDER_PATHS.net_charge_plot,
-    # )
-    # print(f"Wrote net disclination charge plot to {CYLINDER_PATHS.net_charge_plot}.")
+    plot_center_of_mass_series(CYLINDER_PATHS.in_gsd, CYLINDER_PATHS.com_plot)
+    print(f"Wrote center-of-mass plot to {CYLINDER_PATHS.com_plot}.")
+    plot_disclination_center_of_mass_series(
+        CYLINDER_PATHS.in_gsd,
+        CYLINDER_PATHS.neighbor_count_txt,
+        CYLINDER_PATHS.disclination_com_plot,
+    )
+    print(
+        "Wrote disclination center-of-mass plot to "
+        f"{CYLINDER_PATHS.disclination_com_plot}."
+    )
+    plot_dislocation_center_of_mass_series(
+        CYLINDER_PATHS.in_gsd,
+        CYLINDER_PATHS.neighbor_count_txt,
+        CYLINDER_PATHS.dislocation_com_plot,
+    )
+    print(
+        "Wrote dislocation center-of-mass plot to "
+        f"{CYLINDER_PATHS.dislocation_com_plot}."
+    )
+    plot_dislocation_count_series(
+        CYLINDER_PATHS.in_gsd,
+        CYLINDER_PATHS.neighbor_count_txt,
+        CYLINDER_PATHS.dislocation_count_plot,
+    )
+    print(f"Wrote dislocation count plot to {CYLINDER_PATHS.dislocation_count_plot}.")
+    plot_disclination_count_series(
+        CYLINDER_PATHS.in_gsd,
+        CYLINDER_PATHS.neighbor_count_txt,
+        CYLINDER_PATHS.disclination_count_plot,
+    )
+    print(f"Wrote disclination count plot to {CYLINDER_PATHS.disclination_count_plot}.")
+    plot_net_disclination_charge_series(
+        CYLINDER_PATHS.in_gsd,
+        CYLINDER_PATHS.neighbor_count_txt,
+        CYLINDER_PATHS.net_charge_plot,
+    )
+    print(f"Wrote net disclination charge plot to {CYLINDER_PATHS.net_charge_plot}.")
     write_active_matter_field_outputs(
         CYLINDER_PATHS.in_gsd,
     )

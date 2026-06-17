@@ -578,6 +578,7 @@ def _trajectory_chi_frame(
     frame_idx: int,
     data: _TrajectoryData,
     config: GeometricChiralityConfig,
+    particle_mask: np.ndarray | None = None,
 ) -> tuple[float, int, float, float, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     n_radial = len(data.radial_centers)
     x_bins = len(data.x_centers)
@@ -629,6 +630,8 @@ def _trajectory_chi_frame(
         data.radial_edges,
         config.radius_epsilon,
     )
+    if particle_mask is not None:
+        radial_groups = np.where(particle_mask, radial_groups, -1)
     radial_values, radial_counts, radial_num, radial_den = _ratio_by_group(
         numerator,
         denominator,
@@ -645,6 +648,8 @@ def _trajectory_chi_frame(
         data.box_lengths_x[frame_idx],
         config.radius_epsilon,
     )
+    if particle_mask is not None:
+        xtheta_groups = np.where(particle_mask, xtheta_groups, -1)
     xtheta_values, xtheta_counts, xtheta_num, xtheta_den = _ratio_by_group(
         numerator,
         denominator,
@@ -659,6 +664,8 @@ def _trajectory_chi_frame(
         & np.isfinite(denominator)
         & (denominator > config.denominator_epsilon)
     )
+    if particle_mask is not None:
+        valid = valid & particle_mask
     global_count = int(np.count_nonzero(valid & (radial_groups >= 0)))
     global_numerator = float(np.sum(numerator[valid])) if np.any(valid) else 0.0
     global_denominator = float(np.sum(denominator[valid])) if np.any(valid) else 0.0
@@ -685,13 +692,18 @@ def _trajectory_chi_frame(
 def compute_geometric_chirality_fields(
     input_gsd: str | Path,
     config: GeometricChiralityConfig = GeometricChiralityConfig(),
+    particle_masks: np.ndarray | None = None,
 ) -> GeometricChiralityFields:
     data = _read_trajectory(input_gsd, config)
     n_frames = len(data.steps)
+    n_particles = data.positions.shape[1]
     n_metrics = len(GEOMETRIC_METRIC_NAMES)
     n_radial = len(data.radial_centers)
     x_bins = len(data.x_centers)
     theta_bins = len(data.theta_centers)
+    if particle_masks is not None:
+        particle_masks = np.asarray(particle_masks, dtype=bool)
+        assert particle_masks.shape == (n_frames, n_particles)
 
     global_values = np.full((n_metrics, n_frames), np.nan, dtype=np.float64)
     global_counts = np.zeros((n_metrics, n_frames), dtype=np.int64)
@@ -727,6 +739,12 @@ def compute_geometric_chirality_fields(
             data.radial_edges,
             config.radius_epsilon,
         )
+        frame_particle_mask = (
+            particle_masks[frame_idx]
+            if particle_masks is not None
+            else np.ones(len(positions), dtype=bool)
+        )
+        radial_groups = np.where(frame_particle_mask, radial_groups, -1)
         xtheta_groups = _xtheta_groups(
             coords,
             data.x_edges,
@@ -734,11 +752,12 @@ def compute_geometric_chirality_fields(
             box_length_x,
             config.radius_epsilon,
         )
+        xtheta_groups = np.where(frame_particle_mask, xtheta_groups, -1)
 
         ccm_global, ccm_global_counts, ccm_global_num, ccm_global_den = _ccm_by_group(
             positions,
             masses,
-            np.zeros(len(positions), dtype=np.int64),
+            np.where(frame_particle_mask, 0, -1),
             1,
             config.min_count,
             config.denominator_epsilon,
@@ -828,7 +847,7 @@ def compute_geometric_chirality_fields(
             trajectory_xtheta_counts,
             trajectory_xtheta_num,
             trajectory_xtheta_den,
-        ) = _trajectory_chi_frame(frame_idx, data, config)
+        ) = _trajectory_chi_frame(frame_idx, data, config, frame_particle_mask)
         global_values[trajectory_idx, frame_idx] = trajectory_global
         global_counts[trajectory_idx, frame_idx] = trajectory_count
         global_numerators[trajectory_idx, frame_idx] = trajectory_num
@@ -962,6 +981,7 @@ def _metric_colormap(name: str):
 def plot_geometric_chirality_global(
     fields: GeometricChiralityFields,
     image_dir: str | Path = GEOMETRIC_CHIRALITY_IMAGE_DIR,
+    title: str = "Geometric chirality diagnostics",
 ) -> None:
     output_path = Path(image_dir) / "geometric_chirality_global_ccm_chi.png"
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -988,7 +1008,7 @@ def plot_geometric_chirality_global(
     axis.set_ylim(-1.05, 1.05)
     axis.set_xlabel("Simulation step")
     axis.set_ylabel("Geometric chirality")
-    axis.set_title("Geometric chirality diagnostics")
+    axis.set_title(title)
     axis.grid(True, linestyle="--", alpha=0.35)
     axis.legend(loc="best")
     fig.tight_layout()
@@ -1000,6 +1020,7 @@ def plot_geometric_chirality_radial_heatmaps(
     fields: GeometricChiralityFields,
     image_dir: str | Path = GEOMETRIC_CHIRALITY_IMAGE_DIR,
     min_count: int = GeometricChiralityConfig.min_count,
+    title: str = "Geometric chirality by radius",
 ) -> None:
     output_path = Path(image_dir) / "geometric_chirality_radial_heatmaps.png"
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1023,7 +1044,7 @@ def plot_geometric_chirality_radial_heatmaps(
         axis.set_ylabel("r")
         axis.set_title(label)
     axes[-1].set_xlabel("Simulation step")
-    fig.suptitle(f"Geometric chirality by radius (N >= {min_count})")
+    fig.suptitle(f"{title} (N >= {min_count})")
     fig.tight_layout()
     fig.savefig(output_path, dpi=200)
     plt.close(fig)
@@ -1138,18 +1159,27 @@ def write_geometric_chirality_outputs(
     image_dir: str | Path = GEOMETRIC_CHIRALITY_IMAGE_DIR,
     config: GeometricChiralityConfig = GeometricChiralityConfig(),
     write_movies: bool = True,
+    particle_masks: np.ndarray | None = None,
+    data_filename: str = "geometric_chirality_fields.npz",
+    plot_title: str = "Geometric chirality diagnostics",
+    radial_title: str = "Geometric chirality by radius",
 ) -> GeometricChiralityFields:
-    fields = compute_geometric_chirality_fields(input_gsd, config=config)
+    fields = compute_geometric_chirality_fields(
+        input_gsd,
+        config=config,
+        particle_masks=particle_masks,
+    )
     save_geometric_chirality_fields(
         fields,
-        Path(data_dir) / "geometric_chirality_fields.npz",
+        Path(data_dir) / data_filename,
         config=config,
     )
-    plot_geometric_chirality_global(fields, image_dir=image_dir)
+    plot_geometric_chirality_global(fields, image_dir=image_dir, title=plot_title)
     plot_geometric_chirality_radial_heatmaps(
         fields,
         image_dir=image_dir,
         min_count=config.min_count,
+        title=radial_title,
     )
     if write_movies:
         write_geometric_chirality_xtheta_movies(
