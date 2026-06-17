@@ -27,7 +27,7 @@ LATTICE_SPACING = 2.0 ** (1.0 / 6.0) + 0.5
 @dataclass(frozen=True)
 class CylinderPaths:
     disc_image_dir = IMAGE_OUTPUT_DIR / "disc"
-    in_gsd = CYLINDER_OUTPUT_DIR / "trajectory_cylinder.gsd"
+    in_gsd = CYLINDER_OUTPUT_DIR / "trajectory_cylinder_arch.gsd"
     initial_gsd = CYLINDER_OUTPUT_DIR / "initial_mesh.gsd"
     hexatic_txt = CYLINDER_OUTPUT_DIR / "cylinder_hexatic_order.txt"
     neighbor_count_txt = CYLINDER_OUTPUT_DIR / "cylinder_surface_neighbor_counts.txt"

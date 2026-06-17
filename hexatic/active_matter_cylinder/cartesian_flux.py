@@ -86,6 +86,91 @@ def _cartesian_density_sum(
     return density / volume
 
 
+def _cartesian_tensor_density_sum(
+    grid_points: np.ndarray,
+    positions: np.ndarray,
+    values: np.ndarray,
+    box_length_x: float,
+    radius: float,
+    block_size: int = 512,
+) -> np.ndarray:
+    values = np.asarray(values, dtype=np.float64)
+    assert values.ndim == 3 and values.shape[0] == len(positions)
+    density = np.zeros((len(grid_points), values.shape[1], values.shape[2]), dtype=np.float64)
+
+    cutoff_sq = radius * radius
+    volume = _delta_volume(radius)
+    flat_values = values.reshape(values.shape[0], -1)
+    flat_density = density.reshape(len(grid_points), -1)
+    for start in range(0, len(grid_points), block_size):
+        stop = min(start + block_size, len(grid_points))
+        deltas = grid_points[start:stop, np.newaxis, :] - positions[np.newaxis, :, :]
+        deltas[..., 0] = _minimum_image_delta(deltas[..., 0], box_length_x)
+        pocket_mask = np.sum(deltas * deltas, axis=2) <= cutoff_sq
+        flat_density[start:stop] = pocket_mask.astype(np.float64) @ flat_values
+
+    return density / volume
+
+
+def _virial_tensor_from_components(virials: np.ndarray) -> np.ndarray:
+    virials = np.asarray(virials, dtype=np.float64)
+    if virials.ndim == 3 and virials.shape[1:] == (3, 3):
+        return virials
+    assert virials.ndim == 2 and virials.shape[1] >= 6
+    tensor = np.zeros((virials.shape[0], 3, 3), dtype=np.float64)
+    tensor[:, 0, 0] = virials[:, 0]
+    tensor[:, 0, 1] = tensor[:, 1, 0] = virials[:, 1]
+    tensor[:, 0, 2] = tensor[:, 2, 0] = virials[:, 2]
+    tensor[:, 1, 1] = virials[:, 3]
+    tensor[:, 1, 2] = tensor[:, 2, 1] = virials[:, 4]
+    tensor[:, 2, 2] = virials[:, 5]
+    return tensor
+
+
+def _grid_axis_indices(
+    grid_points: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    x_values = np.unique(grid_points[:, 0])
+    y_values = np.unique(grid_points[:, 1])
+    z_values = np.unique(grid_points[:, 2])
+    x_indices = np.searchsorted(x_values, grid_points[:, 0])
+    y_indices = np.searchsorted(y_values, grid_points[:, 1])
+    z_indices = np.searchsorted(z_values, grid_points[:, 2])
+    return x_indices, y_indices, z_indices, (x_values, y_values, z_values)
+
+
+def _axis_gradient(values: np.ndarray, coordinates: np.ndarray, axis: int) -> np.ndarray:
+    if len(coordinates) < 2:
+        return np.zeros_like(values, dtype=np.float64)
+    return np.gradient(values, coordinates, axis=axis, edge_order=1)
+
+
+def _stress_divergence_density(
+    grid_points: np.ndarray,
+    stress_density: np.ndarray,
+) -> np.ndarray:
+    stress_density = np.asarray(stress_density, dtype=np.float64)
+    assert stress_density.shape == (len(grid_points), 3, 3)
+
+    x_indices, y_indices, z_indices, axes = _grid_axis_indices(grid_points)
+    x_values, y_values, z_values = axes
+    stress_grid = np.zeros(
+        (len(x_values), len(y_values), len(z_values), 3, 3),
+        dtype=np.float64,
+    )
+    stress_grid[x_indices, y_indices, z_indices] = stress_density
+
+    divergence_grid = np.zeros(stress_grid.shape[:3] + (3,), dtype=np.float64)
+    for component in range(3):
+        divergence_grid[..., component] = (
+            _axis_gradient(stress_grid[..., component, 0], x_values, axis=0)
+            + _axis_gradient(stress_grid[..., component, 1], y_values, axis=1)
+            + _axis_gradient(stress_grid[..., component, 2], z_values, axis=2)
+        )
+
+    return divergence_grid[x_indices, y_indices, z_indices]
+
+
 def _finite_difference_velocity(
     positions: np.ndarray,
     next_positions: np.ndarray,
@@ -119,6 +204,7 @@ def compute_cartesian_flux_comparison(
         assert particles.position is not None
         assert particles.orientation is not None
         assert next_particles.position is not None
+        assert next_particles.orientation is not None
         assert int(particles.N) == int(next_particles.N)
 
         positions = np.asarray(particles.position, dtype=np.float64)
@@ -129,7 +215,10 @@ def compute_cartesian_flux_comparison(
         dt = float(next_step - step) * CYLINDER_SIM.timestep
 
         directions = _active_direction_from_quaternion(particles.orientation)
+        next_directions = _active_direction_from_quaternion(next_particles.orientation)
         forces = _logged_particle_array(frame, "forces", int(particles.N))
+        virials = _logged_particle_array(frame, "virials", int(particles.N))
+        next_virials = _logged_particle_array(next_frame, "virials", int(particles.N))
         force_velocity = forces[:, :3] / CYLINDER_SIM.gamma
         instantaneous_velocity = CYLINDER_SIM.u0 * directions + force_velocity
         finite_difference_velocity = _finite_difference_velocity(
@@ -155,6 +244,14 @@ def compute_cartesian_flux_comparison(
             box_length_x,
             pocket_radius,
         )
+        next_polar_density = _cartesian_density_sum(
+            grid_points,
+            next_positions,
+            next_directions,
+            box_length_x,
+            pocket_radius,
+        )
+        finite_time_polar_density = 0.5 * (polar_density + next_polar_density)
         force_density = _cartesian_density_sum(
             grid_points,
             positions,
@@ -176,6 +273,39 @@ def compute_cartesian_flux_comparison(
             box_length_x,
             pocket_radius,
         )
+        virial_stress_density = _cartesian_tensor_density_sum(
+            grid_points,
+            positions,
+            _virial_tensor_from_components(virials),
+            box_length_x,
+            pocket_radius,
+        )
+        next_virial_stress_density = _cartesian_tensor_density_sum(
+            grid_points,
+            next_positions,
+            _virial_tensor_from_components(next_virials),
+            box_length_x,
+            pocket_radius,
+        )
+        finite_time_virial_stress_density = 0.5 * (
+            virial_stress_density + next_virial_stress_density
+        )
+        virial_divergence_density = _stress_divergence_density(
+            grid_points,
+            virial_stress_density,
+        )
+        finite_time_virial_divergence_density = _stress_divergence_density(
+            grid_points,
+            finite_time_virial_stress_density,
+        )
+        instantaneous_stress_flux_density = (
+            CYLINDER_SIM.u0 * polar_density
+            + virial_divergence_density / CYLINDER_SIM.gamma
+        )
+        finite_time_stress_flux_density = (
+            CYLINDER_SIM.u0 * finite_time_polar_density
+            + finite_time_virial_divergence_density / CYLINDER_SIM.gamma
+        )
 
     return CartesianFluxComparison(
         step=step,
@@ -191,6 +321,13 @@ def compute_cartesian_flux_comparison(
         force_density=force_density,
         instantaneous_flux_density=instantaneous_flux_density,
         finite_difference_flux_density=finite_difference_flux_density,
+        virial_stress_density=virial_stress_density,
+        virial_divergence_density=virial_divergence_density,
+        instantaneous_stress_flux_density=instantaneous_stress_flux_density,
+        finite_time_polar_density=finite_time_polar_density,
+        finite_time_virial_stress_density=finite_time_virial_stress_density,
+        finite_time_virial_divergence_density=finite_time_virial_divergence_density,
+        finite_time_stress_flux_density=finite_time_stress_flux_density,
     )
 
 
@@ -215,6 +352,13 @@ def save_cartesian_flux_comparison(
         force_density=comparison.force_density,
         instantaneous_flux_density=comparison.instantaneous_flux_density,
         finite_difference_flux_density=comparison.finite_difference_flux_density,
+        virial_stress_density=comparison.virial_stress_density,
+        virial_divergence_density=comparison.virial_divergence_density,
+        instantaneous_stress_flux_density=comparison.instantaneous_stress_flux_density,
+        finite_time_polar_density=comparison.finite_time_polar_density,
+        finite_time_virial_stress_density=comparison.finite_time_virial_stress_density,
+        finite_time_virial_divergence_density=comparison.finite_time_virial_divergence_density,
+        finite_time_stress_flux_density=comparison.finite_time_stress_flux_density,
     )
 
 
@@ -409,16 +553,41 @@ def plot_cartesian_flux_comparison(
     _plot_flux_density_3d(
         comparison,
         comparison.instantaneous_flux_density,
-        image_path / f"active_flux_density_instantaneous_{filename_suffix}.html",
-        f"Instantaneous flux density ({coordinate_system}), step {comparison.step}",
+        image_path / f"active_flux_density_current_instantaneous_{filename_suffix}.html",
+        (
+            f"Current-method J = sum(v_i delta) with instantaneous velocity "
+            f"({coordinate_system}), step {comparison.step}"
+        ),
         coordinate_system,
     )
     _plot_flux_density_3d(
         comparison,
         comparison.finite_difference_flux_density,
-        image_path / f"active_flux_density_finite_difference_{filename_suffix}.html",
+        image_path / f"active_flux_density_current_finite_time_{filename_suffix}.html",
         (
-            f"Finite-difference flux density ({coordinate_system}), "
+            f"Current-method J = sum(v_i delta) with finite-time velocity "
+            f"({coordinate_system}), "
+            f"step {comparison.step} to {comparison.next_step}"
+        ),
+        coordinate_system,
+    )
+    _plot_flux_density_3d(
+        comparison,
+        comparison.instantaneous_stress_flux_density,
+        image_path / f"active_flux_density_stress_instantaneous_{filename_suffix}.html",
+        (
+            f"Stress-divergence J = U0 P + div(sigma)/gamma "
+            f"with instantaneous fields ({coordinate_system}), step {comparison.step}"
+        ),
+        coordinate_system,
+    )
+    _plot_flux_density_3d(
+        comparison,
+        comparison.finite_time_stress_flux_density,
+        image_path / f"active_flux_density_stress_finite_time_{filename_suffix}.html",
+        (
+            f"Stress-divergence J = U0 P + div(sigma)/gamma "
+            f"with finite-time averaged fields ({coordinate_system}), "
             f"step {comparison.step} to {comparison.next_step}"
         ),
         coordinate_system,

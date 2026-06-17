@@ -61,3 +61,10 @@ class CartesianFluxComparison:
     force_density: np.ndarray
     instantaneous_flux_density: np.ndarray
     finite_difference_flux_density: np.ndarray
+    virial_stress_density: np.ndarray
+    virial_divergence_density: np.ndarray
+    instantaneous_stress_flux_density: np.ndarray
+    finite_time_polar_density: np.ndarray
+    finite_time_virial_stress_density: np.ndarray
+    finite_time_virial_divergence_density: np.ndarray
+    finite_time_stress_flux_density: np.ndarray
