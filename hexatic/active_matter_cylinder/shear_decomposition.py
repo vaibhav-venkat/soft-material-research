@@ -12,15 +12,16 @@ except ImportError:
 
     _erf = np.vectorize(math.erf, otypes=[np.float64])
 
-from .cartesian_flux import (
-    _cartesian_density_sum,
-    _cartesian_vector_to_cylindrical_components,
-    _cylindrical_basis,
-)
 from .common import (
     _active_direction_from_quaternion,
+    _axis_edges_and_centers,
+    _cartesian_vector_to_cylindrical_components,
+    _cylindrical_basis,
+    _density_sum,
     _logged_particle_array,
     _minimum_image_delta,
+    _theta_edges_and_centers,
+    _write_full_view_html,
 )
 from .config import (
     ACTIVE_FLUX_PLOT_THETA_BINS,
@@ -73,23 +74,6 @@ class ShearFluxDecomposition:
     pair_force_slope: np.ndarray
     stress_force_correlation: np.ndarray
     stress_force_slope: np.ndarray
-
-
-def _axis_edges_and_centers(low: float, high: float, spacing: float) -> tuple[np.ndarray, np.ndarray]:
-    assert high > low
-    assert spacing > 0.0
-    n_bins = int(np.ceil((high - low) / spacing))
-    edges = low + spacing * np.arange(n_bins + 1)
-    edges[-1] = high
-    centers = 0.5 * (edges[:-1] + edges[1:])
-    return edges, centers
-
-
-def _theta_edges_and_centers(n_theta_bins: int) -> tuple[np.ndarray, np.ndarray]:
-    assert n_theta_bins > 0
-    edges = np.linspace(0.0, 2.0 * np.pi, n_theta_bins + 1)
-    centers = 0.5 * (edges[:-1] + edges[1:])
-    return edges, centers
 
 
 def _xrtheta_grid(
@@ -506,35 +490,35 @@ def compute_shear_flux_decomposition(
 
         directions = _active_direction_from_quaternion(particles.orientation)
         ones = np.ones(len(positions), dtype=np.float64)
-        rho_density = _cartesian_density_sum(
+        rho_density = _density_sum(
             grid_points,
             positions,
             ones,
             box_length_x,
             pocket_radius,
         )
-        polar_cart = _cartesian_density_sum(
+        polar_cart = _density_sum(
             grid_points,
             positions,
             directions,
             box_length_x,
             pocket_radius,
         )
-        pair_force_density_cart = _cartesian_density_sum(
+        pair_force_density_cart = _density_sum(
             grid_points,
             positions,
             reconstructed_particle_pair_forces,
             box_length_x,
             pocket_radius,
         )
-        wall_force_density_cart = _cartesian_density_sum(
+        wall_force_density_cart = _density_sum(
             grid_points,
             positions,
             wall_particle_forces,
             box_length_x,
             pocket_radius,
         )
-        logged_force_density_cart = _cartesian_density_sum(
+        logged_force_density_cart = _density_sum(
             grid_points,
             positions,
             all_logged_forces,
@@ -683,36 +667,66 @@ def _valid_plot_indices(
     return indices
 
 
-def _write_full_view_html(output_path: Path, div_id: str, controls: str, plot_html: str, script: str) -> None:
-    output_path.write_text(
-        f"""<!doctype html>
-<html>
-<head>
-  <style>
-    html, body {{
-      height: 100%;
-      width: 100%;
-      margin: 0;
-      overflow: hidden;
-    }}
-    body {{
-      display: flex;
-      flex-direction: column;
-      font-family: sans-serif;
-    }}
-    .controls {{
-      flex: 0 0 auto;
-      padding: 10px 12px;
-    }}
-    #{div_id} {{
-      flex: 1 1 auto;
-      width: 100% !important;
-      height: calc(100vh - 48px) !important;
-    }}
-  </style>
-</head>
-<body>{controls}{plot_html}{script}</body>
-</html>"""
+def _trace_map_literal(trace_indices: dict[str, int]) -> str:
+    return "{" + ",".join(f'"{key}": {value}' for key, value in trace_indices.items()) + "}"
+
+
+def _select_options(values: tuple[str, ...], selected: str) -> str:
+    return "\n".join(
+        f'<option value="{value}"{" selected" if value == selected else ""}>{value}</option>'
+        for value in values
+    )
+
+
+def _symmetric_color_limit(values: np.ndarray, percentile: float | None = None) -> float:
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return 1.0
+    limit = float(np.nanpercentile(np.abs(finite), percentile)) if percentile else float(np.max(np.abs(finite)))
+    return 1.0 if np.isclose(limit, 0.0) else limit
+
+
+def _shear_scene_layout(coords: np.ndarray) -> dict:
+    return {
+        "xaxis": {"title": "x", "range": [float(np.min(coords[:, 0])), float(np.max(coords[:, 0]))]},
+        "yaxis": {"title": "r", "range": [0.0, CYLINDER.cylinder_radius]},
+        "zaxis": {"title": "theta", "range": [0.0, 2.0 * np.pi]},
+        "aspectmode": "data",
+    }
+
+
+def _grid_marker_trace(
+    coords: np.ndarray,
+    values: np.ndarray,
+    name: str,
+    colorbar_title: str,
+    visible: bool,
+    cmin: float,
+    cmax: float,
+    colorscale: str,
+    hover_label: str = "value",
+) -> go.Scatter3d:
+    return go.Scatter3d(
+        x=coords[:, 0],
+        y=coords[:, 1],
+        z=coords[:, 2],
+        mode="markers",
+        marker={
+            "size": 3,
+            "color": values,
+            "colorscale": colorscale,
+            "cmin": cmin,
+            "cmax": cmax,
+            "opacity": 0.8,
+            "colorbar": {"title": colorbar_title},
+        },
+        name=name,
+        visible=visible,
+        customdata=values,
+        hovertemplate=(
+            "x=%{x:.3g}<br>r=%{y:.3g}<br>theta=%{z:.3g}"
+            f"<br>{hover_label}=%{{customdata:.3g}}<extra></extra>"
+        ),
     )
 
 
@@ -756,34 +770,20 @@ def plot_shear_flux_decomposition(
                 cmax = float(np.max(finite)) if finite.size else 1.0
                 colorscale = "Plasma"
             else:
-                limit = float(np.max(np.abs(finite))) if finite.size else 1.0
-                if np.isclose(limit, 0.0):
-                    limit = 1.0
+                limit = _symmetric_color_limit(values)
                 cmin = -limit
                 cmax = limit
                 colorscale = "RdBu"
             traces.append(
-                go.Scatter3d(
-                    x=coords[:, 0],
-                    y=coords[:, 1],
-                    z=coords[:, 2],
-                    mode="markers",
-                    marker={
-                        "size": 3,
-                        "color": values,
-                        "colorscale": colorscale,
-                        "cmin": cmin,
-                        "cmax": cmax,
-                        "opacity": 0.8,
-                        "colorbar": {"title": component},
-                    },
+                _grid_marker_trace(
+                    coords,
+                    values,
                     name=key,
+                    colorbar_title=component,
                     visible=(field_name == "J_total_with_wall" and component == "magnitude"),
-                    customdata=values,
-                    hovertemplate=(
-                        "x=%{x:.3g}<br>r=%{y:.3g}<br>theta=%{z:.3g}"
-                        "<br>value=%{customdata:.3g}<extra></extra>"
-                    ),
+                    cmin=cmin,
+                    cmax=cmax,
+                    colorscale=colorscale,
                 )
             )
 
@@ -800,21 +800,13 @@ def plot_shear_flux_decomposition(
         f'<option value="{name}"{" selected" if name == "J_total_with_wall" else ""}>{label}</option>'
         for name, label in labels.items()
     )
-    component_options = "\n".join(
-        f'<option value="{component}"{" selected" if component == "magnitude" else ""}>{component}</option>'
-        for component in components
-    )
-    trace_map = "{" + ",".join(f'"{key}": {value}' for key, value in trace_indices.items()) + "}"
+    component_options = _select_options(components, "magnitude")
+    trace_map = _trace_map_literal(trace_indices)
 
     fig = go.Figure(data=traces)
     fig.update_layout(
         title=f"Hardy shear flux decomposition: J_total_with_wall magnitude, step {decomposition.step}",
-        scene={
-            "xaxis": {"title": "x", "range": [float(np.min(coords[:, 0])), float(np.max(coords[:, 0]))]},
-            "yaxis": {"title": "r", "range": [0.0, CYLINDER.cylinder_radius]},
-            "zaxis": {"title": "theta", "range": [0.0, 2.0 * np.pi]},
-            "aspectmode": "data",
-        },
+        scene=_shear_scene_layout(coords),
         margin={"l": 0, "r": 0, "b": 0, "t": 45},
     )
 
@@ -882,50 +874,28 @@ def plot_shear_stress_tensor_components(
             key = f"{component_label}:{normal_label}"
             trace_indices[key] = len(traces)
             values = decomposition.sigma_shear[indices, component_index, normal_index]
-            finite = values[np.isfinite(values)]
-            limit = float(np.max(np.abs(finite))) if finite.size else 1.0
-            if np.isclose(limit, 0.0):
-                limit = 1.0
+            limit = _symmetric_color_limit(values)
             traces.append(
-                go.Scatter3d(
-                    x=coords[:, 0],
-                    y=coords[:, 1],
-                    z=coords[:, 2],
-                    mode="markers",
-                    marker={
-                        "size": 3,
-                        "color": values,
-                        "colorscale": "RdBu",
-                        "cmin": -limit,
-                        "cmax": limit,
-                        "opacity": 0.8,
-                        "colorbar": {"title": "sigma_shear"},
-                    },
+                _grid_marker_trace(
+                    coords,
+                    values,
                     name=f"sigma_{component_label}{normal_label}",
                     visible=(component_label == "x" and normal_label == "r"),
-                    customdata=values,
-                    hovertemplate=(
-                        "x=%{x:.3g}<br>r=%{y:.3g}<br>theta=%{z:.3g}"
-                        "<br>sigma_shear=%{customdata:.3g}<extra></extra>"
-                    ),
+                    colorbar_title="sigma_shear",
+                    cmin=-limit,
+                    cmax=limit,
+                    colorscale="RdBu",
+                    hover_label="sigma_shear",
                 )
             )
 
-    options = "\n".join(f'<option value="{label}">{label}</option>' for label in labels)
-    normal_options = "\n".join(
-        f'<option value="{label}"{" selected" if label == "r" else ""}>{label}</option>'
-        for label in labels
-    )
-    trace_map = "{" + ",".join(f'"{key}": {value}' for key, value in trace_indices.items()) + "}"
+    options = _select_options(labels, "x")
+    normal_options = _select_options(labels, "r")
+    trace_map = _trace_map_literal(trace_indices)
     fig = go.Figure(data=traces)
     fig.update_layout(
         title=f"Hardy sigma_shear: sigma_xr, step {decomposition.step}",
-        scene={
-            "xaxis": {"title": "x", "range": [float(np.min(coords[:, 0])), float(np.max(coords[:, 0]))]},
-            "yaxis": {"title": "r", "range": [0.0, CYLINDER.cylinder_radius]},
-            "zaxis": {"title": "theta", "range": [0.0, 2.0 * np.pi]},
-            "aspectmode": "data",
-        },
+        scene=_shear_scene_layout(coords),
         margin={"l": 0, "r": 0, "b": 0, "t": 45},
     )
 
@@ -1013,43 +983,27 @@ def plot_shear_flux_fraction(
                 cmax = 1.0
             colorscale = "Plasma"
         else:
-            limit = float(np.nanpercentile(np.abs(finite), 99.0)) if finite.size else 1.0
-            if np.isclose(limit, 0.0):
-                limit = 1.0
+            limit = _symmetric_color_limit(values, percentile=99.0)
             cmin = -limit
             cmax = limit
             colorscale = "RdBu"
         trace_indices[component] = len(traces)
         traces.append(
-            go.Scatter3d(
-                x=coords[:, 0],
-                y=coords[:, 1],
-                z=coords[:, 2],
-                mode="markers",
-                marker={
-                    "size": 3,
-                    "color": values,
-                    "colorscale": colorscale,
-                    "cmin": cmin,
-                    "cmax": cmax,
-                    "opacity": 0.8,
-                    "colorbar": {"title": "J_shear/J_total"},
-                },
+            _grid_marker_trace(
+                coords,
+                values,
                 name=f"J_shear/J_total {component}",
                 visible=(component == "magnitude"),
-                customdata=values,
-                hovertemplate=(
-                    "x=%{x:.3g}<br>r=%{y:.3g}<br>theta=%{z:.3g}"
-                    "<br>fraction=%{customdata:.3g}<extra></extra>"
-                ),
+                colorbar_title="J_shear/J_total",
+                cmin=cmin,
+                cmax=cmax,
+                colorscale=colorscale,
+                hover_label="fraction",
             )
         )
 
-    component_options = "\n".join(
-        f'<option value="{component}"{" selected" if component == "magnitude" else ""}>{component}</option>'
-        for component in components
-    )
-    trace_map = "{" + ",".join(f'"{key}": {value}' for key, value in trace_indices.items()) + "}"
+    component_options = _select_options(components, "magnitude")
+    trace_map = _trace_map_literal(trace_indices)
     mean_map = "{" + ",".join(
         f'"{key}": {value:.17g}' if np.isfinite(value) else f'"{key}": NaN'
         for key, value in fraction_means.items()
@@ -1057,12 +1011,7 @@ def plot_shear_flux_fraction(
     fig = go.Figure(data=traces)
     fig.update_layout(
         title=f"Hardy J_shear / (J_active + J_normal + J_shear): magnitude, step {decomposition.step}",
-        scene={
-            "xaxis": {"title": "x", "range": [float(np.min(coords[:, 0])), float(np.max(coords[:, 0]))]},
-            "yaxis": {"title": "r", "range": [0.0, CYLINDER.cylinder_radius]},
-            "zaxis": {"title": "theta", "range": [0.0, 2.0 * np.pi]},
-            "aspectmode": "data",
-        },
+        scene=_shear_scene_layout(coords),
         margin={"l": 0, "r": 0, "b": 0, "t": 45},
     )
 

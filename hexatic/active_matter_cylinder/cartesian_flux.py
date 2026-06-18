@@ -7,7 +7,12 @@ from plotly.subplots import make_subplots
 
 from .common import (
     _active_direction_from_quaternion,
-    _gaussian_delta_weights,
+    _axis_edges_and_centers,
+    _cartesian_tensor_to_cylindrical,
+    _cartesian_vector_to_cylindrical_components,
+    _cylindrical_plot_points,
+    _cylindrical_plot_vectors,
+    _density_sum,
     _gaussian_kernel_volume,
     _logged_particle_array,
     _minimum_image_delta,
@@ -29,16 +34,6 @@ def _delta_volume(radius: float) -> float:
     return _gaussian_kernel_volume(radius)
 
 
-def _axis_edges_and_centers(low: float, high: float, spacing: float) -> tuple[np.ndarray, np.ndarray]:
-    assert high > low
-    assert spacing > 0.0
-    n_bins = int(np.ceil((high - low) / spacing))
-    edges = low + spacing * np.arange(n_bins + 1)
-    edges[-1] = high
-    centers = 0.5 * (edges[:-1] + edges[1:])
-    return edges, centers
-
-
 def _cartesian_grid_points(
     box_length_x: float,
     dx: float,
@@ -57,91 +52,6 @@ def _cartesian_grid_points(
     points = np.column_stack((x_grid.ravel(), y_grid.ravel(), z_grid.ravel()))
     inside_cylinder = points[:, 1] ** 2 + points[:, 2] ** 2 <= CYLINDER.cylinder_radius**2
     return points[inside_cylinder]
-
-
-def _cartesian_density_sum(
-    grid_points: np.ndarray,
-    positions: np.ndarray,
-    values: np.ndarray,
-    box_length_x: float,
-    radius: float,
-    block_size: int = 512,
-) -> np.ndarray:
-    values = np.asarray(values, dtype=np.float64)
-    is_scalar = values.ndim == 1
-    if is_scalar:
-        density = np.zeros(len(grid_points), dtype=np.float64)
-    else:
-        density = np.zeros((len(grid_points), values.shape[1]), dtype=np.float64)
-
-    for start in range(0, len(grid_points), block_size):
-        stop = min(start + block_size, len(grid_points))
-        deltas = grid_points[start:stop, np.newaxis, :] - positions[np.newaxis, :, :]
-        deltas[..., 0] = _minimum_image_delta(deltas[..., 0], box_length_x)
-        weights = _gaussian_delta_weights(np.sum(deltas * deltas, axis=2), radius)
-        if is_scalar:
-            density[start:stop] = weights @ values
-        else:
-            density[start:stop] = weights @ values
-
-    return density
-
-
-def _cartesian_tensor_density_sum(
-    grid_points: np.ndarray,
-    positions: np.ndarray,
-    values: np.ndarray,
-    box_length_x: float,
-    radius: float,
-    block_size: int = 512,
-) -> np.ndarray:
-    values = np.asarray(values, dtype=np.float64)
-    assert values.ndim == 3 and values.shape[0] == len(positions)
-    density = np.zeros((len(grid_points), values.shape[1], values.shape[2]), dtype=np.float64)
-
-    flat_values = values.reshape(values.shape[0], -1)
-    flat_density = density.reshape(len(grid_points), -1)
-    for start in range(0, len(grid_points), block_size):
-        stop = min(start + block_size, len(grid_points))
-        deltas = grid_points[start:stop, np.newaxis, :] - positions[np.newaxis, :, :]
-        deltas[..., 0] = _minimum_image_delta(deltas[..., 0], box_length_x)
-        weights = _gaussian_delta_weights(np.sum(deltas * deltas, axis=2), radius)
-        flat_density[start:stop] = weights @ flat_values
-
-    return density
-
-
-def _cylindrical_basis(points: np.ndarray) -> np.ndarray:
-    theta = np.mod(np.arctan2(points[:, 1], points[:, 2]), 2.0 * np.pi)
-    sin_theta = np.sin(theta)
-    cos_theta = np.cos(theta)
-    basis = np.zeros((len(points), 3, 3), dtype=np.float64)
-    basis[:, 0, 0] = 1.0
-    basis[:, 1, 1] = sin_theta
-    basis[:, 1, 2] = cos_theta
-    basis[:, 2, 1] = cos_theta
-    basis[:, 2, 2] = -sin_theta
-    return basis
-
-
-def _cartesian_tensor_to_cylindrical(
-    points: np.ndarray,
-    tensors: np.ndarray,
-) -> np.ndarray:
-    tensors = np.asarray(tensors, dtype=np.float64)
-    assert tensors.shape == (len(points), 3, 3)
-    basis = _cylindrical_basis(points)
-    return np.einsum("iac,icd,ibd->iab", basis, tensors, basis)
-
-
-def _cartesian_vector_to_cylindrical_components(
-    points: np.ndarray,
-    vectors: np.ndarray,
-) -> np.ndarray:
-    vectors = np.asarray(vectors, dtype=np.float64)
-    assert vectors.shape == (len(points), 3)
-    basis = _cylindrical_basis(points)
-    return np.einsum("iac,ic->ia", basis, vectors)
 
 
 def _virial_tensor_from_components(virials: np.ndarray) -> np.ndarray:
@@ -275,21 +185,21 @@ def compute_cartesian_flux_comparison(
 
         grid_points = _cartesian_grid_points(box_length_x, dx, dy, dz)
         ones = np.ones(len(positions), dtype=np.float64)
-        rho_density = _cartesian_density_sum(
+        rho_density = _density_sum(
             grid_points,
             positions,
             ones,
             box_length_x,
             pocket_radius,
         )
-        polar_density = _cartesian_density_sum(
+        polar_density = _density_sum(
             grid_points,
             positions,
             directions,
             box_length_x,
             pocket_radius,
         )
-        next_polar_density = _cartesian_density_sum(
+        next_polar_density = _density_sum(
             grid_points,
             next_positions,
             next_directions,
@@ -297,14 +207,14 @@ def compute_cartesian_flux_comparison(
             pocket_radius,
         )
         finite_time_polar_density = 0.5 * (polar_density + next_polar_density)
-        virial_divergence_density = _cartesian_density_sum(
+        virial_divergence_density = _density_sum(
             grid_points,
             positions,
             force_divergence_values,
             box_length_x,
             pocket_radius,
         )
-        next_virial_divergence_density = _cartesian_density_sum(
+        next_virial_divergence_density = _density_sum(
             grid_points,
             next_positions,
             next_forces[:, :3],
@@ -314,35 +224,35 @@ def compute_cartesian_flux_comparison(
         finite_time_virial_divergence_density = 0.5 * (
             virial_divergence_density + next_virial_divergence_density
         )
-        force_density = _cartesian_density_sum(
+        force_density = _density_sum(
             grid_points,
             positions,
             force_velocity,
             box_length_x,
             pocket_radius,
         )
-        instantaneous_flux_density = _cartesian_density_sum(
+        instantaneous_flux_density = _density_sum(
             grid_points,
             positions,
             instantaneous_velocity,
             box_length_x,
             pocket_radius,
         )
-        finite_difference_flux_density = _cartesian_density_sum(
+        finite_difference_flux_density = _density_sum(
             grid_points,
             positions,
             finite_difference_velocity,
             box_length_x,
             pocket_radius,
         )
-        virial_stress_density = _cartesian_tensor_density_sum(
+        virial_stress_density = _density_sum(
             grid_points,
             positions,
             _virial_tensor_from_components(virials),
             box_length_x,
             pocket_radius,
         )
-        next_virial_stress_density = _cartesian_tensor_density_sum(
+        next_virial_stress_density = _density_sum(
             grid_points,
             next_positions,
             _virial_tensor_from_components(next_virials),
@@ -420,28 +330,6 @@ def save_cartesian_flux_comparison(
         finite_time_stress_flux_density=comparison.finite_time_stress_flux_density,
         virial_stress_cylindrical=comparison.virial_stress_cylindrical,
     )
-
-
-def _cylindrical_plot_points(points: np.ndarray) -> np.ndarray:
-    radii = np.sqrt(points[:, 1] ** 2 + points[:, 2] ** 2)
-    theta = np.mod(np.arctan2(points[:, 1], points[:, 2]), 2.0 * np.pi)
-    return np.column_stack((points[:, 0], radii, theta))
-
-
-def _cylindrical_plot_vectors(points: np.ndarray, vectors: np.ndarray) -> np.ndarray:
-    radii = np.sqrt(points[:, 1] ** 2 + points[:, 2] ** 2)
-    theta = np.mod(np.arctan2(points[:, 1], points[:, 2]), 2.0 * np.pi)
-    sin_theta = np.sin(theta)
-    cos_theta = np.cos(theta)
-    radial = vectors[:, 1] * sin_theta + vectors[:, 2] * cos_theta
-    azimuthal = vectors[:, 1] * cos_theta - vectors[:, 2] * sin_theta
-    angular = np.divide(
-        azimuthal,
-        radii,
-        out=np.zeros_like(azimuthal, dtype=np.float64),
-        where=radii > 0.0,
-    )
-    return np.column_stack((vectors[:, 0], radial, angular))
 
 
 def _plot_coordinates(

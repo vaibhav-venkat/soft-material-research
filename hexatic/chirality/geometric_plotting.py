@@ -4,7 +4,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.animation import FFMpegWriter
 from matplotlib.colors import Normalize, TwoSlopeNorm
-from matplotlib.ticker import FuncFormatter
 
 try:
     from hexatic.active_matter_cylinder import ACTIVE_MOVIE_FPS, _time_edges
@@ -20,6 +19,7 @@ from .geometric_config import (
     GeometricChiralityConfig,
     GeometricChiralityFields,
 )
+from .common import _format_theta_axis
 
 
 def save_geometric_chirality_fields(
@@ -77,23 +77,10 @@ def save_geometric_chirality_fields(
     )
 
 
-def _format_theta_axis(axis) -> None:
-    axis.set_ylabel("theta")
-    axis.set_ylim(0.0, 2.0 * np.pi)
-    axis.set_yticks(
-        [0.0, 0.5 * np.pi, np.pi, 1.5 * np.pi, 2.0 * np.pi]
-    )
-    axis.yaxis.set_major_formatter(
-        FuncFormatter(
-            lambda value, _: {
-                0.0: "0",
-                0.5: r"$\pi/2$",
-                1.0: r"$\pi$",
-                1.5: r"$3\pi/2$",
-                2.0: r"$2\pi$",
-            }.get(round(value / np.pi, 1), "")
-        )
-    )
+def _masked_by_count(values: np.ndarray, counts: np.ndarray, min_count: int) -> np.ndarray:
+    masked = values.copy()
+    masked[counts < min_count] = np.nan
+    return masked
 
 
 def _metric_norm(values: np.ndarray, name: str):
@@ -166,8 +153,11 @@ def plot_geometric_chirality_radial_heatmaps(
     for metric_idx, axis in enumerate(axes):
         name = fields.metric_names[metric_idx]
         label = fields.metric_labels[metric_idx]
-        values = fields.radial_values[metric_idx].copy()
-        values[fields.radial_counts[metric_idx] < min_count] = np.nan
+        values = _masked_by_count(
+            fields.radial_values[metric_idx],
+            fields.radial_counts[metric_idx],
+            min_count,
+        )
         mesh = axis.pcolormesh(
             time_edges,
             fields.radial_edges,
@@ -196,8 +186,11 @@ def _draw_xtheta_heatmap(
     norm,
     colormap,
 ) -> None:
-    values = fields.xtheta_values[metric_idx, frame_idx].copy()
-    values[fields.xtheta_counts[metric_idx, frame_idx] < min_count] = np.nan
+    values = _masked_by_count(
+        fields.xtheta_values[metric_idx, frame_idx],
+        fields.xtheta_counts[metric_idx, frame_idx],
+        min_count,
+    )
     masked_values = np.ma.masked_invalid(values)
     x_grid, theta_grid = np.meshgrid(
         fields.x_edges,
@@ -239,8 +232,11 @@ def _write_metric_movie(
     fps: int,
 ) -> None:
     name = fields.metric_names[metric_idx]
-    values = fields.xtheta_values[metric_idx].copy()
-    values[fields.xtheta_counts[metric_idx] < min_count] = np.nan
+    values = _masked_by_count(
+        fields.xtheta_values[metric_idx],
+        fields.xtheta_counts[metric_idx],
+        min_count,
+    )
     norm = _metric_norm(values, name)
     colormap = _metric_colormap(name)
 

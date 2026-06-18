@@ -5,7 +5,6 @@ import numpy as np
 
 try:
     from hexatic.active_matter_cylinder import (
-        _minimum_image_delta,
         _theta_bin_indices,
         _theta_edges_and_centers,
         _x_bin_indices,
@@ -13,66 +12,20 @@ try:
     )
 except ImportError:
     from active_matter_cylinder import (
-        _minimum_image_delta,
         _theta_bin_indices,
         _theta_edges_and_centers,
         _x_bin_indices,
         _x_edges_and_centers,
     )
 
+from .common import (
+    _cylinder_coords,
+    _image_array,
+    _mass_array,
+    _radius_edges_and_centers,
+    _unwrapped_x,
+)
 from .geometric_config import CYLINDER, GeometricChiralityConfig, _TrajectoryData
-
-
-def _radius_edges_and_centers(radial_bin_width: float) -> tuple[np.ndarray, np.ndarray]:
-    assert radial_bin_width > 0.0
-    n_bins = int(np.ceil(CYLINDER.cylinder_radius / radial_bin_width))
-    edges = radial_bin_width * np.arange(n_bins + 1)
-    edges[-1] = CYLINDER.cylinder_radius
-    centers = 0.5 * (edges[:-1] + edges[1:])
-    return edges, centers
-
-
-def _cylinder_coords(positions: np.ndarray) -> np.ndarray:
-    radii = np.sqrt(positions[:, 1] ** 2 + positions[:, 2] ** 2)
-    theta = np.mod(np.arctan2(positions[:, 1], positions[:, 2]), 2.0 * np.pi)
-    return np.column_stack((positions[:, 0], theta, radii))
-
-
-def _mass_array(particles, n_particles: int) -> np.ndarray:
-    masses = getattr(particles, "mass", None)
-    if masses is None:
-        return np.ones(n_particles, dtype=np.float64)
-    masses = np.asarray(masses, dtype=np.float64)
-    if masses.shape != (n_particles,):
-        return np.ones(n_particles, dtype=np.float64)
-    return masses
-
-
-def _image_array(particles, n_particles: int) -> np.ndarray | None:
-    images = getattr(particles, "image", None)
-    if images is None:
-        return None
-    images = np.asarray(images, dtype=np.int64)
-    if images.shape != (n_particles, 3):
-        return None
-    return images
-
-
-def _unwrapped_x(
-    positions: np.ndarray,
-    images: np.ndarray | None,
-    box_lengths_x: np.ndarray,
-) -> np.ndarray:
-    if images is not None:
-        return positions[:, :, 0] + images[:, :, 0] * box_lengths_x[:, np.newaxis]
-
-    unwrapped = np.empty_like(positions[:, :, 0])
-    unwrapped[0] = positions[0, :, 0]
-    for frame_idx in range(1, len(positions)):
-        delta = positions[frame_idx, :, 0] - positions[frame_idx - 1, :, 0]
-        delta = _minimum_image_delta(delta, float(box_lengths_x[frame_idx]))
-        unwrapped[frame_idx] = unwrapped[frame_idx - 1] + delta
-    return unwrapped
 
 
 def _read_trajectory(

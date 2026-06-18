@@ -51,6 +51,18 @@ def save_chirality_fields(
     )
 
 
+def _masked_by_count(values: np.ndarray, counts: np.ndarray, min_count: int) -> np.ndarray:
+    masked = values.copy()
+    masked[counts < min_count] = np.nan
+    return masked
+
+
+def _bad_coolwarm():
+    colormap = plt.get_cmap("coolwarm").copy()
+    colormap.set_bad("0.85")
+    return colormap
+
+
 def plot_chirality_global(
     fields: ChiralityFields,
     image_dir: str | Path = CHIRALITY_IMAGE_DIR,
@@ -123,13 +135,18 @@ def plot_chirality_radial_heatmaps(
     time_edges = _time_edges(fields.steps)
     pairs, paired_names = _raw_relative_metric_pairs(fields)
     for raw_idx, relative_idx, filename_stem, title in pairs:
-        raw_values = fields.radial_values[raw_idx].copy()
-        relative_values = fields.radial_values[relative_idx].copy()
-        raw_values[fields.radial_counts[raw_idx] < min_count] = np.nan
-        relative_values[fields.radial_counts[relative_idx] < min_count] = np.nan
+        raw_values = _masked_by_count(
+            fields.radial_values[raw_idx],
+            fields.radial_counts[raw_idx],
+            min_count,
+        )
+        relative_values = _masked_by_count(
+            fields.radial_values[relative_idx],
+            fields.radial_counts[relative_idx],
+            min_count,
+        )
         combined_values = np.concatenate((raw_values.ravel(), relative_values.ravel()))
-        colormap = plt.get_cmap("coolwarm").copy()
-        colormap.set_bad("0.85")
+        colormap = _bad_coolwarm()
         norm = _plot_norm(combined_values, is_screw=False)
 
         fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharey=True)
@@ -159,11 +176,13 @@ def plot_chirality_radial_heatmaps(
     ):
         if name in paired_names:
             continue
-        values = fields.radial_values[metric_idx].copy()
-        values[fields.radial_counts[metric_idx] < min_count] = np.nan
+        values = _masked_by_count(
+            fields.radial_values[metric_idx],
+            fields.radial_counts[metric_idx],
+            min_count,
+        )
         is_screw = name == "screw"
-        colormap = plt.get_cmap("coolwarm").copy()
-        colormap.set_bad("0.85")
+        colormap = _bad_coolwarm()
 
         fig, axis = plt.subplots(figsize=(10, 5))
         mesh = axis.pcolormesh(
@@ -193,8 +212,11 @@ def _draw_xtheta_heatmap(
     norm,
     colormap,
 ) -> None:
-    values = fields.xtheta_values[metric_idx, frame_idx].copy()
-    values[fields.xtheta_counts[metric_idx, frame_idx] < min_count] = np.nan
+    values = _masked_by_count(
+        fields.xtheta_values[metric_idx, frame_idx],
+        fields.xtheta_counts[metric_idx, frame_idx],
+        min_count,
+    )
     x_grid, theta_grid = np.meshgrid(
         fields.x_edges,
         fields.theta_edges,
@@ -223,12 +245,14 @@ def _write_metric_movie(
     min_count: int,
     fps: int,
 ) -> None:
-    values = fields.xtheta_values[metric_idx].copy()
-    values[fields.xtheta_counts[metric_idx] < min_count] = np.nan
+    values = _masked_by_count(
+        fields.xtheta_values[metric_idx],
+        fields.xtheta_counts[metric_idx],
+        min_count,
+    )
     is_screw = fields.metric_names[metric_idx] == "screw"
     norm = _plot_norm(values, is_screw=is_screw)
-    colormap = plt.get_cmap("coolwarm").copy()
-    colormap.set_bad("0.85")
+    colormap = _bad_coolwarm()
 
     output_path = Path(filename)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -269,8 +293,11 @@ def _draw_xtheta_pair_heatmap(
         (axes[0], raw_idx, "raw"),
         (axes[1], relative_idx, "relative"),
     ):
-        values = fields.xtheta_values[metric_idx, frame_idx].copy()
-        values[fields.xtheta_counts[metric_idx, frame_idx] < min_count] = np.nan
+        values = _masked_by_count(
+            fields.xtheta_values[metric_idx, frame_idx],
+            fields.xtheta_counts[metric_idx, frame_idx],
+            min_count,
+        )
         x_grid, theta_grid = np.meshgrid(
             fields.x_edges,
             fields.theta_edges,
@@ -300,14 +327,19 @@ def _write_metric_pair_movie(
     min_count: int,
     fps: int,
 ) -> None:
-    raw_values = fields.xtheta_values[raw_idx].copy()
-    relative_values = fields.xtheta_values[relative_idx].copy()
-    raw_values[fields.xtheta_counts[raw_idx] < min_count] = np.nan
-    relative_values[fields.xtheta_counts[relative_idx] < min_count] = np.nan
+    raw_values = _masked_by_count(
+        fields.xtheta_values[raw_idx],
+        fields.xtheta_counts[raw_idx],
+        min_count,
+    )
+    relative_values = _masked_by_count(
+        fields.xtheta_values[relative_idx],
+        fields.xtheta_counts[relative_idx],
+        min_count,
+    )
     combined_values = np.concatenate((raw_values.ravel(), relative_values.ravel()))
     norm = _plot_norm(combined_values, is_screw=False)
-    colormap = plt.get_cmap("coolwarm").copy()
-    colormap.set_bad("0.85")
+    colormap = _bad_coolwarm()
 
     output_path = Path(filename)
     output_path.parent.mkdir(parents=True, exist_ok=True)
