@@ -81,8 +81,8 @@ class CylinderSimulationConfig:
     rotational_diffusion_period: int = ROTATIONAL_DIFFUSION_PERIOD
     trajectory_write_period: int = TRAJECTORY_WRITE_PERIOD
     run_steps: int = RUN_STEPS
-    flipped_run_steps: int = FLIPPED_RUN_STEPS
-    flipped_trajectory_write_period: int = FLIPPED_TRAJECTORY_WRITE_PERIOD
+    # run_steps: int = FLIPPED_RUN_STEPS
+    # trajectory_write_period: int = FLIPPED_TRAJECTORY_WRITE_PERIOD
     lattice_spacing: float = LATTICE_SPACING
 
     @property

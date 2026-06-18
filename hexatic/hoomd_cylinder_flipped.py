@@ -116,11 +116,11 @@ logger.add(lj2, quantities=["forces", "virials"])
 
 gsd_writer = hoomd.write.GSD(
     filename=str(paths.flipped_gsd),
-    trigger=hoomd.trigger.Periodic(simulation.flipped_trajectory_write_period),
+    trigger=hoomd.trigger.Periodic(simulation.trajectory_write_period),
     mode="wb",
     dynamic=["property", "particles/orientation"],
     logger=logger,
 )
 sim.operations.writers.append(gsd_writer)
 print("starting sim")
-sim.run(simulation.flipped_run_steps)
+sim.run(simulation.run_steps)

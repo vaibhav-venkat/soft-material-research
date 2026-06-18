@@ -142,6 +142,27 @@ def _minimum_image_delta(delta: np.ndarray, box_length: float) -> np.ndarray:
     return delta - box_length * np.round(delta / box_length)
 
 
+def _particle_masses(particles, n_particles: int) -> np.ndarray:
+    masses = getattr(particles, "mass", None)
+    if masses is None:
+        return np.ones(n_particles, dtype=np.float64)
+    masses = np.asarray(masses, dtype=np.float64)
+    if masses.shape != (n_particles,):
+        return np.ones(n_particles, dtype=np.float64)
+    return masses
+
+
+def _unwrapped_x_positions(particles, box_length_x: float) -> np.ndarray:
+    positions = np.asarray(particles.position, dtype=np.float64)
+    x_positions = positions[:, 0].copy()
+    images = getattr(particles, "image", None)
+    if images is not None:
+        images = np.asarray(images)
+        if images.shape == positions.shape:
+            x_positions += images[:, 0] * box_length_x
+    return x_positions
+
+
 def load_neighbor_count_matrix(
     filename: str | Path,
 ) -> NeighborCountMatrix:
@@ -271,44 +292,88 @@ def center_of_mass_series(
 
 def x_center_of_mass_velocity_series(
     input_gsd: str | Path,
+    shell_only: bool = False,
 ) -> XCenterOfMassVelocitySeries:
-    series = center_of_mass_series(input_gsd)
-    if series.steps.size < 2:
-        return XCenterOfMassVelocitySeries(
-            steps=np.asarray([], dtype=np.int64),
-            x_velocities=np.asarray([], dtype=np.float64),
-        )
+    steps: list[int] = []
+    x_velocities: list[float] = []
+    previous_x: np.ndarray | None = None
+    previous_step: int | None = None
+    previous_mask: np.ndarray | None = None
+    previous_masses: np.ndarray | None = None
+    previous_box_length_x: float | None = None
 
-    delta_steps = np.diff(series.steps).astype(np.float64)
-    delta_t = delta_steps * float(cylinder.TIMESTEP)
-    delta_x = _minimum_image_delta(np.diff(series.x_centers), float(cylinder.LX))
-    valid = np.isfinite(delta_x) & np.isfinite(delta_t) & (delta_t > 0.0)
+    with gsd.hoomd.open(name=str(input_gsd), mode="r") as source:
+        for frame in source:
+            particles = frame.particles
+            assert particles.position is not None
 
-    x_velocities = np.full(delta_x.shape, np.nan, dtype=np.float64)
-    x_velocities[valid] = delta_x[valid] / delta_t[valid]
+            positions = np.asarray(particles.position, dtype=np.float64)
+            box_length_x = float(frame.configuration.box[0])
+            current_x = _unwrapped_x_positions(particles, box_length_x)
+            current_step = int(frame.configuration.step)
+            current_masses = _particle_masses(particles, positions.shape[0])
+            current_mask = np.ones(positions.shape[0], dtype=bool)
+            if shell_only:
+                current_mask = hx.get_dynamic_values(
+                    positions,
+                    contain_all=False,
+                    cylinder_radius=CYLINDER.cylinder_radius,
+                    cutoff=CYLINDER.wall_cutoff,
+                ).shell_mask
+
+            if (
+                previous_x is not None
+                and previous_step is not None
+                and previous_mask is not None
+                and previous_masses is not None
+                and previous_box_length_x is not None
+            ):
+                assert current_x.shape == previous_x.shape
+                delta_t = (current_step - previous_step) * float(cylinder.TIMESTEP)
+                mask = previous_mask & current_mask
+                if delta_t > 0.0 and np.any(mask):
+                    delta_x = _minimum_image_delta(
+                        current_x - previous_x,
+                        previous_box_length_x,
+                    )
+                    weights = previous_masses[mask]
+                    x_velocity = float(np.average(delta_x[mask], weights=weights) / delta_t)
+                else:
+                    x_velocity = np.nan
+                steps.append(current_step)
+                x_velocities.append(x_velocity)
+
+            previous_x = current_x
+            previous_step = current_step
+            previous_mask = current_mask
+            previous_masses = current_masses
+            previous_box_length_x = box_length_x
+
     return XCenterOfMassVelocitySeries(
-        steps=series.steps[1:],
-        x_velocities=x_velocities,
+        steps=np.asarray(steps, dtype=np.int64),
+        x_velocities=np.asarray(x_velocities, dtype=np.float64),
     )
 
 
 def plot_x_center_of_mass_velocity_series(
     input_gsd: str | Path = CYLINDER_PATHS.in_gsd,
     filename: str | Path | None = CYLINDER_PATHS.x_com_velocity_plot,
+    shell_only: bool = False,
 ) -> None:
-    series = x_center_of_mass_velocity_series(input_gsd)
+    series = x_center_of_mass_velocity_series(input_gsd, shell_only=shell_only)
 
     fig, axis = plt.subplots(figsize=(10, 5))
     axis.plot(
         series.steps,
         series.x_velocities,
         color="tab:blue",
-        label=r"$\Delta x_{\mathrm{COM}} / \Delta t$",
+        label=r"$\langle \Delta x_i\rangle / \Delta t$",
     )
     axis.axhline(0.0, color="black", linewidth=1.0, alpha=0.45)
     axis.set_xlabel("Simulation step")
     axis.set_ylabel("x center-of-mass velocity")
-    axis.set_title("Cylinder x center-of-mass velocity")
+    population = "outer-shell" if shell_only else "all-particle"
+    axis.set_title(f"Cylinder {population} x center-of-mass velocity")
     axis.grid(True, ls="--", alpha=0.35)
     axis.legend(loc="best")
     fig.tight_layout()
@@ -714,6 +779,15 @@ def main() -> None:
     print(f"Wrote OVITO dynamic values file to {CYLINDER_PATHS.dynamic_values_gsd}.")
     plot_center_of_mass_series(CYLINDER_PATHS.in_gsd, CYLINDER_PATHS.com_plot)
     print(f"Wrote center-of-mass plot to {CYLINDER_PATHS.com_plot}.")
+    plot_x_center_of_mass_velocity_series(
+        CYLINDER_PATHS.in_gsd,
+        CYLINDER_PATHS.x_com_velocity_plot,
+        shell_only = True
+    )
+    print(
+        "Wrote x center-of-mass velocity plot to "
+        f"{CYLINDER_PATHS.x_com_velocity_plot}."
+    )
     # plot_disclination_center_of_mass_series(
     #     CYLINDER_PATHS.in_gsd,
     #     CYLINDER_PATHS.neighbor_count_txt,
