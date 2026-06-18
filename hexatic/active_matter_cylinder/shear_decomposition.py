@@ -2,8 +2,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import gsd.hoomd
+import matplotlib.pyplot as plt
 import numpy as np
 import plotly.graph_objects as go
+from matplotlib.colors import TwoSlopeNorm
+
+try:
+    from scipy.integrate import trapezoid
+except ImportError:
+    trapezoid = np.trapz
 
 try:
     from scipy.special import erf as _erf
@@ -50,6 +57,7 @@ class ShearFluxDecomposition:
     grid_points: np.ndarray
     rho_density: np.ndarray
     sigma_full: np.ndarray
+    deriv_sigma_full: np.ndarray
     sigma_normal: np.ndarray
     sigma_shear: np.ndarray
     div_sigma_full: np.ndarray
@@ -573,6 +581,7 @@ def compute_shear_flux_decomposition(
         grid_points=grid_points,
         rho_density=rho_density,
         sigma_full=sigma_full,
+        deriv_sigma_full=deriv_sigma,
         sigma_normal=sigma_normal,
         sigma_shear=sigma_shear,
         div_sigma_full=div_full,
@@ -621,6 +630,7 @@ def save_shear_flux_decomposition(
         grid_points=decomposition.grid_points,
         rho_density=decomposition.rho_density,
         sigma_full=decomposition.sigma_full,
+        deriv_sigma_full=decomposition.deriv_sigma_full,
         sigma_normal=decomposition.sigma_normal,
         sigma_shear=decomposition.sigma_shear,
         div_sigma_full=decomposition.div_sigma_full,
@@ -727,6 +737,128 @@ def _grid_marker_trace(
             "x=%{x:.3g}<br>r=%{y:.3g}<br>theta=%{z:.3g}"
             f"<br>{hover_label}=%{{customdata:.3g}}<extra></extra>"
         ),
+    )
+
+
+def _grid_shape(decomposition: ShearFluxDecomposition) -> tuple[int, int, int]:
+    return (
+        len(decomposition.x_centers),
+        len(decomposition.r_centers),
+        len(decomposition.theta_centers),
+    )
+
+
+def _reshape_grid_field(decomposition: ShearFluxDecomposition, values: np.ndarray) -> np.ndarray:
+    return np.asarray(values).reshape(_grid_shape(decomposition) + np.asarray(values).shape[1:])
+
+
+def _radial_trapezoid(values: np.ndarray, radii: np.ndarray, include_jacobian: bool) -> np.ndarray:
+    integrand = values
+    if include_jacobian:
+        shape = (1, len(radii)) + (1,) * (values.ndim - 2)
+        integrand = values * radii.reshape(shape)
+    return trapezoid(integrand, x=radii, axis=1)
+
+
+def _direct_radial_j_integral(decomposition: ShearFluxDecomposition) -> np.ndarray:
+    values = _reshape_grid_field(decomposition, decomposition.j_total_with_wall)
+    return _radial_trapezoid(values, decomposition.r_centers, include_jacobian=True)
+
+
+def _formula_radial_j_integral(decomposition: ShearFluxDecomposition) -> np.ndarray:
+    radii = decomposition.r_centers
+    sigma = _reshape_grid_field(decomposition, decomposition.sigma_full)
+    deriv_sigma = _reshape_grid_field(decomposition, decomposition.deriv_sigma_full)
+    nonstress_j = _reshape_grid_field(
+        decomposition,
+        decomposition.j_active + decomposition.j_wall,
+    )
+
+    def sigma_int(a: int, b: int, include_jacobian: bool) -> np.ndarray:
+        return _radial_trapezoid(sigma[..., a, b], radii, include_jacobian)
+
+    def deriv_int(direction: int, a: int, b: int, include_jacobian: bool) -> np.ndarray:
+        return _radial_trapezoid(deriv_sigma[..., direction, a, b], radii, include_jacobian)
+
+    def radial_boundary(a: int, b: int) -> np.ndarray:
+        return radii[-1] * sigma[:, -1, :, a, b] - radii[0] * sigma[:, 0, :, a, b]
+
+    nx, _, ntheta = _grid_shape(decomposition)
+    div_integral = np.empty((nx, ntheta, 3), dtype=np.float64)
+    div_integral[..., 0] = (
+        deriv_int(0, 0, 0, True)
+        + deriv_int(2, 0, 2, False)
+        + radial_boundary(0, 1)
+    )
+    div_integral[..., 1] = (
+        deriv_int(0, 1, 0, True)
+        + deriv_int(2, 1, 2, False)
+        + radial_boundary(1, 1)
+        - sigma_int(2, 2, False)
+    )
+    div_integral[..., 2] = (
+        deriv_int(0, 2, 0, True)
+        + deriv_int(2, 2, 2, False)
+        + radial_boundary(2, 1)
+        + sigma_int(1, 2, False)
+    )
+
+    return (
+        _radial_trapezoid(nonstress_j, radii, include_jacobian=True)
+        + div_integral / CYLINDER_SIM.gamma
+    )
+
+
+def _plot_radial_j_integral_components(
+    decomposition: ShearFluxDecomposition,
+    values: np.ndarray,
+    filename: Path,
+    title: str,
+) -> None:
+    filename.parent.mkdir(parents=True, exist_ok=True)
+    components = (("x", 0), ("theta", 2), ("r", 1))
+    limit = _symmetric_color_limit(values)
+    norm = TwoSlopeNorm(vmin=-limit, vcenter=0.0, vmax=limit)
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4.5), sharey=True)
+    for axis, (label, component_index) in zip(axes, components):
+        mesh = axis.pcolormesh(
+            decomposition.x_edges,
+            decomposition.theta_edges,
+            values[..., component_index].T,
+            shading="auto",
+            cmap="coolwarm",
+            norm=norm,
+        )
+        fig.colorbar(mesh, ax=axis, label=rf"$\int r J_{label}\,dr$")
+        axis.set_xlabel("x")
+        axis.set_title(f"{label} component")
+    axes[0].set_ylabel("theta")
+    fig.suptitle(title)
+    fig.tight_layout()
+    fig.savefig(filename, dpi=200)
+    plt.close(fig)
+
+
+def plot_radial_j_integral_comparison(
+    decomposition: ShearFluxDecomposition,
+    image_dir: str | Path = ACTIVE_IMAGE_DIR,
+) -> None:
+    image_path = Path(image_dir) / "shear"
+    _plot_radial_j_integral_components(
+        decomposition,
+        _direct_radial_j_integral(decomposition),
+        image_path / "hardy_j_radial_integral_direct.png",
+        (
+            "Direct radial integral of "
+            r"$J_\mathrm{total}=U_0P+\gamma^{-1}\nabla\cdot\sigma+J_\mathrm{wall}$"
+        ),
+    )
+    _plot_radial_j_integral_components(
+        decomposition,
+        _formula_radial_j_integral(decomposition),
+        image_path / "hardy_j_radial_integral_formula.png",
+        "Radial integral from integrated stress-divergence identities plus active and wall terms",
     )
 
 

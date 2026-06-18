@@ -58,6 +58,7 @@ from .radial_px import (
 from .shear_decomposition import (
     ShearFluxDecomposition,
     compute_shear_flux_decomposition,
+    plot_radial_j_integral_comparison,
     plot_shear_flux_fraction,
     plot_shear_flux_decomposition,
     plot_shear_stress_tensor_components,

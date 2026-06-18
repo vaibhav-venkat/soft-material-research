@@ -21,6 +21,8 @@ ROTATIONAL_DIFFUSION_PERIOD = 10
 TRAJECTORY_WRITE_PERIOD = int(1e5)
 
 RUN_STEPS = int(1e7)
+FLIPPED_RUN_STEPS = int(1e6)
+FLIPPED_TRAJECTORY_WRITE_PERIOD = int(1e4)
 LATTICE_SPACING = 2.0 ** (1.0 / 6.0) + 0.5
 
 
@@ -29,6 +31,8 @@ class CylinderPaths:
     disc_image_dir = IMAGE_OUTPUT_DIR / "disc"
     in_gsd = CYLINDER_OUTPUT_DIR / "trajectory_cylinder.gsd"
     initial_gsd = CYLINDER_OUTPUT_DIR / "initial_mesh.gsd"
+    flipped_initial_gsd = CYLINDER_OUTPUT_DIR / "initial_mesh_cylinder_flipped.gsd"
+    flipped_gsd = CYLINDER_OUTPUT_DIR / "trajectory_cylinder_flipped.gsd"
     hexatic_txt = CYLINDER_OUTPUT_DIR / "cylinder_hexatic_order.txt"
     neighbor_count_txt = CYLINDER_OUTPUT_DIR / "cylinder_surface_neighbor_counts.txt"
     distribution_txt = CYLINDER_OUTPUT_DIR / "cylinder_hexatic_order_distribution.txt"
@@ -36,6 +40,7 @@ class CylinderPaths:
     out_gsd = CYLINDER_OUTPUT_DIR / "trajectory_cylinder_hexatic_velocity.gsd"
     dynamic_values_gsd = CYLINDER_OUTPUT_DIR / "trajectory_cylinder_dynamic_values.gsd"
     com_plot = IMAGE_OUTPUT_DIR / "cylinder_center_of_mass_x_theta.png"
+    x_com_velocity_plot = IMAGE_OUTPUT_DIR / "cylinder_x_com_velocity.png"
     disclination_com_plot = IMAGE_OUTPUT_DIR / "cylinder_disclination_com_x_theta.png"
     dislocation_com_plot = disc_image_dir / "dislocation_center_of_mass_x_theta.png"
     dislocation_count_plot = disc_image_dir / "dislocation_count.png"
@@ -76,6 +81,8 @@ class CylinderSimulationConfig:
     rotational_diffusion_period: int = ROTATIONAL_DIFFUSION_PERIOD
     trajectory_write_period: int = TRAJECTORY_WRITE_PERIOD
     run_steps: int = RUN_STEPS
+    flipped_run_steps: int = FLIPPED_RUN_STEPS
+    flipped_trajectory_write_period: int = FLIPPED_TRAJECTORY_WRITE_PERIOD
     lattice_spacing: float = LATTICE_SPACING
 
     @property
@@ -92,6 +99,8 @@ SIMULATION = CylinderSimulationConfig()
 DISC_IMAGE_DIR = PATHS.disc_image_dir
 IN_GSD = PATHS.in_gsd
 INITIAL_GSD = PATHS.initial_gsd
+FLIPPED_INITIAL_GSD = PATHS.flipped_initial_gsd
+FLIPPED_GSD = PATHS.flipped_gsd
 HEXATIC_TXT = PATHS.hexatic_txt
 NEIGHBOR_COUNT_TXT = PATHS.neighbor_count_txt
 DISTRIBUTION_TXT = PATHS.distribution_txt
@@ -99,6 +108,7 @@ FIGURE_FILE = PATHS.figure_file
 OUT_GSD = PATHS.out_gsd
 DYNAMIC_VALUES_GSD = PATHS.dynamic_values_gsd
 COM_PLOT = PATHS.com_plot
+X_COM_VELOCITY_PLOT = PATHS.x_com_velocity_plot
 DISCLINATION_COM_PLOT = PATHS.disclination_com_plot
 DISLOCATION_COM_PLOT = PATHS.dislocation_com_plot
 DISLOCATION_COUNT_PLOT = PATHS.dislocation_count_plot

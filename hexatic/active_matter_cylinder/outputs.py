@@ -26,6 +26,7 @@ from .shear_decomposition import (
     compute_shear_flux_decomposition,
     plot_shear_flux_fraction,
     plot_shear_flux_decomposition,
+    plot_radial_j_integral_comparison,
     plot_shear_stress_tensor_components,
     save_shear_flux_decomposition,
 )
@@ -91,6 +92,10 @@ def write_active_matter_field_outputs(
         image_dir=image_dir,
     )
     plot_shear_flux_fraction(
+        shear_decomposition,
+        image_dir=image_dir,
+    )
+    plot_radial_j_integral_comparison(
         shear_decomposition,
         image_dir=image_dir,
     )

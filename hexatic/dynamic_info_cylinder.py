@@ -48,6 +48,16 @@ class CenterOfMassSeries:
 
 
 @dataclass(frozen=True)
+class XCenterOfMassVelocitySeries:
+    steps: np.ndarray
+    x_velocities: np.ndarray
+
+    def __iter__(self) -> Iterator[np.ndarray]:
+        yield self.steps
+        yield self.x_velocities
+
+
+@dataclass(frozen=True)
 class DisclinationCenterOfMassSeries:
     steps: np.ndarray
     plus_x_centers: np.ndarray
@@ -126,6 +136,10 @@ def _center_of_mass_or_nan(
         periodic_x=box_length_x is not None,
         box_length_x=box_length_x,
     )
+
+
+def _minimum_image_delta(delta: np.ndarray, box_length: float) -> np.ndarray:
+    return delta - box_length * np.round(delta / box_length)
 
 
 def load_neighbor_count_matrix(
@@ -253,6 +267,59 @@ def center_of_mass_series(
         x_centers=np.asarray(x_centers, dtype=np.float64),
         theta_centers=np.asarray(theta_centers, dtype=np.float64),
     )
+
+
+def x_center_of_mass_velocity_series(
+    input_gsd: str | Path,
+) -> XCenterOfMassVelocitySeries:
+    series = center_of_mass_series(input_gsd)
+    if series.steps.size < 2:
+        return XCenterOfMassVelocitySeries(
+            steps=np.asarray([], dtype=np.int64),
+            x_velocities=np.asarray([], dtype=np.float64),
+        )
+
+    delta_steps = np.diff(series.steps).astype(np.float64)
+    delta_t = delta_steps * float(cylinder.TIMESTEP)
+    delta_x = _minimum_image_delta(np.diff(series.x_centers), float(cylinder.LX))
+    valid = np.isfinite(delta_x) & np.isfinite(delta_t) & (delta_t > 0.0)
+
+    x_velocities = np.full(delta_x.shape, np.nan, dtype=np.float64)
+    x_velocities[valid] = delta_x[valid] / delta_t[valid]
+    return XCenterOfMassVelocitySeries(
+        steps=series.steps[1:],
+        x_velocities=x_velocities,
+    )
+
+
+def plot_x_center_of_mass_velocity_series(
+    input_gsd: str | Path = CYLINDER_PATHS.in_gsd,
+    filename: str | Path | None = CYLINDER_PATHS.x_com_velocity_plot,
+) -> None:
+    series = x_center_of_mass_velocity_series(input_gsd)
+
+    fig, axis = plt.subplots(figsize=(10, 5))
+    axis.plot(
+        series.steps,
+        series.x_velocities,
+        color="tab:blue",
+        label=r"$\Delta x_{\mathrm{COM}} / \Delta t$",
+    )
+    axis.axhline(0.0, color="black", linewidth=1.0, alpha=0.45)
+    axis.set_xlabel("Simulation step")
+    axis.set_ylabel("x center-of-mass velocity")
+    axis.set_title("Cylinder x center-of-mass velocity")
+    axis.grid(True, ls="--", alpha=0.35)
+    axis.legend(loc="best")
+    fig.tight_layout()
+
+    if filename is None:
+        plt.show()
+    else:
+        output_path = Path(filename)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, dpi=200)
+        plt.close(fig)
 
 
 def plot_center_of_mass_series(
@@ -645,8 +712,8 @@ def plot_net_disclination_charge_series(
 def main() -> None:
     write_dynamic_values_gsd(CYLINDER_PATHS.in_gsd, CYLINDER_PATHS.dynamic_values_gsd)
     print(f"Wrote OVITO dynamic values file to {CYLINDER_PATHS.dynamic_values_gsd}.")
-    # plot_center_of_mass_series(CYLINDER_PATHS.in_gsd, CYLINDER_PATHS.com_plot)
-    # print(f"Wrote center-of-mass plot to {CYLINDER_PATHS.com_plot}.")
+    plot_center_of_mass_series(CYLINDER_PATHS.in_gsd, CYLINDER_PATHS.com_plot)
+    print(f"Wrote center-of-mass plot to {CYLINDER_PATHS.com_plot}.")
     # plot_disclination_center_of_mass_series(
     #     CYLINDER_PATHS.in_gsd,
     #     CYLINDER_PATHS.neighbor_count_txt,
