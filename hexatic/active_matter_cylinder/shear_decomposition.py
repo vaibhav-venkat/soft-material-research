@@ -671,6 +671,51 @@ def _field_component_values(field: np.ndarray, component: str) -> np.ndarray:
     return field[:, component_index]
 
 
+def _valid_plot_indices(
+    decomposition: ShearFluxDecomposition,
+    max_points: int,
+) -> np.ndarray:
+    valid = np.isfinite(decomposition.grid_coords).all(axis=1) & np.isfinite(decomposition.rho_density)
+    valid &= decomposition.rho_density > 0.0
+    indices = np.flatnonzero(valid)
+    if len(indices) > max_points:
+        indices = indices[np.linspace(0, len(indices) - 1, max_points).astype(np.int64)]
+    return indices
+
+
+def _write_full_view_html(output_path: Path, div_id: str, controls: str, plot_html: str, script: str) -> None:
+    output_path.write_text(
+        f"""<!doctype html>
+<html>
+<head>
+  <style>
+    html, body {{
+      height: 100%;
+      width: 100%;
+      margin: 0;
+      overflow: hidden;
+    }}
+    body {{
+      display: flex;
+      flex-direction: column;
+      font-family: sans-serif;
+    }}
+    .controls {{
+      flex: 0 0 auto;
+      padding: 10px 12px;
+    }}
+    #{div_id} {{
+      flex: 1 1 auto;
+      width: 100% !important;
+      height: calc(100vh - 48px) !important;
+    }}
+  </style>
+</head>
+<body>{controls}{plot_html}{script}</body>
+</html>"""
+    )
+
+
 def plot_shear_flux_decomposition(
     decomposition: ShearFluxDecomposition,
     image_dir: str | Path = ACTIVE_IMAGE_DIR,
@@ -689,11 +734,7 @@ def plot_shear_flux_decomposition(
         "J_force_baseline": decomposition.j_force_baseline,
     }
     components = ("x", "r", "theta", "magnitude")
-    valid = np.isfinite(decomposition.grid_coords).all(axis=1) & np.isfinite(decomposition.rho_density)
-    valid &= decomposition.rho_density > 0.0
-    indices = np.flatnonzero(valid)
-    if len(indices) > max_points:
-        indices = indices[np.linspace(0, len(indices) - 1, max_points).astype(np.int64)]
+    indices = _valid_plot_indices(decomposition, max_points)
 
     if len(indices) == 0:
         fig = go.Figure()
@@ -815,33 +856,251 @@ document.getElementById("shear-component").addEventListener("change", updateShea
         default_width="100%",
         default_height="100%",
     )
-    output_path.write_text(
-        f"""<!doctype html>
-<html>
-<head>
-  <style>
-    html, body {{
-      height: 100%;
-      width: 100%;
-      margin: 0;
-      overflow: hidden;
-    }}
-    body {{
-      display: flex;
-      flex-direction: column;
-      font-family: sans-serif;
-    }}
-    .controls {{
-      flex: 0 0 auto;
-      padding: 10px 12px;
-    }}
-    #{div_id} {{
-      flex: 1 1 auto;
-      width: 100% !important;
-      height: calc(100vh - 48px) !important;
-    }}
-  </style>
-</head>
-<body>{controls}{plot_html}{script}</body>
-</html>"""
+    _write_full_view_html(output_path, div_id, controls, plot_html, script)
+
+
+def plot_shear_stress_tensor_components(
+    decomposition: ShearFluxDecomposition,
+    image_dir: str | Path = ACTIVE_IMAGE_DIR,
+    max_points: int = 9000,
+) -> None:
+    output_path = Path(image_dir) / "shear" / "hardy_sigma_shear_tensor.html"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    labels = ("x", "r", "theta")
+    indices = _valid_plot_indices(decomposition, max_points)
+    if len(indices) == 0:
+        fig = go.Figure()
+        fig.update_layout(title="Hardy sigma_shear tensor: no occupied grid points")
+        fig.write_html(str(output_path), include_plotlyjs=True, full_html=True)
+        return
+
+    coords = decomposition.grid_coords[indices]
+    traces = []
+    trace_indices: dict[str, int] = {}
+    for component_index, component_label in enumerate(labels):
+        for normal_index, normal_label in enumerate(labels):
+            key = f"{component_label}:{normal_label}"
+            trace_indices[key] = len(traces)
+            values = decomposition.sigma_shear[indices, component_index, normal_index]
+            finite = values[np.isfinite(values)]
+            limit = float(np.max(np.abs(finite))) if finite.size else 1.0
+            if np.isclose(limit, 0.0):
+                limit = 1.0
+            traces.append(
+                go.Scatter3d(
+                    x=coords[:, 0],
+                    y=coords[:, 1],
+                    z=coords[:, 2],
+                    mode="markers",
+                    marker={
+                        "size": 3,
+                        "color": values,
+                        "colorscale": "RdBu",
+                        "cmin": -limit,
+                        "cmax": limit,
+                        "opacity": 0.8,
+                        "colorbar": {"title": "sigma_shear"},
+                    },
+                    name=f"sigma_{component_label}{normal_label}",
+                    visible=(component_label == "x" and normal_label == "r"),
+                    customdata=values,
+                    hovertemplate=(
+                        "x=%{x:.3g}<br>r=%{y:.3g}<br>theta=%{z:.3g}"
+                        "<br>sigma_shear=%{customdata:.3g}<extra></extra>"
+                    ),
+                )
+            )
+
+    options = "\n".join(f'<option value="{label}">{label}</option>' for label in labels)
+    normal_options = "\n".join(
+        f'<option value="{label}"{" selected" if label == "r" else ""}>{label}</option>'
+        for label in labels
     )
+    trace_map = "{" + ",".join(f'"{key}": {value}' for key, value in trace_indices.items()) + "}"
+    fig = go.Figure(data=traces)
+    fig.update_layout(
+        title=f"Hardy sigma_shear: sigma_xr, step {decomposition.step}",
+        scene={
+            "xaxis": {"title": "x", "range": [float(np.min(coords[:, 0])), float(np.max(coords[:, 0]))]},
+            "yaxis": {"title": "r", "range": [0.0, CYLINDER.cylinder_radius]},
+            "zaxis": {"title": "theta", "range": [0.0, 2.0 * np.pi]},
+            "aspectmode": "data",
+        },
+        margin={"l": 0, "r": 0, "b": 0, "t": 45},
+    )
+
+    div_id = "hardy-sigma-shear-tensor-plot"
+    controls = f"""
+<div class="controls">
+  <label for="sigma-component">Component a:&nbsp;</label>
+  <select id="sigma-component">{options}</select>
+  <label for="sigma-normal" style="margin-left: 18px;">Normal b:&nbsp;</label>
+  <select id="sigma-normal">{normal_options}</select>
+</div>
+"""
+    script = f"""
+<script>
+const sigmaTraceMap = {trace_map};
+const sigmaTraceCount = {len(traces)};
+const sigmaStep = {decomposition.step};
+function updateSigmaTrace() {{
+  const component = document.getElementById("sigma-component").value;
+  const normal = document.getElementById("sigma-normal").value;
+  const key = component + ":" + normal;
+  const visible = Array(sigmaTraceCount).fill(false);
+  visible[sigmaTraceMap[key]] = true;
+  Plotly.restyle("{div_id}", {{"visible": visible}});
+  Plotly.relayout(
+    "{div_id}",
+    {{"title.text": "Hardy sigma_shear: sigma_" + component + normal + ", step " + sigmaStep}}
+  );
+}}
+document.getElementById("sigma-component").addEventListener("change", updateSigmaTrace);
+document.getElementById("sigma-normal").addEventListener("change", updateSigmaTrace);
+</script>
+"""
+    plot_html = fig.to_html(
+        full_html=False,
+        include_plotlyjs=True,
+        div_id=div_id,
+        default_width="100%",
+        default_height="100%",
+    )
+    _write_full_view_html(output_path, div_id, controls, plot_html, script)
+
+
+def plot_shear_flux_fraction(
+    decomposition: ShearFluxDecomposition,
+    image_dir: str | Path = ACTIVE_IMAGE_DIR,
+    max_points: int = 9000,
+) -> None:
+    output_path = Path(image_dir) / "shear" / "hardy_j_shear_fraction.html"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    components = ("x", "r", "theta", "magnitude")
+    indices = _valid_plot_indices(decomposition, max_points)
+    if len(indices) == 0:
+        fig = go.Figure()
+        fig.update_layout(title="J_shear/J_total: no occupied grid points")
+        fig.write_html(str(output_path), include_plotlyjs=True, full_html=True)
+        return
+
+    coords = decomposition.grid_coords[indices]
+    shear = decomposition.j_shear[indices]
+    total = decomposition.j_total[indices]
+    traces = []
+    trace_indices: dict[str, int] = {}
+    fraction_means: dict[str, float] = {}
+    for component in components:
+        if component == "magnitude":
+            numerator = np.linalg.norm(shear, axis=1)
+            denominator = np.linalg.norm(total, axis=1)
+        else:
+            component_index = {"x": 0, "r": 1, "theta": 2}[component]
+            numerator = shear[:, component_index]
+            denominator = total[:, component_index]
+        values = np.divide(
+            numerator,
+            denominator,
+            out=np.full_like(numerator, np.nan, dtype=np.float64),
+            where=np.abs(denominator) > 1e-12,
+        )
+        finite = values[np.isfinite(values)]
+        fraction_means[component] = float(np.mean(finite)) if finite.size else float("nan")
+        if component == "magnitude":
+            cmin = 0.0
+            cmax = float(np.nanpercentile(finite, 99.0)) if finite.size else 1.0
+            if np.isclose(cmax, 0.0):
+                cmax = 1.0
+            colorscale = "Plasma"
+        else:
+            limit = float(np.nanpercentile(np.abs(finite), 99.0)) if finite.size else 1.0
+            if np.isclose(limit, 0.0):
+                limit = 1.0
+            cmin = -limit
+            cmax = limit
+            colorscale = "RdBu"
+        trace_indices[component] = len(traces)
+        traces.append(
+            go.Scatter3d(
+                x=coords[:, 0],
+                y=coords[:, 1],
+                z=coords[:, 2],
+                mode="markers",
+                marker={
+                    "size": 3,
+                    "color": values,
+                    "colorscale": colorscale,
+                    "cmin": cmin,
+                    "cmax": cmax,
+                    "opacity": 0.8,
+                    "colorbar": {"title": "J_shear/J_total"},
+                },
+                name=f"J_shear/J_total {component}",
+                visible=(component == "magnitude"),
+                customdata=values,
+                hovertemplate=(
+                    "x=%{x:.3g}<br>r=%{y:.3g}<br>theta=%{z:.3g}"
+                    "<br>fraction=%{customdata:.3g}<extra></extra>"
+                ),
+            )
+        )
+
+    component_options = "\n".join(
+        f'<option value="{component}"{" selected" if component == "magnitude" else ""}>{component}</option>'
+        for component in components
+    )
+    trace_map = "{" + ",".join(f'"{key}": {value}' for key, value in trace_indices.items()) + "}"
+    mean_map = "{" + ",".join(
+        f'"{key}": {value:.17g}' if np.isfinite(value) else f'"{key}": NaN'
+        for key, value in fraction_means.items()
+    ) + "}"
+    fig = go.Figure(data=traces)
+    fig.update_layout(
+        title=f"Hardy J_shear / (J_active + J_normal + J_shear): magnitude, step {decomposition.step}",
+        scene={
+            "xaxis": {"title": "x", "range": [float(np.min(coords[:, 0])), float(np.max(coords[:, 0]))]},
+            "yaxis": {"title": "r", "range": [0.0, CYLINDER.cylinder_radius]},
+            "zaxis": {"title": "theta", "range": [0.0, 2.0 * np.pi]},
+            "aspectmode": "data",
+        },
+        margin={"l": 0, "r": 0, "b": 0, "t": 45},
+    )
+
+    div_id = "hardy-j-shear-fraction-plot"
+    controls = f"""
+<div class="controls">
+  <label for="fraction-component">Component:&nbsp;</label>
+  <select id="fraction-component">{component_options}</select>
+  <span id="fraction-mean" style="margin-left: 18px;">mean = {fraction_means["magnitude"]:.6g}</span>
+</div>
+"""
+    script = f"""
+<script>
+const fractionTraceMap = {trace_map};
+const fractionMeanMap = {mean_map};
+const fractionTraceCount = {len(traces)};
+const fractionStep = {decomposition.step};
+function updateFractionTrace() {{
+  const component = document.getElementById("fraction-component").value;
+  const visible = Array(fractionTraceCount).fill(false);
+  visible[fractionTraceMap[component]] = true;
+  Plotly.restyle("{div_id}", {{"visible": visible}});
+  Plotly.relayout(
+    "{div_id}",
+    {{"title.text": "Hardy J_shear / (J_active + J_normal + J_shear): " + component + ", step " + fractionStep}}
+  );
+  const meanValue = fractionMeanMap[component];
+  document.getElementById("fraction-mean").textContent =
+    Number.isFinite(meanValue) ? "mean = " + meanValue.toPrecision(6) : "mean = NaN";
+}}
+document.getElementById("fraction-component").addEventListener("change", updateFractionTrace);
+</script>
+"""
+    plot_html = fig.to_html(
+        full_html=False,
+        include_plotlyjs=True,
+        div_id=div_id,
+        default_width="100%",
+        default_height="100%",
+    )
+    _write_full_view_html(output_path, div_id, controls, plot_html, script)

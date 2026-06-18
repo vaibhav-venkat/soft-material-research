@@ -24,7 +24,9 @@ from .movies import plot_active_matter_movies
 from .radial_px import plot_radial_px_fields
 from .shear_decomposition import (
     compute_shear_flux_decomposition,
+    plot_shear_flux_fraction,
     plot_shear_flux_decomposition,
+    plot_shear_stress_tensor_components,
     save_shear_flux_decomposition,
 )
 from .vector_plots import plot_active_component_series, plot_active_x_balance_series
@@ -81,6 +83,14 @@ def write_active_matter_field_outputs(
         Path(data_dir) / "shear_flux_decomposition.npz",
     )
     plot_shear_flux_decomposition(
+        shear_decomposition,
+        image_dir=image_dir,
+    )
+    plot_shear_stress_tensor_components(
+        shear_decomposition,
+        image_dir=image_dir,
+    )
+    plot_shear_flux_fraction(
         shear_decomposition,
         image_dir=image_dir,
     )
