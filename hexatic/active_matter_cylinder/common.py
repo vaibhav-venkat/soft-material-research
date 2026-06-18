@@ -61,6 +61,15 @@ def _minimum_image_delta(values: np.ndarray, period: float) -> np.ndarray:
     return values - period * np.round(values / period)
 
 
+def _gaussian_kernel_volume(radius: float) -> float:
+    assert radius > 0.0
+    return (2.0 * np.pi) ** 1.5 * radius**3
+
+
+def _gaussian_delta_weights(delta_sq: np.ndarray, radius: float) -> np.ndarray:
+    return np.exp(-0.5 * delta_sq / (radius * radius)) / _gaussian_kernel_volume(radius)
+
+
 def _x_edges_and_centers(box_length_x: float, n_bins: int) -> tuple[np.ndarray, np.ndarray]:
     assert box_length_x > 0.0
     assert n_bins > 0
@@ -98,18 +107,16 @@ def _pocket_fields(
     n_particles = len(positions)
     rho = np.zeros(n_particles, dtype=np.float64)
     polar_sum = np.zeros((n_particles, 3), dtype=np.float64)
-    cutoff_sq = pocket_radius * pocket_radius
-    delta_volume = 4.0 * np.pi * pocket_radius**3 / 3.0
 
     for start in range(0, n_particles, block_size):
         stop = min(start + block_size, n_particles)
         deltas = positions[start:stop, np.newaxis, :] - positions[np.newaxis, :, :]
         deltas[..., 0] = _minimum_image_delta(deltas[..., 0], box_length_x)
-        pocket_mask = np.sum(deltas * deltas, axis=2) <= cutoff_sq
-        rho[start:stop] = np.count_nonzero(pocket_mask, axis=1)
-        polar_sum[start:stop] = pocket_mask.astype(np.float64) @ directions
+        weights = _gaussian_delta_weights(np.sum(deltas * deltas, axis=2), pocket_radius)
+        rho[start:stop] = np.sum(weights, axis=1)
+        polar_sum[start:stop] = weights @ directions
 
-    return rho / delta_volume, polar_sum / delta_volume, polar_sum / delta_volume
+    return rho, polar_sum, polar_sum
 
 
 def _pocket_vector_density(
@@ -121,18 +128,16 @@ def _pocket_vector_density(
 ) -> np.ndarray:
     vectors = np.asarray(vectors, dtype=np.float64)
     assert vectors.ndim == 2 and vectors.shape[0] == len(positions)
-    cutoff_sq = pocket_radius * pocket_radius
-    delta_volume = 4.0 * np.pi * pocket_radius**3 / 3.0
     vector_density = np.zeros_like(vectors, dtype=np.float64)
 
     for start in range(0, len(positions), block_size):
         stop = min(start + block_size, len(positions))
         deltas = positions[start:stop, np.newaxis, :] - positions[np.newaxis, :, :]
         deltas[..., 0] = _minimum_image_delta(deltas[..., 0], box_length_x)
-        pocket_mask = np.sum(deltas * deltas, axis=2) <= cutoff_sq
-        vector_density[start:stop] = pocket_mask.astype(np.float64) @ vectors
+        weights = _gaussian_delta_weights(np.sum(deltas * deltas, axis=2), pocket_radius)
+        vector_density[start:stop] = weights @ vectors
 
-    return vector_density / delta_volume
+    return vector_density
 
 
 def _cylindrical_components(vectors: np.ndarray, theta: np.ndarray) -> np.ndarray:

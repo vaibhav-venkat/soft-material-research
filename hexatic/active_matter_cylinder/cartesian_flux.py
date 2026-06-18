@@ -6,6 +6,8 @@ import plotly.graph_objects as go
 
 from .common import (
     _active_direction_from_quaternion,
+    _gaussian_delta_weights,
+    _gaussian_kernel_volume,
     _logged_particle_array,
     _minimum_image_delta,
 )
@@ -22,8 +24,7 @@ from .config import (
 
 
 def _delta_volume(radius: float) -> float:
-    assert radius > 0.0
-    return 4.0 * np.pi * radius**3 / 3.0
+    return _gaussian_kernel_volume(radius)
 
 
 def _axis_edges_and_centers(low: float, high: float, spacing: float) -> tuple[np.ndarray, np.ndarray]:
@@ -71,19 +72,17 @@ def _cartesian_density_sum(
     else:
         density = np.zeros((len(grid_points), values.shape[1]), dtype=np.float64)
 
-    cutoff_sq = radius * radius
-    volume = _delta_volume(radius)
     for start in range(0, len(grid_points), block_size):
         stop = min(start + block_size, len(grid_points))
         deltas = grid_points[start:stop, np.newaxis, :] - positions[np.newaxis, :, :]
         deltas[..., 0] = _minimum_image_delta(deltas[..., 0], box_length_x)
-        pocket_mask = np.sum(deltas * deltas, axis=2) <= cutoff_sq
+        weights = _gaussian_delta_weights(np.sum(deltas * deltas, axis=2), radius)
         if is_scalar:
-            density[start:stop] = pocket_mask.astype(np.float64) @ values
+            density[start:stop] = weights @ values
         else:
-            density[start:stop] = pocket_mask.astype(np.float64) @ values
+            density[start:stop] = weights @ values
 
-    return density / volume
+    return density
 
 
 def _cartesian_tensor_density_sum(
@@ -98,18 +97,39 @@ def _cartesian_tensor_density_sum(
     assert values.ndim == 3 and values.shape[0] == len(positions)
     density = np.zeros((len(grid_points), values.shape[1], values.shape[2]), dtype=np.float64)
 
-    cutoff_sq = radius * radius
-    volume = _delta_volume(radius)
     flat_values = values.reshape(values.shape[0], -1)
     flat_density = density.reshape(len(grid_points), -1)
     for start in range(0, len(grid_points), block_size):
         stop = min(start + block_size, len(grid_points))
         deltas = grid_points[start:stop, np.newaxis, :] - positions[np.newaxis, :, :]
         deltas[..., 0] = _minimum_image_delta(deltas[..., 0], box_length_x)
-        pocket_mask = np.sum(deltas * deltas, axis=2) <= cutoff_sq
-        flat_density[start:stop] = pocket_mask.astype(np.float64) @ flat_values
+        weights = _gaussian_delta_weights(np.sum(deltas * deltas, axis=2), radius)
+        flat_density[start:stop] = weights @ flat_values
 
-    return density / volume
+    return density
+
+
+def _cylindrical_basis(points: np.ndarray) -> np.ndarray:
+    theta = np.mod(np.arctan2(points[:, 1], points[:, 2]), 2.0 * np.pi)
+    sin_theta = np.sin(theta)
+    cos_theta = np.cos(theta)
+    basis = np.zeros((len(points), 3, 3), dtype=np.float64)
+    basis[:, 0, 0] = 1.0
+    basis[:, 1, 1] = sin_theta
+    basis[:, 1, 2] = cos_theta
+    basis[:, 2, 1] = cos_theta
+    basis[:, 2, 2] = -sin_theta
+    return basis
+
+
+def _cartesian_tensor_to_cylindrical(
+    points: np.ndarray,
+    tensors: np.ndarray,
+) -> np.ndarray:
+    tensors = np.asarray(tensors, dtype=np.float64)
+    assert tensors.shape == (len(points), 3, 3)
+    basis = _cylindrical_basis(points)
+    return np.einsum("iac,icd,ibd->iab", basis, tensors, basis)
 
 
 def _virial_tensor_from_components(virials: np.ndarray) -> np.ndarray:
@@ -125,50 +145,6 @@ def _virial_tensor_from_components(virials: np.ndarray) -> np.ndarray:
     tensor[:, 1, 2] = tensor[:, 2, 1] = virials[:, 4]
     tensor[:, 2, 2] = virials[:, 5]
     return tensor
-
-
-def _grid_axis_indices(
-    grid_points: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, tuple[np.ndarray, np.ndarray, np.ndarray]]:
-    x_values = np.unique(grid_points[:, 0])
-    y_values = np.unique(grid_points[:, 1])
-    z_values = np.unique(grid_points[:, 2])
-    x_indices = np.searchsorted(x_values, grid_points[:, 0])
-    y_indices = np.searchsorted(y_values, grid_points[:, 1])
-    z_indices = np.searchsorted(z_values, grid_points[:, 2])
-    return x_indices, y_indices, z_indices, (x_values, y_values, z_values)
-
-
-def _axis_gradient(values: np.ndarray, coordinates: np.ndarray, axis: int) -> np.ndarray:
-    if len(coordinates) < 2:
-        return np.zeros_like(values, dtype=np.float64)
-    return np.gradient(values, coordinates, axis=axis, edge_order=1)
-
-
-def _stress_divergence_density(
-    grid_points: np.ndarray,
-    stress_density: np.ndarray,
-) -> np.ndarray:
-    stress_density = np.asarray(stress_density, dtype=np.float64)
-    assert stress_density.shape == (len(grid_points), 3, 3)
-
-    x_indices, y_indices, z_indices, axes = _grid_axis_indices(grid_points)
-    x_values, y_values, z_values = axes
-    stress_grid = np.zeros(
-        (len(x_values), len(y_values), len(z_values), 3, 3),
-        dtype=np.float64,
-    )
-    stress_grid[x_indices, y_indices, z_indices] = stress_density
-
-    divergence_grid = np.zeros(stress_grid.shape[:3] + (3,), dtype=np.float64)
-    for component in range(3):
-        divergence_grid[..., component] = (
-            _axis_gradient(stress_grid[..., component, 0], x_values, axis=0)
-            + _axis_gradient(stress_grid[..., component, 1], y_values, axis=1)
-            + _axis_gradient(stress_grid[..., component, 2], z_values, axis=2)
-        )
-
-    return divergence_grid[x_indices, y_indices, z_indices]
 
 
 def _finite_difference_velocity(
@@ -217,9 +193,11 @@ def compute_cartesian_flux_comparison(
         directions = _active_direction_from_quaternion(particles.orientation)
         next_directions = _active_direction_from_quaternion(next_particles.orientation)
         forces = _logged_particle_array(frame, "forces", int(particles.N))
+        next_forces = _logged_particle_array(next_frame, "forces", int(particles.N))
         virials = _logged_particle_array(frame, "virials", int(particles.N))
         next_virials = _logged_particle_array(next_frame, "virials", int(particles.N))
-        force_velocity = forces[:, :3] / CYLINDER_SIM.gamma
+        force_divergence_values = forces[:, :3]
+        force_velocity = force_divergence_values / CYLINDER_SIM.gamma
         instantaneous_velocity = CYLINDER_SIM.u0 * directions + force_velocity
         finite_difference_velocity = _finite_difference_velocity(
             positions,
@@ -252,6 +230,23 @@ def compute_cartesian_flux_comparison(
             pocket_radius,
         )
         finite_time_polar_density = 0.5 * (polar_density + next_polar_density)
+        virial_divergence_density = _cartesian_density_sum(
+            grid_points,
+            positions,
+            force_divergence_values,
+            box_length_x,
+            pocket_radius,
+        )
+        next_virial_divergence_density = _cartesian_density_sum(
+            grid_points,
+            next_positions,
+            next_forces[:, :3],
+            box_length_x,
+            pocket_radius,
+        )
+        finite_time_virial_divergence_density = 0.5 * (
+            virial_divergence_density + next_virial_divergence_density
+        )
         force_density = _cartesian_density_sum(
             grid_points,
             positions,
@@ -290,13 +285,9 @@ def compute_cartesian_flux_comparison(
         finite_time_virial_stress_density = 0.5 * (
             virial_stress_density + next_virial_stress_density
         )
-        virial_divergence_density = _stress_divergence_density(
+        virial_stress_cylindrical = _cartesian_tensor_to_cylindrical(
             grid_points,
             virial_stress_density,
-        )
-        finite_time_virial_divergence_density = _stress_divergence_density(
-            grid_points,
-            finite_time_virial_stress_density,
         )
         instantaneous_stress_flux_density = (
             CYLINDER_SIM.u0 * polar_density
@@ -328,6 +319,7 @@ def compute_cartesian_flux_comparison(
         finite_time_virial_stress_density=finite_time_virial_stress_density,
         finite_time_virial_divergence_density=finite_time_virial_divergence_density,
         finite_time_stress_flux_density=finite_time_stress_flux_density,
+        virial_stress_cylindrical=virial_stress_cylindrical,
     )
 
 
@@ -359,6 +351,7 @@ def save_cartesian_flux_comparison(
         finite_time_virial_stress_density=comparison.finite_time_virial_stress_density,
         finite_time_virial_divergence_density=comparison.finite_time_virial_divergence_density,
         finite_time_stress_flux_density=comparison.finite_time_stress_flux_density,
+        virial_stress_cylindrical=comparison.virial_stress_cylindrical,
     )
 
 
@@ -576,7 +569,7 @@ def plot_cartesian_flux_comparison(
         comparison.instantaneous_stress_flux_density,
         image_path / f"active_flux_density_stress_instantaneous_{filename_suffix}.html",
         (
-            f"Stress-divergence J = U0 P + div(sigma)/gamma "
+            f"Stress-divergence J = U0 P + force-equivalent div(sigma)/gamma "
             f"with instantaneous fields ({coordinate_system}), step {comparison.step}"
         ),
         coordinate_system,
@@ -586,7 +579,7 @@ def plot_cartesian_flux_comparison(
         comparison.finite_time_stress_flux_density,
         image_path / f"active_flux_density_stress_finite_time_{filename_suffix}.html",
         (
-            f"Stress-divergence J = U0 P + div(sigma)/gamma "
+            f"Stress-divergence J = U0 P + force-equivalent div(sigma)/gamma "
             f"with finite-time averaged fields ({coordinate_system}), "
             f"step {comparison.step} to {comparison.next_step}"
         ),
