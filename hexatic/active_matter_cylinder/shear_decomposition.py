@@ -752,7 +752,7 @@ def plot_shear_flux_decomposition(
 
     if len(indices) == 0:
         fig = go.Figure()
-        fig.update_layout(title="Hardy shear flux decomposition: no occupied grid points")
+        fig.update_layout(title="flux decomposition: no occupied grid points")
         fig.write_html(str(output_path), include_plotlyjs=True, full_html=True)
         return
 
@@ -805,7 +805,7 @@ def plot_shear_flux_decomposition(
 
     fig = go.Figure(data=traces)
     fig.update_layout(
-        title=f"Hardy shear flux decomposition: J_total_with_wall magnitude, step {decomposition.step}",
+        title=f"Flux decomposition: J_total_with_wall magnitude, step {decomposition.step}",
         scene=_shear_scene_layout(coords),
         margin={"l": 0, "r": 0, "b": 0, "t": 45},
     )
@@ -833,7 +833,7 @@ function updateShearTrace() {{
   Plotly.restyle("{div_id}", {{"visible": visible}});
   Plotly.relayout(
     "{div_id}",
-    {{"title.text": "Hardy shear flux decomposition: "
+    {{"title.text": "Flux decomposition: "
       + field + " " + component + ", step " + shearStep}}
   );
 }}
@@ -862,7 +862,7 @@ def plot_shear_stress_tensor_components(
     indices = _valid_plot_indices(decomposition, max_points)
     if len(indices) == 0:
         fig = go.Figure()
-        fig.update_layout(title="Hardy sigma_shear tensor: no occupied grid points")
+        fig.update_layout(title="Hardy stress tensor: no occupied grid points")
         fig.write_html(str(output_path), include_plotlyjs=True, full_html=True)
         return
 
@@ -873,7 +873,7 @@ def plot_shear_stress_tensor_components(
         for normal_index, normal_label in enumerate(labels):
             key = f"{component_label}:{normal_label}"
             trace_indices[key] = len(traces)
-            values = decomposition.sigma_shear[indices, component_index, normal_index]
+            values = decomposition.sigma_full[indices, component_index, normal_index]
             limit = _symmetric_color_limit(values)
             traces.append(
                 _grid_marker_trace(
@@ -881,11 +881,11 @@ def plot_shear_stress_tensor_components(
                     values,
                     name=f"sigma_{component_label}{normal_label}",
                     visible=(component_label == "x" and normal_label == "r"),
-                    colorbar_title="sigma_shear",
+                    colorbar_title="sigma",
                     cmin=-limit,
                     cmax=limit,
                     colorscale="RdBu",
-                    hover_label="sigma_shear",
+                    hover_label="sigma",
                 )
             )
 
@@ -894,7 +894,7 @@ def plot_shear_stress_tensor_components(
     trace_map = _trace_map_literal(trace_indices)
     fig = go.Figure(data=traces)
     fig.update_layout(
-        title=f"Hardy sigma_shear: sigma_xr, step {decomposition.step}",
+        title=f"Hardy stress tensor: sigma_xr, step {decomposition.step}",
         scene=_shear_scene_layout(coords),
         margin={"l": 0, "r": 0, "b": 0, "t": 45},
     )
@@ -922,7 +922,7 @@ function updateSigmaTrace() {{
   Plotly.restyle("{div_id}", {{"visible": visible}});
   Plotly.relayout(
     "{div_id}",
-    {{"title.text": "Hardy sigma_shear: sigma_" + component + normal + ", step " + sigmaStep}}
+    {{"title.text": "Hardy stress tensor: sigma_" + component + normal + ", step " + sigmaStep}}
   );
 }}
 document.getElementById("sigma-component").addEventListener("change", updateSigmaTrace);
