@@ -21,15 +21,13 @@ ROTATIONAL_DIFFUSION_PERIOD = 10
 TRAJECTORY_WRITE_PERIOD = int(1e5)
 
 RUN_STEPS = int(1e7)
-FLIPPED_RUN_STEPS = int(1e6)
-FLIPPED_TRAJECTORY_WRITE_PERIOD = int(1e4)
 LATTICE_SPACING = 2.0 ** (1.0 / 6.0) + 0.5
 
 
 @dataclass(frozen=True)
 class CylinderPaths:
     disc_image_dir = IMAGE_OUTPUT_DIR / "disc"
-    in_gsd = CYLINDER_OUTPUT_DIR / "trajectory_cylinder.gsd"
+    in_gsd = CYLINDER_OUTPUT_DIR / "trajectory_cylinder_flipped.gsd"
     initial_gsd = CYLINDER_OUTPUT_DIR / "initial_mesh.gsd"
     flipped_initial_gsd = CYLINDER_OUTPUT_DIR / "initial_mesh_cylinder_flipped.gsd"
     flipped_gsd = CYLINDER_OUTPUT_DIR / "trajectory_cylinder_flipped.gsd"
@@ -81,8 +79,6 @@ class CylinderSimulationConfig:
     rotational_diffusion_period: int = ROTATIONAL_DIFFUSION_PERIOD
     trajectory_write_period: int = TRAJECTORY_WRITE_PERIOD
     run_steps: int = RUN_STEPS
-    # run_steps: int = FLIPPED_RUN_STEPS
-    # trajectory_write_period: int = FLIPPED_TRAJECTORY_WRITE_PERIOD
     lattice_spacing: float = LATTICE_SPACING
 
     @property

@@ -122,5 +122,5 @@ gsd_writer = hoomd.write.GSD(
     logger=logger,
 )
 sim.operations.writers.append(gsd_writer)
-print("starting sim")
+print(f"starting sim for {simulation.run_steps} steps, {simulation.trajectory_write_period} write_period")
 sim.run(simulation.run_steps)
