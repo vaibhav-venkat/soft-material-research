@@ -25,6 +25,7 @@ ACTIVE_GRID_DZ = CYLINDER.particle_diameter
 ACTIVE_MOVIE_FPS = 8
 ACTIVE_DATA_DIR = Path(CYLINDER_PATHS.in_gsd).parent
 ACTIVE_IMAGE_DIR = Path(CYLINDER_PATHS.com_plot).parent / "active"
+VIRIAL_STRESS_SIGN = -1.0
 
 
 @dataclass(frozen=True)

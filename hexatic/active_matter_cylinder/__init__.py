@@ -55,6 +55,12 @@ from .radial_px import (
     _radius_edges_and_centers,
     plot_radial_px_fields,
 )
+from .shear_decomposition import (
+    ShearFluxDecomposition,
+    compute_shear_flux_decomposition,
+    plot_shear_flux_decomposition,
+    save_shear_flux_decomposition,
+)
 from .scalar_plots import (
     _draw_polar_radial_integral,
     _draw_polar_shell,

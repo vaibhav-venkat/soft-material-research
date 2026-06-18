@@ -3,6 +3,7 @@ from pathlib import Path
 import gsd.hoomd
 import numpy as np
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 from .common import (
     _active_direction_from_quaternion,
@@ -19,6 +20,7 @@ from .config import (
     CYLINDER,
     CYLINDER_SIM,
     LOCAL_POCKET_RADIUS,
+    VIRIAL_STRESS_SIGN,
     CartesianFluxComparison,
 )
 
@@ -132,6 +134,16 @@ def _cartesian_tensor_to_cylindrical(
     return np.einsum("iac,icd,ibd->iab", basis, tensors, basis)
 
 
+def _cartesian_vector_to_cylindrical_components(
+    points: np.ndarray,
+    vectors: np.ndarray,
+) -> np.ndarray:
+    vectors = np.asarray(vectors, dtype=np.float64)
+    assert vectors.shape == (len(points), 3)
+    basis = _cylindrical_basis(points)
+    return np.einsum("iac,ic->ia", basis, vectors)
+
+
 def _virial_tensor_from_components(virials: np.ndarray) -> np.ndarray:
     virials = np.asarray(virials, dtype=np.float64)
     if virials.ndim == 3 and virials.shape[1:] == (3, 3):
@@ -145,6 +157,61 @@ def _virial_tensor_from_components(virials: np.ndarray) -> np.ndarray:
     tensor[:, 1, 2] = tensor[:, 2, 1] = virials[:, 4]
     tensor[:, 2, 2] = virials[:, 5]
     return tensor
+
+
+def _regular_grid_indices(points: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, tuple[int, int, int]]:
+    x_values = np.unique(points[:, 0])
+    y_values = np.unique(points[:, 1])
+    z_values = np.unique(points[:, 2])
+    x_indices = np.searchsorted(x_values, points[:, 0])
+    y_indices = np.searchsorted(y_values, points[:, 1])
+    z_indices = np.searchsorted(z_values, points[:, 2])
+    return x_indices, y_indices, z_indices, (len(x_values), len(y_values), len(z_values))
+
+
+def _central_derivative(values: np.ndarray, spacing: float, axis: int) -> np.ndarray:
+    forward = np.roll(values, -1, axis=axis)
+    backward = np.roll(values, 1, axis=axis)
+    valid = np.isfinite(forward) & np.isfinite(backward)
+    derivative = np.full_like(values, np.nan, dtype=np.float64)
+    derivative[valid] = (forward[valid] - backward[valid]) / (2.0 * spacing)
+
+    first = [slice(None)] * values.ndim
+    first[axis] = 0
+    derivative[tuple(first)] = np.nan
+
+    last = [slice(None)] * values.ndim
+    last[axis] = -1
+    derivative[tuple(last)] = np.nan
+    return derivative
+
+
+def _cartesian_stress_divergence(
+    points: np.ndarray,
+    stress: np.ndarray,
+    spacing: np.ndarray,
+) -> np.ndarray:
+    x_indices, y_indices, z_indices, shape = _regular_grid_indices(points)
+    stress_grid = np.full(shape + (3, 3), np.nan, dtype=np.float64)
+    stress_grid[x_indices, y_indices, z_indices] = stress
+
+    div_grid = np.zeros(shape + (3,), dtype=np.float64)
+    valid = np.ones(shape, dtype=bool)
+    for component_index in range(3):
+        component_terms = []
+        for normal_index in range(3):
+            derivative = _central_derivative(
+                stress_grid[..., component_index, normal_index],
+                float(spacing[normal_index]),
+                axis=normal_index,
+            )
+            component_terms.append(derivative)
+            valid &= np.isfinite(derivative)
+        div_grid[..., component_index] = np.sum(component_terms, axis=0)
+
+    divergence = div_grid[x_indices, y_indices, z_indices]
+    divergence[~valid[x_indices, y_indices, z_indices]] = np.nan
+    return divergence
 
 
 def _finite_difference_velocity(
@@ -285,7 +352,7 @@ def compute_cartesian_flux_comparison(
         finite_time_virial_stress_density = 0.5 * (
             virial_stress_density + next_virial_stress_density
         )
-        virial_stress_cylindrical = _cartesian_tensor_to_cylindrical(
+        virial_stress_cylindrical = VIRIAL_STRESS_SIGN * _cartesian_tensor_to_cylindrical(
             grid_points,
             virial_stress_density,
         )
@@ -535,6 +602,299 @@ def _plot_flux_density_3d(
     fig.write_html(str(output_path), include_plotlyjs=True, full_html=True)
 
 
+def _plot_virial_shear_stress_dropdown(
+    comparison: CartesianFluxComparison,
+    image_dir: str | Path = ACTIVE_IMAGE_DIR,
+) -> None:
+    output_path = Path(image_dir) / "shear" / "smoothed_virial_shear_stress.html"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    labels = ("x", "r", "theta")
+    points = comparison.grid_points
+    values = comparison.virial_stress_cylindrical
+    valid = np.isfinite(values).all(axis=(1, 2)) & (comparison.rho_density > 0.0)
+    plot_points = _cylindrical_plot_points(points[valid])
+    plot_values = values[valid]
+
+    if len(plot_points) == 0:
+        fig = go.Figure()
+        fig.update_layout(title="Smoothed virial shear stress: no occupied grid points")
+        fig.write_html(str(output_path), include_plotlyjs=True, full_html=True)
+        return
+
+    finite_values = plot_values[np.isfinite(plot_values)]
+    max_abs = float(np.max(np.abs(finite_values))) if finite_values.size else 1.0
+    if np.isclose(max_abs, 0.0):
+        max_abs = 1.0
+
+    traces = []
+    trace_indices: dict[str, int] = {}
+    for component_index, component_label in enumerate(labels):
+        for normal_index, normal_label in enumerate(labels):
+            trace_indices[f"{component_label}_{normal_label}"] = len(traces)
+            field = plot_values[:, component_index, normal_index]
+            traces.append(
+                go.Scatter3d(
+                    x=plot_points[:, 0],
+                    y=plot_points[:, 1],
+                    z=plot_points[:, 2],
+                    mode="markers",
+                    marker={
+                        "size": 3,
+                        "color": field,
+                        "colorscale": "RdBu",
+                        "cmin": -max_abs,
+                        "cmax": max_abs,
+                        "colorbar": {"title": "stress"},
+                        "opacity": 0.85,
+                    },
+                    name=f"sigma_{component_label}{normal_label}",
+                    visible=(component_index == 0 and normal_index == 1),
+                    customdata=field,
+                    hovertemplate=(
+                        "x=%{x:.3g}<br>r=%{y:.3g}<br>theta=%{z:.3g}"
+                        "<br>stress=%{customdata:.3g}<extra></extra>"
+                    ),
+                )
+            )
+
+    radius = CYLINDER.cylinder_radius
+    fig = go.Figure(data=traces)
+    fig.update_layout(
+        title=f"Smoothed virial stress: component x, normal r, step {comparison.step}",
+        scene={
+            "xaxis": {
+                "title": "x",
+                "range": [float(np.min(plot_points[:, 0])), float(np.max(plot_points[:, 0]))],
+            },
+            "yaxis": {"title": "r", "range": [0.0, radius]},
+            "zaxis": {"title": "theta", "range": [0.0, 2.0 * np.pi]},
+            "aspectmode": "data",
+        },
+        margin={"l": 0, "r": 0, "b": 0, "t": 45},
+    )
+
+    div_id = "smoothed-virial-shear-stress-plot"
+    plot_html = fig.to_html(full_html=False, include_plotlyjs=True, div_id=div_id)
+    options = "\n".join(f'<option value="{label}">{label}</option>' for label in labels)
+    trace_map = "{" + ",".join(
+        f'"{key}": {value}' for key, value in trace_indices.items()
+    ) + "}"
+    controls = f"""
+<div style="font-family: sans-serif; margin: 12px 0;">
+  <label for="stress-component">Component:&nbsp;</label>
+  <select id="stress-component">{options}</select>
+  <label for="stress-normal" style="margin-left: 18px;">Normal:&nbsp;</label>
+  <select id="stress-normal">
+    <option value="x">x</option>
+    <option value="r" selected>r</option>
+    <option value="theta">theta</option>
+  </select>
+</div>
+"""
+    script = f"""
+<script>
+const stressTraceMap = {trace_map};
+const stressTraceCount = {len(traces)};
+const stressStep = {comparison.step};
+function updateStressTrace() {{
+  const component = document.getElementById("stress-component").value;
+  const normal = document.getElementById("stress-normal").value;
+  const key = component + "_" + normal;
+  const visible = Array(stressTraceCount).fill(false);
+  visible[stressTraceMap[key]] = true;
+  Plotly.restyle("{div_id}", {{"visible": visible}});
+  Plotly.relayout(
+    "{div_id}",
+    {{"title.text": "Smoothed virial stress: component "
+      + component + ", normal " + normal + ", step " + stressStep}}
+  );
+}}
+document.getElementById("stress-component").addEventListener("change", updateStressTrace);
+document.getElementById("stress-normal").addEventListener("change", updateStressTrace);
+</script>
+"""
+    output_path.write_text(f"<!doctype html><html><body>{controls}{plot_html}{script}</body></html>")
+
+
+def _plot_div_sigma_force_density_check(
+    comparison: CartesianFluxComparison,
+    image_dir: str | Path = ACTIVE_IMAGE_DIR,
+    component_system: str = "xyz",
+    max_points: int = 7000,
+) -> None:
+    component_system = _normalize_coordinate_system(component_system)
+    filename_suffix = "xyz" if component_system == "xyz" else "xrtheta"
+    output_path = (
+        Path(image_dir)
+        / "stress"
+        / f"div_sigma_vs_force_density_{filename_suffix}.html"
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    current_div_sigma = _cartesian_stress_divergence(
+        comparison.grid_points,
+        VIRIAL_STRESS_SIGN * comparison.virial_stress_density,
+        comparison.grid_spacing,
+    )
+    opposite_div_sigma = -current_div_sigma
+    net_force_density = comparison.virial_divergence_density
+    labels = ("x", "y", "z")
+    if component_system == "xrtheta":
+        current_div_sigma = _cartesian_vector_to_cylindrical_components(
+            comparison.grid_points,
+            current_div_sigma,
+        )
+        opposite_div_sigma = -current_div_sigma
+        net_force_density = _cartesian_vector_to_cylindrical_components(
+            comparison.grid_points,
+            net_force_density,
+        )
+        labels = ("x", "r", "theta")
+
+    valid = (
+        (comparison.rho_density > 0.0)
+        & np.isfinite(current_div_sigma).all(axis=1)
+        & np.isfinite(net_force_density).all(axis=1)
+    )
+
+    if not np.any(valid):
+        fig = go.Figure()
+        fig.update_layout(
+            title=(
+                f"div(sigma) vs net force density ({component_system}): "
+                "no interior grid points with finite central differences"
+            )
+        )
+        fig.write_html(str(output_path), include_plotlyjs=True, full_html=True)
+        return
+
+    valid_indices = np.flatnonzero(valid)
+    if len(valid_indices) > max_points:
+        valid_indices = valid_indices[np.linspace(0, len(valid_indices) - 1, max_points).astype(np.int64)]
+
+    def component_correlation(x_values: np.ndarray, y_values: np.ndarray) -> float:
+        if len(x_values) < 2 or np.isclose(np.std(x_values), 0.0) or np.isclose(np.std(y_values), 0.0):
+            return float("nan")
+        return float(np.corrcoef(x_values, y_values)[0, 1])
+
+    def component_slope(x_values: np.ndarray, y_values: np.ndarray) -> float:
+        denominator = float(np.dot(x_values, x_values))
+        if np.isclose(denominator, 0.0):
+            return float("nan")
+        return float(np.dot(x_values, y_values) / denominator)
+
+    fig = make_subplots(
+        rows=1,
+        cols=3,
+        subplot_titles=[f"{label} component" for label in labels],
+        horizontal_spacing=0.08,
+    )
+    annotations = []
+    for component_index, label in enumerate(labels):
+        x_force = net_force_density[valid_indices, component_index]
+        y_current = current_div_sigma[valid_indices, component_index]
+        y_opposite = opposite_div_sigma[valid_indices, component_index]
+        finite_values = np.concatenate((x_force, y_current, y_opposite))
+        finite_values = finite_values[np.isfinite(finite_values)]
+        limit = float(np.max(np.abs(finite_values))) if finite_values.size else 1.0
+        if np.isclose(limit, 0.0):
+            limit = 1.0
+
+        corr_current = component_correlation(x_force, y_current)
+        corr_opposite = component_correlation(x_force, y_opposite)
+        slope_current = component_slope(x_force, y_current)
+        slope_opposite = -slope_current
+
+        fig.add_trace(
+            go.Scattergl(
+                x=x_force,
+                y=y_current,
+                mode="markers",
+                marker={"size": 4, "opacity": 0.45, "color": "#2563eb"},
+                name=f"configured sign ({VIRIAL_STRESS_SIGN:+.0f})",
+                legendgroup="current",
+                showlegend=component_index == 0,
+                hovertemplate=(
+                    f"F_{label} density=%{{x:.3g}}"
+                    f"<br>div(sigma)_{label}=%{{y:.3g}}<extra></extra>"
+                ),
+            ),
+            row=1,
+            col=component_index + 1,
+        )
+        fig.add_trace(
+            go.Scattergl(
+                x=x_force,
+                y=y_opposite,
+                mode="markers",
+                marker={"size": 4, "opacity": 0.35, "color": "#f97316"},
+                name=f"opposite sign ({-VIRIAL_STRESS_SIGN:+.0f})",
+                legendgroup="opposite",
+                showlegend=component_index == 0,
+                hovertemplate=(
+                    f"F_{label} density=%{{x:.3g}}"
+                    f"<br>-div(sigma)_{label}=%{{y:.3g}}<extra></extra>"
+                ),
+            ),
+            row=1,
+            col=component_index + 1,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=[-limit, limit],
+                y=[-limit, limit],
+                mode="lines",
+                line={"color": "black", "dash": "dash", "width": 1},
+                name="y = x",
+                legendgroup="identity",
+                showlegend=component_index == 0,
+                hoverinfo="skip",
+            ),
+            row=1,
+            col=component_index + 1,
+        )
+        fig.update_xaxes(
+            title_text=f"net force density F_{label}",
+            range=[-limit, limit],
+            row=1,
+            col=component_index + 1,
+        )
+        fig.update_yaxes(
+            title_text=f"div(sigma)_{label}",
+            range=[-limit, limit],
+            row=1,
+            col=component_index + 1,
+        )
+        annotations.append(
+            f"{label}: corr sign={corr_current:.3g}, corr opposite={corr_opposite:.3g}, "
+            f"slope sign={slope_current:.3g}, slope opposite={slope_opposite:.3g}"
+        )
+
+    fig.update_layout(
+        title=(
+            "Numerical div(sigma) vs smoothed net force density "
+            f"({component_system}, step {comparison.step})"
+        ),
+        margin={"l": 40, "r": 20, "b": 70, "t": 70},
+        legend={"orientation": "h", "yanchor": "bottom", "y": -0.25, "x": 0.0},
+        annotations=list(fig.layout.annotations)
+        + [
+            {
+                "x": 0.0,
+                "y": -0.18 - 0.05 * idx,
+                "xref": "paper",
+                "yref": "paper",
+                "text": text,
+                "showarrow": False,
+                "align": "left",
+            }
+            for idx, text in enumerate(annotations)
+        ],
+    )
+    fig.write_html(str(output_path), include_plotlyjs=True, full_html=True)
+
+
 def plot_cartesian_flux_comparison(
     comparison: CartesianFluxComparison,
     image_dir: str | Path = ACTIVE_IMAGE_DIR,
@@ -543,45 +903,24 @@ def plot_cartesian_flux_comparison(
     coordinate_system = _normalize_coordinate_system(coordinate_system)
     filename_suffix = "xyz" if coordinate_system == "xyz" else "xrtheta"
     image_path = Path(image_dir) / "flux" / filename_suffix
-    _plot_flux_density_3d(
+    _plot_virial_shear_stress_dropdown(comparison, image_dir=image_dir)
+    _plot_div_sigma_force_density_check(
         comparison,
-        comparison.instantaneous_flux_density,
-        image_path / f"active_flux_density_current_instantaneous_{filename_suffix}.html",
-        (
-            f"Current-method J = sum(v_i delta) with instantaneous velocity "
-            f"({coordinate_system}), step {comparison.step}"
-        ),
-        coordinate_system,
+        image_dir=image_dir,
+        component_system="xyz",
     )
-    _plot_flux_density_3d(
+    _plot_div_sigma_force_density_check(
         comparison,
-        comparison.finite_difference_flux_density,
-        image_path / f"active_flux_density_current_finite_time_{filename_suffix}.html",
-        (
-            f"Current-method J = sum(v_i delta) with finite-time velocity "
-            f"({coordinate_system}), "
-            f"step {comparison.step} to {comparison.next_step}"
-        ),
-        coordinate_system,
+        image_dir=image_dir,
+        component_system="xrtheta",
     )
     _plot_flux_density_3d(
         comparison,
         comparison.instantaneous_stress_flux_density,
-        image_path / f"active_flux_density_stress_instantaneous_{filename_suffix}.html",
+        image_path / f"active_flux_density_force_density_{filename_suffix}.html",
         (
-            f"Stress-divergence J = U0 P + force-equivalent div(sigma)/gamma "
-            f"with instantaneous fields ({coordinate_system}), step {comparison.step}"
-        ),
-        coordinate_system,
-    )
-    _plot_flux_density_3d(
-        comparison,
-        comparison.finite_time_stress_flux_density,
-        image_path / f"active_flux_density_stress_finite_time_{filename_suffix}.html",
-        (
-            f"Stress-divergence J = U0 P + force-equivalent div(sigma)/gamma "
-            f"with finite-time averaged fields ({coordinate_system}), "
-            f"step {comparison.step} to {comparison.next_step}"
+            f"Force-density J = U0 P + F/gamma "
+            f"({coordinate_system}), step {comparison.step}"
         ),
         coordinate_system,
     )

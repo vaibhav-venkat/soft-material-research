@@ -7,6 +7,7 @@ from .config import (
     ACTIVE_DATA_DIR,
     ACTIVE_FIELD_THETA_BINS,
     ACTIVE_FIELD_X_BINS,
+    ACTIVE_FLUX_PLOT_THETA_BINS,
     ACTIVE_IMAGE_DIR,
     ACTIVE_MOVIE_FPS,
     CYLINDER_PATHS,
@@ -21,6 +22,11 @@ from .cartesian_flux import (
 from .fields import active_matter_field_series, save_active_matter_fields
 from .movies import plot_active_matter_movies
 from .radial_px import plot_radial_px_fields
+from .shear_decomposition import (
+    compute_shear_flux_decomposition,
+    plot_shear_flux_decomposition,
+    save_shear_flux_decomposition,
+)
 from .vector_plots import plot_active_component_series, plot_active_x_balance_series
 
 
@@ -47,6 +53,7 @@ def write_active_matter_field_outputs(
     dy: float = ACTIVE_GRID_DY,
     dz: float = ACTIVE_GRID_DZ,
     coordinate_system: str = "xyz",
+    shear_theta_bins: int = ACTIVE_FLUX_PLOT_THETA_BINS,
 ) -> CartesianFluxComparison:
     comparison = compute_cartesian_flux_comparison(
         input_gsd,
@@ -60,5 +67,21 @@ def write_active_matter_field_outputs(
         comparison,
         image_dir=image_dir,
         coordinate_system=coordinate_system,
+    )
+    shear_decomposition = compute_shear_flux_decomposition(
+        input_gsd,
+        pocket_radius=pocket_radius,
+        dx=dx,
+        dr=dy,
+        n_theta_bins=shear_theta_bins,
+        frame_index=frame_index if frame_index != -1 else -2,
+    )
+    save_shear_flux_decomposition(
+        shear_decomposition,
+        Path(data_dir) / "shear_flux_decomposition.npz",
+    )
+    plot_shear_flux_decomposition(
+        shear_decomposition,
+        image_dir=image_dir,
     )
     return comparison

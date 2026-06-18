@@ -685,7 +685,7 @@ def main() -> None:
     # print(f"Wrote net disclination charge plot to {CYLINDER_PATHS.net_charge_plot}.")
     write_active_matter_field_outputs(
         CYLINDER_PATHS.in_gsd,
-        coordinate_system="xyz"
+        coordinate_system="xrtheta"
     )
     print(
         "Wrote active matter flux density plots to "
