@@ -39,6 +39,10 @@ class CylinderPaths:
     dynamic_values_gsd = CYLINDER_OUTPUT_DIR / "trajectory_cylinder_dynamic_values.gsd"
     com_plot = IMAGE_OUTPUT_DIR / "cylinder_center_of_mass_x_theta.png"
     x_com_velocity_plot = IMAGE_OUTPUT_DIR / "cylinder_x_com_velocity.png"
+    shell_xtheta_x_velocity_movie = IMAGE_OUTPUT_DIR / "cylinder_shell_xtheta_x_velocity.mp4"
+    shell_xtheta_theta_velocity_movie = (
+        IMAGE_OUTPUT_DIR / "cylinder_shell_xtheta_theta_velocity.mp4"
+    )
     disclination_com_plot = IMAGE_OUTPUT_DIR / "cylinder_disclination_com_x_theta.png"
     dislocation_com_plot = disc_image_dir / "dislocation_center_of_mass_x_theta.png"
     dislocation_count_plot = disc_image_dir / "dislocation_count.png"
@@ -105,6 +109,8 @@ OUT_GSD = PATHS.out_gsd
 DYNAMIC_VALUES_GSD = PATHS.dynamic_values_gsd
 COM_PLOT = PATHS.com_plot
 X_COM_VELOCITY_PLOT = PATHS.x_com_velocity_plot
+SHELL_XTHETA_X_VELOCITY_MOVIE = PATHS.shell_xtheta_x_velocity_movie
+SHELL_XTHETA_THETA_VELOCITY_MOVIE = PATHS.shell_xtheta_theta_velocity_movie
 DISCLINATION_COM_PLOT = PATHS.disclination_com_plot
 DISLOCATION_COM_PLOT = PATHS.dislocation_com_plot
 DISLOCATION_COUNT_PLOT = PATHS.dislocation_count_plot

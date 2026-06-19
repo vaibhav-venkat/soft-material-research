@@ -9,7 +9,7 @@ paths = cylinder.PATHS
 analysis = cylinder.ANALYSIS
 simulation = cylinder.SIMULATION
 
-RUN_STEPS = int(1e7)
+RUN_STEPS = int(4e7)
 
 CPU = hoomd.device.CPU()
 sim = hoomd.Simulation(device=CPU, seed=simulation.seed)
