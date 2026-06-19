@@ -4,6 +4,8 @@ from typing import Iterator
 
 import gsd.hoomd
 import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+from matplotlib.colors import TwoSlopeNorm
 from matplotlib.ticker import FuncFormatter
 import numpy as np
 
@@ -140,6 +142,22 @@ def _center_of_mass_or_nan(
 
 def _minimum_image_delta(delta: np.ndarray, box_length: float) -> np.ndarray:
     return delta - box_length * np.round(delta / box_length)
+
+
+def _theta_from_positions(positions: np.ndarray) -> np.ndarray:
+    return np.mod(np.arctan2(positions[:, 1], positions[:, 2]), 2.0 * np.pi)
+
+
+def _x_bin_indices(x_positions: np.ndarray, box_length_x: float, n_bins: int) -> np.ndarray:
+    wrapped = np.mod(x_positions + 0.5 * box_length_x, box_length_x)
+    indices = np.floor(wrapped / box_length_x * n_bins).astype(np.int64)
+    return np.clip(indices, 0, n_bins - 1)
+
+
+def _theta_bin_indices(theta: np.ndarray, n_bins: int) -> np.ndarray:
+    wrapped = np.mod(theta, 2.0 * np.pi)
+    indices = np.floor(wrapped / (2.0 * np.pi) * n_bins).astype(np.int64)
+    return np.clip(indices, 0, n_bins - 1)
 
 
 def _particle_masses(particles, n_particles: int) -> np.ndarray:
@@ -353,6 +371,224 @@ def x_center_of_mass_velocity_series(
         steps=np.asarray(steps, dtype=np.int64),
         x_velocities=np.asarray(x_velocities, dtype=np.float64),
     )
+
+
+def _outer_shell_xtheta_x_velocity_frames(
+    input_gsd: str | Path,
+    start_frame: int,
+    n_x_bins: int,
+    n_theta_bins: int,
+) -> list[dict[str, np.ndarray | int | float]]:
+    frames: list[dict[str, np.ndarray | int | float]] = []
+    previous_x: np.ndarray | None = None
+    previous_step: int | None = None
+    previous_shell_mask: np.ndarray | None = None
+    previous_box_length_x: float | None = None
+
+    with gsd.hoomd.open(name=str(input_gsd), mode="r") as source:
+        for frame_idx, frame in enumerate(source):
+            particles = frame.particles
+            assert particles.position is not None
+
+            positions = np.asarray(particles.position, dtype=np.float64)
+            box_length_x = float(frame.configuration.box[0])
+            step = int(frame.configuration.step)
+            current_x = _unwrapped_x_positions(particles, box_length_x)
+            dynamic_values = hx.get_dynamic_values(
+                positions,
+                contain_all=False,
+                cylinder_radius=CYLINDER.cylinder_radius,
+                cutoff=CYLINDER.wall_cutoff,
+            )
+            shell_mask = dynamic_values.shell_mask
+
+            if (
+                frame_idx >= start_frame
+                and previous_x is not None
+                and previous_step is not None
+                and previous_shell_mask is not None
+                and previous_box_length_x is not None
+            ):
+                assert current_x.shape == previous_x.shape
+                delta_t = (step - previous_step) * float(cylinder.TIMESTEP)
+                mask = shell_mask & previous_shell_mask
+                if delta_t > 0.0 and np.any(mask):
+                    delta_x = _minimum_image_delta(
+                        current_x - previous_x,
+                        previous_box_length_x,
+                    )
+                    x_velocity = delta_x[mask] / delta_t
+                    shell_positions = positions[mask]
+                    x_indices = _x_bin_indices(
+                        shell_positions[:, 0],
+                        box_length_x,
+                        n_x_bins,
+                    )
+                    theta = _theta_from_positions(shell_positions)
+                    theta_indices = _theta_bin_indices(theta, n_theta_bins)
+                    flat_indices = x_indices * n_theta_bins + theta_indices
+                    n_bins = n_x_bins * n_theta_bins
+                    counts = np.bincount(flat_indices, minlength=n_bins)
+                    velocity_sums = np.bincount(
+                        flat_indices,
+                        weights=x_velocity,
+                        minlength=n_bins,
+                    )
+                    occupied = counts > 0
+                    bin_velocity = np.divide(
+                        velocity_sums,
+                        counts,
+                        out=np.full(n_bins, np.nan, dtype=np.float64),
+                        where=occupied,
+                    )
+                    occupied_indices = np.flatnonzero(occupied)
+                    x_edges = np.linspace(
+                        -0.5 * box_length_x,
+                        0.5 * box_length_x,
+                        n_x_bins + 1,
+                    )
+                    theta_edges = np.linspace(0.0, 2.0 * np.pi, n_theta_bins + 1)
+                    x_centers = 0.5 * (x_edges[:-1] + x_edges[1:])
+                    theta_centers = 0.5 * (theta_edges[:-1] + theta_edges[1:])
+                    occupied_x = occupied_indices // n_theta_bins
+                    occupied_theta = occupied_indices % n_theta_bins
+                    frames.append(
+                        {
+                            "frame_idx": frame_idx,
+                            "step": step,
+                            "x": x_centers[occupied_x],
+                            "theta": theta_centers[occupied_theta],
+                            "velocity": bin_velocity[occupied_indices],
+                            "counts": counts[occupied_indices],
+                            "box_length_x": box_length_x,
+                        }
+                    )
+                else:
+                    frames.append(
+                        {
+                            "frame_idx": frame_idx,
+                            "step": step,
+                            "x": np.asarray([], dtype=np.float64),
+                            "theta": np.asarray([], dtype=np.float64),
+                            "velocity": np.asarray([], dtype=np.float64),
+                            "counts": np.asarray([], dtype=np.int64),
+                            "box_length_x": box_length_x,
+                        }
+                    )
+
+            previous_x = current_x
+            previous_step = step
+            previous_shell_mask = shell_mask
+            previous_box_length_x = box_length_x
+
+    return frames
+
+
+def animate_outer_shell_xtheta_x_velocity(
+    input_gsd: str | Path = CYLINDER_PATHS.in_gsd,
+    filename: str | Path | None = CYLINDER_PATHS.shell_xtheta_x_velocity_movie,
+    start_frame: int = 100,
+    n_x_bins: int = 80,
+    n_theta_bins: int = 48,
+    fps: int = 12,
+) -> None:
+    frames = _outer_shell_xtheta_x_velocity_frames(
+        input_gsd,
+        start_frame=start_frame,
+        n_x_bins=n_x_bins,
+        n_theta_bins=n_theta_bins,
+    )
+    if not frames:
+        raise ValueError(
+            f"No consecutive frames available at or after frame {start_frame}."
+        )
+
+    all_velocities = np.concatenate(
+        [
+            np.asarray(frame["velocity"], dtype=np.float64)
+            for frame in frames
+            if np.asarray(frame["velocity"]).size
+        ]
+    )
+    if all_velocities.size:
+        vmax = float(np.nanpercentile(np.abs(all_velocities), 98.0))
+        if not np.isfinite(vmax) or vmax <= 0.0:
+            vmax = float(np.nanmax(np.abs(all_velocities)))
+        if not np.isfinite(vmax) or vmax <= 0.0:
+            vmax = 1.0
+    else:
+        vmax = 1.0
+
+    first_box_length_x = float(frames[0]["box_length_x"])
+    fig, axis = plt.subplots(figsize=(11, 5.8))
+    scatter = axis.scatter(
+        [],
+        [],
+        c=[],
+        s=[],
+        cmap="coolwarm",
+        norm=TwoSlopeNorm(vmin=-vmax, vcenter=0.0, vmax=vmax),
+        edgecolors="none",
+    )
+    colorbar = fig.colorbar(scatter, ax=axis, pad=0.02)
+    colorbar.set_label(r"binned discrete $v_x = \Delta x / \Delta t$")
+    axis.set_xlim(-0.5 * first_box_length_x, 0.5 * first_box_length_x)
+    axis.set_ylim(0.0, 2.0 * np.pi)
+    axis.set_xlabel("x")
+    axis.set_ylabel(r"$\theta$")
+    axis.set_yticks([0.0, 0.5 * np.pi, np.pi, 1.5 * np.pi, 2.0 * np.pi])
+    axis.yaxis.set_major_formatter(
+        FuncFormatter(
+            lambda value, _: {
+                0.0: "0",
+                0.5: r"$\pi/2$",
+                1.0: r"$\pi$",
+                1.5: r"$3\pi/2$",
+                2.0: r"$2\pi$",
+            }.get(round(value / np.pi, 1), "")
+        )
+    )
+    axis.grid(True, ls="--", alpha=0.25)
+    title = axis.set_title("")
+
+    def update(animation_idx: int):
+        frame = frames[animation_idx]
+        x = np.asarray(frame["x"], dtype=np.float64)
+        theta = np.asarray(frame["theta"], dtype=np.float64)
+        velocity = np.asarray(frame["velocity"], dtype=np.float64)
+        counts = np.asarray(frame["counts"], dtype=np.float64)
+        scatter.set_offsets(np.column_stack((x, theta)) if x.size else np.empty((0, 2)))
+        scatter.set_array(velocity)
+        scatter.set_sizes(18.0 + 5.0 * np.sqrt(counts) if counts.size else [])
+        axis.set_xlim(
+            -0.5 * float(frame["box_length_x"]),
+            0.5 * float(frame["box_length_x"]),
+        )
+        title.set_text(
+            "Outer-shell binned x velocity on x-theta grid "
+            f"(frame {int(frame['frame_idx'])}, step {int(frame['step'])})"
+        )
+        return scatter, title
+
+    animation = FuncAnimation(
+        fig,
+        update,
+        frames=len(frames),
+        interval=1000 / fps,
+        blit=False,
+    )
+    fig.tight_layout()
+
+    if filename is None:
+        plt.show()
+    else:
+        output_path = Path(filename)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        if output_path.suffix.lower() == ".gif":
+            animation.save(output_path, writer="pillow", fps=fps)
+        else:
+            animation.save(output_path, writer="ffmpeg", fps=fps, dpi=160)
+        plt.close(fig)
 
 
 def plot_x_center_of_mass_velocity_series(
@@ -782,11 +1018,20 @@ def main() -> None:
     plot_x_center_of_mass_velocity_series(
         CYLINDER_PATHS.in_gsd,
         CYLINDER_PATHS.x_com_velocity_plot,
-        shell_only = True
+        shell_only=True,
     )
     print(
         "Wrote x center-of-mass velocity plot to "
         f"{CYLINDER_PATHS.x_com_velocity_plot}."
+    )
+    animate_outer_shell_xtheta_x_velocity(
+        CYLINDER_PATHS.in_gsd,
+        CYLINDER_PATHS.shell_xtheta_x_velocity_movie,
+        start_frame=100,
+    )
+    print(
+        "Wrote outer-shell x-theta x velocity movie to "
+        f"{CYLINDER_PATHS.shell_xtheta_x_velocity_movie}."
     )
     # plot_disclination_center_of_mass_series(
     #     CYLINDER_PATHS.in_gsd,
