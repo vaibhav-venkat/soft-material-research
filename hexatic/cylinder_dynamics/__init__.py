@@ -19,7 +19,7 @@ from .plotting import (
     plot_dislocation_count_series,
     plot_net_disclination_charge_series,
     plot_theta_center_of_mass_velocity_series,
-    plot_x_center_of_mass_velocity_series,
+    plot_velocity_series,
 )
 from .script import main
 from .series import (

@@ -1,6 +1,7 @@
 import argparse
 
 from hexatic.active_matter_cylinder import (
+    ACTIVE_DATA_DIR,
     ACTIVE_IMAGE_DIR,
     write_active_matter_field_outputs,
 )
@@ -18,7 +19,7 @@ from .plotting import (
     plot_dislocation_count_series,
     plot_net_disclination_charge_series,
     plot_theta_center_of_mass_velocity_series,
-    plot_x_center_of_mass_velocity_series,
+    plot_velocity_series,
 )
 
 
@@ -40,11 +41,23 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     args = _parse_args()
 
-    write_dynamic_values_gsd(CYLINDER_PATHS.in_gsd, CYLINDER_PATHS.dynamic_values_gsd)
-    print(f"Wrote OVITO dynamic values file to {CYLINDER_PATHS.dynamic_values_gsd}.")
-    plot_center_of_mass_series(CYLINDER_PATHS.in_gsd, CYLINDER_PATHS.com_plot)
-    print(f"Wrote center-of-mass plot to {CYLINDER_PATHS.com_plot}.")
-    plot_x_center_of_mass_velocity_series(
+    # # write_active_matter_field_outputs(
+    # #     CYLINDER_PATHS.in_gsd,
+    # #     coordinate_system="xrtheta"
+    # # )
+    # # print(
+    # #     "Wrote active matter fields to "
+    # #     f"{ACTIVE_DATA_DIR / 'active_matter_fields.npz'}."
+    # # )
+    # print(
+    #     "Wrote active matter flux density plots to "
+    #     f"{ACTIVE_IMAGE_DIR / 'flux'}."
+    # )
+    # write_dynamic_values_gsd(CYLINDER_PATHS.in_gsd, CYLINDER_PATHS.dynamic_values_gsd)
+    # print(f"Wrote OVITO dynamic values file to {CYLINDER_PATHS.dynamic_values_gsd}.")
+    # plot_center_of_mass_series(CYLINDER_PATHS.in_gsd, CYLINDER_PATHS.com_plot)
+    # print(f"Wrote center-of-mass plot to {CYLINDER_PATHS.com_plot}.")
+    plot_velocity_series(
         CYLINDER_PATHS.in_gsd,
         CYLINDER_PATHS.x_com_velocity_plot,
         shell_only=True,
@@ -54,15 +67,15 @@ def main() -> None:
         "Wrote x center-of-mass velocity plot to "
         f"{CYLINDER_PATHS.x_com_velocity_plot}."
     )
-    plot_theta_center_of_mass_velocity_series(
-        CYLINDER_PATHS.in_gsd,
-        CYLINDER_PATHS.theta_com_velocity_plot,
-        shell_only=True,
-    )
-    print(
-        "Wrote theta center-of-mass velocity plot to "
-        f"{CYLINDER_PATHS.theta_com_velocity_plot}."
-    )
+    # plot_theta_center_of_mass_velocity_series(
+    #     CYLINDER_PATHS.in_gsd,
+    #     CYLINDER_PATHS.theta_com_velocity_plot,
+    #     shell_only=True,
+    # )
+    # print(
+    #     "Wrote theta center-of-mass velocity plot to "
+    #     f"{CYLINDER_PATHS.theta_com_velocity_plot}."
+    # )
     # animate_outer_shell_xtheta_x_velocity(
     #     CYLINDER_PATHS.in_gsd,
     #     CYLINDER_PATHS.shell_xtheta_x_velocity_movie,
@@ -117,14 +130,6 @@ def main() -> None:
     #     CYLINDER_PATHS.net_charge_plot,
     # )
     # print(f"Wrote net disclination charge plot to {CYLINDER_PATHS.net_charge_plot}.")
-    # write_active_matter_field_outputs(
-    #     CYLINDER_PATHS.in_gsd,
-    #     coordinate_system="xrtheta"
-    # )
-    # print(
-    #     "Wrote active matter flux density plots to "
-    #     f"{ACTIVE_IMAGE_DIR / 'flux'}."
-    # )
     # write_chirality_outputs(
     #     CYLINDER_PATHS.in_gsd,
     #     config = ChiralityConfig(limit_disclination=True)

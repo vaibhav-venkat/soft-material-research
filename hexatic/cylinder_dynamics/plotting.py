@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -7,6 +8,8 @@ from matplotlib.ticker import FuncFormatter
 import numpy as np
 from scipy.optimize import curve_fit
 
+from hexatic.active_matter_cylinder.common import _theta_bin_indices, _x_bin_indices
+from hexatic.active_matter_cylinder.config import ACTIVE_DATA_DIR, ActiveMatterFields
 from hexatic.constants import cylinder
 
 from .common import CYLINDER_PATHS, _format_theta_axis
@@ -18,6 +21,41 @@ from .series import (
     theta_com_velocity_series,
     x_center_of_mass_velocity_series,
 )
+
+
+ACTIVE_MATTER_FIELDS_FILE = ACTIVE_DATA_DIR / "active_matter_fields.npz"
+
+
+@dataclass(frozen=True)
+class RelaxationParams:
+    v_inf: float
+    amplitude: float
+    tau: float
+    amplitude_2: float | None = None
+    tau_2: float | None = None
+
+    @property
+    def stage_count(self) -> int:
+        return 1 if self.amplitude_2 is None or self.tau_2 is None else 2
+
+    def as_tuple(self) -> tuple[float, ...]:
+        if self.stage_count == 1:
+            return (self.v_inf, self.amplitude, self.tau)
+        assert self.amplitude_2 is not None
+        assert self.tau_2 is not None
+        return (self.v_inf, self.amplitude, self.tau, self.amplitude_2, self.tau_2)
+
+
+@dataclass(frozen=True)
+class RelaxationFit:
+    stage_count: int
+    params: RelaxationParams
+    aicc: float
+    steps: np.ndarray
+    modeled_values: np.ndarray
+    residual_noise: float
+    rms_residual: float
+    fit_mode: str
 
 
 def _single_relaxation(time: np.ndarray, v_inf: float, amplitude: float, tau: float):
@@ -53,17 +91,17 @@ def _aicc(residuals: np.ndarray, parameter_count: int) -> float:
     )
 
 
-def _fit_x_velocity_relaxation(
+def _fit_relaxation_series(
     steps: np.ndarray,
-    velocities: np.ndarray,
+    values: np.ndarray,
     fit_mode: str = "auto",
-):
+) -> RelaxationFit | None:
     if fit_mode not in {"auto", "single", "double"}:
         raise ValueError("fit_mode must be 'auto', 'single', or 'double'.")
 
-    finite = np.isfinite(steps) & np.isfinite(velocities)
+    finite = np.isfinite(steps) & np.isfinite(values)
     fit_steps = np.asarray(steps[finite], dtype=np.float64)
-    fit_velocities = np.asarray(velocities[finite], dtype=np.float64)
+    fit_values = np.asarray(values[finite], dtype=np.float64)
     if fit_steps.size < 4:
         return None
 
@@ -72,11 +110,11 @@ def _fit_x_velocity_relaxation(
     if not np.isfinite(time_span) or time_span <= 0.0:
         return None
 
-    tail_start = max(0, int(0.75 * fit_velocities.size))
-    v_inf_guess = float(np.nanmedian(fit_velocities[tail_start:]))
-    amplitude_guess = float(fit_velocities[0] - v_inf_guess)
+    tail_start = max(0, int(0.75 * fit_values.size))
+    v_inf_guess = float(np.nanmedian(fit_values[tail_start:]))
+    amplitude_guess = float(fit_values[0] - v_inf_guess)
     if amplitude_guess == 0.0:
-        amplitude_guess = float(np.nanmax(fit_velocities) - np.nanmin(fit_velocities))
+        amplitude_guess = float(np.nanmax(fit_values) - np.nanmin(fit_values))
     if amplitude_guess == 0.0:
         amplitude_guess = 1.0
 
@@ -88,7 +126,7 @@ def _fit_x_velocity_relaxation(
             single_params, _ = curve_fit(
                 _single_relaxation,
                 time,
-                fit_velocities,
+                fit_values,
                 p0=(v_inf_guess, amplitude_guess, max(time_span / 3.0, tau_min)),
                 bounds=([-np.inf, -np.inf, tau_min], [np.inf, np.inf, np.inf]),
                 maxfev=20000,
@@ -96,9 +134,10 @@ def _fit_x_velocity_relaxation(
             single_model = _single_relaxation(time, *single_params)
             fits.append(
                 {
-                    "stage_count": 1,
-                    "params": tuple(float(value) for value in single_params),
-                    "aicc": _aicc(fit_velocities - single_model, 3),
+                    "params": RelaxationParams(
+                        *tuple(float(value) for value in single_params)
+                    ),
+                    "aicc": _aicc(fit_values - single_model, 3),
                 }
             )
         except (RuntimeError, ValueError, FloatingPointError):
@@ -109,7 +148,7 @@ def _fit_x_velocity_relaxation(
             double_params, _ = curve_fit(
                 _double_relaxation,
                 time,
-                fit_velocities,
+                fit_values,
                 p0=(
                     v_inf_guess,
                     0.6 * amplitude_guess,
@@ -133,13 +172,18 @@ def _fit_x_velocity_relaxation(
                     amplitude_1,
                     tau_1,
                 )
-            double_params = (v_inf, amplitude_1, tau_1, amplitude_2, tau_2)
-            double_model = _double_relaxation(time, *double_params)
+            params = RelaxationParams(
+                v_inf=v_inf,
+                amplitude=amplitude_1,
+                tau=tau_1,
+                amplitude_2=amplitude_2,
+                tau_2=tau_2,
+            )
+            double_model = _double_relaxation(time, *params.as_tuple())
             fits.append(
                 {
-                    "stage_count": 2,
-                    "params": double_params,
-                    "aicc": _aicc(fit_velocities - double_model, 5),
+                    "params": params,
+                    "aicc": _aicc(fit_values - double_model, 5),
                 }
             )
         except (RuntimeError, ValueError, FloatingPointError):
@@ -149,43 +193,127 @@ def _fit_x_velocity_relaxation(
         return None
 
     best_fit = min(fits, key=lambda fit: fit["aicc"])
-    if best_fit["stage_count"] == 1:
-        fitted = _single_relaxation(time, *best_fit["params"])
+    params = best_fit["params"]
+    if params.stage_count == 1:
+        fitted = _single_relaxation(time, *params.as_tuple())
     else:
-        fitted = _double_relaxation(time, *best_fit["params"])
+        fitted = _double_relaxation(time, *params.as_tuple())
 
-    residuals = fit_velocities - fitted
+    residuals = fit_values - fitted
     late_start = max(0, int(0.67 * residuals.size))
-    best_fit["steps"] = fit_steps
-    best_fit["modeled_velocities"] = fitted
-    best_fit["residual_noise"] = float(np.nanstd(residuals[late_start:]))
-    best_fit["rms_residual"] = float(np.sqrt(np.nanmean(residuals**2)))
-    best_fit["fit_mode"] = fit_mode
-    return best_fit
+    return RelaxationFit(
+        stage_count=params.stage_count,
+        params=params,
+        aicc=float(best_fit["aicc"]),
+        steps=fit_steps,
+        modeled_values=fitted,
+        residual_noise=float(np.nanstd(residuals[late_start:])),
+        rms_residual=float(np.sqrt(np.nanmean(residuals**2))),
+        fit_mode=fit_mode,
+    )
 
 
-def _print_x_velocity_relaxation_fit(fit: dict | None, shell_only: bool) -> None:
+def _print_x_velocity_relaxation_fit(
+    fit: RelaxationFit | None,
+    shell_only: bool,
+) -> None:
     population = "outer-shell" if shell_only else "all-particle"
     if fit is None:
         print(f"x velocity relaxation fit ({population}): no stable fit found.")
         return
 
     print(f"x velocity relaxation fit ({population}):")
-    print(f"  requested mode = {fit['fit_mode']}")
-    print(f"  stages = {fit['stage_count']}")
-    print(f"  V_inf = {fit['params'][0]:.8g}")
-    if fit["stage_count"] == 1:
-        _, amplitude, tau = fit["params"]
-        print(f"  A = {amplitude:.8g}")
-        print(f"  tau = {tau:.8g}")
+    print(f"  requested mode = {fit.fit_mode}")
+    print(f"  stages = {fit.stage_count}")
+    print(f"  V_inf = {fit.params.v_inf:.8g}")
+    if fit.stage_count == 1:
+        print(f"  A = {fit.params.amplitude:.8g}")
+        print(f"  tau = {fit.params.tau:.8g}")
     else:
-        _, amplitude_1, tau_1, amplitude_2, tau_2 = fit["params"]
-        print(f"  A_1 = {amplitude_1:.8g}")
-        print(f"  tau_1 = {tau_1:.8g}")
-        print(f"  A_2 = {amplitude_2:.8g}")
-        print(f"  tau_2 = {tau_2:.8g}")
-    print(f"  residual noise = {fit['residual_noise']:.8g}")
-    print(f"  RMS residual = {fit['rms_residual']:.8g}")
+        print(f"  A_1 = {fit.params.amplitude:.8g}")
+        print(f"  tau_1 = {fit.params.tau:.8g}")
+        print(f"  A_2 = {fit.params.amplitude_2:.8g}")
+        print(f"  tau_2 = {fit.params.tau_2:.8g}")
+    print(f"  residual noise = {fit.residual_noise:.8g}")
+    print(f"  RMS residual = {fit.rms_residual:.8g}")
+
+
+def _load_active_matter_fields(filename: str | Path) -> ActiveMatterFields | None:
+    input_path = Path(filename)
+    if not input_path.exists():
+        print(f"shell P_x series: active matter fields file not found at {input_path}.")
+        return None
+
+    with np.load(input_path) as data:
+        return ActiveMatterFields(
+            steps=np.asarray(data["steps"]),
+            x_edges=np.asarray(data["x_edges"]),
+            x_centers=np.asarray(data["x_centers"]),
+            theta_edges=np.asarray(data["theta_edges"]),
+            theta_centers=np.asarray(data["theta_centers"]),
+            coords=np.asarray(data["coords"]),
+            shell_mask=np.asarray(data["shell_mask"]),
+            rho=np.asarray(data["rho"]),
+            active_direction=np.asarray(data["active_direction"]),
+            direction_cylindrical=np.asarray(data["direction_cylindrical"]),
+            polar_mean=np.asarray(data["polar_mean"]),
+            polar_cylindrical=np.asarray(data["polar_cylindrical"]),
+            flux_cylindrical=np.asarray(data["flux_cylindrical"]),
+            force_density=np.asarray(data["force_density"]),
+            force_density_cylindrical=np.asarray(data["force_density_cylindrical"]),
+        )
+
+
+def _shell_binned_px_series(fields: ActiveMatterFields) -> tuple[np.ndarray, np.ndarray]:
+    px_values = np.full(len(fields.steps), np.nan, dtype=np.float64)
+    n_x_bins = len(fields.x_centers)
+    n_theta_bins = len(fields.theta_centers)
+    n_bins = n_x_bins * n_theta_bins
+
+    for frame_idx in range(len(fields.steps)):
+        mask = fields.shell_mask[frame_idx]
+        if not np.any(mask):
+            continue
+
+        coords = fields.coords[frame_idx, mask]
+        px = fields.polar_cylindrical[frame_idx, mask, 0]
+        finite = np.isfinite(coords[:, 0]) & np.isfinite(coords[:, 1]) & np.isfinite(px)
+        if not np.any(finite):
+            continue
+
+        box_length_x = float(fields.x_edges[-1] - fields.x_edges[0])
+        x_indices = _x_bin_indices(coords[finite, 0], box_length_x, n_x_bins)
+        theta_indices = _theta_bin_indices(coords[finite, 1], n_theta_bins)
+        groups = x_indices * n_theta_bins + theta_indices
+        counts = np.bincount(groups, minlength=n_bins)
+        sums = np.bincount(groups, weights=px[finite], minlength=n_bins)
+        occupied = counts > 0
+        if np.any(occupied):
+            bin_means = sums[occupied] / counts[occupied]
+            px_values[frame_idx] = float(np.mean(bin_means))
+
+    return fields.steps, px_values
+
+
+def _print_px_relaxation_fit(fit: RelaxationFit | None) -> None:
+    if fit is None:
+        print("shell P_x relaxation fit: no stable fit found.")
+        return
+
+    print("shell P_x relaxation fit:")
+    print(f"  requested mode = {fit.fit_mode}")
+    print(f"  stages = {fit.stage_count}")
+    print(f"  P_inf = {fit.params.v_inf:.8g}")
+    if fit.stage_count == 1:
+        print(f"  A = {fit.params.amplitude:.8g}")
+        print(f"  tau = {fit.params.tau:.8g}")
+    else:
+        print(f"  A_1 = {fit.params.amplitude:.8g}")
+        print(f"  tau_1 = {fit.params.tau:.8g}")
+        print(f"  A_2 = {fit.params.amplitude_2:.8g}")
+        print(f"  tau_2 = {fit.params.tau_2:.8g}")
+    print(f"  residual noise = {fit.residual_noise:.8g}")
+    print(f"  RMS residual = {fit.rms_residual:.8g}")
 
 
 def _animate_outer_shell_xtheta_velocity(
@@ -345,20 +473,36 @@ def animate_outer_shell_xtheta_theta_velocity(
     )
 
 
-def plot_x_center_of_mass_velocity_series(
+def plot_velocity_series(
     input_gsd: str | Path = CYLINDER_PATHS.in_gsd,
     filename: str | Path | None = CYLINDER_PATHS.x_com_velocity_plot,
     shell_only: bool = False,
     relaxation_fit_mode: str = "auto",
+    active_matter_fields_file: str | Path = ACTIVE_MATTER_FIELDS_FILE,
 ) -> None:
     series = x_center_of_mass_velocity_series(input_gsd, shell_only=shell_only)
-    relaxation_fit = _fit_x_velocity_relaxation(
+    vx_fit = _fit_relaxation_series(
         series.steps,
         series.x_velocities,
         fit_mode=relaxation_fit_mode,
     )
-    _print_x_velocity_relaxation_fit(relaxation_fit, shell_only)
+    assert vx_fit is not None
+    _print_x_velocity_relaxation_fit(vx_fit, shell_only)
+    active_fields = _load_active_matter_fields(active_matter_fields_file)
+    px_steps = px_values = px_fit = None
+    if active_fields is not None:
+        px_steps, px_values = _shell_binned_px_series(active_fields)
+        px_fit = _fit_relaxation_series(
+            px_steps,
+            px_values,
+            fit_mode=relaxation_fit_mode,
+        )
+    _print_px_relaxation_fit(px_fit)
+    assert px_fit is not None
+    u0_eff = vx_fit.params.amplitude / px_fit.params.amplitude
 
+    print(f"U0_eff = {u0_eff}")
+    print(f"U0 actual = {cylinder.U0}")
     fig, axis = plt.subplots(figsize=(10, 5))
     axis.plot(
         series.steps,
@@ -366,26 +510,55 @@ def plot_x_center_of_mass_velocity_series(
         color="tab:blue",
         label="velocity_x",
     )
-    if relaxation_fit is not None:
+    if vx_fit is not None:
         fit_label = (
-            "best-fit relaxation"
-            if relaxation_fit["stage_count"] == 1
-            else "best-fit two-stage relaxation"
+            "velocity_x best-fit relaxation"
+            if vx_fit.stage_count == 1
+            else "velocity_x best-fit two-stage relaxation"
         )
         axis.plot(
-            relaxation_fit["steps"],
-            relaxation_fit["modeled_velocities"],
-            color="purple",
+            vx_fit.steps,
+            vx_fit.modeled_values,
+            color="tab:blue",
+            linestyle="--",
             linewidth=2.0,
             label=fit_label,
         )
+    px_axis = axis.twinx()
+    if px_steps is not None and px_values is not None:
+        px_axis.plot(
+            px_steps,
+            px_values,
+            color="purple",
+            label=r"$P_x$",
+        )
+    if px_fit is not None:
+        px_fit_label = (
+            r"$P_x$ best-fit relaxation"
+            if px_fit.stage_count == 1
+            else r"$P_x$ best-fit two-stage relaxation"
+        )
+        px_axis.plot(
+            px_fit.steps,
+            px_fit.modeled_values,
+            color="purple",
+            linestyle="--",
+            linewidth=2.0,
+            label=px_fit_label,
+        )
     axis.axhline(0.0, color="black", linewidth=1.0, alpha=0.45)
+    px_axis.axhline(0.0, color="purple", linewidth=1.0, alpha=0.2)
     axis.set_xlabel("Simulation step")
-    axis.set_ylabel("x center-of-mass velocity")
+    axis.set_ylabel("x center-of-mass velocity", color="tab:blue")
+    axis.tick_params(axis="y", labelcolor="tab:blue")
+    px_axis.set_ylabel(r"shell-binned mean $P_x$", color="purple")
+    px_axis.tick_params(axis="y", labelcolor="purple")
     population = "outer-shell" if shell_only else "all-particle"
-    axis.set_title(f"Cylinder {population} x center-of-mass velocity")
+    axis.set_title(f"Cylinder {population} x velocity and shell mean $P_x$")
     axis.grid(True, ls="--", alpha=0.35)
-    axis.legend(loc="best")
+    lines, labels = axis.get_legend_handles_labels()
+    px_lines, px_labels = px_axis.get_legend_handles_labels()
+    axis.legend(lines + px_lines, labels + px_labels, loc="best")
     fig.tight_layout()
 
     if filename is None:

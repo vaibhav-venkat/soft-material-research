@@ -58,6 +58,22 @@ def write_active_matter_field_outputs(
     coordinate_system: str = "xyz",
     shear_theta_bins: int = ACTIVE_FLUX_PLOT_THETA_BINS,
 ) -> CartesianFluxComparison:
+    data_path = Path(data_dir)
+    fields = active_matter_field_series(
+        input_gsd,
+        pocket_radius=pocket_radius,
+        n_x_bins=n_x_bins,
+        n_theta_bins=n_theta_bins,
+    )
+    save_active_matter_fields(
+        fields,
+        data_path / "active_matter_fields.npz",
+        pocket_radius=pocket_radius,
+    )
+    plot_active_matter_fields(fields, image_dir=image_dir)
+    if write_movies:
+        plot_active_matter_movies(fields, image_dir=image_dir, fps=movie_fps)
+
     comparison = compute_cartesian_flux_comparison(
         input_gsd,
         pocket_radius=pocket_radius,
@@ -81,7 +97,7 @@ def write_active_matter_field_outputs(
     )
     save_shear_flux_decomposition(
         shear_decomposition,
-        Path(data_dir) / "shear_flux_decomposition.npz",
+        data_path / "shear_flux_decomposition.npz",
     )
     plot_shear_flux_decomposition(
         shear_decomposition,
