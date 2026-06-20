@@ -34,13 +34,22 @@ class CenterOfMassSeries:
 
 
 @dataclass(frozen=True)
-class XCenterOfMassVelocitySeries:
+class XCOMVelocitySeries:
     steps: np.ndarray
     x_velocities: np.ndarray
 
     def __iter__(self) -> Iterator[np.ndarray]:
         yield self.steps
         yield self.x_velocities
+
+@dataclass(frozen = True)
+class ThetaCOMVelocitySeries:
+    steps: np.ndarray
+    theta_velocities: np.ndarray
+
+    def __iter__(self) -> Iterator[np.ndarray]:
+        yield self.steps
+        yield self.theta_velocities
 
 
 @dataclass(frozen=True)

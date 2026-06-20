@@ -4,7 +4,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import numpy.typing as npt
 
-__all__ = ["DistributionPlotStyle", "plot_hexatic_distribution"]
 
 
 @dataclass(frozen=True)

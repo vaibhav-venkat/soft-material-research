@@ -12,6 +12,7 @@ from .series import (
     center_of_mass_series,
     disclination_center_of_mass_series,
     dislocation_summary_series,
+    theta_com_velocity_series,
     x_center_of_mass_velocity_series,
 )
 
@@ -192,6 +193,38 @@ def plot_x_center_of_mass_velocity_series(
     axis.set_ylabel("x center-of-mass velocity")
     population = "outer-shell" if shell_only else "all-particle"
     axis.set_title(f"Cylinder {population} x center-of-mass velocity")
+    axis.grid(True, ls="--", alpha=0.35)
+    axis.legend(loc="best")
+    fig.tight_layout()
+
+    if filename is None:
+        plt.show()
+    else:
+        output_path = Path(filename)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, dpi=200)
+        plt.close(fig)
+
+
+def plot_theta_center_of_mass_velocity_series(
+    input_gsd: str | Path = CYLINDER_PATHS.in_gsd,
+    filename: str | Path | None = CYLINDER_PATHS.theta_com_velocity_plot,
+    shell_only: bool = False,
+) -> None:
+    series = theta_com_velocity_series(input_gsd, shell_only=shell_only)
+
+    fig, axis = plt.subplots(figsize=(10, 5))
+    axis.plot(
+        series.steps,
+        series.theta_velocities,
+        color="tab:orange",
+        label=r"$\langle \Delta \theta_i\rangle / \Delta t$",
+    )
+    axis.axhline(0.0, color="black", linewidth=1.0, alpha=0.45)
+    axis.set_xlabel("Simulation step")
+    axis.set_ylabel("theta center-of-mass angular velocity")
+    population = "outer-shell" if shell_only else "all-particle"
+    axis.set_title(f"Cylinder {population} theta center-of-mass velocity")
     axis.grid(True, ls="--", alpha=0.35)
     axis.legend(loc="best")
     fig.tight_layout()

@@ -13,7 +13,8 @@ from .common import (
     DisclinationCenterOfMassSeries,
     DislocationSummarySeries,
     NeighborCountMatrix,
-    XCenterOfMassVelocitySeries,
+    ThetaCOMVelocitySeries,
+    XCOMVelocitySeries,
     _center_of_mass_or_nan,
     _minimum_image_delta,
     _particle_masses,
@@ -92,7 +93,7 @@ def center_of_mass_series(
 def x_center_of_mass_velocity_series(
     input_gsd: str | Path,
     shell_only: bool = False,
-) -> XCenterOfMassVelocitySeries:
+) -> XCOMVelocitySeries:
     steps: list[int] = []
     x_velocities: list[float] = []
     previous_x: np.ndarray | None = None
@@ -148,9 +149,72 @@ def x_center_of_mass_velocity_series(
             previous_masses = current_masses
             previous_box_length_x = box_length_x
 
-    return XCenterOfMassVelocitySeries(
+    return XCOMVelocitySeries(
         steps=np.asarray(steps, dtype=np.int64),
         x_velocities=np.asarray(x_velocities, dtype=np.float64),
+    )
+
+
+def theta_com_velocity_series(
+    input_gsd: str | Path,
+    shell_only: bool = False,
+) -> ThetaCOMVelocitySeries:
+    steps: list[int] = []
+    theta_velocities: list[float] = []
+    previous_theta: np.ndarray | None = None
+    previous_step: int | None = None
+    previous_mask: np.ndarray | None = None
+    previous_masses: np.ndarray | None = None
+
+    with gsd.hoomd.open(name=str(input_gsd), mode="r") as source:
+        for frame in source:
+            particles = frame.particles
+            assert particles.position is not None
+
+            positions = np.asarray(particles.position, dtype=np.float64)
+            current_step = int(frame.configuration.step)
+            current_theta = _theta_from_positions(positions)
+            current_masses = _particle_masses(particles, positions.shape[0])
+            current_mask = np.ones(positions.shape[0], dtype=bool)
+            if shell_only:
+                current_mask = hx.get_dynamic_values(
+                    positions,
+                    contain_all=False,
+                    cylinder_radius=CYLINDER.cylinder_radius,
+                    cutoff=CYLINDER.wall_cutoff,
+                ).shell_mask
+
+            if (
+                previous_theta is not None
+                and previous_step is not None
+                and previous_mask is not None
+                and previous_masses is not None
+            ):
+                assert current_theta.shape == previous_theta.shape
+                delta_t = (current_step - previous_step) * float(cylinder.TIMESTEP)
+                mask = previous_mask & current_mask
+                if delta_t > 0.0 and np.any(mask):
+                    delta_theta = _minimum_image_delta(
+                        current_theta - previous_theta,
+                        2.0 * np.pi,
+                    )
+                    weights = previous_masses[mask]
+                    theta_velocity = float(
+                        np.average(delta_theta[mask], weights=weights) / delta_t
+                    )
+                else:
+                    theta_velocity = np.nan
+                steps.append(current_step)
+                theta_velocities.append(theta_velocity)
+
+            previous_theta = current_theta
+            previous_step = current_step
+            previous_mask = current_mask
+            previous_masses = current_masses
+
+    return ThetaCOMVelocitySeries(
+        steps=np.asarray(steps, dtype=np.int64),
+        theta_velocities=np.asarray(theta_velocities, dtype=np.float64),
     )
 
 

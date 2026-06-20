@@ -15,6 +15,7 @@ from .plotting import (
     plot_dislocation_center_of_mass_series,
     plot_dislocation_count_series,
     plot_net_disclination_charge_series,
+    plot_theta_center_of_mass_velocity_series,
     plot_x_center_of_mass_velocity_series,
 )
 
@@ -31,6 +32,15 @@ def main() -> None:
     print(
         "Wrote x center-of-mass velocity plot to "
         f"{CYLINDER_PATHS.x_com_velocity_plot}."
+    )
+    plot_theta_center_of_mass_velocity_series(
+        CYLINDER_PATHS.in_gsd,
+        CYLINDER_PATHS.theta_com_velocity_plot,
+        shell_only=True,
+    )
+    print(
+        "Wrote theta center-of-mass velocity plot to "
+        f"{CYLINDER_PATHS.theta_com_velocity_plot}."
     )
     animate_outer_shell_xtheta_x_velocity(
         CYLINDER_PATHS.in_gsd,
