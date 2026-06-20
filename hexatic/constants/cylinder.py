@@ -27,7 +27,7 @@ LATTICE_SPACING = 2.0 ** (1.0 / 6.0) + 0.5
 @dataclass(frozen=True)
 class CylinderPaths:
     disc_image_dir = IMAGE_OUTPUT_DIR / "disc"
-    in_gsd = CYLINDER_OUTPUT_DIR / "trajectory_cylinder_flipped.gsd"
+    in_gsd = CYLINDER_OUTPUT_DIR / "trajectory_cylinder.gsd"
     initial_gsd = CYLINDER_OUTPUT_DIR / "initial_mesh.gsd"
     flipped_initial_gsd = CYLINDER_OUTPUT_DIR / "initial_mesh_cylinder_flipped.gsd"
     flipped_gsd = CYLINDER_OUTPUT_DIR / "trajectory_cylinder_flipped.gsd"
