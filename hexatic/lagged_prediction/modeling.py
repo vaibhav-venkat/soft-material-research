@@ -1,3 +1,4 @@
+from typing import Dict
 from pathlib import Path
 import warnings
 
@@ -14,7 +15,7 @@ from .features import (
 from .types import (
     CYLINDER_PATHS,
     LaggedPredictionConfig,
-    LaggedPredictionResult,
+    LaggedPredictionResult, FeatureFamily,
 )
 
 
@@ -206,7 +207,7 @@ def compute_lagged_predictive_decomposition(
 
 
 def compute_lagged_prediction_from_families(
-    families,
+    families: Dict[str, FeatureFamily],
     input_gsd: str | Path,
     target_name: str,
     config: LaggedPredictionConfig,
@@ -219,13 +220,11 @@ def compute_lagged_prediction_from_families(
         vx_series = x_center_of_mass_velocity_series(input_gsd, shell_only=True)
         target_steps = vx_series.steps
         target_values = vx_series.x_velocities
-
     steps, x, y, feature_names, feature_families = align_families(
         families,
         target_steps,
         target_values,
     )
-
     family_names = np.asarray(tuple(families.keys()))
     lag_frames = np.asarray(config.lag_frames, dtype=np.int64)
     lag_times = (
@@ -302,4 +301,3 @@ def compute_lagged_prediction_from_families(
         predictions=predictions,
         actual=actual,
     )
-

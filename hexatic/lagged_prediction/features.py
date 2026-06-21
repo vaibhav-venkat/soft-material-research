@@ -72,7 +72,6 @@ def field_family(
     finite_counts = np.sum(np.isfinite(flat), axis=1)
     scalars = np.nanmean(flat, axis=1)
     scalars[finite_counts == 0] = np.nan
-
     column_means = np.nanmean(flat, axis=0)
     column_means = np.where(np.isfinite(column_means), column_means, 0.0)
     filled = np.where(np.isfinite(flat), flat, column_means)

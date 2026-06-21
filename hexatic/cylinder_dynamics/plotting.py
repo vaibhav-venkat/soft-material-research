@@ -477,7 +477,7 @@ def plot_velocity_series(
     input_gsd: str | Path = CYLINDER_PATHS.in_gsd,
     filename: str | Path | None = CYLINDER_PATHS.x_com_velocity_plot,
     shell_only: bool = False,
-    relaxation_fit_mode: str = "auto",
+    relaxation_fit_mode: str = "single",
     active_matter_fields_file: str | Path = ACTIVE_MATTER_FIELDS_FILE,
 ) -> None:
     series = x_center_of_mass_velocity_series(input_gsd, shell_only=shell_only)
@@ -494,7 +494,7 @@ def plot_velocity_series(
         px_steps, px_values = _shell_binned_px_series(active_fields)
         px_fit = _fit_relaxation_series(
             px_steps,
-            px_values,
+            cylinder.U0 * px_values,
             fit_mode=relaxation_fit_mode,
         )
     _print_px_relaxation_fit(px_fit)
@@ -528,7 +528,7 @@ def plot_velocity_series(
     if px_steps is not None and px_values is not None:
         px_axis.plot(
             px_steps,
-            px_values,
+            cylinder.U0 * px_values,
             color="purple",
             label=r"$P_x$",
         )

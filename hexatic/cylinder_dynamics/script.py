@@ -73,17 +73,17 @@ def main() -> None:
         CYLINDER_PATHS.in_gsd,
         CYLINDER_PATHS.x_com_velocity_plot,
         shell_only=True,
-        relaxation_fit_mode=args.x_velocity_fit,
+        relaxation_fit_mode="single"
     )
     print(
         "Wrote x center-of-mass velocity plot to "
         f"{CYLINDER_PATHS.x_com_velocity_plot}."
     )
     if not args.skip_lagged_prediction:
-        shear_series_file = ACTIVE_DATA_DIR / "shear_flux_decomposition_series.npz"
-        shear_series = compute_shear_flux_decomposition_series(CYLINDER_PATHS.in_gsd)
-        save_shear_flux_decomposition_series(shear_series, shear_series_file)
-        print(f"Wrote shear flux decomposition time series to {shear_series_file}.")
+        # shear_series_file = ACTIVE_DATA_DIR / "shear_flux_decomposition_series.npz"
+        # shear_series = compute_shear_flux_decomposition_series(CYLINDER_PATHS.in_gsd)
+        # save_shear_flux_decomposition_series(shear_series, shear_series_file)
+        # print(f"Wrote shear flux decomposition time series to {shear_series_file}.")
 
         write_lagged_predictive_decomposition_outputs(CYLINDER_PATHS.in_gsd)
         print(
