@@ -18,7 +18,7 @@ from .config import (
     ActiveMatterFields,
     CartesianFluxComparison,
 )
-from .cartesian_flux import (
+from .cartesian import (
     compute_cartesian_flux_comparison,
     plot_cartesian_flux_comparison,
     save_cartesian_flux_comparison,
@@ -45,9 +45,9 @@ from .common import (
     _xytheta_occupied,
 )
 from .fields import active_matter_field_series, save_active_matter_fields
-from .movies import plot_active_matter_movies
-from .outputs import plot_active_matter_fields, write_active_matter_field_outputs
-from .radial_px import (
+from .fields import plot_active_matter_movies
+from .fields import plot_active_matter_fields, write_active_matter_field_outputs
+from .fields import (
     _radial_px_labels,
     _radial_px_limits,
     _radial_px_series,
@@ -55,7 +55,7 @@ from .radial_px import (
     _radius_edges_and_centers,
     plot_radial_px_fields,
 )
-from .shear_decomposition import (
+from .shear import (
     ShearFluxDecomposition,
     compute_shear_flux_decomposition,
     compute_shear_flux_decomposition_series,
@@ -66,7 +66,7 @@ from .shear_decomposition import (
     save_shear_flux_decomposition,
     save_shear_flux_decomposition_series,
 )
-from .scalar_plots import (
+from .fields import (
     _draw_polar_radial_integral,
     _draw_polar_shell,
     _draw_rho_radial_integral,
@@ -76,7 +76,7 @@ from .scalar_plots import (
     plot_rho_radial_integral,
     plot_rho_shell,
 )
-from .vector_plots import (
+from .fields import (
     _active_component_series,
     _draw_vector_density,
     _plot_active_x_balance_series,

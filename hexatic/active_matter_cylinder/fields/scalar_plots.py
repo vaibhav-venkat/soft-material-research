@@ -4,8 +4,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import Normalize
 
-from .common import _color_limits, _format_theta_axis, _frame_index, _radial_integral_mean
-from .config import ACTIVE_IMAGE_DIR, CYLINDER, ActiveMatterFields
+from ..common import _color_limits, _format_theta_axis, _frame_index, _radial_integral_mean
+from ..config import ACTIVE_IMAGE_DIR, CYLINDER, ActiveMatterFields
 
 
 def plot_rho_shell(

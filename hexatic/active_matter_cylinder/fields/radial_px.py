@@ -4,8 +4,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import Normalize, TwoSlopeNorm
 
-from .common import _color_limits, _time_edges
-from .config import (
+from ..common import _color_limits, _time_edges
+from ..config import (
     ACTIVE_IMAGE_DIR,
     ACTIVE_MOVIE_FPS,
     ACTIVE_RADIAL_BIN_WIDTH,

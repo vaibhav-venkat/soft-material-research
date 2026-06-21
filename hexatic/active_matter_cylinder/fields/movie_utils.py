@@ -3,7 +3,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 from matplotlib.animation import FFMpegWriter
 
-from .config import ACTIVE_MOVIE_FPS, ActiveMatterFields
+from ..config import ACTIVE_MOVIE_FPS, ActiveMatterFields
 
 
 def _write_movie(

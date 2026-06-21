@@ -4,13 +4,13 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from .cartesian_compute import _cartesian_stress_divergence
-from .common import (
+from .compute import _cartesian_stress_divergence
+from ..common import (
     _cartesian_vector_to_cylindrical_components,
     _cylindrical_plot_points,
     _cylindrical_plot_vectors,
 )
-from .config import ACTIVE_IMAGE_DIR, CYLINDER, VIRIAL_STRESS_SIGN, CartesianFluxComparison
+from ..config import ACTIVE_IMAGE_DIR, CYLINDER, VIRIAL_STRESS_SIGN, CartesianFluxComparison
 
 
 def _plot_coordinates(

@@ -3,7 +3,7 @@ from pathlib import Path
 import gsd.hoomd
 import numpy as np
 
-from .common import (
+from ..common import (
     _active_direction_from_quaternion,
     _axis_edges_and_centers,
     _cartesian_tensor_to_cylindrical,
@@ -12,7 +12,7 @@ from .common import (
     _logged_particle_array,
     _minimum_image_delta,
 )
-from .config import (
+from ..config import (
     ACTIVE_GRID_DX,
     ACTIVE_GRID_DY,
     ACTIVE_GRID_DZ,

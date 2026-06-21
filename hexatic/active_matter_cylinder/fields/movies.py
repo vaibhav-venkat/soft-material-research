@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from .config import ACTIVE_IMAGE_DIR, ACTIVE_MOVIE_FPS, ActiveMatterFields
+from ..config import ACTIVE_IMAGE_DIR, ACTIVE_MOVIE_FPS, ActiveMatterFields
 from .movie_utils import _write_movie
 from .radial_px import _write_radial_px_movie, plot_radial_px_fields
 from .scalar_plots import (

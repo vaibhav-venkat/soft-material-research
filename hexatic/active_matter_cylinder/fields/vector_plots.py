@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import Normalize
 
-from .common import (
+from ..common import (
     _coarse_vector_density_grid,
     _color_limits,
     _fixed_length_quiver_components,
@@ -13,7 +13,7 @@ from .common import (
     _radial_integral_mean,
     _xytheta_occupied,
 )
-from .config import (
+from ..config import (
     ACTIVE_FLUX_PLOT_THETA_BINS,
     ACTIVE_FLUX_PLOT_X_BINS,
     ACTIVE_IMAGE_DIR,

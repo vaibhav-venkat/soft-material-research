@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from .config import (
+from ..config import (
     ACTIVE_GRID_DX,
     ACTIVE_GRID_DY,
     ACTIVE_GRID_DZ,
@@ -15,14 +15,14 @@ from .config import (
     ActiveMatterFields,
     CartesianFluxComparison,
 )
-from .cartesian_flux import (
+from ..cartesian import (
     compute_cartesian_flux_comparison,
     plot_cartesian_flux_comparison,
 )
-from .fields import active_matter_field_series, save_active_matter_fields
+from .compute import active_matter_field_series, save_active_matter_fields
 from .movies import plot_active_matter_movies
 from .radial_px import plot_radial_px_fields
-from .shear_decomposition import (
+from ..shear import (
     compute_shear_flux_decomposition,
     plot_shear_flux_fraction,
     plot_shear_flux_decomposition,

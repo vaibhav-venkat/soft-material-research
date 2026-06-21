@@ -10,9 +10,9 @@ try:
 except ImportError:
     trapezoid = np.trapz
 
-from .common import _write_full_view_html
-from .config import ACTIVE_IMAGE_DIR, CYLINDER, CYLINDER_SIM
-from .shear_types import ShearFluxDecomposition
+from ..common import _write_full_view_html
+from ..config import ACTIVE_IMAGE_DIR, CYLINDER, CYLINDER_SIM
+from .types import ShearFluxDecomposition
 
 def _field_component_values(field: np.ndarray, component: str) -> np.ndarray:
     if component == "magnitude":

@@ -3,7 +3,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .shear_types import ShearFluxDecomposition
+from .types import ShearFluxDecomposition
 
 
 def _stack_field(decompositions: Sequence[ShearFluxDecomposition], name: str) -> np.ndarray:

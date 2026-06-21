@@ -8,7 +8,7 @@ try:
 except ImportError:
     import analysis as hx
 
-from .common import (
+from ..common import (
     _active_direction_from_quaternion,
     _cylindrical_components,
     _logged_particle_array,
@@ -17,7 +17,7 @@ from .common import (
     _theta_edges_and_centers,
     _x_edges_and_centers,
 )
-from .config import (
+from ..config import (
     ACTIVE_FIELD_THETA_BINS,
     ACTIVE_FIELD_X_BINS,
     CYLINDER,
