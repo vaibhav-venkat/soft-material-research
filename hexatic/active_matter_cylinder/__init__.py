@@ -58,11 +58,13 @@ from .radial_px import (
 from .shear_decomposition import (
     ShearFluxDecomposition,
     compute_shear_flux_decomposition,
+    compute_shear_flux_decomposition_series,
     plot_radial_j_integral_comparison,
     plot_shear_flux_fraction,
     plot_shear_flux_decomposition,
     plot_shear_stress_tensor_components,
     save_shear_flux_decomposition,
+    save_shear_flux_decomposition_series,
 )
 from .scalar_plots import (
     _draw_polar_radial_integral,

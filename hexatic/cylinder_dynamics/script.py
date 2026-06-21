@@ -3,12 +3,19 @@ import argparse
 from hexatic.active_matter_cylinder import (
     ACTIVE_DATA_DIR,
     ACTIVE_IMAGE_DIR,
+    compute_shear_flux_decomposition_series,
+    save_shear_flux_decomposition_series,
     write_active_matter_field_outputs,
 )
 from hexatic.chirality import CHIRALITY_DATA_DIR, write_chirality_outputs, ChiralityConfig
 
 from .common import CYLINDER_PATHS
 from .gsd_io import write_dynamic_values_gsd
+from hexatic.lagged_prediction import (
+    LAGGED_PREDICTION_DATA,
+    LAGGED_PREDICTION_IMAGE_DIR,
+    write_lagged_predictive_decomposition_outputs,
+)
 from .plotting import (
     animate_outer_shell_xtheta_theta_velocity,
     animate_outer_shell_xtheta_x_velocity,
@@ -34,6 +41,11 @@ def _parse_args() -> argparse.Namespace:
             "'single' fits V_inf + A exp(-t / tau); 'double' fits two "
             "exponential stages; 'auto' tries both and selects by AICc."
         ),
+    )
+    parser.add_argument(
+        "--skip-lagged-prediction",
+        action="store_true",
+        help="Skip lagged predictive decomposition outputs.",
     )
     return parser.parse_args()
 
@@ -67,6 +79,21 @@ def main() -> None:
         "Wrote x center-of-mass velocity plot to "
         f"{CYLINDER_PATHS.x_com_velocity_plot}."
     )
+    if not args.skip_lagged_prediction:
+        shear_series_file = ACTIVE_DATA_DIR / "shear_flux_decomposition_series.npz"
+        shear_series = compute_shear_flux_decomposition_series(CYLINDER_PATHS.in_gsd)
+        save_shear_flux_decomposition_series(shear_series, shear_series_file)
+        print(f"Wrote shear flux decomposition time series to {shear_series_file}.")
+
+        write_lagged_predictive_decomposition_outputs(CYLINDER_PATHS.in_gsd)
+        print(
+            "Wrote lagged predictive decomposition to "
+            f"{LAGGED_PREDICTION_DATA}."
+        )
+        print(
+            "Wrote lagged predictive decomposition plots to "
+            f"{LAGGED_PREDICTION_IMAGE_DIR}."
+        )
     # plot_theta_center_of_mass_velocity_series(
     #     CYLINDER_PATHS.in_gsd,
     #     CYLINDER_PATHS.theta_com_velocity_plot,

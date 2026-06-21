@@ -9,6 +9,16 @@ from .common import (
     XCOMVelocitySeries,
 )
 from .gsd_io import write_dynamic_values_gsd
+from hexatic.lagged_prediction import (
+    LAGGED_PREDICTION_DATA,
+    LAGGED_PREDICTION_IMAGE_DIR,
+    LaggedPredictionConfig,
+    LaggedPredictionResult,
+    compute_lagged_predictive_decomposition,
+    plot_lagged_predictive_decomposition,
+    save_lagged_predictive_decomposition,
+    write_lagged_predictive_decomposition_outputs,
+)
 from .plotting import (
     animate_outer_shell_xtheta_theta_velocity,
     animate_outer_shell_xtheta_x_velocity,
