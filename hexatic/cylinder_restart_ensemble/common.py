@@ -25,7 +25,7 @@ simulation = cylinder.SIMULATION
 SOURCE_GSD = paths.in_gsd
 ENSEMBLE_OUTPUT_DIR = paths.in_gsd.parent / "restart_ensemble"
 INITIAL_OUTPUT_DIR = ENSEMBLE_OUTPUT_DIR / "initial"
-RUN_STEPS = int(1e7)
+RUN_STEPS = int(5e7)
 ORIGINAL_U0 = simulation.u0
 
 FrameTransform = Callable[[gsd.hoomd.Frame, np.random.Generator], None]
@@ -67,7 +67,7 @@ def restart_frame(
     with gsd.hoomd.open(name=str(source_gsd), mode="r") as source:
         if len(source) == 0:
             raise ValueError(f"No frames found in {source_gsd}")
-        num_before = -10
+        num_before = -80
         source_frame = source[num_before]
         source_particles = source_frame.particles
         if source_particles.position is None:

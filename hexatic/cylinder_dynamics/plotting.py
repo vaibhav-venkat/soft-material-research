@@ -18,6 +18,7 @@ from .series import (
     center_of_mass_series,
     disclination_center_of_mass_series,
     dislocation_summary_series,
+    first_trajectory_step,
     theta_com_velocity_series,
     x_center_of_mass_velocity_series,
 )
@@ -56,6 +57,15 @@ class RelaxationFit:
     residual_noise: float
     rms_residual: float
     fit_mode: str
+
+
+@dataclass(frozen=True)
+class ShellPxChangeDecomposition:
+    steps: np.ndarray
+    orientation_term: np.ndarray
+    membership_term: np.ndarray
+    reconstructed_delta: np.ndarray
+    discrete_delta: np.ndarray
 
 
 def _single_relaxation(time: np.ndarray, v_inf: float, amplitude: float, tau: float):
@@ -295,6 +305,63 @@ def _shell_binned_px_series(fields: ActiveMatterFields) -> tuple[np.ndarray, np.
     return fields.steps, px_values
 
 
+def _masked_mean(values: np.ndarray, mask: np.ndarray) -> float:
+    finite_mask = mask & np.isfinite(values)
+    if not np.any(finite_mask):
+        return np.nan
+    return float(np.mean(values[finite_mask]))
+
+
+def _shell_discrete_px_series(fields: ActiveMatterFields) -> tuple[np.ndarray, np.ndarray]:
+    px = np.asarray(fields.direction_cylindrical[..., 0], dtype=np.float64)
+    shell_mask = np.asarray(fields.shell_mask, dtype=bool)
+    px_values = np.full(len(fields.steps), np.nan, dtype=np.float64)
+
+    for frame_idx in range(len(fields.steps)):
+        px_values[frame_idx] = _masked_mean(px[frame_idx], shell_mask[frame_idx])
+
+    return fields.steps, px_values
+
+
+def _shell_px_change_decomposition(
+    fields: ActiveMatterFields,
+) -> ShellPxChangeDecomposition:
+    px = np.asarray(fields.direction_cylindrical[..., 0], dtype=np.float64)
+    shell_mask = np.asarray(fields.shell_mask, dtype=bool)
+    steps = np.asarray(fields.steps, dtype=np.int64)
+
+    n_intervals = max(0, steps.size - 1)
+    orientation_term = np.full(n_intervals, np.nan, dtype=np.float64)
+    membership_term = np.full(n_intervals, np.nan, dtype=np.float64)
+    reconstructed_delta = np.full(n_intervals, np.nan, dtype=np.float64)
+    discrete_delta = np.full(n_intervals, np.nan, dtype=np.float64)
+
+    for interval_idx in range(n_intervals):
+        shell_at_t = shell_mask[interval_idx]
+        shell_at_next = shell_mask[interval_idx + 1]
+        px_at_t = px[interval_idx]
+        px_at_next = px[interval_idx + 1]
+
+        mean_a_t = _masked_mean(px_at_t, shell_at_t)
+        mean_a_next = _masked_mean(px_at_next, shell_at_t)
+        mean_b_next = _masked_mean(px_at_next, shell_at_next)
+
+        orientation_term[interval_idx] = mean_a_next - mean_a_t
+        membership_term[interval_idx] = mean_b_next - mean_a_next
+        reconstructed_delta[interval_idx] = (
+            orientation_term[interval_idx] + membership_term[interval_idx]
+        )
+        discrete_delta[interval_idx] = mean_b_next - mean_a_t
+
+    return ShellPxChangeDecomposition(
+        steps=steps[1:],
+        orientation_term=orientation_term,
+        membership_term=membership_term,
+        reconstructed_delta=reconstructed_delta,
+        discrete_delta=discrete_delta,
+    )
+
+
 def _print_px_relaxation_fit(fit: RelaxationFit | None) -> None:
     if fit is None:
         print("shell P_x relaxation fit: no stable fit found.")
@@ -314,6 +381,97 @@ def _print_px_relaxation_fit(fit: RelaxationFit | None) -> None:
         print(f"  tau_2 = {fit.params.tau_2:.8g}")
     print(f"  residual noise = {fit.residual_noise:.8g}")
     print(f"  RMS residual = {fit.rms_residual:.8g}")
+
+
+def _default_restart_initial_gsd(comparison_gsd: str | Path) -> Path:
+    comparison_path = Path(comparison_gsd)
+    if comparison_path.name.startswith("trajectory_"):
+        initial_name = comparison_path.name.replace("trajectory_", "initial_", 1)
+    else:
+        initial_name = f"initial_{comparison_path.name}"
+    return comparison_path.parent / "initial" / initial_name
+
+
+def _restart_alignment_step(
+    comparison_gsd: str | Path,
+    restart_initial_gsd: str | Path | None = None,
+) -> int:
+    initial_path = (
+        Path(restart_initial_gsd)
+        if restart_initial_gsd is not None
+        else _default_restart_initial_gsd(comparison_gsd)
+    )
+    if initial_path.exists():
+        return first_trajectory_step(initial_path)
+    return first_trajectory_step(comparison_gsd)
+
+
+def plot_restart_comparison_velocity_series(
+    input_gsd: str | Path = CYLINDER_PATHS.in_gsd,
+    comparison_gsd: str | Path = (
+        CYLINDER_PATHS.in_gsd.parent
+        / "restart_ensemble"
+        / "trajectory_cylinder_C.gsd"
+    ),
+    filename: str | Path | None = CYLINDER_PATHS.x_com_velocity_plot.with_name(
+        "cylinder_x_com_velocity_restart_comparison.png"
+    ),
+    restart_initial_gsd: str | Path | None = None,
+    shell_only: bool = False,
+) -> None:
+    restart_step = _restart_alignment_step(
+        comparison_gsd,
+        restart_initial_gsd=restart_initial_gsd,
+    )
+    regular_series = x_center_of_mass_velocity_series(input_gsd, shell_only=shell_only)
+    comparison_series = x_center_of_mass_velocity_series(
+        comparison_gsd,
+        shell_only=shell_only,
+    )
+
+    regular_mask = regular_series.steps >= restart_step
+    if not np.any(regular_mask):
+        raise ValueError(
+            f"No regular-trajectory velocity samples found at or after step {restart_step}."
+        )
+
+    fig, axis = plt.subplots(figsize=(10, 5))
+    axis.plot(
+        regular_series.steps[regular_mask],
+        regular_series.x_velocities[regular_mask],
+        color="tab:blue",
+        label="regular trajectory",
+    )
+    axis.plot(
+        comparison_series.steps,
+        comparison_series.x_velocities,
+        color="tab:green",
+        label=Path(comparison_gsd).stem,
+    )
+    axis.axvline(
+        restart_step,
+        color="black",
+        linestyle=":",
+        linewidth=1.4,
+        alpha=0.65,
+        label="restart frame",
+    )
+    axis.axhline(0.0, color="black", linewidth=1.0, alpha=0.35)
+    axis.set_xlabel("Simulation step")
+    axis.set_ylabel("x center-of-mass velocity")
+    population = "outer-shell" if shell_only else "all-particle"
+    axis.set_title(f"Cylinder {population} x velocity restart comparison")
+    axis.grid(True, ls="--", alpha=0.35)
+    axis.legend(loc="best")
+    fig.tight_layout()
+
+    if filename is None:
+        plt.show()
+    else:
+        output_path = Path(filename)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, dpi=200)
+        plt.close(fig)
 
 
 def _animate_outer_shell_xtheta_velocity(
@@ -479,7 +637,7 @@ def plot_velocity_series(
     shell_only: bool = False,
     relaxation_fit_mode: str = "single",
     active_matter_fields_file: str | Path = ACTIVE_MATTER_FIELDS_FILE,
-    align_with_px: bool = False
+    align_with_px: bool = False,
 ) -> None:
     series = x_center_of_mass_velocity_series(input_gsd, shell_only=shell_only)
     vx_fit = _fit_relaxation_series(
@@ -493,10 +651,10 @@ def plot_velocity_series(
         active_fields = _load_active_matter_fields(active_matter_fields_file)
         px_steps = px_values = px_fit = None
         if active_fields is not None:
-            px_steps, px_values = _shell_binned_px_series(active_fields)
+            px_steps, px_values = _shell_discrete_px_series(active_fields)
             px_fit = _fit_relaxation_series(
                 px_steps,
-                cylinder.U0 * px_values,
+                px_values,
                 fit_mode=relaxation_fit_mode,
             )
         _print_px_relaxation_fit(px_fit)
@@ -531,9 +689,9 @@ def plot_velocity_series(
         if px_steps is not None and px_values is not None:
             px_axis.plot(
                 px_steps,
-                cylinder.U0 * px_values,
+                px_values,
                 color="purple",
-                label=r"$P_x$",
+                label=r"$P_{x,\mathrm{shell}}$",
             )
         if px_fit is not None:
             px_fit_label = (
@@ -550,7 +708,7 @@ def plot_velocity_series(
                 label=px_fit_label,
             )
         px_axis.axhline(0.0, color="purple", linewidth=1.0, alpha=0.2)
-        px_axis.set_ylabel(r"shell-binned mean $P_x$", color="purple")
+        px_axis.set_ylabel(r"shell mean $P_x$", color="purple")
         px_axis.tick_params(axis="y", labelcolor="purple")
         px_lines, px_labels = px_axis.get_legend_handles_labels()
     axis.axhline(0.0, color="black", linewidth=1.0, alpha=0.45)
@@ -565,6 +723,76 @@ def plot_velocity_series(
     l1 = lines + px_lines if align_with_px else lines
     l2 = labels + px_labels if align_with_px else labels
     axis.legend(l1, l2, loc="best")
+    fig.tight_layout()
+
+    if filename is None:
+        plt.show()
+    else:
+        output_path = Path(filename)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, dpi=200)
+        plt.close(fig)
+
+
+def plot_shell_px_change_decomposition(
+    active_matter_fields_file: str | Path = ACTIVE_MATTER_FIELDS_FILE,
+    filename: str | Path | None = CYLINDER_PATHS.x_com_velocity_plot.with_name(
+        "cylinder_shell_px_change_decomposition.png"
+    ),
+) -> None:
+    active_fields = _load_active_matter_fields(active_matter_fields_file)
+    if active_fields is None:
+        raise FileNotFoundError(active_matter_fields_file)
+
+    px_change = _shell_px_change_decomposition(active_fields)
+
+    fig, axis = plt.subplots(figsize=(10, 5))
+    axis.plot(
+        px_change.steps,
+        px_change.orientation_term,
+        color="tab:red",
+        linewidth=1.5,
+        alpha=0.9,
+        label=(
+            r"$\langle p_x(t+\Delta t)\rangle_A"
+            r"-\langle p_x(t)\rangle_A$"
+        ),
+    )
+    axis.plot(
+        px_change.steps,
+        px_change.membership_term,
+        color="tab:orange",
+        linewidth=1.5,
+        alpha=0.9,
+        label=(
+            r"$\langle p_x(t+\Delta t)\rangle_B"
+            r"-\langle p_x(t+\Delta t)\rangle_A$"
+        ),
+    )
+    axis.plot(
+        px_change.steps,
+        px_change.reconstructed_delta,
+        color="black",
+        linestyle="--",
+        linewidth=1.7,
+        alpha=0.8,
+        label=r"$\Delta P_x$ terms sum",
+    )
+    axis.plot(
+        px_change.steps,
+        px_change.discrete_delta,
+        color="tab:cyan",
+        linestyle=":",
+        linewidth=2.0,
+        alpha=0.95,
+        label=r"discrete $\Delta P_x$",
+    )
+    axis.axhline(0.0, color="black", linewidth=1.0, alpha=0.35)
+    axis.set_xlabel("Simulation step")
+    axis.set_ylabel(r"$\Delta P_x$")
+    axis.set_title(r"Shell $P_x$ change decomposition")
+    axis.grid(True, ls="--", alpha=0.35)
+    axis.legend(loc="best")
     fig.tight_layout()
 
     if filename is None:

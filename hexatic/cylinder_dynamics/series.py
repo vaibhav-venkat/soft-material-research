@@ -56,6 +56,13 @@ def load_neighbor_count_matrix(
     return NeighborCountMatrix(steps=steps, counts=counts)
 
 
+def first_trajectory_step(input_gsd: str | Path) -> int:
+    with gsd.hoomd.open(name=str(input_gsd), mode="r") as source:
+        if len(source) == 0:
+            raise ValueError(f"No frames found in {input_gsd}")
+        return int(source[0].configuration.step)
+
+
 def center_of_mass_series(
     input_gsd: str | Path,
 ) -> CenterOfMassSeries:

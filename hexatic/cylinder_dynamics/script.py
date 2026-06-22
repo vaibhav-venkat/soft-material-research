@@ -25,6 +25,8 @@ from .plotting import (
     plot_dislocation_center_of_mass_series,
     plot_dislocation_count_series,
     plot_net_disclination_charge_series,
+    plot_restart_comparison_velocity_series,
+    plot_shell_px_change_decomposition,
     plot_theta_center_of_mass_velocity_series,
     plot_velocity_series,
 )
@@ -46,6 +48,41 @@ def _parse_args() -> argparse.Namespace:
         "--skip-lagged-prediction",
         action="store_true",
         help="Skip lagged predictive decomposition outputs.",
+    )
+    parser.add_argument(
+        "--restart-comparison-gsd",
+        default=str(
+            CYLINDER_PATHS.in_gsd.parent
+            / "restart_ensemble"
+            / "trajectory_cylinder_C.gsd"
+        ),
+        help="Restart ensemble trajectory to compare against the regular trajectory.",
+    )
+    parser.add_argument(
+        "--restart-comparison-plot",
+        default=str(
+            CYLINDER_PATHS.x_com_velocity_plot.with_name(
+                "cylinder_x_com_velocity_restart_comparison.png"
+            )
+        ),
+        help="Output image for the restart-aligned velocity comparison plot.",
+    )
+    parser.add_argument(
+        "--restart-initial-gsd",
+        default=None,
+        help=(
+            "Optional initial restart GSD used to determine the alignment step. "
+            "When omitted, the matching restart_ensemble/initial file is used if present."
+        ),
+    )
+    parser.add_argument(
+        "--shell-px-change-plot",
+        default=str(
+            CYLINDER_PATHS.x_com_velocity_plot.with_name(
+                "cylinder_shell_px_change_decomposition.png"
+            )
+        ),
+        help="Output image for the shell P_x change decomposition plot.",
     )
     return parser.parse_args()
 
@@ -73,11 +110,28 @@ def main() -> None:
         CYLINDER_PATHS.in_gsd,
         CYLINDER_PATHS.x_com_velocity_plot,
         shell_only=True,
-        relaxation_fit_mode="single"
+        relaxation_fit_mode="single",
+        align_with_px=True,
     )
     print(
         "Wrote x center-of-mass velocity plot to "
         f"{CYLINDER_PATHS.x_com_velocity_plot}."
+    )
+    plot_shell_px_change_decomposition(filename=args.shell_px_change_plot)
+    print(
+        "Wrote shell P_x change decomposition plot to "
+        f"{args.shell_px_change_plot}."
+    )
+    plot_restart_comparison_velocity_series(
+        CYLINDER_PATHS.in_gsd,
+        args.restart_comparison_gsd,
+        args.restart_comparison_plot,
+        restart_initial_gsd=args.restart_initial_gsd,
+        shell_only=True,
+    )
+    print(
+        "Wrote restart-aligned x center-of-mass velocity comparison plot to "
+        f"{args.restart_comparison_plot}."
     )
     # if not args.skip_lagged_prediction:
     #     # shear_series_file = ACTIVE_DATA_DIR / "shear_flux_decomposition_series.npz"
