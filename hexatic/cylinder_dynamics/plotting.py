@@ -422,8 +422,247 @@ def _shell_xtheta_px_contribution_map(
     return flat.reshape((n_x, n_theta))
 
 
+def _shell_xtheta_density_map(
+    coords: np.ndarray,
+    shell_mask: np.ndarray,
+    x_edges: np.ndarray,
+    theta_edges: np.ndarray,
+) -> np.ndarray:
+    result = np.zeros((len(x_edges) - 1, len(theta_edges) - 1), dtype=np.float64)
+    if not np.any(shell_mask):
+        return result
+
+    groups, n_x, n_theta, n_bins = _xtheta_group_indices(
+        coords[shell_mask],
+        x_edges,
+        theta_edges,
+    )
+    counts = np.bincount(groups, minlength=n_bins).reshape((n_x, n_theta))
+    dx = float(np.mean(np.diff(x_edges)))
+    dtheta = float(np.mean(np.diff(theta_edges)))
+    bin_area = dx * float(cylinder.CYLINDER_RADIUS) * dtheta
+    if bin_area <= 0.0:
+        return counts.astype(np.float64)
+    return counts.astype(np.float64) / bin_area
+
+
 def _closest_index(steps: np.ndarray, target_step: int) -> int:
     return int(np.argmin(np.abs(np.asarray(steps, dtype=np.int64) - int(target_step))))
+
+
+def _point_xtheta_mean_map(
+    coords: np.ndarray,
+    values: np.ndarray,
+    x_edges: np.ndarray,
+    theta_edges: np.ndarray,
+    theta_column: int = 1,
+) -> np.ndarray:
+    result = np.full((len(x_edges) - 1, len(theta_edges) - 1), np.nan, dtype=np.float64)
+    finite = (
+        np.isfinite(coords[:, 0])
+        & np.isfinite(coords[:, theta_column])
+        & np.isfinite(values)
+    )
+    if not np.any(finite):
+        return result
+
+    group_coords = np.column_stack((coords[finite, 0], coords[finite, theta_column]))
+    groups, n_x, n_theta, n_bins = _xtheta_group_indices(
+        group_coords,
+        x_edges,
+        theta_edges,
+    )
+    counts = np.bincount(groups, minlength=n_bins)
+    sums = np.bincount(groups, weights=values[finite], minlength=n_bins)
+    occupied = counts > 0
+    flat = np.full(n_bins, np.nan, dtype=np.float64)
+    flat[occupied] = sums[occupied] / counts[occupied]
+    return flat.reshape((n_x, n_theta))
+
+
+def _initial_hexatic_maps(
+    hexatic_gsd: str | Path,
+    target_step: int,
+    coords: np.ndarray,
+    shell_mask: np.ndarray,
+    x_edges: np.ndarray,
+    theta_edges: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    empty = np.full((len(x_edges) - 1, len(theta_edges) - 1), np.nan, dtype=np.float64)
+    path = Path(hexatic_gsd)
+    if not path.exists():
+        return empty, empty
+
+    with gsd.hoomd.open(name=str(path), mode="r") as source:
+        if len(source) == 0:
+            return empty, empty
+        steps = np.asarray(
+            [int(frame.configuration.step) for frame in source],
+            dtype=np.int64,
+        )
+        frame = source[_closest_index(steps, target_step)]
+        velocity = getattr(frame.particles, "velocity", None)
+        if velocity is None:
+            return empty, empty
+        velocity = np.asarray(velocity, dtype=np.float64)
+        if velocity.ndim != 2 or velocity.shape[1] < 3:
+            return empty, empty
+
+    psi6 = velocity[:, 0]
+    charge = velocity[:, 2]
+    defect_indicator = np.where(np.isfinite(charge), np.abs(charge) > 0.0, np.nan)
+    return (
+        _shell_xtheta_mean_map(coords, shell_mask, psi6, x_edges, theta_edges),
+        _shell_xtheta_mean_map(
+            coords,
+            shell_mask,
+            defect_indicator.astype(np.float64),
+            x_edges,
+            theta_edges,
+        ),
+    )
+
+
+def _initial_chirality_map(
+    chirality_npz: str | Path,
+    target_step: int,
+    x_edges: np.ndarray,
+    theta_edges: np.ndarray,
+    metric_name: str = "instant_helix_relative",
+) -> np.ndarray:
+    result = np.full((len(x_edges) - 1, len(theta_edges) - 1), np.nan, dtype=np.float64)
+    path = Path(chirality_npz)
+    if not path.exists():
+        return result
+
+    with np.load(path) as data:
+        if "xtheta_values" not in data or "steps" not in data or "metric_names" not in data:
+            return result
+        metric_names = tuple(str(name) for name in data["metric_names"])
+        if metric_name in metric_names:
+            metric_idx = metric_names.index(metric_name)
+        else:
+            metric_idx = 0
+        steps = np.asarray(data["steps"], dtype=np.int64)
+        frame_idx = _closest_index(steps, target_step)
+        values = np.asarray(data["xtheta_values"], dtype=np.float64)[
+            metric_idx,
+            frame_idx,
+        ]
+        source_x_centers = np.asarray(data["x_centers"], dtype=np.float64)
+        source_theta_centers = np.asarray(data["theta_centers"], dtype=np.float64)
+
+    if values.shape == result.shape:
+        return values
+
+    x_grid, theta_grid = np.meshgrid(
+        source_x_centers,
+        source_theta_centers,
+        indexing="ij",
+    )
+    coords = np.column_stack((x_grid.ravel(), theta_grid.ravel()))
+    return _point_xtheta_mean_map(
+        coords,
+        values.ravel(),
+        x_edges,
+        theta_edges,
+        theta_column=1,
+    )
+
+
+def _initial_stress_divergence_x_map(
+    stress_npz: str | Path,
+    target_step: int,
+    x_edges: np.ndarray,
+    theta_edges: np.ndarray,
+    field_name: str = "div_sigma_full",
+) -> np.ndarray:
+    result = np.full((len(x_edges) - 1, len(theta_edges) - 1), np.nan, dtype=np.float64)
+    path = Path(stress_npz)
+    if not path.exists():
+        return result
+
+    with np.load(path) as data:
+        if field_name not in data or "grid_coords" not in data:
+            return result
+        if "steps" in data:
+            steps = np.asarray(data["steps"], dtype=np.int64)
+            frame_idx = _closest_index(steps, target_step)
+            coords = np.asarray(data["grid_coords"], dtype=np.float64)
+            values = np.asarray(data[field_name], dtype=np.float64)
+            if coords.ndim == 3:
+                coords = coords[frame_idx]
+            if values.ndim == 3:
+                values = values[frame_idx]
+        else:
+            coords = np.asarray(data["grid_coords"], dtype=np.float64)
+            values = np.asarray(data[field_name], dtype=np.float64)
+
+    if values.ndim != 2 or values.shape[1] < 1:
+        return result
+    return _point_xtheta_mean_map(
+        coords,
+        values[:, 0],
+        x_edges,
+        theta_edges,
+        theta_column=2,
+    )
+
+
+def _initial_cylinder_maps(
+    active_fields: ActiveMatterFields,
+    frame_idx: int = 0,
+    hexatic_gsd: str | Path = CYLINDER_PATHS.out_gsd,
+    chirality_npz: str | Path = CYLINDER_PATHS.in_gsd.parent / "chirality_fields.npz",
+    stress_npz: str | Path = CYLINDER_PATHS.in_gsd.parent
+    / "shear_flux_decomposition_series.npz",
+) -> InitialCylinderMaps:
+    steps = np.asarray(active_fields.steps, dtype=np.int64)
+    if steps.size == 0:
+        raise ValueError("No active matter frames available for initial maps.")
+    frame_idx = int(np.clip(frame_idx, 0, steps.size - 1))
+
+    coords = np.asarray(active_fields.coords[frame_idx], dtype=np.float64)
+    shell_mask = np.asarray(active_fields.shell_mask[frame_idx], dtype=bool)
+    px_values = np.asarray(
+        active_fields.direction_cylindrical[frame_idx, :, 0],
+        dtype=np.float64,
+    )
+    x_edges = np.asarray(active_fields.x_edges, dtype=np.float64)
+    theta_edges = np.asarray(active_fields.theta_edges, dtype=np.float64)
+    step = int(steps[frame_idx])
+    psi6_map, defect_map = _initial_hexatic_maps(
+        hexatic_gsd,
+        step,
+        coords,
+        shell_mask,
+        x_edges,
+        theta_edges,
+    )
+
+    return InitialCylinderMaps(
+        step=step,
+        x_edges=x_edges,
+        theta_edges=theta_edges,
+        px=_shell_xtheta_mean_map(coords, shell_mask, px_values, x_edges, theta_edges),
+        rho=_shell_xtheta_density_map(coords, shell_mask, x_edges, theta_edges),
+        px_contribution=_shell_xtheta_px_contribution_map(
+            coords,
+            shell_mask,
+            px_values,
+            x_edges,
+            theta_edges,
+        ),
+        psi6=psi6_map,
+        defects=defect_map,
+        chirality=_initial_chirality_map(chirality_npz, step, x_edges, theta_edges),
+        stress_divergence_x=_initial_stress_divergence_x_map(
+            stress_npz,
+            step,
+            x_edges,
+            theta_edges,
+        ),
+    )
 
 
 def _shell_px_change_decomposition(
@@ -1281,6 +1520,116 @@ def plot_orientation_autocorrelation_diagnostics(
         tau_axis.legend(loc="best")
 
     fig.tight_layout()
+
+    if filename is None:
+        plt.show()
+    else:
+        output_path = Path(filename)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, dpi=200)
+        plt.close(fig)
+
+
+def _map_norm(values: np.ndarray):
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return None
+    vmin = float(np.nanmin(finite))
+    vmax = float(np.nanmax(finite))
+    if vmin < 0.0 < vmax:
+        return TwoSlopeNorm(vmin=vmin, vcenter=0.0, vmax=vmax)
+    return None
+
+
+def _plot_xtheta_map(
+    axis,
+    x_edges: np.ndarray,
+    theta_edges: np.ndarray,
+    values: np.ndarray,
+    title: str,
+    colorbar_label: str,
+) -> None:
+    norm = _map_norm(values)
+    mesh = axis.pcolormesh(
+        x_edges,
+        theta_edges,
+        values.T,
+        shading="auto",
+        cmap="coolwarm" if norm is not None else "viridis",
+        norm=norm,
+    )
+    axis.set_title(title)
+    axis.set_xlabel("x")
+    axis.set_ylabel(r"$\theta$")
+    axis.set_yticks([0.0, 0.5 * np.pi, np.pi, 1.5 * np.pi, 2.0 * np.pi])
+    axis.yaxis.set_major_formatter(
+        FuncFormatter(
+            lambda value, _: {
+                0.0: "0",
+                0.5: r"$\pi/2$",
+                1.0: r"$\pi$",
+                1.5: r"$3\pi/2$",
+                2.0: r"$2\pi$",
+            }.get(round(value / np.pi, 1), "")
+        )
+    )
+    axis.grid(False)
+    axis.figure.colorbar(mesh, ax=axis, label=colorbar_label)
+
+
+def plot_initial_cylinder_spatial_maps(
+    active_matter_fields_file: str | Path = ACTIVE_MATTER_FIELDS_FILE,
+    filename: str | Path | None = CYLINDER_PATHS.x_com_velocity_plot.with_name(
+        "cylinder_initial_spatial_maps.png"
+    ),
+    frame_idx: int = 0,
+    hexatic_gsd: str | Path = CYLINDER_PATHS.out_gsd,
+    chirality_npz: str | Path = CYLINDER_PATHS.in_gsd.parent / "chirality_fields.npz",
+    stress_npz: str | Path = CYLINDER_PATHS.in_gsd.parent
+    / "shear_flux_decomposition_series.npz",
+) -> None:
+    active_fields = _load_active_matter_fields(active_matter_fields_file)
+    if active_fields is None:
+        raise FileNotFoundError(active_matter_fields_file)
+
+    maps = _initial_cylinder_maps(
+        active_fields,
+        frame_idx=frame_idx,
+        hexatic_gsd=hexatic_gsd,
+        chirality_npz=chirality_npz,
+        stress_npz=stress_npz,
+    )
+    panels = [
+        (maps.px, r"$P_x(x,\theta)$", r"$P_x$"),
+        (maps.rho, r"$\rho(x,\theta)$", r"shell surface density"),
+        (
+            maps.px_contribution,
+            r"$[N_b/N_{\mathrm{shell}}]P_{x,b}$",
+            r"contribution$_b$",
+        ),
+        (maps.psi6, r"$\psi_6(x,\theta)$", r"$\psi_6$"),
+        (maps.defects, r"defects$(x,\theta)$", "defect fraction"),
+        (maps.chirality, r"chirality$(x,\theta)$", "chirality"),
+        (
+            maps.stress_divergence_x,
+            r"stress divergence$_x(x,\theta)$",
+            r"$(\nabla\cdot\sigma)_x$",
+        ),
+    ]
+
+    fig, axes = plt.subplots(4, 2, figsize=(13, 14), constrained_layout=True)
+    flat_axes = axes.ravel()
+    for axis, (values, title, colorbar_label) in zip(flat_axes, panels):
+        _plot_xtheta_map(
+            axis,
+            maps.x_edges,
+            maps.theta_edges,
+            values,
+            title,
+            colorbar_label,
+        )
+    flat_axes[-1].axis("off")
+    fig.suptitle(f"Initial cylinder x-theta maps (step {maps.step})")
 
     if filename is None:
         plt.show()

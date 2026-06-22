@@ -27,6 +27,7 @@ from .plotting import (
     plot_disclination_count_series,
     plot_dislocation_center_of_mass_series,
     plot_dislocation_count_series,
+    plot_initial_cylinder_spatial_maps,
     plot_net_disclination_charge_series,
     plot_orientation_autocorrelation_diagnostics,
     plot_restart_comparison_velocity_series,

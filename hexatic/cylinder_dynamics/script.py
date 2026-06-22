@@ -24,6 +24,7 @@ from .plotting import (
     plot_disclination_count_series,
     plot_dislocation_center_of_mass_series,
     plot_dislocation_count_series,
+    plot_initial_cylinder_spatial_maps,
     plot_net_disclination_charge_series,
     plot_orientation_autocorrelation_diagnostics,
     plot_restart_comparison_velocity_series,
@@ -114,6 +115,33 @@ def _parse_args() -> argparse.Namespace:
         ),
         help="Output image for orientation autocorrelation and tau comparison.",
     )
+    parser.add_argument(
+        "--initial-spatial-maps-plot",
+        default=str(
+            CYLINDER_PATHS.x_com_velocity_plot.with_name(
+                "cylinder_initial_spatial_maps.png"
+            )
+        ),
+        help="Output image for initial x-theta spatial maps.",
+    )
+    parser.add_argument(
+        "--initial-spatial-frame",
+        type=int,
+        default=0,
+        help="Active-matter frame index to use for initial x-theta spatial maps.",
+    )
+    parser.add_argument(
+        "--initial-spatial-chirality-npz",
+        default=str(CYLINDER_PATHS.in_gsd.parent / "chirality_fields.npz"),
+        help="Saved chirality fields used for the initial chirality x-theta map.",
+    )
+    parser.add_argument(
+        "--initial-spatial-stress-npz",
+        default=str(
+            CYLINDER_PATHS.in_gsd.parent / "shear_flux_decomposition_series.npz"
+        ),
+        help="Saved shear/stress fields used for the initial stress-divergence map.",
+    )
     return parser.parse_args()
 
 
@@ -171,6 +199,13 @@ def main() -> None:
         "Wrote orientation autocorrelation tau comparison plot to "
         f"{args.orientation_autocorrelation_plot}."
     )
+    plot_initial_cylinder_spatial_maps(
+        filename=args.initial_spatial_maps_plot,
+        frame_idx=args.initial_spatial_frame,
+        chirality_npz=args.initial_spatial_chirality_npz,
+        stress_npz=args.initial_spatial_stress_npz,
+    )
+    print(f"Wrote initial cylinder spatial maps to {args.initial_spatial_maps_plot}.")
     plot_restart_comparison_velocity_series(
         CYLINDER_PATHS.in_gsd,
         args.restart_comparison_gsd,
