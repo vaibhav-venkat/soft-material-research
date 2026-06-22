@@ -26,9 +26,11 @@ from .plotting import (
     plot_dislocation_count_series,
     plot_net_disclination_charge_series,
     plot_restart_comparison_velocity_series,
+    plot_shell_px_change_cumsum,
     plot_shell_px_change_decomposition,
     plot_theta_center_of_mass_velocity_series,
     plot_velocity_series,
+    plot_x_residual_diagnostics,
 )
 
 
@@ -84,6 +86,24 @@ def _parse_args() -> argparse.Namespace:
         ),
         help="Output image for the shell P_x change decomposition plot.",
     )
+    parser.add_argument(
+        "--shell-px-change-cumsum-plot",
+        default=str(
+            CYLINDER_PATHS.x_com_velocity_plot.with_name(
+                "cylinder_shell_px_change_cumsum.png"
+            )
+        ),
+        help="Output image for the cumulative shell P_x change decomposition plot.",
+    )
+    parser.add_argument(
+        "--x-residual-plot",
+        default=str(
+            CYLINDER_PATHS.x_com_velocity_plot.with_name(
+                "cylinder_x_residual_diagnostics.png"
+            )
+        ),
+        help="Output image for R_x = V_x - U0 P_x residual diagnostics.",
+    )
     return parser.parse_args()
 
 
@@ -122,6 +142,17 @@ def main() -> None:
         "Wrote shell P_x change decomposition plot to "
         f"{args.shell_px_change_plot}."
     )
+    plot_shell_px_change_cumsum(filename=args.shell_px_change_cumsum_plot)
+    print(
+        "Wrote cumulative shell P_x change decomposition plot to "
+        f"{args.shell_px_change_cumsum_plot}."
+    )
+    plot_x_residual_diagnostics(
+        CYLINDER_PATHS.in_gsd,
+        filename=args.x_residual_plot,
+        shell_only=True,
+    )
+    print(f"Wrote x residual diagnostics plot to {args.x_residual_plot}.")
     plot_restart_comparison_velocity_series(
         CYLINDER_PATHS.in_gsd,
         args.restart_comparison_gsd,

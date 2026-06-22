@@ -29,9 +29,11 @@ from .plotting import (
     plot_dislocation_count_series,
     plot_net_disclination_charge_series,
     plot_restart_comparison_velocity_series,
+    plot_shell_px_change_cumsum,
     plot_shell_px_change_decomposition,
     plot_theta_center_of_mass_velocity_series,
     plot_velocity_series,
+    plot_x_residual_diagnostics,
 )
 from .script import main
 from .series import (

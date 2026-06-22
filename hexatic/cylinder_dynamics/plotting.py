@@ -68,6 +68,27 @@ class ShellPxChangeDecomposition:
     discrete_delta: np.ndarray
 
 
+@dataclass(frozen=True)
+class XResidualSeries:
+    steps: np.ndarray
+    residuals: np.ndarray
+    mean: float
+    rms: float
+    autocorrelation_lags: np.ndarray
+    autocorrelation: np.ndarray
+
+
+@dataclass(frozen=True)
+class OrientationAutocorrelationSeries:
+    label: str
+    lag_steps: np.ndarray
+    lag_times: np.ndarray
+    c_p: np.ndarray
+    c_px: np.ndarray
+    tau_p: float
+    tau_px: float
+
+
 def _single_relaxation(time: np.ndarray, v_inf: float, amplitude: float, tau: float):
     return v_inf + amplitude * np.exp(-time / tau)
 
@@ -359,6 +380,143 @@ def _shell_px_change_decomposition(
         membership_term=membership_term,
         reconstructed_delta=reconstructed_delta,
         discrete_delta=discrete_delta,
+    )
+
+
+def _autocorrelation(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    finite_values = np.asarray(values[np.isfinite(values)], dtype=np.float64)
+    if finite_values.size == 0:
+        return (
+            np.asarray([], dtype=np.int64),
+            np.asarray([], dtype=np.float64),
+        )
+
+    centered = finite_values - float(np.mean(finite_values))
+    denominator = float(np.dot(centered, centered))
+    lags = np.arange(finite_values.size, dtype=np.int64)
+    if denominator <= 0.0:
+        autocorrelation = np.full(finite_values.size, np.nan, dtype=np.float64)
+        autocorrelation[0] = 1.0
+        return lags, autocorrelation
+
+    autocorrelation = np.asarray(
+        [
+            float(np.dot(centered[: finite_values.size - lag], centered[lag:]))
+            / denominator
+            for lag in lags
+        ],
+        dtype=np.float64,
+    )
+    return lags, autocorrelation
+
+
+def _x_residual_series(
+    input_gsd: str | Path,
+    active_fields: ActiveMatterFields,
+    shell_only: bool = True,
+) -> XResidualSeries:
+    velocity_series = x_center_of_mass_velocity_series(input_gsd, shell_only=shell_only)
+    px_steps, px_values = _shell_discrete_px_series(active_fields)
+    common_steps, velocity_indices, px_indices = np.intersect1d(
+        velocity_series.steps,
+        px_steps,
+        assume_unique=False,
+        return_indices=True,
+    )
+    residuals = (
+        velocity_series.x_velocities[velocity_indices]
+        - float(cylinder.U0) * px_values[px_indices]
+    )
+    finite = np.isfinite(residuals)
+    finite_residuals = residuals[finite]
+    if finite_residuals.size:
+        mean = float(np.mean(finite_residuals))
+        rms = float(np.sqrt(np.mean(finite_residuals**2)))
+    else:
+        mean = np.nan
+        rms = np.nan
+    autocorrelation_lags, autocorrelation = _autocorrelation(finite_residuals)
+
+    return XResidualSeries(
+        steps=common_steps,
+        residuals=residuals,
+        mean=mean,
+        rms=rms,
+        autocorrelation_lags=autocorrelation_lags,
+        autocorrelation=autocorrelation,
+    )
+
+
+def _orientation_population_mask(
+    shell_mask: np.ndarray,
+    lag: int,
+    population: str,
+) -> np.ndarray:
+    start_shell = shell_mask[: shell_mask.shape[0] - lag]
+    if population == "all":
+        return np.ones_like(start_shell, dtype=bool)
+    if population == "shell":
+        return start_shell
+    if population == "shell_remain":
+        next_shell = shell_mask[lag:]
+        return start_shell & next_shell
+    if population == "core":
+        return ~start_shell
+    raise ValueError(f"Unknown orientation population: {population}")
+
+
+def _fit_autocorrelation_tau(
+    lag_steps: np.ndarray,
+    values: np.ndarray,
+) -> float:
+    fit = _fit_relaxation_series(lag_steps, values, fit_mode="single")
+    if fit is None:
+        return np.nan
+    return float(fit.params.tau)
+
+
+def _orientation_autocorrelation_series(
+    fields: ActiveMatterFields,
+    population: str,
+    label: str,
+) -> OrientationAutocorrelationSeries:
+    directions = np.asarray(fields.active_direction, dtype=np.float64)
+    px = np.asarray(fields.direction_cylindrical[..., 0], dtype=np.float64)
+    shell_mask = np.asarray(fields.shell_mask, dtype=bool)
+    steps = np.asarray(fields.steps, dtype=np.int64)
+    n_frames = steps.size
+
+    lag_steps = np.empty(n_frames, dtype=np.int64)
+    c_p = np.full(n_frames, np.nan, dtype=np.float64)
+    c_px = np.full(n_frames, np.nan, dtype=np.float64)
+
+    for lag in range(n_frames):
+        lag_steps[lag] = int(steps[lag] - steps[0])
+        start_directions = directions[: n_frames - lag]
+        lagged_directions = directions[lag:]
+        start_px = px[: n_frames - lag]
+        lagged_px = px[lag:]
+        mask = _orientation_population_mask(shell_mask, lag, population)
+
+        dot_values = np.sum(start_directions * lagged_directions, axis=-1)
+        axial_values = start_px * lagged_px
+        finite_dot = mask & np.isfinite(dot_values)
+        finite_axial = mask & np.isfinite(axial_values)
+
+        if np.any(finite_dot):
+            c_p[lag] = float(np.mean(dot_values[finite_dot]))
+        if np.any(finite_axial):
+            c_px[lag] = float(np.mean(axial_values[finite_axial]))
+
+    lag_times = lag_steps.astype(np.float64) * float(cylinder.TIMESTEP)
+    return OrientationAutocorrelationSeries(
+        label=label,
+        lag_steps=lag_steps,
+        lag_times=lag_times,
+        c_p=c_p,
+        c_px=c_px,
+        tau_p=_fit_autocorrelation_tau(lag_steps, c_p),
+        tau_px=_fit_autocorrelation_tau(lag_steps, c_px),
     )
 
 
@@ -769,30 +927,275 @@ def plot_shell_px_change_decomposition(
             r"-\langle p_x(t+\Delta t)\rangle_A$"
         ),
     )
-    axis.plot(
-        px_change.steps,
-        px_change.reconstructed_delta,
-        color="black",
-        linestyle="--",
-        linewidth=1.7,
-        alpha=0.8,
-        label=r"$\Delta P_x$ terms sum",
-    )
-    axis.plot(
-        px_change.steps,
-        px_change.discrete_delta,
-        color="tab:cyan",
-        linestyle=":",
-        linewidth=2.0,
-        alpha=0.95,
-        label=r"discrete $\Delta P_x$",
-    )
+    # axis.plot(
+    #     px_change.steps,
+    #     px_change.reconstructed_delta,
+    #     color="black",
+    #     linestyle="--",
+    #     linewidth=1.7,
+    #     alpha=0.8,
+    #     label=r"$\Delta P_x$ terms sum",
+    # )
+    # axis.plot(
+    #     px_change.steps,
+    #     px_change.discrete_delta,
+    #     color="tab:cyan",
+    #     linestyle=":",
+    #     linewidth=2.0,
+    #     alpha=0.95,
+    #     label=r"discrete $\Delta P_x$",
+    # )
     axis.axhline(0.0, color="black", linewidth=1.0, alpha=0.35)
     axis.set_xlabel("Simulation step")
     axis.set_ylabel(r"$\Delta P_x$")
     axis.set_title(r"Shell $P_x$ change decomposition")
     axis.grid(True, ls="--", alpha=0.35)
     axis.legend(loc="best")
+    fig.tight_layout()
+
+    if filename is None:
+        plt.show()
+    else:
+        output_path = Path(filename)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, dpi=200)
+        plt.close(fig)
+
+
+def plot_shell_px_change_cumsum(
+    active_matter_fields_file: str | Path = ACTIVE_MATTER_FIELDS_FILE,
+    filename: str | Path | None = CYLINDER_PATHS.x_com_velocity_plot.with_name(
+        "cylinder_shell_px_change_cumsum.png"
+    ),
+) -> None:
+    active_fields = _load_active_matter_fields(active_matter_fields_file)
+    if active_fields is None:
+        raise FileNotFoundError(active_matter_fields_file)
+
+    px_change = _shell_px_change_decomposition(active_fields)
+
+    fig, axis = plt.subplots(figsize=(10, 5))
+    axis.plot(
+        px_change.steps,
+        np.cumsum(px_change.reconstructed_delta),
+        color="black",
+        linewidth=1.8,
+        label=r"$\mathrm{cumsum}(\Delta P_{\mathrm{total}})$",
+    )
+    axis.plot(
+        px_change.steps,
+        np.cumsum(px_change.orientation_term),
+        color="tab:red",
+        linewidth=1.6,
+        alpha=0.9,
+        label=r"$\mathrm{cumsum}(\Delta P_{\mathrm{orient}})$",
+    )
+    axis.plot(
+        px_change.steps,
+        np.cumsum(px_change.membership_term),
+        color="tab:orange",
+        linewidth=1.6,
+        alpha=0.9,
+        label=r"$\mathrm{cumsum}(\Delta P_{\mathrm{member}})$",
+    )
+    axis.axhline(0.0, color="black", linewidth=1.0, alpha=0.35)
+    axis.set_xlabel("Simulation step")
+    axis.set_ylabel(r"Cumulative $\Delta P_x$")
+    axis.set_title(r"Cumulative shell $P_x$ change decomposition")
+    axis.grid(True, ls="--", alpha=0.35)
+    axis.legend(loc="best")
+    fig.tight_layout()
+
+    if filename is None:
+        plt.show()
+    else:
+        output_path = Path(filename)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, dpi=200)
+        plt.close(fig)
+
+
+def plot_x_residual_diagnostics(
+    input_gsd: str | Path = CYLINDER_PATHS.in_gsd,
+    active_matter_fields_file: str | Path = ACTIVE_MATTER_FIELDS_FILE,
+    filename: str | Path | None = CYLINDER_PATHS.x_com_velocity_plot.with_name(
+        "cylinder_x_residual_diagnostics.png"
+    ),
+    shell_only: bool = True,
+) -> None:
+    active_fields = _load_active_matter_fields(active_matter_fields_file)
+    if active_fields is None:
+        raise FileNotFoundError(active_matter_fields_file)
+
+    residual_series = _x_residual_series(
+        input_gsd,
+        active_fields,
+        shell_only=shell_only,
+    )
+
+    fig, (residual_axis, stats_axis, autocorr_axis) = plt.subplots(
+        3,
+        1,
+        figsize=(10, 8.4),
+        sharex=False,
+        gridspec_kw={"height_ratios": [2.2, 1.0, 1.6]},
+    )
+    residual_axis.plot(
+        residual_series.steps,
+        residual_series.residuals,
+        color="tab:blue",
+        linewidth=1.5,
+        label=r"$R_x = V_x - U_0 P_x$",
+    )
+    residual_axis.axhline(0.0, color="black", linewidth=1.0, alpha=0.35)
+    residual_axis.axhline(
+        residual_series.mean,
+        color="tab:red",
+        linestyle="--",
+        linewidth=1.4,
+        label=fr"mean = {residual_series.mean:.4g}",
+    )
+    residual_axis.set_xlabel("Simulation step")
+    residual_axis.set_ylabel(r"$R_x$")
+    population = "outer-shell" if shell_only else "all-particle"
+    residual_axis.set_title(f"Cylinder {population} x residual after active-polar removal")
+    residual_axis.grid(True, ls="--", alpha=0.35)
+    residual_axis.legend(loc="best")
+
+    stats_axis.bar(
+        ["mean", "RMS"],
+        [residual_series.mean, residual_series.rms],
+        color=["tab:red", "tab:purple"],
+        alpha=0.8,
+    )
+    stats_axis.axhline(0.0, color="black", linewidth=1.0, alpha=0.35)
+    stats_axis.set_ylabel(r"$R_x$ statistic")
+    stats_axis.set_title(
+        fr"mean = {residual_series.mean:.4g}, RMS = {residual_series.rms:.4g}"
+    )
+    stats_axis.grid(True, axis="y", ls="--", alpha=0.35)
+
+    autocorr_axis.plot(
+        residual_series.autocorrelation_lags,
+        residual_series.autocorrelation,
+        color="tab:green",
+        linewidth=1.5,
+        label=r"$R_x$ autocorrelation",
+    )
+    autocorr_axis.axhline(0.0, color="black", linewidth=1.0, alpha=0.35)
+    autocorr_axis.set_xlabel("Lag index")
+    autocorr_axis.set_ylabel("Autocorrelation")
+    autocorr_axis.grid(True, ls="--", alpha=0.35)
+    autocorr_axis.legend(loc="best")
+    fig.tight_layout()
+
+    if filename is None:
+        plt.show()
+    else:
+        output_path = Path(filename)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, dpi=200)
+        plt.close(fig)
+
+
+def plot_orientation_autocorrelation_diagnostics(
+    active_matter_fields_file: str | Path = ACTIVE_MATTER_FIELDS_FILE,
+    filename: str | Path | None = CYLINDER_PATHS.x_com_velocity_plot.with_name(
+        "cylinder_orientation_autocorrelation_tau.png"
+    ),
+    relaxation_fit_mode: str = "single",
+) -> None:
+    active_fields = _load_active_matter_fields(active_matter_fields_file)
+    if active_fields is None:
+        raise FileNotFoundError(active_matter_fields_file)
+
+    populations = [
+        ("all", "all particles"),
+        ("shell", "shell at t"),
+        ("shell_remain", "remain in shell"),
+        ("core", "core at t"),
+    ]
+    correlations = [
+        _orientation_autocorrelation_series(active_fields, key, label)
+        for key, label in populations
+    ]
+
+    px_steps, px_values = _shell_discrete_px_series(active_fields)
+    shell_px_fit = _fit_relaxation_series(
+        px_steps,
+        px_values,
+        fit_mode=relaxation_fit_mode,
+    )
+    shell_px_tau = np.nan if shell_px_fit is None else float(shell_px_fit.params.tau)
+
+    fig, (cp_axis, cpx_axis, tau_axis) = plt.subplots(
+        3,
+        1,
+        figsize=(11, 9.5),
+        sharex=False,
+        gridspec_kw={"height_ratios": [2.0, 2.0, 1.3]},
+    )
+    for correlation in correlations:
+        cp_axis.plot(
+            correlation.lag_times,
+            correlation.c_p,
+            linewidth=1.5,
+            label=correlation.label,
+        )
+        cpx_axis.plot(
+            correlation.lag_times,
+            correlation.c_px,
+            linewidth=1.5,
+            label=correlation.label,
+        )
+
+    cp_axis.axhline(0.0, color="black", linewidth=1.0, alpha=0.35)
+    cp_axis.set_xlabel(r"Lag time $\tau$")
+    cp_axis.set_ylabel(r"$C_p(\tau)$")
+    cp_axis.set_title(r"Orientation autocorrelation $\langle p_i(t)\cdot p_i(t+\tau)\rangle$")
+    cp_axis.grid(True, ls="--", alpha=0.35)
+    cp_axis.legend(loc="best")
+
+    cpx_axis.axhline(0.0, color="black", linewidth=1.0, alpha=0.35)
+    cpx_axis.set_xlabel(r"Lag time $\tau$")
+    cpx_axis.set_ylabel(r"$C_{p_x}(\tau)$")
+    cpx_axis.set_title(r"Axial orientation autocorrelation $\langle p_{x,i}(t)p_{x,i}(t+\tau)\rangle$")
+    cpx_axis.grid(True, ls="--", alpha=0.35)
+    cpx_axis.legend(loc="best")
+
+    tau_labels: list[str] = []
+    tau_values: list[float] = []
+    tau_colors: list[str] = []
+    for correlation in correlations:
+        tau_labels.append(f"{correlation.label}\nC_p")
+        tau_values.append(correlation.tau_p)
+        tau_colors.append("tab:blue")
+        tau_labels.append(f"{correlation.label}\nC_px")
+        tau_values.append(correlation.tau_px)
+        tau_colors.append("tab:orange")
+
+    tau_axis.bar(
+        np.arange(len(tau_values)),
+        tau_values,
+        color=tau_colors,
+        alpha=0.8,
+    )
+    if np.isfinite(shell_px_tau):
+        tau_axis.axhline(
+            shell_px_tau,
+            color="purple",
+            linestyle="--",
+            linewidth=1.6,
+            label=fr"$\tau_P$ = {shell_px_tau:.4g}",
+        )
+    tau_axis.set_xticks(np.arange(len(tau_labels)))
+    tau_axis.set_xticklabels(tau_labels, rotation=35, ha="right")
+    tau_axis.set_ylabel(r"Fitted $\tau$")
+    tau_axis.set_title(r"$\tau_P$ and fitted orientation decorrelation times")
+    tau_axis.grid(True, axis="y", ls="--", alpha=0.35)
+    if np.isfinite(shell_px_tau):
+        tau_axis.legend(loc="best")
+
     fig.tight_layout()
 
     if filename is None:
