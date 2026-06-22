@@ -97,6 +97,7 @@ class InitialCylinderMaps:
     theta_edges: np.ndarray
     px: np.ndarray
     rho: np.ndarray
+    counts: np.ndarray
     px_contribution: np.ndarray
     psi6: np.ndarray
     defects: np.ndarray
@@ -428,7 +429,22 @@ def _shell_xtheta_density_map(
     x_edges: np.ndarray,
     theta_edges: np.ndarray,
 ) -> np.ndarray:
-    result = np.zeros((len(x_edges) - 1, len(theta_edges) - 1), dtype=np.float64)
+    counts = _shell_xtheta_count_map(coords, shell_mask, x_edges, theta_edges)
+    dx = float(np.mean(np.diff(x_edges)))
+    dtheta = float(np.mean(np.diff(theta_edges)))
+    bin_area = dx * float(cylinder.CYLINDER_RADIUS) * dtheta
+    if bin_area <= 0.0:
+        return counts.astype(np.float64)
+    return counts.astype(np.float64) / bin_area
+
+
+def _shell_xtheta_count_map(
+    coords: np.ndarray,
+    shell_mask: np.ndarray,
+    x_edges: np.ndarray,
+    theta_edges: np.ndarray,
+) -> np.ndarray:
+    result = np.zeros((len(x_edges) - 1, len(theta_edges) - 1), dtype=np.int64)
     if not np.any(shell_mask):
         return result
 
@@ -437,13 +453,7 @@ def _shell_xtheta_density_map(
         x_edges,
         theta_edges,
     )
-    counts = np.bincount(groups, minlength=n_bins).reshape((n_x, n_theta))
-    dx = float(np.mean(np.diff(x_edges)))
-    dtheta = float(np.mean(np.diff(theta_edges)))
-    bin_area = dx * float(cylinder.CYLINDER_RADIUS) * dtheta
-    if bin_area <= 0.0:
-        return counts.astype(np.float64)
-    return counts.astype(np.float64) / bin_area
+    return np.bincount(groups, minlength=n_bins).reshape((n_x, n_theta))
 
 
 def _closest_index(steps: np.ndarray, target_step: int) -> int:
@@ -646,6 +656,7 @@ def _initial_cylinder_maps(
         theta_edges=theta_edges,
         px=_shell_xtheta_mean_map(coords, shell_mask, px_values, x_edges, theta_edges),
         rho=_shell_xtheta_density_map(coords, shell_mask, x_edges, theta_edges),
+        counts=_shell_xtheta_count_map(coords, shell_mask, x_edges, theta_edges),
         px_contribution=_shell_xtheta_px_contribution_map(
             coords,
             shell_mask,
@@ -1577,6 +1588,49 @@ def _plot_xtheta_map(
     axis.figure.colorbar(mesh, ax=axis, label=colorbar_label)
 
 
+def _map_correlation(
+    reference: np.ndarray,
+    values: np.ndarray,
+    mask: np.ndarray | None = None,
+) -> float:
+    reference_flat = np.asarray(reference, dtype=np.float64).ravel()
+    values_flat = np.asarray(values, dtype=np.float64).ravel()
+    finite = np.isfinite(reference_flat) & np.isfinite(values_flat)
+    if mask is not None:
+        finite &= np.asarray(mask, dtype=bool).ravel()
+    if np.count_nonzero(finite) < 2:
+        return np.nan
+
+    reference_values = reference_flat[finite]
+    comparison_values = values_flat[finite]
+    if np.nanstd(reference_values) == 0.0 or np.nanstd(comparison_values) == 0.0:
+        return np.nan
+    return float(np.corrcoef(reference_values, comparison_values)[0, 1])
+
+
+def _print_initial_stress_divergence_correlations(
+    maps: InitialCylinderMaps,
+) -> None:
+    mask = (
+        np.isfinite(maps.px_contribution)
+        & np.isfinite(maps.stress_divergence_x)
+    )
+    n_bins = int(np.count_nonzero(mask))
+    px_corr = _map_correlation(maps.px, maps.stress_divergence_x, mask=mask)
+    contribution_corr = _map_correlation(
+        maps.px_contribution,
+        maps.stress_divergence_x,
+        mask=mask,
+    )
+
+    print(
+        "Initial x-theta stress-divergence bin correlations "
+        f"(step {maps.step}, bins={n_bins}):"
+    )
+    print(f"  corr(P_x,b, stress_div_b) = {px_corr:.8g}")
+    print(f"  corr(contribution_b, stress_div_b) = {contribution_corr:.8g}")
+
+
 def plot_initial_cylinder_spatial_maps(
     active_matter_fields_file: str | Path = ACTIVE_MATTER_FIELDS_FILE,
     filename: str | Path | None = CYLINDER_PATHS.x_com_velocity_plot.with_name(
@@ -1599,6 +1653,7 @@ def plot_initial_cylinder_spatial_maps(
         chirality_npz=chirality_npz,
         stress_npz=stress_npz,
     )
+    _print_initial_stress_divergence_correlations(maps)
     panels = [
         (maps.px, r"$P_x(x,\theta)$", r"$P_x$"),
         (maps.rho, r"$\rho(x,\theta)$", r"shell surface density"),
@@ -1630,6 +1685,66 @@ def plot_initial_cylinder_spatial_maps(
         )
     flat_axes[-1].axis("off")
     fig.suptitle(f"Initial cylinder x-theta maps (step {maps.step})")
+
+    if filename is None:
+        plt.show()
+    else:
+        output_path = Path(filename)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, dpi=200)
+        plt.close(fig)
+
+
+def plot_initial_local_balance_maps(
+    active_matter_fields_file: str | Path = ACTIVE_MATTER_FIELDS_FILE,
+    filename: str | Path | None = CYLINDER_PATHS.x_com_velocity_plot.with_name(
+        "cylinder_initial_local_balance_maps.png"
+    ),
+    frame_idx: int = 0,
+    hexatic_gsd: str | Path = CYLINDER_PATHS.out_gsd,
+    chirality_npz: str | Path = CYLINDER_PATHS.in_gsd.parent / "chirality_fields.npz",
+    stress_npz: str | Path = CYLINDER_PATHS.in_gsd.parent
+    / "shear_flux_decomposition_series.npz",
+) -> None:
+    active_fields = _load_active_matter_fields(active_matter_fields_file)
+    if active_fields is None:
+        raise FileNotFoundError(active_matter_fields_file)
+
+    maps = _initial_cylinder_maps(
+        active_fields,
+        frame_idx=frame_idx,
+        hexatic_gsd=hexatic_gsd,
+        chirality_npz=chirality_npz,
+        stress_npz=stress_npz,
+    )
+    local_active = float(cylinder.U0) * maps.px
+    local_stress = maps.stress_divergence_x / float(cylinder.GAMMA)
+    local_sum = local_active + local_stress
+    panels = [
+        (local_active, r"local active$_b = U_0 P_{x,b}$", "local active"),
+        (
+            local_stress,
+            r"local stress$_b = \gamma^{-1}$ stress div$_b$",
+            "local stress",
+        ),
+        (
+            local_sum,
+            r"local active$_b$ + local stress$_b$",
+            "local balance",
+        ),
+    ]
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4.6), constrained_layout=True)
+    for axis, (values, title, colorbar_label) in zip(axes, panels):
+        _plot_xtheta_map(
+            axis,
+            maps.x_edges,
+            maps.theta_edges,
+            values,
+            title,
+            colorbar_label,
+        )
+    fig.suptitle(f"Initial local active-stress balance maps (step {maps.step})")
 
     if filename is None:
         plt.show()
