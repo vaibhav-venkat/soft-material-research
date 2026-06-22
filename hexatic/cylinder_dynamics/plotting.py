@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 
+import gsd.hoomd
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 from matplotlib.colors import TwoSlopeNorm
@@ -87,6 +88,20 @@ class OrientationAutocorrelationSeries:
     c_px: np.ndarray
     tau_p: float
     tau_px: float
+
+
+@dataclass(frozen=True)
+class InitialCylinderMaps:
+    step: int
+    x_edges: np.ndarray
+    theta_edges: np.ndarray
+    px: np.ndarray
+    rho: np.ndarray
+    px_contribution: np.ndarray
+    psi6: np.ndarray
+    defects: np.ndarray
+    chirality: np.ndarray
+    stress_divergence_x: np.ndarray
 
 
 def _single_relaxation(time: np.ndarray, v_inf: float, amplitude: float, tau: float):
@@ -344,6 +359,73 @@ def _shell_discrete_px_series(fields: ActiveMatterFields) -> tuple[np.ndarray, n
     return fields.steps, px_values
 
 
+def _xtheta_group_indices(
+    coords: np.ndarray,
+    x_edges: np.ndarray,
+    theta_edges: np.ndarray,
+) -> tuple[np.ndarray, int, int, int]:
+    n_x = len(x_edges) - 1
+    n_theta = len(theta_edges) - 1
+    x_indices = _x_bin_indices(coords[:, 0], float(x_edges[-1] - x_edges[0]), n_x)
+    theta_indices = _theta_bin_indices(coords[:, 1], n_theta)
+    return x_indices * n_theta + theta_indices, n_x, n_theta, n_x * n_theta
+
+
+def _shell_xtheta_mean_map(
+    coords: np.ndarray,
+    shell_mask: np.ndarray,
+    values: np.ndarray,
+    x_edges: np.ndarray,
+    theta_edges: np.ndarray,
+) -> np.ndarray:
+    finite = shell_mask & np.isfinite(values)
+    result = np.full((len(x_edges) - 1, len(theta_edges) - 1), np.nan, dtype=np.float64)
+    if not np.any(finite):
+        return result
+
+    groups, n_x, n_theta, n_bins = _xtheta_group_indices(
+        coords[finite],
+        x_edges,
+        theta_edges,
+    )
+    counts = np.bincount(groups, minlength=n_bins)
+    sums = np.bincount(groups, weights=values[finite], minlength=n_bins)
+    occupied = counts > 0
+    flat = np.full(n_bins, np.nan, dtype=np.float64)
+    flat[occupied] = sums[occupied] / counts[occupied]
+    return flat.reshape((n_x, n_theta))
+
+
+def _shell_xtheta_px_contribution_map(
+    coords: np.ndarray,
+    shell_mask: np.ndarray,
+    px_values: np.ndarray,
+    x_edges: np.ndarray,
+    theta_edges: np.ndarray,
+) -> np.ndarray:
+    finite = shell_mask & np.isfinite(px_values)
+    result = np.full((len(x_edges) - 1, len(theta_edges) - 1), np.nan, dtype=np.float64)
+    n_shell = int(np.count_nonzero(finite))
+    if n_shell == 0:
+        return result
+
+    groups, n_x, n_theta, n_bins = _xtheta_group_indices(
+        coords[finite],
+        x_edges,
+        theta_edges,
+    )
+    counts = np.bincount(groups, minlength=n_bins)
+    sums = np.bincount(groups, weights=px_values[finite], minlength=n_bins)
+    occupied = counts > 0
+    flat = np.full(n_bins, np.nan, dtype=np.float64)
+    flat[occupied] = sums[occupied] / float(n_shell)
+    return flat.reshape((n_x, n_theta))
+
+
+def _closest_index(steps: np.ndarray, target_step: int) -> int:
+    return int(np.argmin(np.abs(np.asarray(steps, dtype=np.int64) - int(target_step))))
+
+
 def _shell_px_change_decomposition(
     fields: ActiveMatterFields,
 ) -> ShellPxChangeDecomposition:
@@ -491,7 +573,9 @@ def _orientation_autocorrelation_series(
     c_px = np.full(n_frames, np.nan, dtype=np.float64)
 
     for lag in range(n_frames):
-        lag_steps[lag] = int(steps[lag] - steps[0])
+        lag_steps[lag] = int(
+            np.round(np.mean(steps[lag:] - steps[: n_frames - lag]))
+        )
         start_directions = directions[: n_frames - lag]
         lagged_directions = directions[lag:]
         start_px = px[: n_frames - lag]

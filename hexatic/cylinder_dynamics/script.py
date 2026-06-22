@@ -25,6 +25,7 @@ from .plotting import (
     plot_dislocation_center_of_mass_series,
     plot_dislocation_count_series,
     plot_net_disclination_charge_series,
+    plot_orientation_autocorrelation_diagnostics,
     plot_restart_comparison_velocity_series,
     plot_shell_px_change_cumsum,
     plot_shell_px_change_decomposition,
@@ -104,6 +105,15 @@ def _parse_args() -> argparse.Namespace:
         ),
         help="Output image for R_x = V_x - U0 P_x residual diagnostics.",
     )
+    parser.add_argument(
+        "--orientation-autocorrelation-plot",
+        default=str(
+            CYLINDER_PATHS.x_com_velocity_plot.with_name(
+                "cylinder_orientation_autocorrelation_tau.png"
+            )
+        ),
+        help="Output image for orientation autocorrelation and tau comparison.",
+    )
     return parser.parse_args()
 
 
@@ -153,6 +163,14 @@ def main() -> None:
         shell_only=True,
     )
     print(f"Wrote x residual diagnostics plot to {args.x_residual_plot}.")
+    plot_orientation_autocorrelation_diagnostics(
+        filename=args.orientation_autocorrelation_plot,
+        relaxation_fit_mode="single",
+    )
+    print(
+        "Wrote orientation autocorrelation tau comparison plot to "
+        f"{args.orientation_autocorrelation_plot}."
+    )
     plot_restart_comparison_velocity_series(
         CYLINDER_PATHS.in_gsd,
         args.restart_comparison_gsd,
