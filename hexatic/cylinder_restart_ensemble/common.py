@@ -67,7 +67,8 @@ def restart_frame(
     with gsd.hoomd.open(name=str(source_gsd), mode="r") as source:
         if len(source) == 0:
             raise ValueError(f"No frames found in {source_gsd}")
-        source_frame = source[-1]
+        num_before = -10
+        source_frame = source[num_before]
         source_particles = source_frame.particles
         if source_particles.position is None:
             raise ValueError(f"Frame in {source_gsd} has no particle positions")

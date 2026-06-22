@@ -479,6 +479,7 @@ def plot_velocity_series(
     shell_only: bool = False,
     relaxation_fit_mode: str = "single",
     active_matter_fields_file: str | Path = ACTIVE_MATTER_FIELDS_FILE,
+    align_with_px: bool = False
 ) -> None:
     series = x_center_of_mass_velocity_series(input_gsd, shell_only=shell_only)
     vx_fit = _fit_relaxation_series(
@@ -488,21 +489,22 @@ def plot_velocity_series(
     )
     assert vx_fit is not None
     _print_x_velocity_relaxation_fit(vx_fit, shell_only)
-    active_fields = _load_active_matter_fields(active_matter_fields_file)
-    px_steps = px_values = px_fit = None
-    if active_fields is not None:
-        px_steps, px_values = _shell_binned_px_series(active_fields)
-        px_fit = _fit_relaxation_series(
-            px_steps,
-            cylinder.U0 * px_values,
-            fit_mode=relaxation_fit_mode,
-        )
-    _print_px_relaxation_fit(px_fit)
-    assert px_fit is not None
-    u0_eff = vx_fit.params.amplitude / px_fit.params.amplitude
+    if align_with_px:
+        active_fields = _load_active_matter_fields(active_matter_fields_file)
+        px_steps = px_values = px_fit = None
+        if active_fields is not None:
+            px_steps, px_values = _shell_binned_px_series(active_fields)
+            px_fit = _fit_relaxation_series(
+                px_steps,
+                cylinder.U0 * px_values,
+                fit_mode=relaxation_fit_mode,
+            )
+        _print_px_relaxation_fit(px_fit)
+        assert px_fit is not None
+        u0_eff = vx_fit.params.amplitude / px_fit.params.amplitude
 
-    print(f"U0_eff = {u0_eff}")
-    print(f"U0 actual = {cylinder.U0}")
+        print(f"U0_eff = {u0_eff}")
+        print(f"U0 actual = {cylinder.U0}")
     fig, axis = plt.subplots(figsize=(10, 5))
     axis.plot(
         series.steps,
@@ -524,41 +526,45 @@ def plot_velocity_series(
             linewidth=2.0,
             label=fit_label,
         )
-    px_axis = axis.twinx()
-    if px_steps is not None and px_values is not None:
-        px_axis.plot(
-            px_steps,
-            cylinder.U0 * px_values,
-            color="purple",
-            label=r"$P_x$",
-        )
-    if px_fit is not None:
-        px_fit_label = (
-            r"$P_x$ best-fit relaxation"
-            if px_fit.stage_count == 1
-            else r"$P_x$ best-fit two-stage relaxation"
-        )
-        px_axis.plot(
-            px_fit.steps,
-            px_fit.modeled_values,
-            color="purple",
-            linestyle="--",
-            linewidth=2.0,
-            label=px_fit_label,
-        )
+    if align_with_px:
+        px_axis = axis.twinx()
+        if px_steps is not None and px_values is not None:
+            px_axis.plot(
+                px_steps,
+                cylinder.U0 * px_values,
+                color="purple",
+                label=r"$P_x$",
+            )
+        if px_fit is not None:
+            px_fit_label = (
+                r"$P_x$ best-fit relaxation"
+                if px_fit.stage_count == 1
+                else r"$P_x$ best-fit two-stage relaxation"
+            )
+            px_axis.plot(
+                px_fit.steps,
+                px_fit.modeled_values,
+                color="purple",
+                linestyle="--",
+                linewidth=2.0,
+                label=px_fit_label,
+            )
+        px_axis.axhline(0.0, color="purple", linewidth=1.0, alpha=0.2)
+        px_axis.set_ylabel(r"shell-binned mean $P_x$", color="purple")
+        px_axis.tick_params(axis="y", labelcolor="purple")
+        px_lines, px_labels = px_axis.get_legend_handles_labels()
     axis.axhline(0.0, color="black", linewidth=1.0, alpha=0.45)
-    px_axis.axhline(0.0, color="purple", linewidth=1.0, alpha=0.2)
     axis.set_xlabel("Simulation step")
     axis.set_ylabel("x center-of-mass velocity", color="tab:blue")
     axis.tick_params(axis="y", labelcolor="tab:blue")
-    px_axis.set_ylabel(r"shell-binned mean $P_x$", color="purple")
-    px_axis.tick_params(axis="y", labelcolor="purple")
     population = "outer-shell" if shell_only else "all-particle"
-    axis.set_title(f"Cylinder {population} x velocity and shell mean $P_x$")
+    title = f"Cylinder {population} x velocity and shell mean $P_x$" if align_with_px else f"Cylinder {population} x velocity"
+    axis.set_title(title)
     axis.grid(True, ls="--", alpha=0.35)
     lines, labels = axis.get_legend_handles_labels()
-    px_lines, px_labels = px_axis.get_legend_handles_labels()
-    axis.legend(lines + px_lines, labels + px_labels, loc="best")
+    l1 = lines + px_lines if align_with_px else lines
+    l2 = labels + px_labels if align_with_px else labels
+    axis.legend(l1, l2, loc="best")
     fig.tight_layout()
 
     if filename is None:

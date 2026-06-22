@@ -53,14 +53,14 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     args = _parse_args()
 
-    # # write_active_matter_field_outputs(
-    # #     CYLINDER_PATHS.in_gsd,
-    # #     coordinate_system="xrtheta"
-    # # )
-    # # print(
-    # #     "Wrote active matter fields to "
-    # #     f"{ACTIVE_DATA_DIR / 'active_matter_fields.npz'}."
-    # # )
+    # write_active_matter_field_outputs(
+    #     CYLINDER_PATHS.in_gsd,
+    #     coordinate_system="xrtheta"
+    # )
+    # print(
+    #     "Wrote active matter fields to "
+    #     f"{ACTIVE_DATA_DIR / 'active_matter_fields.npz'}."
+    # )
     # print(
     #     "Wrote active matter flux density plots to "
     #     f"{ACTIVE_IMAGE_DIR / 'flux'}."
@@ -79,21 +79,21 @@ def main() -> None:
         "Wrote x center-of-mass velocity plot to "
         f"{CYLINDER_PATHS.x_com_velocity_plot}."
     )
-    if not args.skip_lagged_prediction:
-        # shear_series_file = ACTIVE_DATA_DIR / "shear_flux_decomposition_series.npz"
-        # shear_series = compute_shear_flux_decomposition_series(CYLINDER_PATHS.in_gsd)
-        # save_shear_flux_decomposition_series(shear_series, shear_series_file)
-        # print(f"Wrote shear flux decomposition time series to {shear_series_file}.")
+    # if not args.skip_lagged_prediction:
+    #     # shear_series_file = ACTIVE_DATA_DIR / "shear_flux_decomposition_series.npz"
+    #     # shear_series = compute_shear_flux_decomposition_series(CYLINDER_PATHS.in_gsd)
+    #     # save_shear_flux_decomposition_series(shear_series, shear_series_file)
+    #     # print(f"Wrote shear flux decomposition time series to {shear_series_file}.")
 
-        write_lagged_predictive_decomposition_outputs(CYLINDER_PATHS.in_gsd)
-        print(
-            "Wrote lagged predictive decomposition to "
-            f"{LAGGED_PREDICTION_DATA}."
-        )
-        print(
-            "Wrote lagged predictive decomposition plots to "
-            f"{LAGGED_PREDICTION_IMAGE_DIR}."
-        )
+    #     write_lagged_predictive_decomposition_outputs(CYLINDER_PATHS.in_gsd)
+    #     print(
+    #         "Wrote lagged predictive decomposition to "
+    #         f"{LAGGED_PREDICTION_DATA}."
+    #     )
+    #     print(
+    #         "Wrote lagged predictive decomposition plots to "
+    #         f"{LAGGED_PREDICTION_IMAGE_DIR}."
+    #     )
     # plot_theta_center_of_mass_velocity_series(
     #     CYLINDER_PATHS.in_gsd,
     #     CYLINDER_PATHS.theta_com_velocity_plot,
