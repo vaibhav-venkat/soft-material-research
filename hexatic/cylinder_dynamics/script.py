@@ -31,6 +31,7 @@ from .plotting import (
     plot_polar_source_residual_series,
     plot_polar_tangent_population_series,
     plot_restart_comparison_velocity_series,
+    plot_shell_polar_component_series,
     plot_shell_px_change_cumsum,
     plot_shell_px_change_decomposition,
     plot_theta_center_of_mass_velocity_series,
@@ -108,6 +109,15 @@ def _parse_args() -> argparse.Namespace:
             )
         ),
         help="Output image for R_x = V_x - U0 P_x residual diagnostics.",
+    )
+    parser.add_argument(
+        "--shell-polar-component-plot",
+        default=str(
+            CYLINDER_PATHS.x_com_velocity_plot.with_name(
+                "cylinder_shell_polar_component_series.png"
+            )
+        ),
+        help="Output image for shell P_x, P_theta, and P_r over time.",
     )
     parser.add_argument(
         "--polar-tangent-population-plot",
@@ -221,18 +231,23 @@ def main() -> None:
     #     shell_only=True,
     # )
     # print(f"Wrote x residual diagnostics plot to {args.x_residual_plot}.")
-    plot_polar_tangent_population_series(
-        filename=args.polar_tangent_population_plot
-    )
+    plot_shell_polar_component_series(filename=args.shell_polar_component_plot)
     print(
-        "Wrote tangent polarization population plot to "
-        f"{args.polar_tangent_population_plot}."
+        "Wrote shell polar component plot to "
+        f"{args.shell_polar_component_plot}."
     )
-    plot_polar_source_residual_series(filename=args.polar_source_residual_plot)
-    print(
-        "Wrote tangent polarization source residual plot to "
-        f"{args.polar_source_residual_plot}."
-    )
+    # plot_polar_tangent_population_series(
+    #     filename=args.polar_tangent_population_plot
+    # )
+    # print(
+    #     "Wrote tangent polarization population plot to "
+    #     f"{args.polar_tangent_population_plot}."
+    # )
+    # plot_polar_source_residual_series(filename=args.polar_source_residual_plot)
+    # print(
+    #     "Wrote tangent polarization source residual plot to "
+    #     f"{args.polar_source_residual_plot}."
+    # )
     # plot_orientation_autocorrelation_diagnostics(
     #     filename=args.orientation_autocorrelation_plot,
     #     relaxation_fit_mode="single",

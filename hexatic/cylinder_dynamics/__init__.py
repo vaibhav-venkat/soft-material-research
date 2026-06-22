@@ -34,6 +34,7 @@ from .plotting import (
     plot_polar_source_residual_series,
     plot_polar_tangent_population_series,
     plot_restart_comparison_velocity_series,
+    plot_shell_polar_component_series,
     plot_shell_px_change_cumsum,
     plot_shell_px_change_decomposition,
     plot_theta_center_of_mass_velocity_series,

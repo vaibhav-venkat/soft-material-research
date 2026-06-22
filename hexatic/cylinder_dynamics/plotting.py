@@ -81,6 +81,14 @@ class PolarTangentPopulationSeries:
 
 
 @dataclass(frozen=True)
+class ShellPolarComponentSeries:
+    steps: np.ndarray
+    px_shell: np.ndarray
+    ptheta_shell: np.ndarray
+    pr_shell: np.ndarray
+
+
+@dataclass(frozen=True)
 class PolarSourceResidualSeries:
     steps: np.ndarray
     source_x_shell: np.ndarray
@@ -382,6 +390,35 @@ def _shell_discrete_px_series(fields: ActiveMatterFields) -> tuple[np.ndarray, n
         px_values[frame_idx] = _masked_mean(px[frame_idx], shell_mask[frame_idx])
 
     return fields.steps, px_values
+
+
+def _shell_polar_component_series(fields: ActiveMatterFields) -> ShellPolarComponentSeries:
+    orientation = np.asarray(fields.direction_cylindrical, dtype=np.float64)
+    shell_mask = np.asarray(fields.shell_mask, dtype=bool)
+    px_shell = np.full(len(fields.steps), np.nan, dtype=np.float64)
+    ptheta_shell = np.full(len(fields.steps), np.nan, dtype=np.float64)
+    pr_shell = np.full(len(fields.steps), np.nan, dtype=np.float64)
+
+    for frame_idx in range(len(fields.steps)):
+        px_shell[frame_idx] = _masked_mean(
+            orientation[frame_idx, :, 0],
+            shell_mask[frame_idx],
+        )
+        ptheta_shell[frame_idx] = _masked_mean(
+            orientation[frame_idx, :, 2],
+            shell_mask[frame_idx],
+        )
+        pr_shell[frame_idx] = _masked_mean(
+            orientation[frame_idx, :, 1],
+            shell_mask[frame_idx],
+        )
+
+    return ShellPolarComponentSeries(
+        steps=np.asarray(fields.steps, dtype=np.int64),
+        px_shell=px_shell,
+        ptheta_shell=ptheta_shell,
+        pr_shell=pr_shell,
+    )
 
 
 def _polar_tangent_population_series(
@@ -1486,6 +1523,57 @@ def plot_shell_px_change_cumsum(
     axis.set_xlabel("Simulation step")
     axis.set_ylabel(r"Cumulative $\Delta P_x$")
     axis.set_title(r"Cumulative shell $P_x$ change decomposition")
+    axis.grid(True, ls="--", alpha=0.35)
+    axis.legend(loc="best")
+    fig.tight_layout()
+
+    if filename is None:
+        plt.show()
+    else:
+        output_path = Path(filename)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, dpi=200)
+        plt.close(fig)
+
+
+def plot_shell_polar_component_series(
+    active_matter_fields_file: str | Path = ACTIVE_MATTER_FIELDS_FILE,
+    filename: str | Path | None = CYLINDER_PATHS.x_com_velocity_plot.with_name(
+        "cylinder_shell_polar_component_series.png"
+    ),
+) -> None:
+    active_fields = _load_active_matter_fields(active_matter_fields_file)
+    if active_fields is None:
+        raise FileNotFoundError(active_matter_fields_file)
+
+    series = _shell_polar_component_series(active_fields)
+
+    fig, axis = plt.subplots(figsize=(10, 5))
+    axis.plot(
+        series.steps,
+        series.px_shell,
+        color="tab:blue",
+        linewidth=1.6,
+        label=r"$P_{x,\mathrm{shell}}(t)$",
+    )
+    axis.plot(
+        series.steps,
+        series.ptheta_shell,
+        color="tab:orange",
+        linewidth=1.6,
+        label=r"$P_{\theta,\mathrm{shell}}(t)$",
+    )
+    axis.plot(
+        series.steps,
+        series.pr_shell,
+        color="tab:green",
+        linewidth=1.6,
+        label=r"$P_{r,\mathrm{shell}}(t)$",
+    )
+    axis.axhline(0.0, color="black", linewidth=1.0, alpha=0.45)
+    axis.set_xlabel("Simulation step")
+    axis.set_ylabel("mean shell orientation")
+    axis.set_title("Shell cylindrical orientation components")
     axis.grid(True, ls="--", alpha=0.35)
     axis.legend(loc="best")
     fig.tight_layout()
