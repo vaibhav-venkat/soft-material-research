@@ -48,6 +48,23 @@ def generate_lattice(nx, ny, nz, lx, ly, lz):
     coords = np.vstack([xv.ravel(), yv.ravel(), zv.ravel()]).T
     return coords
 
+
+def random_uniform_quaternions(n, rng=np.random):
+    u1 = rng.rand(n)
+    u2 = rng.rand(n)
+    u3 = rng.rand(n)
+
+    # Shoemake method. Output order: (w, x, y, z)
+    qx = np.sqrt(1 - u1) * np.sin(2 * np.pi * u2)
+    qy = np.sqrt(1 - u1) * np.cos(2 * np.pi * u2)
+    qz = np.sqrt(u1) * np.sin(2 * np.pi * u3)
+    qw = np.sqrt(u1) * np.cos(2 * np.pi * u3)
+
+    q = np.column_stack([qw, qx, qy, qz])
+    q /= np.linalg.norm(q, axis=1)[:, None]
+    return q
+
+
 # Example: 4x4x4 grid with spacings 1.5, 2.0, and 1.0
 position = generate_lattice(
     Kx,
@@ -76,20 +93,7 @@ frame.particles.position = position
 frame.particles.diameter = [analysis.particle_diameter] * N
 # set orientation & MoI
 frame.particles.moment_inertia = [(1, 1, 1)] * N
-orientation_angle = 2.0 * np.pi * np.random.rand(N)
-phi = 2.0 * np.pi * np.random.rand(N)
-theta = 1.0 * np.pi * np.random.rand(N)
-sin_half_angle = np.sin(orientation_angle / 2.0)
-orient_quat = np.column_stack(
-    (
-        np.cos(orientation_angle / 2.0),
-        sin_half_angle * np.sin(theta) * np.cos(phi),
-        sin_half_angle * np.sin(theta) * np.sin(phi),
-        sin_half_angle * np.cos(theta),
-    )
-)
-orient_quat /= np.linalg.norm(orient_quat, axis=1)[:, np.newaxis]
-frame.particles.orientation = orient_quat
+frame.particles.orientation = random_uniform_quaternions(N)
 frame.particles.typeid = [0] * N
 frame.configuration.box = [Lx, L, L, 0, 0, 0]
 frame.particles.types = ["A"]
