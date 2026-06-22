@@ -70,6 +70,14 @@ class ShellPxChangeDecomposition:
 
 
 @dataclass(frozen=True)
+class AxialPxPopulationSeries:
+    steps: np.ndarray
+    all_particles: np.ndarray
+    shell: np.ndarray
+    core: np.ndarray
+
+
+@dataclass(frozen=True)
 class XResidualSeries:
     steps: np.ndarray
     residuals: np.ndarray
@@ -358,6 +366,28 @@ def _shell_discrete_px_series(fields: ActiveMatterFields) -> tuple[np.ndarray, n
         px_values[frame_idx] = _masked_mean(px[frame_idx], shell_mask[frame_idx])
 
     return fields.steps, px_values
+
+
+def _axial_px_population_series(fields: ActiveMatterFields) -> AxialPxPopulationSeries:
+    px = np.asarray(fields.direction_cylindrical[..., 0], dtype=np.float64)
+    shell_mask = np.asarray(fields.shell_mask, dtype=bool)
+    all_values = np.full(len(fields.steps), np.nan, dtype=np.float64)
+    shell_values = np.full(len(fields.steps), np.nan, dtype=np.float64)
+    core_values = np.full(len(fields.steps), np.nan, dtype=np.float64)
+
+    for frame_idx in range(len(fields.steps)):
+        finite = np.isfinite(px[frame_idx])
+        if np.any(finite):
+            all_values[frame_idx] = float(np.mean(px[frame_idx, finite]))
+        shell_values[frame_idx] = _masked_mean(px[frame_idx], shell_mask[frame_idx])
+        core_values[frame_idx] = _masked_mean(px[frame_idx], ~shell_mask[frame_idx])
+
+    return AxialPxPopulationSeries(
+        steps=np.asarray(fields.steps, dtype=np.int64),
+        all_particles=all_values,
+        shell=shell_values,
+        core=core_values,
+    )
 
 
 def _xtheta_group_indices(
@@ -1349,6 +1379,57 @@ def plot_shell_px_change_cumsum(
         plt.close(fig)
 
 
+def plot_axial_px_population_series(
+    active_matter_fields_file: str | Path = ACTIVE_MATTER_FIELDS_FILE,
+    filename: str | Path | None = CYLINDER_PATHS.x_com_velocity_plot.with_name(
+        "cylinder_axial_px_population_series.png"
+    ),
+) -> None:
+    active_fields = _load_active_matter_fields(active_matter_fields_file)
+    if active_fields is None:
+        raise FileNotFoundError(active_matter_fields_file)
+
+    series = _axial_px_population_series(active_fields)
+
+    fig, axis = plt.subplots(figsize=(10, 5))
+    axis.plot(
+        series.steps,
+        series.shell,
+        color="tab:blue",
+        linewidth=1.6,
+        label=r"$P_{x,\mathrm{shell}}(t)$",
+    )
+    axis.plot(
+        series.steps,
+        series.core,
+        color="tab:orange",
+        linewidth=1.6,
+        label=r"$P_{x,\mathrm{core}}(t)$",
+    )
+    axis.plot(
+        series.steps,
+        series.all_particles,
+        color="tab:green",
+        linewidth=1.6,
+        label=r"$P_{x,\mathrm{all}}(t)$",
+    )
+    axis.axhline(0.0, color="black", linewidth=1.0, alpha=0.45)
+    axis.set_xlabel("Simulation step")
+    axis.set_ylabel(r"mean axial orientation $P_x$")
+    axis.set_title(r"Axial orientation by population")
+    axis.grid(True, ls="--", alpha=0.35)
+    axis.legend(loc="best")
+    fig.tight_layout()
+
+    if filename is None:
+        plt.show()
+    else:
+        output_path = Path(filename)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, dpi=200)
+        plt.close(fig)
+
+
 def plot_x_residual_diagnostics(
     input_gsd: str | Path = CYLINDER_PATHS.in_gsd,
     active_matter_fields_file: str | Path = ACTIVE_MATTER_FIELDS_FILE,
@@ -1631,6 +1712,51 @@ def _print_initial_stress_divergence_correlations(
     print(f"  corr(contribution_b, stress_div_b) = {contribution_corr:.8g}")
 
 
+def _print_initial_px_means(
+    active_fields: ActiveMatterFields,
+    frame_idx: int,
+) -> None:
+    steps = np.asarray(active_fields.steps, dtype=np.int64)
+    if steps.size == 0:
+        return
+    frame_idx = int(np.clip(frame_idx, 0, steps.size - 1))
+    shell_mask = np.asarray(active_fields.shell_mask[frame_idx], dtype=bool)
+    orientation = np.asarray(
+        active_fields.direction_cylindrical[frame_idx],
+        dtype=np.float64,
+    )
+    core_mask = ~shell_mask
+
+    def component_means(mask: np.ndarray | None = None) -> tuple[float, float, float]:
+        if mask is None:
+            return tuple(float(np.nanmean(orientation[:, idx])) for idx in range(3))
+        return tuple(_masked_mean(orientation[:, idx], mask) for idx in range(3))
+
+    all_means = component_means()
+    shell_means = component_means(shell_mask)
+    core_means = component_means(core_mask)
+
+    print(f"Initial cylindrical orientation means (step {int(steps[frame_idx])}):")
+    print(
+        "  "
+        f"P_x_all = {all_means[0]:.8g}, "
+        f"P_theta_all = {all_means[1]:.8g}, "
+        f"P_r_all = {all_means[2]:.8g}"
+    )
+    print(
+        "  "
+        f"P_x_shell = {shell_means[0]:.8g}, "
+        f"P_theta_shell = {shell_means[1]:.8g}, "
+        f"P_r_shell = {shell_means[2]:.8g}"
+    )
+    print(
+        "  "
+        f"P_x_core = {core_means[0]:.8g}, "
+        f"P_theta_core = {core_means[1]:.8g}, "
+        f"P_r_core = {core_means[2]:.8g}"
+    )
+
+
 def plot_initial_cylinder_spatial_maps(
     active_matter_fields_file: str | Path = ACTIVE_MATTER_FIELDS_FILE,
     filename: str | Path | None = CYLINDER_PATHS.x_com_velocity_plot.with_name(
@@ -1653,6 +1779,7 @@ def plot_initial_cylinder_spatial_maps(
         chirality_npz=chirality_npz,
         stress_npz=stress_npz,
     )
+    _print_initial_px_means(active_fields, frame_idx)
     _print_initial_stress_divergence_correlations(maps)
     panels = [
         (maps.px, r"$P_x(x,\theta)$", r"$P_x$"),
@@ -1717,6 +1844,7 @@ def plot_initial_local_balance_maps(
         chirality_npz=chirality_npz,
         stress_npz=stress_npz,
     )
+    _print_initial_px_means(active_fields, frame_idx)
     local_active = float(cylinder.U0) * maps.px
     local_stress = maps.stress_divergence_x / float(cylinder.GAMMA)
     local_sum = local_active + local_stress

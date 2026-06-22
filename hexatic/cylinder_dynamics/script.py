@@ -19,6 +19,7 @@ from hexatic.lagged_prediction import (
 from .plotting import (
     animate_outer_shell_xtheta_theta_velocity,
     animate_outer_shell_xtheta_x_velocity,
+    plot_axial_px_population_series,
     plot_center_of_mass_series,
     plot_disclination_center_of_mass_series,
     plot_disclination_count_series,
@@ -108,6 +109,15 @@ def _parse_args() -> argparse.Namespace:
         help="Output image for R_x = V_x - U0 P_x residual diagnostics.",
     )
     parser.add_argument(
+        "--axial-px-population-plot",
+        default=str(
+            CYLINDER_PATHS.x_com_velocity_plot.with_name(
+                "cylinder_axial_px_population_series.png"
+            )
+        ),
+        help="Output image for P_x(t) across all, shell, and core populations.",
+    )
+    parser.add_argument(
         "--orientation-autocorrelation-plot",
         default=str(
             CYLINDER_PATHS.x_com_velocity_plot.with_name(
@@ -174,17 +184,17 @@ def main() -> None:
     # print(f"Wrote OVITO dynamic values file to {CYLINDER_PATHS.dynamic_values_gsd}.")
     # plot_center_of_mass_series(CYLINDER_PATHS.in_gsd, CYLINDER_PATHS.com_plot)
     # print(f"Wrote center-of-mass plot to {CYLINDER_PATHS.com_plot}.")
-    plot_velocity_series(
-        CYLINDER_PATHS.in_gsd,
-        CYLINDER_PATHS.x_com_velocity_plot,
-        shell_only=True,
-        relaxation_fit_mode="single",
-        align_with_px=True,
-    )
-    print(
-        "Wrote x center-of-mass velocity plot to "
-        f"{CYLINDER_PATHS.x_com_velocity_plot}."
-    )
+    # plot_velocity_series(
+    #     CYLINDER_PATHS.in_gsd,
+    #     CYLINDER_PATHS.x_com_velocity_plot,
+    #     shell_only=True,
+    #     relaxation_fit_mode="single",
+    #     align_with_px=True,
+    # )
+    # print(
+    #     "Wrote x center-of-mass velocity plot to "
+    #     f"{CYLINDER_PATHS.x_com_velocity_plot}."
+    # )
     # plot_shell_px_change_decomposition(filename=args.shell_px_change_plot)
     # print(
     #     "Wrote shell P_x change decomposition plot to "
@@ -201,6 +211,8 @@ def main() -> None:
     #     shell_only=True,
     # )
     # print(f"Wrote x residual diagnostics plot to {args.x_residual_plot}.")
+    plot_axial_px_population_series(filename=args.axial_px_population_plot)
+    print(f"Wrote axial P_x population plot to {args.axial_px_population_plot}.")
     # plot_orientation_autocorrelation_diagnostics(
     #     filename=args.orientation_autocorrelation_plot,
     #     relaxation_fit_mode="single",

@@ -22,6 +22,7 @@ from hexatic.lagged_prediction import (
 from .plotting import (
     animate_outer_shell_xtheta_theta_velocity,
     animate_outer_shell_xtheta_x_velocity,
+    plot_axial_px_population_series,
     plot_center_of_mass_series,
     plot_disclination_center_of_mass_series,
     plot_disclination_count_series,
