@@ -22,7 +22,6 @@ from hexatic.lagged_prediction import (
 from .plotting import (
     animate_outer_shell_xtheta_theta_velocity,
     animate_outer_shell_xtheta_x_velocity,
-    plot_axial_px_population_series,
     plot_center_of_mass_series,
     plot_disclination_center_of_mass_series,
     plot_disclination_count_series,
@@ -32,6 +31,8 @@ from .plotting import (
     plot_initial_local_balance_maps,
     plot_net_disclination_charge_series,
     plot_orientation_autocorrelation_diagnostics,
+    plot_polar_source_residual_series,
+    plot_polar_tangent_population_series,
     plot_restart_comparison_velocity_series,
     plot_shell_px_change_cumsum,
     plot_shell_px_change_decomposition,

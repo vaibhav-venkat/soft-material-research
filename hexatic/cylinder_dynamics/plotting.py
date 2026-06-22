@@ -70,11 +70,27 @@ class ShellPxChangeDecomposition:
 
 
 @dataclass(frozen=True)
-class AxialPxPopulationSeries:
+class PolarTangentPopulationSeries:
     steps: np.ndarray
-    all_particles: np.ndarray
-    shell: np.ndarray
-    core: np.ndarray
+    p_tangent_all: np.ndarray
+    p_tangent_shell: np.ndarray
+    p_tangent_core: np.ndarray
+    alpha_all: np.ndarray
+    alpha_shell: np.ndarray
+    alpha_core: np.ndarray
+
+
+@dataclass(frozen=True)
+class PolarSourceResidualSeries:
+    steps: np.ndarray
+    source_x_shell: np.ndarray
+    source_theta_shell: np.ndarray
+    source_x_core: np.ndarray
+    source_theta_core: np.ndarray
+    tau_rot_shell: float
+    tau_rot_core: float
+    lambda_shell: float
+    lambda_core: float
 
 
 @dataclass(frozen=True)
@@ -368,25 +384,129 @@ def _shell_discrete_px_series(fields: ActiveMatterFields) -> tuple[np.ndarray, n
     return fields.steps, px_values
 
 
-def _axial_px_population_series(fields: ActiveMatterFields) -> AxialPxPopulationSeries:
-    px = np.asarray(fields.direction_cylindrical[..., 0], dtype=np.float64)
+def _polar_tangent_population_series(
+    fields: ActiveMatterFields,
+) -> PolarTangentPopulationSeries:
+    orientation = np.asarray(fields.direction_cylindrical, dtype=np.float64)
+    px = orientation[..., 0]
+    ptheta = orientation[..., 2]
     shell_mask = np.asarray(fields.shell_mask, dtype=bool)
-    all_values = np.full(len(fields.steps), np.nan, dtype=np.float64)
-    shell_values = np.full(len(fields.steps), np.nan, dtype=np.float64)
-    core_values = np.full(len(fields.steps), np.nan, dtype=np.float64)
+    px_all = np.full(len(fields.steps), np.nan, dtype=np.float64)
+    ptheta_all = np.full(len(fields.steps), np.nan, dtype=np.float64)
+    px_shell = np.full(len(fields.steps), np.nan, dtype=np.float64)
+    ptheta_shell = np.full(len(fields.steps), np.nan, dtype=np.float64)
+    px_core = np.full(len(fields.steps), np.nan, dtype=np.float64)
+    ptheta_core = np.full(len(fields.steps), np.nan, dtype=np.float64)
 
     for frame_idx in range(len(fields.steps)):
-        finite = np.isfinite(px[frame_idx])
+        finite = np.isfinite(px[frame_idx]) & np.isfinite(ptheta[frame_idx])
         if np.any(finite):
-            all_values[frame_idx] = float(np.mean(px[frame_idx, finite]))
-        shell_values[frame_idx] = _masked_mean(px[frame_idx], shell_mask[frame_idx])
-        core_values[frame_idx] = _masked_mean(px[frame_idx], ~shell_mask[frame_idx])
+            px_all[frame_idx] = float(np.mean(px[frame_idx, finite]))
+            ptheta_all[frame_idx] = float(np.mean(ptheta[frame_idx, finite]))
+        px_shell[frame_idx] = _masked_mean(px[frame_idx], shell_mask[frame_idx])
+        ptheta_shell[frame_idx] = _masked_mean(ptheta[frame_idx], shell_mask[frame_idx])
+        px_core[frame_idx] = _masked_mean(px[frame_idx], ~shell_mask[frame_idx])
+        ptheta_core[frame_idx] = _masked_mean(ptheta[frame_idx], ~shell_mask[frame_idx])
 
-    return AxialPxPopulationSeries(
+    return PolarTangentPopulationSeries(
         steps=np.asarray(fields.steps, dtype=np.int64),
-        all_particles=all_values,
-        shell=shell_values,
-        core=core_values,
+        p_tangent_all=np.sqrt(px_all**2 + ptheta_all**2),
+        p_tangent_shell=np.sqrt(px_shell**2 + ptheta_shell**2),
+        p_tangent_core=np.sqrt(px_core**2 + ptheta_core**2),
+        alpha_all=np.arctan2(ptheta_all, px_all),
+        alpha_shell=np.arctan2(ptheta_shell, px_shell),
+        alpha_core=np.arctan2(ptheta_core, px_core),
+    )
+
+
+def _tangent_mean_components(
+    fields: ActiveMatterFields,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    orientation = np.asarray(fields.direction_cylindrical, dtype=np.float64)
+    px = orientation[..., 0]
+    ptheta = orientation[..., 2]
+    shell_mask = np.asarray(fields.shell_mask, dtype=bool)
+    n_frames = len(fields.steps)
+    px_all = np.full(n_frames, np.nan, dtype=np.float64)
+    ptheta_all = np.full(n_frames, np.nan, dtype=np.float64)
+    px_shell = np.full(n_frames, np.nan, dtype=np.float64)
+    ptheta_shell = np.full(n_frames, np.nan, dtype=np.float64)
+    px_core = np.full(n_frames, np.nan, dtype=np.float64)
+    ptheta_core = np.full(n_frames, np.nan, dtype=np.float64)
+
+    for frame_idx in range(n_frames):
+        finite = np.isfinite(px[frame_idx]) & np.isfinite(ptheta[frame_idx])
+        masks = [
+            (finite, px_all, ptheta_all),
+            (finite & shell_mask[frame_idx], px_shell, ptheta_shell),
+            (finite & ~shell_mask[frame_idx], px_core, ptheta_core),
+        ]
+        for mask, px_out, ptheta_out in masks:
+            if np.any(mask):
+                px_out[frame_idx] = float(np.mean(px[frame_idx, mask]))
+                ptheta_out[frame_idx] = float(np.mean(ptheta[frame_idx, mask]))
+
+    return px_all, ptheta_all, px_shell, ptheta_shell, px_core, ptheta_core
+
+
+def _polar_source_residual_series(
+    fields: ActiveMatterFields,
+) -> PolarSourceResidualSeries:
+    steps = np.asarray(fields.steps, dtype=np.int64)
+    (
+        _px_all,
+        _ptheta_all,
+        px_shell,
+        ptheta_shell,
+        px_core,
+        ptheta_core,
+    ) = _tangent_mean_components(fields)
+    shell_correlation = _orientation_autocorrelation_series(
+        fields,
+        "shell",
+        "shell at t",
+    )
+    core_correlation = _orientation_autocorrelation_series(
+        fields,
+        "core",
+        "core at t",
+    )
+    tau_shell = float(shell_correlation.tau_p)
+    tau_core = float(core_correlation.tau_p)
+    lambda_shell = (
+        1.0 / tau_shell
+        if np.isfinite(tau_shell) and tau_shell > 0.0
+        else np.nan
+    )
+    lambda_core = (
+        1.0 / tau_core
+        if np.isfinite(tau_core) and tau_core > 0.0
+        else np.nan
+    )
+    dt = np.diff(steps).astype(np.float64) * float(cylinder.TIMESTEP)
+
+    def source_component(values: np.ndarray, tau_rot: float) -> np.ndarray:
+        source = np.full(max(0, values.size - 1), np.nan, dtype=np.float64)
+        valid_tau = np.isfinite(tau_rot) and tau_rot > 0.0
+        if not valid_tau:
+            return source
+        finite = np.isfinite(values[:-1]) & np.isfinite(values[1:]) & np.isfinite(dt)
+        lambda_dt = 1.0 - np.exp(-dt / tau_rot)
+        source[finite] = values[1:][finite] - values[:-1][finite] + (
+            lambda_dt[finite] * values[:-1][finite]
+        )
+        return source
+
+    return PolarSourceResidualSeries(
+        steps=steps[:-1],
+        source_x_shell=source_component(px_shell, tau_shell),
+        source_theta_shell=source_component(ptheta_shell, tau_shell),
+        source_x_core=source_component(px_core, tau_core),
+        source_theta_core=source_component(ptheta_core, tau_core),
+        tau_rot_shell=tau_shell,
+        tau_rot_core=tau_core,
+        lambda_shell=lambda_shell,
+        lambda_core=lambda_core,
     )
 
 
@@ -1379,46 +1499,164 @@ def plot_shell_px_change_cumsum(
         plt.close(fig)
 
 
-def plot_axial_px_population_series(
+def plot_polar_tangent_population_series(
     active_matter_fields_file: str | Path = ACTIVE_MATTER_FIELDS_FILE,
     filename: str | Path | None = CYLINDER_PATHS.x_com_velocity_plot.with_name(
-        "cylinder_axial_px_population_series.png"
+        "cylinder_polar_tangent_population_series.png"
     ),
 ) -> None:
     active_fields = _load_active_matter_fields(active_matter_fields_file)
     if active_fields is None:
         raise FileNotFoundError(active_matter_fields_file)
 
-    series = _axial_px_population_series(active_fields)
+    series = _polar_tangent_population_series(active_fields)
 
-    fig, axis = plt.subplots(figsize=(10, 5))
-    axis.plot(
+    fig, (magnitude_axis, angle_axis) = plt.subplots(
+        2,
+        1,
+        figsize=(10, 7),
+        sharex=True,
+    )
+    magnitude_axis.plot(
         series.steps,
-        series.shell,
+        series.p_tangent_shell,
         color="tab:blue",
         linewidth=1.6,
-        label=r"$P_{x,\mathrm{shell}}(t)$",
+        label=r"$P_{\mathrm{tangent,shell}}(t)$",
     )
-    axis.plot(
+    magnitude_axis.plot(
         series.steps,
-        series.core,
+        series.p_tangent_core,
         color="tab:orange",
         linewidth=1.6,
-        label=r"$P_{x,\mathrm{core}}(t)$",
+        label=r"$P_{\mathrm{tangent,core}}(t)$",
     )
-    axis.plot(
+    magnitude_axis.set_ylabel(r"$P_{\mathrm{tangent}}$")
+    magnitude_axis.set_title(r"Mean tangent-plane polarization magnitude")
+    magnitude_axis.grid(True, ls="--", alpha=0.35)
+    magnitude_axis.legend(loc="best")
+
+    angle_axis.plot(
         series.steps,
-        series.all_particles,
-        color="tab:green",
+        series.alpha_shell,
+        color="tab:blue",
         linewidth=1.6,
-        label=r"$P_{x,\mathrm{all}}(t)$",
+        label=r"$\alpha_{\mathrm{shell}}(t)$",
     )
-    axis.axhline(0.0, color="black", linewidth=1.0, alpha=0.45)
-    axis.set_xlabel("Simulation step")
-    axis.set_ylabel(r"mean axial orientation $P_x$")
-    axis.set_title(r"Axial orientation by population")
-    axis.grid(True, ls="--", alpha=0.35)
-    axis.legend(loc="best")
+    angle_axis.plot(
+        series.steps,
+        series.alpha_core,
+        color="tab:orange",
+        linewidth=1.6,
+        label=r"$\alpha_{\mathrm{core}}(t)$",
+    )
+    angle_axis.axhline(0.0, color="black", linewidth=1.0, alpha=0.35)
+    angle_axis.set_xlabel("Simulation step")
+    angle_axis.set_ylabel(r"$\alpha = \mathrm{atan2}(P_\theta, P_x)$")
+    angle_axis.set_title(r"Mean tangent-plane polarization angle")
+    angle_axis.grid(True, ls="--", alpha=0.35)
+    angle_axis.legend(loc="best")
+    fig.tight_layout()
+
+    if filename is None:
+        plt.show()
+    else:
+        output_path = Path(filename)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, dpi=200)
+        plt.close(fig)
+
+
+def plot_polar_source_residual_series(
+    active_matter_fields_file: str | Path = ACTIVE_MATTER_FIELDS_FILE,
+    filename: str | Path | None = CYLINDER_PATHS.x_com_velocity_plot.with_name(
+        "cylinder_polar_source_residual_series.png"
+    ),
+) -> None:
+    active_fields = _load_active_matter_fields(active_matter_fields_file)
+    if active_fields is None:
+        raise FileNotFoundError(active_matter_fields_file)
+
+    source = _polar_source_residual_series(active_fields)
+    shell_magnitude = np.sqrt(source.source_x_shell**2 + source.source_theta_shell**2)
+    core_magnitude = np.sqrt(source.source_x_core**2 + source.source_theta_core**2)
+
+    print("Polar source residual decorrelation rates:")
+    print(
+        f"  shell tau_rot = {source.tau_rot_shell:.8g}, "
+        f"lambda = {source.lambda_shell:.8g}"
+    )
+    print(
+        f"  core tau_rot = {source.tau_rot_core:.8g}, "
+        f"lambda = {source.lambda_core:.8g}"
+    )
+
+    fig, (x_axis, theta_axis, magnitude_axis) = plt.subplots(
+        3,
+        1,
+        figsize=(10, 8.2),
+        sharex=True,
+    )
+    x_axis.plot(
+        source.steps,
+        source.source_x_shell,
+        color="tab:blue",
+        linewidth=1.5,
+        label=r"$S_{x,\mathrm{shell}}(t)$",
+    )
+    x_axis.plot(
+        source.steps,
+        source.source_x_core,
+        color="tab:orange",
+        linewidth=1.5,
+        label=r"$S_{x,\mathrm{core}}(t)$",
+    )
+    x_axis.axhline(0.0, color="black", linewidth=1.0, alpha=0.35)
+    x_axis.set_ylabel(r"$S_x$")
+    x_axis.set_title(
+        r"Polar source residual, "
+        r"$S_T=\Delta P_T+(1-e^{-\Delta t/\tau_{\rm rot}})P_T$"
+    )
+    x_axis.grid(True, ls="--", alpha=0.35)
+    x_axis.legend(loc="best")
+
+    theta_axis.plot(
+        source.steps,
+        source.source_theta_shell,
+        color="tab:blue",
+        linewidth=1.5,
+        label=r"$S_{\theta,\mathrm{shell}}(t)$",
+    )
+    theta_axis.plot(
+        source.steps,
+        source.source_theta_core,
+        color="tab:orange",
+        linewidth=1.5,
+        label=r"$S_{\theta,\mathrm{core}}(t)$",
+    )
+    theta_axis.axhline(0.0, color="black", linewidth=1.0, alpha=0.35)
+    theta_axis.set_ylabel(r"$S_\theta$")
+    theta_axis.grid(True, ls="--", alpha=0.35)
+    theta_axis.legend(loc="best")
+
+    magnitude_axis.plot(
+        source.steps,
+        shell_magnitude,
+        color="tab:blue",
+        linewidth=1.5,
+        label=r"$|S_T|_{\mathrm{shell}}(t)$",
+    )
+    magnitude_axis.plot(
+        source.steps,
+        core_magnitude,
+        color="tab:orange",
+        linewidth=1.5,
+        label=r"$|S_T|_{\mathrm{core}}(t)$",
+    )
+    magnitude_axis.set_xlabel("Simulation step")
+    magnitude_axis.set_ylabel(r"$|S_T|$")
+    magnitude_axis.grid(True, ls="--", alpha=0.35)
+    magnitude_axis.legend(loc="best")
     fig.tight_layout()
 
     if filename is None:
@@ -1740,20 +1978,20 @@ def _print_initial_px_means(
     print(
         "  "
         f"P_x_all = {all_means[0]:.8g}, "
-        f"P_theta_all = {all_means[1]:.8g}, "
-        f"P_r_all = {all_means[2]:.8g}"
+        f"P_theta_all = {all_means[2]:.8g}, "
+        f"P_r_all = {all_means[1]:.8g}"
     )
     print(
         "  "
         f"P_x_shell = {shell_means[0]:.8g}, "
-        f"P_theta_shell = {shell_means[1]:.8g}, "
-        f"P_r_shell = {shell_means[2]:.8g}"
+        f"P_theta_shell = {shell_means[2]:.8g}, "
+        f"P_r_shell = {shell_means[1]:.8g}"
     )
     print(
         "  "
         f"P_x_core = {core_means[0]:.8g}, "
-        f"P_theta_core = {core_means[1]:.8g}, "
-        f"P_r_core = {core_means[2]:.8g}"
+        f"P_theta_core = {core_means[2]:.8g}, "
+        f"P_r_core = {core_means[1]:.8g}"
     )
 
 

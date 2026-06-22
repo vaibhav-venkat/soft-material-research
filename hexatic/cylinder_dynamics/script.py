@@ -19,7 +19,6 @@ from hexatic.lagged_prediction import (
 from .plotting import (
     animate_outer_shell_xtheta_theta_velocity,
     animate_outer_shell_xtheta_x_velocity,
-    plot_axial_px_population_series,
     plot_center_of_mass_series,
     plot_disclination_center_of_mass_series,
     plot_disclination_count_series,
@@ -29,6 +28,8 @@ from .plotting import (
     plot_initial_local_balance_maps,
     plot_net_disclination_charge_series,
     plot_orientation_autocorrelation_diagnostics,
+    plot_polar_source_residual_series,
+    plot_polar_tangent_population_series,
     plot_restart_comparison_velocity_series,
     plot_shell_px_change_cumsum,
     plot_shell_px_change_decomposition,
@@ -109,13 +110,22 @@ def _parse_args() -> argparse.Namespace:
         help="Output image for R_x = V_x - U0 P_x residual diagnostics.",
     )
     parser.add_argument(
-        "--axial-px-population-plot",
+        "--polar-tangent-population-plot",
         default=str(
             CYLINDER_PATHS.x_com_velocity_plot.with_name(
-                "cylinder_axial_px_population_series.png"
+                "cylinder_polar_tangent_population_series.png"
             )
         ),
-        help="Output image for P_x(t) across all, shell, and core populations.",
+        help="Output image for tangent polarization magnitude and angle over time.",
+    )
+    parser.add_argument(
+        "--polar-source-residual-plot",
+        default=str(
+            CYLINDER_PATHS.x_com_velocity_plot.with_name(
+                "cylinder_polar_source_residual_series.png"
+            )
+        ),
+        help="Output image for tangent polarization source residual over time.",
     )
     parser.add_argument(
         "--orientation-autocorrelation-plot",
@@ -211,8 +221,18 @@ def main() -> None:
     #     shell_only=True,
     # )
     # print(f"Wrote x residual diagnostics plot to {args.x_residual_plot}.")
-    plot_axial_px_population_series(filename=args.axial_px_population_plot)
-    print(f"Wrote axial P_x population plot to {args.axial_px_population_plot}.")
+    plot_polar_tangent_population_series(
+        filename=args.polar_tangent_population_plot
+    )
+    print(
+        "Wrote tangent polarization population plot to "
+        f"{args.polar_tangent_population_plot}."
+    )
+    plot_polar_source_residual_series(filename=args.polar_source_residual_plot)
+    print(
+        "Wrote tangent polarization source residual plot to "
+        f"{args.polar_source_residual_plot}."
+    )
     # plot_orientation_autocorrelation_diagnostics(
     #     filename=args.orientation_autocorrelation_plot,
     #     relaxation_fit_mode="single",
