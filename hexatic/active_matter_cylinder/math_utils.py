@@ -197,5 +197,3 @@ def _cylindrical_plot_vectors(points: np.ndarray, vectors: np.ndarray) -> np.nda
         where=radii > 0.0,
     )
     return np.column_stack((vectors[:, 0], radial, angular))
-
-

@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-
+import numpy as np
 try:
     from .project import CYLINDER_OUTPUT_DIR, IMAGE_OUTPUT_DIR
 except ImportError:
@@ -20,7 +20,7 @@ TIMESTEP = 1e-6
 ROTATIONAL_DIFFUSION_PERIOD = 10
 TRAJECTORY_WRITE_PERIOD = int(1e5)
 
-RUN_STEPS = int(1e7)
+RUN_STEPS = int(1e8)
 LATTICE_SPACING = 2.0 ** (1.0 / 6.0) + 0.5
 
 
@@ -61,7 +61,7 @@ class CylinderAnalysisConfig:
     disclination_charge_component: int = 2
     sigma: float = SIGMA
     particle_diameter: float = PARTICLE_DIAMETER
-    cylinder_radius: float = 10.0 * 2.0 ** (1.0 / 6.0)
+    cylinder_radius: float = 10.0 * PARTICLE_DIAMETER
     wall_cutoff: float = 2.0 ** (1.0 / 6.0) * SIGMA
     min_neighbor_count_radius: float = wall_cutoff
     max_neighbor_count_radius: float = 2.0 ** (7.0 / 6.0) * SIGMA

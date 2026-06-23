@@ -188,14 +188,14 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     args = _parse_args()
 
-    # write_active_matter_field_outputs(
-    #     CYLINDER_PATHS.in_gsd,
-    #     coordinate_system="xrtheta"
-    # )
-    # print(
-    #     "Wrote active matter fields to "
-    #     f"{ACTIVE_DATA_DIR / 'active_matter_fields.npz'}."
-    # )
+    write_active_matter_field_outputs(
+        CYLINDER_PATHS.in_gsd,
+        coordinate_system="xrtheta"
+    )
+    print(
+        "Wrote active matter fields to "
+        f"{ACTIVE_DATA_DIR / 'active_matter_fields.npz'}."
+    )
     # print(
     #     "Wrote active matter flux density plots to "
     #     f"{ACTIVE_IMAGE_DIR / 'flux'}."
@@ -204,17 +204,17 @@ def main() -> None:
     # print(f"Wrote OVITO dynamic values file to {CYLINDER_PATHS.dynamic_values_gsd}.")
     # plot_center_of_mass_series(CYLINDER_PATHS.in_gsd, CYLINDER_PATHS.com_plot)
     # print(f"Wrote center-of-mass plot to {CYLINDER_PATHS.com_plot}.")
-    plot_velocity_series(
-        CYLINDER_PATHS.in_gsd,
-        CYLINDER_PATHS.x_com_velocity_plot,
-        shell_only=True,
-        relaxation_fit_mode="single",
-        align_with_px=True,
-    )
-    print(
-        "Wrote x center-of-mass velocity plot to "
-        f"{CYLINDER_PATHS.x_com_velocity_plot}."
-    )
+    # plot_velocity_series(
+    #     CYLINDER_PATHS.in_gsd,
+    #     CYLINDER_PATHS.x_com_velocity_plot,
+    #     shell_only=True,
+    #     relaxation_fit_mode="single",
+    #     align_with_px=True,
+    # )
+    # print(
+    #     "Wrote x center-of-mass velocity plot to "
+    #     f"{CYLINDER_PATHS.x_com_velocity_plot}."
+    # )
     # plot_shell_px_change_decomposition(filename=args.shell_px_change_plot)
     # print(
     #     "Wrote shell P_x change decomposition plot to "
@@ -231,11 +231,11 @@ def main() -> None:
     #     shell_only=True,
     # )
     # print(f"Wrote x residual diagnostics plot to {args.x_residual_plot}.")
-    plot_shell_polar_component_series(filename=args.shell_polar_component_plot)
-    print(
-        "Wrote shell polar component plot to "
-        f"{args.shell_polar_component_plot}."
-    )
+    # plot_shell_polar_component_series(filename=args.shell_polar_component_plot)
+    # print(
+    #     "Wrote shell polar component plot to "
+    #     f"{args.shell_polar_component_plot}."
+    # )
     # plot_polar_tangent_population_series(
     #     filename=args.polar_tangent_population_plot
     # )
@@ -263,16 +263,16 @@ def main() -> None:
     #     stress_npz=args.initial_spatial_stress_npz,
     # )
     # print(f"Wrote initial cylinder spatial maps to {args.initial_spatial_maps_plot}.")
-    plot_initial_local_balance_maps(
-        filename=args.initial_local_balance_plot,
-        frame_idx=args.initial_spatial_frame,
-        chirality_npz=args.initial_spatial_chirality_npz,
-        stress_npz=args.initial_spatial_stress_npz,
-    )
-    print(
-        "Wrote initial local active-stress balance maps to "
-        f"{args.initial_local_balance_plot}."
-    )
+    # plot_initial_local_balance_maps(
+    #     filename=args.initial_local_balance_plot,
+    #     frame_idx=args.initial_spatial_frame,
+    #     chirality_npz=args.initial_spatial_chirality_npz,
+    #     stress_npz=args.initial_spatial_stress_npz,
+    # )
+    # print(
+    #     "Wrote initial local active-stress balance maps to "
+    #     f"{args.initial_local_balance_plot}."
+    # )
     # plot_restart_comparison_velocity_series(
     #     CYLINDER_PATHS.in_gsd,
     #     args.restart_comparison_gsd,

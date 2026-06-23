@@ -48,7 +48,6 @@ def generate_lattice(nx, ny, nz, lx, ly, lz):
     coords = np.vstack([xv.ravel(), yv.ravel(), zv.ravel()]).T
     return coords
 
-
 def random_uniform_quaternions(n, rng=np.random):
     u1 = rng.rand(n)
     u2 = rng.rand(n)
