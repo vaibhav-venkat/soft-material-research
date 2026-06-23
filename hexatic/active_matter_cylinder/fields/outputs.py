@@ -57,6 +57,7 @@ def write_active_matter_field_outputs(
     dz: float = ACTIVE_GRID_DZ,
     coordinate_system: str = "xyz",
     shear_theta_bins: int = ACTIVE_FLUX_PLOT_THETA_BINS,
+    plot = False,
 ) -> CartesianFluxComparison:
     data_path = Path(data_dir)
     fields = active_matter_field_series(
@@ -70,10 +71,6 @@ def write_active_matter_field_outputs(
         data_path / "active_matter_fields.npz",
         pocket_radius=pocket_radius,
     )
-    plot_active_matter_fields(fields, image_dir=image_dir)
-    if write_movies:
-        plot_active_matter_movies(fields, image_dir=image_dir, fps=movie_fps)
-
     comparison = compute_cartesian_flux_comparison(
         input_gsd,
         pocket_radius=pocket_radius,
@@ -81,11 +78,6 @@ def write_active_matter_field_outputs(
         dy=dy,
         dz=dz,
         frame_index=frame_index if frame_index != -1 else -2,
-    )
-    plot_cartesian_flux_comparison(
-        comparison,
-        image_dir=image_dir,
-        coordinate_system=coordinate_system,
     )
     shear_decomposition = compute_shear_flux_decomposition(
         input_gsd,
@@ -99,20 +91,29 @@ def write_active_matter_field_outputs(
         shear_decomposition,
         data_path / "shear_flux_decomposition.npz",
     )
-    plot_shear_flux_decomposition(
-        shear_decomposition,
-        image_dir=image_dir,
-    )
-    plot_shear_stress_tensor_components(
-        shear_decomposition,
-        image_dir=image_dir,
-    )
-    plot_shear_flux_fraction(
-        shear_decomposition,
-        image_dir=image_dir,
-    )
-    plot_radial_j_integral_comparison(
-        shear_decomposition,
-        image_dir=image_dir,
-    )
+    if plot:
+        plot_active_matter_fields(fields, image_dir=image_dir)
+        plot_cartesian_flux_comparison(
+            comparison,
+            image_dir=image_dir,
+            coordinate_system=coordinate_system,
+        )
+        if write_movies:
+            plot_active_matter_movies(fields, image_dir=image_dir, fps=movie_fps)
+        plot_shear_flux_decomposition(
+            shear_decomposition,
+            image_dir=image_dir,
+        )
+        plot_shear_stress_tensor_components(
+            shear_decomposition,
+            image_dir=image_dir,
+        )
+        plot_shear_flux_fraction(
+            shear_decomposition,
+            image_dir=image_dir,
+        )
+        plot_radial_j_integral_comparison(
+            shear_decomposition,
+            image_dir=image_dir,
+        )
     return comparison
