@@ -1,5 +1,7 @@
 import argparse
 
+import numpy as np
+
 from hexatic.active_matter_cylinder import (
     ACTIVE_DATA_DIR,
     ACTIVE_IMAGE_DIR,
@@ -7,9 +9,16 @@ from hexatic.active_matter_cylinder import (
     save_shear_flux_decomposition_series,
     write_active_matter_field_outputs,
 )
-from hexatic.chirality import CHIRALITY_DATA_DIR, write_chirality_outputs, ChiralityConfig
+from hexatic.chirality import (
+    CHIRALITY_DATA_DIR,
+    CHIRALITY_IMAGE_DIR,
+    ChiralityConfig,
+    compute_translation_chirality_trajectory,
+    write_translation_chirality_measure_outputs,
+    write_chirality_outputs,
+)
 
-from .common import CYLINDER_PATHS
+from .common import CYLINDER, CYLINDER_PATHS
 from .gsd_io import write_dynamic_values_gsd
 from hexatic.lagged_prediction import (
     LAGGED_PREDICTION_DATA,
@@ -197,20 +206,41 @@ def _parse_args() -> argparse.Namespace:
             "wall-plus-particle force density series."
         ),
     )
+    parser.add_argument(
+        "--translation-chirality-radius",
+        type=float,
+        default=CYLINDER.neighbor_count_radius,
+        help="Neighborhood radius for translation chirality.",
+    )
+    parser.add_argument(
+        "--translation-chirality-npz",
+        default=str(CYLINDER_PATHS.in_gsd.parent / "translation_chirality_fields.npz"),
+        help="Output NPZ for translation chirality fields.",
+    )
+    parser.add_argument(
+        "--translation-chirality-plot",
+        default=str(CHIRALITY_IMAGE_DIR / "translation_chirality_bond_mean.png"),
+        help="Output plot for mean shell bond translation chirality.",
+    )
+    parser.add_argument(
+        "--translation-chirality-measure-gsd",
+        default=str(CYLINDER_PATHS.in_gsd.parent / "chirality_measure.gsd"),
+        help="Output GSD storing per-particle translation chirality in Orientation.Y.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = _parse_args()
 
-    write_active_matter_field_outputs(
-        CYLINDER_PATHS.in_gsd,
-        coordinate_system="xrtheta"
-    )
-    print(
-        "Wrote active matter fields to "
-        f"{ACTIVE_DATA_DIR / 'active_matter_fields.npz'}."
-    )
+    # write_active_matter_field_outputs(
+    #     CYLINDER_PATHS.in_gsd,
+    #     coordinate_system="xrtheta"
+    # )
+    # print(
+    #     "Wrote active matter fields to "
+    #     f"{ACTIVE_DATA_DIR / 'active_matter_fields.npz'}."
+    # )
     # print(
     #     "Wrote active matter flux density plots to "
     #     f"{ACTIVE_IMAGE_DIR / 'flux'}."
@@ -229,6 +259,31 @@ def main() -> None:
     print(
         "Wrote x center-of-mass velocity plot to "
         f"{CYLINDER_PATHS.x_com_velocity_plot}."
+    )
+    translation_chirality = compute_translation_chirality_trajectory(
+        CYLINDER_PATHS.in_gsd,
+        neighborhood_radius=args.translation_chirality_radius,
+    )
+    np.savez_compressed(
+        args.translation_chirality_npz,
+        steps=translation_chirality.steps,
+        chirality=translation_chirality.chirality,
+        neighborhood_radius=args.translation_chirality_radius,
+    )
+    print(f"Wrote translation chirality fields to {args.translation_chirality_npz}.")
+    write_translation_chirality_measure_outputs(
+        CYLINDER_PATHS.in_gsd,
+        plot_png=args.translation_chirality_plot,
+        measure_gsd=args.translation_chirality_measure_gsd,
+        neighborhood_radius=args.translation_chirality_radius,
+    )
+    print(
+        "Wrote translation chirality bond mean plot to "
+        f"{args.translation_chirality_plot}."
+    )
+    print(
+        "Wrote translation chirality measure GSD to "
+        f"{args.translation_chirality_measure_gsd}."
     )
     # plot_shell_px_change_decomposition(filename=args.shell_px_change_plot)
     # print(
