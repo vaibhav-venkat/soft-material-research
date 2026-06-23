@@ -225,7 +225,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--translation-chirality-measure-gsd",
         default=str(CYLINDER_PATHS.in_gsd.parent / "chirality_measure.gsd"),
-        help="Output GSD storing per-particle translation chirality in Orientation.Y.",
+        help="Output GSD storing per-particle translation chirality in velocity.x.",
     )
     return parser.parse_args()
 
@@ -260,17 +260,17 @@ def main() -> None:
         "Wrote x center-of-mass velocity plot to "
         f"{CYLINDER_PATHS.x_com_velocity_plot}."
     )
-    translation_chirality = compute_translation_chirality_trajectory(
-        CYLINDER_PATHS.in_gsd,
-        neighborhood_radius=args.translation_chirality_radius,
-    )
-    np.savez_compressed(
-        args.translation_chirality_npz,
-        steps=translation_chirality.steps,
-        chirality=translation_chirality.chirality,
-        neighborhood_radius=args.translation_chirality_radius,
-    )
-    print(f"Wrote translation chirality fields to {args.translation_chirality_npz}.")
+    # translation_chirality = compute_translation_chirality_trajectory(
+    #     CYLINDER_PATHS.in_gsd,
+    #     neighborhood_radius=args.translation_chirality_radius,
+    # )
+    # np.savez_compressed(
+    #     args.translation_chirality_npz,
+    #     steps=translation_chirality.steps,
+    #     chirality=translation_chirality.chirality,
+    #     neighborhood_radius=args.translation_chirality_radius,
+    # )
+    # print(f"Wrote translation chirality fields to {args.translation_chirality_npz}.")
     write_translation_chirality_measure_outputs(
         CYLINDER_PATHS.in_gsd,
         plot_png=args.translation_chirality_plot,

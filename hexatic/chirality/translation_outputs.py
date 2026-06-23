@@ -145,15 +145,9 @@ def write_translation_chirality_measure_gsd(
                     box_length_x=float(frame.configuration.box[0]),
                 )
                 new_frame = deepcopy(frame)
-                orientation = new_frame.particles.orientation
-                orientation = (
-                    np.zeros((n_particles, 4), dtype=np.float32)
-                    if orientation is None
-                    else np.asarray(orientation, dtype=np.float32).copy()
-                )
-                assert orientation.shape == (n_particles, 4)
-                orientation[:, 1] = chirality.astype(np.float32)
-                new_frame.particles.orientation = orientation
+                velocity = np.zeros((n_particles, 3), dtype=np.float32)
+                velocity[:, 0] = chirality.astype(np.float32)
+                new_frame.particles.velocity = velocity
                 destination.append(new_frame)
 
 
