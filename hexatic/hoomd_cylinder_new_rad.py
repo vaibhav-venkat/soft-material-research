@@ -13,25 +13,32 @@ paths = cylinder.PATHS
 analysis = cylinder.ANALYSIS
 simulation = cylinder.SIMULATION
 
-RUN_STEPS = int(1e7)
-TRAJECTORY_WRITE_PERIOD = int(1e5)
-OUTPUT_GSD = paths.in_gsd.parent / "trajectory_cylinder_new_rad.gsd"
-INITIAL_GSD = paths.in_gsd.parent / "initial_mesh_cylinder_new_rad.gsd"
-NEW_TIMESTEP = simulation.timestep / 10.0
+RUN_STEPS = simulation.run_steps
+TRAJECTORY_WRITE_PERIOD = simulation.trajectory_write_period
+OUTPUT_GSD = paths.in_gsd
+INITIAL_GSD = paths.initial_gsd
+INTEGRATOR_TIMESTEP = simulation.timestep
 
-NEW_CIRCUMFERENCE = 60.0 * analysis.particle_diameter
-NEW_RADIUS = NEW_CIRCUMFERENCE / (2.0 * math.pi)
+# CYLINDER_CIRCUMFERENCE = 60.0 * analysis.particle_diameter
+CYLINDER_CIRCUMFERENCE = 2.0 * math.pi * analysis.cylinder_radius
+# CYLINDER_RADIUS = CYLINDER_CIRCUMFERENCE / (2.0 * math.pi)
+CYLINDER_RADIUS = analysis.cylinder_radius
 TARGET_N = int(simulation.requested_n_particles)
 TARGET_VOLUME = TARGET_N / float(simulation.rho)
-Lx = TARGET_VOLUME / (math.pi * NEW_RADIUS**2)
-TRANSVERSE_MARGIN = 8.0 * analysis.wall_cutoff + 2.0 * analysis.particle_diameter
-L = 2.0 * (NEW_RADIUS + TRANSVERSE_MARGIN)
+Lx = TARGET_VOLUME / (math.pi * CYLINDER_RADIUS**2)
+TRANSVERSE_MARGIN = (
+    simulation.transverse_wall_cutoff_margin * analysis.wall_cutoff
+    + simulation.transverse_particle_diameter_margin * analysis.particle_diameter
+)
+L = 2.0 * (CYLINDER_RADIUS + TRANSVERSE_MARGIN)
 
 
 def cylinder_cross_section_points(radius, min_spacing):
     center_limit = max(
         0.0,
-        radius - analysis.wall_cutoff - 0.001 * analysis.particle_diameter,
+        radius
+        - analysis.wall_cutoff
+        - simulation.wall_clearance_epsilon * analysis.particle_diameter,
     )
     if center_limit == 0.0:
         return np.asarray([[0.0, 0.0]], dtype=np.float64)
@@ -42,7 +49,11 @@ def cylinder_cross_section_points(radius, min_spacing):
         if ring_radius == 0.0:
             candidates.append((0.0, 0.0))
             continue
-        n_angles = max(12, int(math.ceil(2.0 * math.pi * ring_radius / min_spacing)) * 4)
+        n_angles = max(
+            simulation.min_angular_candidates,
+            int(math.ceil(2.0 * math.pi * ring_radius / min_spacing))
+            * simulation.angular_candidate_multiplier,
+        )
         for angle in np.linspace(0.0, 2.0 * math.pi, n_angles, endpoint=False):
             candidates.append(
                 (
@@ -102,7 +113,7 @@ np.random.seed(simulation.seed)
 position = generate_cylinder_lattice(
     TARGET_N,
     Lx,
-    NEW_RADIUS,
+    CYLINDER_RADIUS,
     analysis.wall_cutoff,
 )
 N = position.shape[0]
@@ -127,7 +138,7 @@ CPU = hoomd.device.CPU()
 sim = hoomd.Simulation(device=CPU, seed=simulation.seed)
 sim.create_state_from_gsd(filename=str(INITIAL_GSD))
 
-integrator = hoomd.md.Integrator(dt=NEW_TIMESTEP)
+integrator = hoomd.md.Integrator(dt=INTEGRATOR_TIMESTEP)
 sim.operations.integrator = integrator
 filter_all = hoomd.filter.All()
 
@@ -146,7 +157,7 @@ integrator.forces.append(lj)
 
 walls = [
     hoomd.wall.Cylinder(
-        radius=NEW_RADIUS,
+        radius=CYLINDER_RADIUS,
         axis=(1, 0, 0),
         inside=True,
         open=True,

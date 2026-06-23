@@ -16,19 +16,28 @@ KT = 1
 GAMMA = 1
 U0 = 100
 TAU_R = 1
-TIMESTEP = 1e-6
+# TIMESTEP = 1e-6
+TIMESTEP = 1e-7
 ROTATIONAL_DIFFUSION_PERIOD = 10
 TRAJECTORY_WRITE_PERIOD = int(1e5)
 
-RUN_STEPS = int(1e8)
+# RUN_STEPS = int(1e8)
+RUN_STEPS = int(1e7)
 LATTICE_SPACING = 2.0 ** (1.0 / 6.0) + 0.5
+TRANSVERSE_WALL_CUTOFF_MARGIN = 8.0
+TRANSVERSE_PARTICLE_DIAMETER_MARGIN = 2.0
+WALL_CLEARANCE_EPSILON = 1.0e-3
+MIN_ANGULAR_CANDIDATES = 12
+ANGULAR_CANDIDATE_MULTIPLIER = 4
 
 
 @dataclass(frozen=True)
 class CylinderPaths:
     disc_image_dir = IMAGE_OUTPUT_DIR / "disc"
-    in_gsd = CYLINDER_OUTPUT_DIR / "trajectory_cylinder.gsd"
-    initial_gsd = CYLINDER_OUTPUT_DIR / "initial_mesh.gsd"
+    # in_gsd = CYLINDER_OUTPUT_DIR / "trajectory_cylinder.gsd"
+    in_gsd = CYLINDER_OUTPUT_DIR / "trajectory_cylinder_new_rad.gsd"
+    # initial_gsd = CYLINDER_OUTPUT_DIR / "initial_mesh.gsd"
+    initial_gsd = CYLINDER_OUTPUT_DIR / "initial_mesh_cylinder_new_rad.gsd"
     flipped_initial_gsd = CYLINDER_OUTPUT_DIR / "initial_mesh_cylinder_flipped.gsd"
     flipped_gsd = CYLINDER_OUTPUT_DIR / "trajectory_cylinder_flipped.gsd"
     hexatic_txt = CYLINDER_OUTPUT_DIR / "cylinder_hexatic_order.txt"
@@ -61,13 +70,15 @@ class CylinderAnalysisConfig:
     disclination_charge_component: int = 2
     sigma: float = SIGMA
     particle_diameter: float = PARTICLE_DIAMETER
-    cylinder_radius: float = 10.0 * PARTICLE_DIAMETER
+    cylinder_radius: float = 60.0 * PARTICLE_DIAMETER / (2.0 * np.pi)
+    # cylinder_radius: float = 10.0 * PARTICLE_DIAMETER
     wall_cutoff: float = 2.0 ** (1.0 / 6.0) * SIGMA
     min_neighbor_count_radius: float = wall_cutoff
     max_neighbor_count_radius: float = 2.0 ** (7.0 / 6.0) * SIGMA
     shell_delta: float = wall_cutoff
-    neighbor_count_radius: float = 1.85 * SIGMA
-    dislocation_pair_distance: float = 1.7 * PARTICLE_DIAMETER
+    # neighbor_count_radius: float = 1.85 * SIGMA
+    neighbor_count_radius: float = 1.61 * PARTICLE_DIAMETER
+    dislocation_pair_distance: float = 1.61 * PARTICLE_DIAMETER
 
 
 @dataclass(frozen=True)
@@ -85,6 +96,11 @@ class CylinderSimulationConfig:
     trajectory_write_period: int = TRAJECTORY_WRITE_PERIOD
     run_steps: int = RUN_STEPS
     lattice_spacing: float = LATTICE_SPACING
+    transverse_wall_cutoff_margin: float = TRANSVERSE_WALL_CUTOFF_MARGIN
+    transverse_particle_diameter_margin: float = TRANSVERSE_PARTICLE_DIAMETER_MARGIN
+    wall_clearance_epsilon: float = WALL_CLEARANCE_EPSILON
+    min_angular_candidates: int = MIN_ANGULAR_CANDIDATES
+    angular_candidate_multiplier: int = ANGULAR_CANDIDATE_MULTIPLIER
 
     @property
     def lx(self) -> float:
@@ -134,3 +150,10 @@ NEIGHBOR_COUNT_RADIUS = ANALYSIS.neighbor_count_radius
 DISLOCATION_PAIR_DISTANCE = ANALYSIS.dislocation_pair_distance
 
 LX = SIMULATION.lx
+TRANSVERSE_WALL_CUTOFF_MARGIN = SIMULATION.transverse_wall_cutoff_margin
+TRANSVERSE_PARTICLE_DIAMETER_MARGIN = (
+    SIMULATION.transverse_particle_diameter_margin
+)
+WALL_CLEARANCE_EPSILON = SIMULATION.wall_clearance_epsilon
+MIN_ANGULAR_CANDIDATES = SIMULATION.min_angular_candidates
+ANGULAR_CANDIDATE_MULTIPLIER = SIMULATION.angular_candidate_multiplier

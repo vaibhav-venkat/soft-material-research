@@ -36,14 +36,20 @@ def disclination_charges_from_counts(
 def main() -> None:
     paths = cylinder.PATHS
     analysis = cylinder.ANALYSIS
+    analysis_cylinder_radius = analysis.cylinder_radius
+    # analysis_cylinder_radius = (
+    #     60.0 * analysis.particle_diameter / (2.0 * np.pi)
+    # )
 
     calculator = hx.CylinderHexaticCalculator(
-        cylinder_radius=analysis.cylinder_radius,
+        # cylinder_radius=analysis.cylinder_radius,
+        cylinder_radius=analysis_cylinder_radius,
         shell_delta=analysis.shell_delta,
         n_neighbors=analysis.neighbors,
     )
 
-    print(f"Used cylinder radius R={analysis.cylinder_radius:.6f}.")
+    # print(f"Used cylinder radius R={analysis.cylinder_radius:.6f}.")
+    print(f"Used cylinder radius R={analysis_cylinder_radius:.6f}.")
     print(f"Used wall repulsion cutoff={analysis.wall_cutoff:.6f}.")
     print(f"Used radial shell cutoff Delta={analysis.shell_delta:.6f}.")
     print(
@@ -89,25 +95,25 @@ def main() -> None:
     frame_indices = hexatic_table[:, 0].astype(int)
     psi_abs = hexatic_table[:, 5]
 
-    distribution = hx.hexatic_probability_distribution(
-        psi_abs,
-        frame_indices,
-        min_frame=analysis.equilibrium_frame,
-        bins=analysis.distribution_bins,
-        exclude_zeros=True,
-    )
-    hx.save_distribution_text(
-        paths.distribution_txt,
-        distribution.bin_centers,
-        distribution.probability_density,
-        distribution.counts,
-    )
-    hx.plot_hexatic_distribution(
-        distribution.bin_centers,
-        distribution.probability_density,
-        title=f"cylinder hexatic distribution, frames > {analysis.equilibrium_frame}",
-        filename=paths.figure_file,
-    )
+    # distribution = hx.hexatic_probability_distribution(
+    #     psi_abs,
+    #     frame_indices,
+    #     min_frame=analysis.equilibrium_frame,
+    #     bins=analysis.distribution_bins,
+    #     exclude_zeros=True,
+    # )
+    # hx.save_distribution_text(
+    #     paths.distribution_txt,
+    #     distribution.bin_centers,
+    #     distribution.probability_density,
+    #     distribution.counts,
+    # )
+    # hx.plot_hexatic_distribution(
+    #     distribution.bin_centers,
+    #     distribution.probability_density,
+    #     title=f"cylinder hexatic distribution, frames > {analysis.equilibrium_frame}",
+    #     filename=paths.figure_file,
+    # )
 
     hx.write_hexatic_velocity_gsd(
         paths.in_gsd,
@@ -124,6 +130,7 @@ def main() -> None:
     selected_psi_abs = psi_abs[frame_indices > analysis.equilibrium_frame]
     distribution_psi_abs = selected_psi_abs[selected_psi_abs > 0.0]
     surface_mask = np.abs(data.psi[analysis.equilibrium_frame + 1 :]) > 0.0
+    print(data.neighbor_counts)
     surface_neighbor_counts = data.neighbor_counts[
         analysis.equilibrium_frame + 1 :
     ][surface_mask]
@@ -147,13 +154,13 @@ def main() -> None:
         "Used dislocation pair distance="
         f"{analysis.dislocation_pair_distance:.6f}."
     )
-    print(
-        "Distribution frames on shell "
-        f"min={distribution_psi_abs.min():.6f}, "
-        f"mean={distribution_psi_abs.mean():.6f}, "
-        f"max={distribution_psi_abs.max():.6f}, "
-        f"nonzero={len(distribution_psi_abs)}"
-    )
+    # print(
+    #     "Distribution frames on shell "
+    #     f"min={distribution_psi_abs.min():.6f}, "
+    #     f"mean={distribution_psi_abs.mean():.6f}, "
+    #     f"max={distribution_psi_abs.max():.6f}, "
+    #     f"nonzero={len(distribution_psi_abs)}"
+    # )
     print(
         "Surface neighbor counts on shell "
         f"min={surface_neighbor_counts.min()}, "
