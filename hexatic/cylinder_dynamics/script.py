@@ -38,6 +38,9 @@ from .plotting import (
     plot_velocity_series,
     plot_x_residual_diagnostics,
 )
+from .velocity_polar_force_density import (
+    plot_velocity_polar_force_density_series,
+)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -182,6 +185,18 @@ def _parse_args() -> argparse.Namespace:
         ),
         help="Output image for initial local active-stress balance maps.",
     )
+    parser.add_argument(
+        "--velocity-polar-force-density-plot",
+        default=str(
+            CYLINDER_PATHS.x_com_velocity_plot.with_name(
+                "cylinder_velocity_polar_force_density_series.png"
+            )
+        ),
+        help=(
+            "Output image for stacked x/theta velocity, U0P, and direct "
+            "wall-plus-particle force density series."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -204,17 +219,17 @@ def main() -> None:
     # print(f"Wrote OVITO dynamic values file to {CYLINDER_PATHS.dynamic_values_gsd}.")
     # plot_center_of_mass_series(CYLINDER_PATHS.in_gsd, CYLINDER_PATHS.com_plot)
     # print(f"Wrote center-of-mass plot to {CYLINDER_PATHS.com_plot}.")
-    # plot_velocity_series(
-    #     CYLINDER_PATHS.in_gsd,
-    #     CYLINDER_PATHS.x_com_velocity_plot,
-    #     shell_only=True,
-    #     relaxation_fit_mode="single",
-    #     align_with_px=True,
-    # )
-    # print(
-    #     "Wrote x center-of-mass velocity plot to "
-    #     f"{CYLINDER_PATHS.x_com_velocity_plot}."
-    # )
+    plot_velocity_series(
+        CYLINDER_PATHS.in_gsd,
+        CYLINDER_PATHS.x_com_velocity_plot,
+        shell_only=True,
+        relaxation_fit_mode="single",
+        align_with_px=True,
+    )
+    print(
+        "Wrote x center-of-mass velocity plot to "
+        f"{CYLINDER_PATHS.x_com_velocity_plot}."
+    )
     # plot_shell_px_change_decomposition(filename=args.shell_px_change_plot)
     # print(
     #     "Wrote shell P_x change decomposition plot to "
@@ -235,6 +250,14 @@ def main() -> None:
     # print(
     #     "Wrote shell polar component plot to "
     #     f"{args.shell_polar_component_plot}."
+    # )
+    # plot_velocity_polar_force_density_series(
+    #     filename=args.velocity_polar_force_density_plot,
+    #     shell_only=True,
+    # )
+    # print(
+    #     "Wrote velocity, U0P, and direct force-density plot to "
+    #     f"{args.velocity_polar_force_density_plot}."
     # )
     # plot_polar_tangent_population_series(
     #     filename=args.polar_tangent_population_plot
@@ -344,18 +367,18 @@ def main() -> None:
     #     "Wrote dislocation center-of-mass plot to "
     #     f"{CYLINDER_PATHS.dislocation_com_plot}."
     # )
-    # plot_dislocation_count_series(
-    #     CYLINDER_PATHS.in_gsd,
-    #     CYLINDER_PATHS.neighbor_count_txt,
-    #     CYLINDER_PATHS.dislocation_count_plot,
-    # )
-    # print(f"Wrote dislocation count plot to {CYLINDER_PATHS.dislocation_count_plot}.")
-    # plot_disclination_count_series(
-    #     CYLINDER_PATHS.in_gsd,
-    #     CYLINDER_PATHS.neighbor_count_txt,
-    #     CYLINDER_PATHS.disclination_count_plot,
-    # )
-    # print(f"Wrote disclination count plot to {CYLINDER_PATHS.disclination_count_plot}.")
+    plot_dislocation_count_series(
+        CYLINDER_PATHS.in_gsd,
+        CYLINDER_PATHS.neighbor_count_txt,
+        CYLINDER_PATHS.dislocation_count_plot,
+    )
+    print(f"Wrote dislocation count plot to {CYLINDER_PATHS.dislocation_count_plot}.")
+    plot_disclination_count_series(
+        CYLINDER_PATHS.in_gsd,
+        CYLINDER_PATHS.neighbor_count_txt,
+        CYLINDER_PATHS.disclination_count_plot,
+    )
+    print(f"Wrote disclination count plot to {CYLINDER_PATHS.disclination_count_plot}.")
     # plot_net_disclination_charge_series(
     #     CYLINDER_PATHS.in_gsd,
     #     CYLINDER_PATHS.neighbor_count_txt,

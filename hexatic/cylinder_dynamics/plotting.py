@@ -1339,7 +1339,10 @@ def plot_velocity_series(
         _print_px_relaxation_fit(px_fit)
         assert px_fit is not None
         u0_eff = vx_fit.params.amplitude / px_fit.params.amplitude
-
+        assert px_values is not None
+        assert series.x_velocities is not None
+        vel = np.asarray(series.x_velocities, dtype=np.float64)
+        print(f"Correct eff = {np.mean(vel)/np.mean(px_values)}")
         print(f"U0_eff = {u0_eff}")
         print(f"U0 actual = {cylinder.U0}")
     fig, axis = plt.subplots(figsize=(10, 5))
