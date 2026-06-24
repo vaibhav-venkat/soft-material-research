@@ -16,13 +16,13 @@ KT = 1
 GAMMA = 1
 U0 = 100
 TAU_R = 1
-# TIMESTEP = 1e-6
-TIMESTEP = 1e-7
+TIMESTEP = 1e-6
+# TIMESTEP = 1e-7
 ROTATIONAL_DIFFUSION_PERIOD = 10
-TRAJECTORY_WRITE_PERIOD = int(1e5)
+TRAJECTORY_WRITE_PERIOD = int(1e6)
 
-# RUN_STEPS = int(1e8)
-RUN_STEPS = int(1e7)
+RUN_STEPS = int(1e8)
+# RUN_STEPS = int(1e7)
 LATTICE_SPACING = 2.0 ** (1.0 / 6.0) + 0.5
 TRANSVERSE_WALL_CUTOFF_MARGIN = 8.0
 TRANSVERSE_PARTICLE_DIAMETER_MARGIN = 2.0
@@ -77,8 +77,8 @@ class CylinderAnalysisConfig:
     max_neighbor_count_radius: float = 2.0 ** (7.0 / 6.0) * SIGMA
     shell_delta: float = wall_cutoff
     # neighbor_count_radius: float = 1.85 * SIGMA
-    neighbor_count_radius: float = 1.61 * PARTICLE_DIAMETER
-    dislocation_pair_distance: float = 1.61 * PARTICLE_DIAMETER
+    neighbor_count_radius: float = 1.7272 * PARTICLE_DIAMETER
+    dislocation_pair_distance: float = 1.7272 * PARTICLE_DIAMETER
 
 
 @dataclass(frozen=True)

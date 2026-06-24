@@ -128,17 +128,16 @@ def main() -> None:
     )
 
     selected_psi_abs = psi_abs[frame_indices > analysis.equilibrium_frame]
+    frame_idx = 90
     distribution_psi_abs = selected_psi_abs[selected_psi_abs > 0.0]
-    surface_mask = np.abs(data.psi[analysis.equilibrium_frame + 1 :]) > 0.0
+    surface_mask = np.abs(data.psi[frame_idx]) > 0.0
     print(data.neighbor_counts)
-    surface_neighbor_counts = data.neighbor_counts[
-        analysis.equilibrium_frame + 1 :
-    ][surface_mask]
+    surface_neighbor_counts = data.neighbor_counts[frame_idx][surface_mask]
     surface_charges = data.disclination_charges[
-        analysis.equilibrium_frame + 1 :
+        frame_idx
     ][surface_mask]
     surface_dislocations = data.dislocation_particles[
-        analysis.equilibrium_frame + 1 :
+        frame_idx
     ][surface_mask]
 
     print(f"Wrote hexatic order to {paths.hexatic_txt}.")

@@ -59,7 +59,6 @@ def compute_translation_chirality_trajectory(
         for frame in trajectory:
             positions = _validate_positions(frame.particles.position)
             n_particles = positions.shape[0] if n_particles is None else n_particles
-            assert positions.shape[0] == n_particles
             chirality_frames.append(
                 compute_translation_chirality_frame(
                     positions,

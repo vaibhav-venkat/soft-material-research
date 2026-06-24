@@ -434,12 +434,12 @@ def main() -> None:
         CYLINDER_PATHS.disclination_count_plot,
     )
     print(f"Wrote disclination count plot to {CYLINDER_PATHS.disclination_count_plot}.")
-    # plot_net_disclination_charge_series(
-    #     CYLINDER_PATHS.in_gsd,
-    #     CYLINDER_PATHS.neighbor_count_txt,
-    #     CYLINDER_PATHS.net_charge_plot,
-    # )
-    # print(f"Wrote net disclination charge plot to {CYLINDER_PATHS.net_charge_plot}.")
+    plot_net_disclination_charge_series(
+        CYLINDER_PATHS.in_gsd,
+        CYLINDER_PATHS.neighbor_count_txt,
+        CYLINDER_PATHS.net_charge_plot,
+    )
+    print(f"Wrote net disclination charge plot to {CYLINDER_PATHS.net_charge_plot}.")
     # write_chirality_outputs(
     #     CYLINDER_PATHS.in_gsd,
     #     config = ChiralityConfig(limit_disclination=True)
