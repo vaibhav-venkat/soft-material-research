@@ -4,6 +4,7 @@ import argparse
 
 from . import (
     chirality,
+    density_profile,
     disclination,
     dislocation,
     force_density,
@@ -33,6 +34,7 @@ def _parse_args() -> argparse.Namespace:
         choices=(
             "velocity",
             "chirality",
+            "density_profile",
             "disclination",
             "dislocation",
             "polarization",
@@ -54,6 +56,7 @@ def run_all(args: argparse.Namespace) -> None:
     metrics = (
         ("velocity", velocity.run),
         ("chirality", chirality.run),
+        ("density_profile", density_profile.run),
         ("disclination", disclination.run),
         ("dislocation", dislocation.run),
         ("polarization", polarization.run),
