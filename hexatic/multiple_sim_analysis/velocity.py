@@ -13,6 +13,7 @@ from .common import (
     NPZ_OUTPUT_DIR,
     PLOT_OUTPUT_DIR,
     active_fields_path,
+    center_of_mass_x_from_coords,
     finite_nanmean,
     frame_indices,
     load_active_fields,
@@ -20,11 +21,13 @@ from .common import (
     load_metric_fit_curves,
     minimum_image_delta,
     particle_masses,
+    neighbor_counts_path,
     radii_for_cases,
     save_metric_npz,
     shell_mask_for_positions,
     unwrapped_x_positions,
 )
+from .disclination import _load_neighbor_counts
 from .plotting import plot_for_cases
 
 
@@ -134,6 +137,178 @@ def _x_com_velocity_values_from_active_fields(
     }
 
 
+def _defect_x_com_velocity_from_coords(
+    coords: np.ndarray,
+    charges: np.ndarray,
+    steps: np.ndarray,
+    box_length_x: float,
+    charge: int,
+    frame_start: int,
+    frame_stop: int,
+) -> float:
+    centers = np.full(len(steps), np.nan, dtype=np.float64)
+    for frame_idx in range(len(steps)):
+        mask = charges[frame_idx] == charge
+        centers[frame_idx] = center_of_mass_x_from_coords(coords[frame_idx, mask], box_length_x)
+
+    velocities: list[float] = []
+    for frame_idx in frame_indices(len(steps), frame_start, frame_stop):
+        if frame_idx == 0:
+            continue
+        delta_t = (steps[frame_idx] - steps[frame_idx - 1]) * float(cylinder.TIMESTEP)
+        if (
+            delta_t <= 0.0
+            or not np.isfinite(centers[frame_idx])
+            or not np.isfinite(centers[frame_idx - 1])
+        ):
+            velocities.append(np.nan)
+            continue
+        delta_x = minimum_image_delta(
+            centers[frame_idx] - centers[frame_idx - 1],
+            box_length_x,
+        )
+        velocities.append(float(delta_x / delta_t))
+    return finite_nanmean(np.asarray(velocities, dtype=np.float64))
+
+
+def disclination_velocity_values_for_case(
+    case: RadiusCase,
+    frame_start: int = FRAME_START,
+    frame_stop: int = FRAME_STOP,
+) -> dict[str, float]:
+    counts = _load_neighbor_counts(neighbor_counts_path(case))
+    charges = cylinder.NEIGHBORS - counts
+    fields_path = active_fields_path(case)
+    if fields_path.exists():
+        fields = load_active_fields(fields_path)
+        n_frames = min(len(fields.steps), charges.shape[0])
+        coords = np.asarray(fields.coords[:n_frames], dtype=np.float64)
+        steps = np.asarray(fields.steps[:n_frames], dtype=np.int64)
+        charges = charges[:n_frames]
+        box_length_x = float(fields.x_edges[-1] - fields.x_edges[0])
+        return {
+            "plus_1": _defect_x_com_velocity_from_coords(
+                coords,
+                charges,
+                steps,
+                box_length_x,
+                charge=1,
+                frame_start=frame_start,
+                frame_stop=frame_stop,
+            ),
+            "minus_1": _defect_x_com_velocity_from_coords(
+                coords,
+                charges,
+                steps,
+                box_length_x,
+                charge=-1,
+                frame_start=frame_start,
+                frame_stop=frame_stop,
+            ),
+        }
+
+    coords: list[np.ndarray] = []
+    steps: list[int] = []
+    box_length_x: float | None = None
+    with gsd.hoomd.open(name=str(case.trajectory_gsd), mode="r") as source:
+        n_frames = min(len(source), charges.shape[0])
+        for frame_idx in range(n_frames):
+            frame = source[frame_idx]
+            positions = np.asarray(frame.particles.position, dtype=np.float64)
+            box_length_x = float(frame.configuration.box[0])
+            theta = np.mod(np.arctan2(positions[:, 1], positions[:, 2]), 2.0 * np.pi)
+            radius = np.linalg.norm(positions[:, 1:3], axis=1)
+            coords.append(np.column_stack((positions[:, 0], theta, radius)))
+            steps.append(int(frame.configuration.step))
+    if box_length_x is None:
+        return {"plus_1": np.nan, "minus_1": np.nan}
+    coord_array = np.asarray(coords, dtype=np.float64)
+    step_array = np.asarray(steps, dtype=np.int64)
+    charges = charges[: len(step_array)]
+    return {
+        "plus_1": _defect_x_com_velocity_from_coords(
+            coord_array,
+            charges,
+            step_array,
+            box_length_x,
+            charge=1,
+            frame_start=frame_start,
+            frame_stop=frame_stop,
+        ),
+        "minus_1": _defect_x_com_velocity_from_coords(
+            coord_array,
+            charges,
+            step_array,
+            box_length_x,
+            charge=-1,
+            frame_start=frame_start,
+            frame_stop=frame_stop,
+        ),
+    }
+
+
+def run_disclination_velocity(
+    cases: tuple[RadiusCase, ...],
+    frame_start: int = FRAME_START,
+    frame_stop: int = FRAME_STOP,
+    overwrite: bool = False,
+) -> dict[str, np.ndarray]:
+    output_npz = NPZ_OUTPUT_DIR / "disclination_velocity.npz"
+    output_png = PLOT_OUTPUT_DIR / "disclination_velocity.png"
+    value_names = ("plus_1", "minus_1")
+    arrays = load_cached_metric_values(
+        output_npz,
+        value_names,
+        cases,
+        frame_start,
+        frame_stop,
+        overwrite=overwrite,
+    )
+    if arrays is not None:
+        if not output_png.exists():
+            fits = load_metric_fit_curves(output_npz, value_names)
+            plot_for_cases(
+                cases,
+                arrays,
+                output_png,
+                title="Mean disclination x velocity vs radius",
+                ylabel="mean disclination x velocity",
+                fits=fits,
+            )
+        print(f"using cached disclination_velocity values from {output_npz}")
+        return arrays
+
+    values = {"plus_1": [], "minus_1": []}
+    for case in cases:
+        case_values = disclination_velocity_values_for_case(
+            case,
+            frame_start,
+            frame_stop,
+        )
+        values["plus_1"].append(case_values["plus_1"])
+        values["minus_1"].append(case_values["minus_1"])
+    arrays = {name: np.asarray(series, dtype=np.float64) for name, series in values.items()}
+    fits, payload = fit_payload(radii_for_cases(cases), arrays)
+    save_metric_npz(
+        output_npz,
+        cases,
+        "disclination_velocity",
+        arrays,
+        payload,
+        frame_start=frame_start,
+        frame_stop=frame_stop,
+    )
+    plot_for_cases(
+        cases,
+        arrays,
+        output_png,
+        title="Mean disclination x velocity vs radius",
+        ylabel="mean disclination x velocity",
+        fits=fits,
+    )
+    return arrays
+
+
 def run(
     cases: tuple[RadiusCase, ...],
     frame_start: int = FRAME_START,
@@ -163,6 +338,12 @@ def run(
                 fits=fits,
             )
         print(f"using cached velocity values from {output_npz}")
+        run_disclination_velocity(
+            cases,
+            frame_start=frame_start,
+            frame_stop=frame_stop,
+            overwrite=overwrite,
+        )
         return arrays
 
     values = {"all": [], "shell": []}
@@ -188,5 +369,11 @@ def run(
         title="Mean x COM velocity vs radius",
         ylabel="mean x COM velocity",
         fits=fits,
+    )
+    run_disclination_velocity(
+        cases,
+        frame_start=frame_start,
+        frame_stop=frame_stop,
+        overwrite=overwrite,
     )
     return arrays
