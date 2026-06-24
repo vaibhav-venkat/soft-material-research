@@ -79,6 +79,7 @@ class CylinderAnalysisConfig:
     # neighbor_count_radius: float = 1.85 * SIGMA
     neighbor_count_radius: float = 1.7272 * PARTICLE_DIAMETER
     dislocation_pair_distance: float = 1.7272 * PARTICLE_DIAMETER
+    # dislocation_pair_distance: float = 1.85 * PARTICLE_DIAMETER
 
 
 @dataclass(frozen=True)

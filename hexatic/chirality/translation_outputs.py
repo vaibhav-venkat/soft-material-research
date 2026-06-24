@@ -34,7 +34,7 @@ def _shell_mask(
     return radii > cylinder_radius - shell_delta
 
 
-def _mean_shell_bond_translation_chirality_frame(
+def _shell_bond_translation_chirality_frame(
     positions: np.ndarray,
     neighborhood_radius: float,
     cylinder_radius: float,
@@ -67,21 +67,7 @@ def _mean_shell_bond_translation_chirality_frame(
     bond_values = values[valid_bonds]
     if bond_values.size == 0:
         return np.nan, 0
-    return float(np.mean(bond_values)), int(bond_values.size)
-
-
-def _rms_shell_particle_translation_chirality_frame(
-    positions: np.ndarray,
-    particle_chirality: np.ndarray,
-    cylinder_radius: float,
-    shell_delta: float,
-) -> float:
-    shell = _shell_mask(positions, cylinder_radius, shell_delta)
-    values = np.asarray(particle_chirality, dtype=np.float64)[shell]
-    values = values[np.isfinite(values)]
-    if values.size == 0:
-        return np.nan
-    return float(np.sqrt(np.mean(values * values)))
+    return float(np.mean(np.abs(bond_values))), int(bond_values.size)
 
 
 def shell_bond_translation_chirality_series(
@@ -89,42 +75,27 @@ def shell_bond_translation_chirality_series(
     neighborhood_radius: float,
     cylinder_radius: float = cylinder.CYLINDER_RADIUS,
     shell_delta: float = cylinder.SHELL_DELTA,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     steps: list[int] = []
-    means: list[float] = []
-    rms_values: list[float] = []
+    mean_abs_values: list[float] = []
     counts: list[int] = []
     with gsd.hoomd.open(name=str(input_gsd), mode="r") as source:
         for frame in source:
             positions = np.asarray(frame.particles.position, dtype=np.float64)
             box_length_x = float(frame.configuration.box[0])
-            mean_value, count = _mean_shell_bond_translation_chirality_frame(
+            mean_abs_value, count = _shell_bond_translation_chirality_frame(
                 positions,
                 neighborhood_radius=neighborhood_radius,
                 cylinder_radius=cylinder_radius,
                 shell_delta=shell_delta,
                 box_length_x=box_length_x,
             )
-            particle_chirality = compute_translation_chirality_frame(
-                positions,
-                neighborhood_radius=neighborhood_radius,
-                box_length_x=box_length_x,
-            )
             steps.append(int(frame.configuration.step))
-            means.append(mean_value)
-            rms_values.append(
-                _rms_shell_particle_translation_chirality_frame(
-                    positions,
-                    particle_chirality,
-                    cylinder_radius=cylinder_radius,
-                    shell_delta=shell_delta,
-                )
-            )
+            mean_abs_values.append(mean_abs_value)
             counts.append(count)
     return (
         np.asarray(steps, dtype=np.int64),
-        np.asarray(means, dtype=np.float64),
-        np.asarray(rms_values, dtype=np.float64),
+        np.asarray(mean_abs_values, dtype=np.float64),
         np.asarray(counts, dtype=np.int64),
     )
 
@@ -135,8 +106,8 @@ def plot_shell_bond_translation_chirality(
     neighborhood_radius: float,
     cylinder_radius: float = cylinder.CYLINDER_RADIUS,
     shell_delta: float = cylinder.SHELL_DELTA,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    steps, means, rms_values, counts = shell_bond_translation_chirality_series(
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    steps, mean_abs_values, counts = shell_bond_translation_chirality_series(
         input_gsd,
         neighborhood_radius=neighborhood_radius,
         cylinder_radius=cylinder_radius,
@@ -146,16 +117,14 @@ def plot_shell_bond_translation_chirality(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     fig, axis = plt.subplots(figsize=(8.0, 4.5), constrained_layout=True)
-    axis.plot(steps, means, lw=1.8, label="mean shell bond chirality")
-    axis.plot(steps, rms_values, lw=1.8, label="RMS shell particle chirality")
-    axis.axhline(0.0, color="black", lw=0.8, alpha=0.5)
+    axis.plot(steps, mean_abs_values, lw=1.8, label="mean abs shell bond chirality")
     axis.set_xlabel("step")
-    axis.set_ylabel("translation chirality")
+    axis.set_ylabel("mean abs bond translation chirality")
     axis.set_title("Shell translation chirality")
     axis.legend()
     fig.savefig(output_path, dpi=200)
     plt.close(fig)
-    return steps, means, rms_values, counts
+    return steps, mean_abs_values, counts
 
 
 def write_translation_chirality_measure_gsd(
@@ -192,8 +161,8 @@ def write_translation_chirality_measure_outputs(
     series_npz: str | Path | None = None,
     cylinder_radius: float = cylinder.CYLINDER_RADIUS,
     shell_delta: float = cylinder.SHELL_DELTA,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    steps, means, rms_values, counts = plot_shell_bond_translation_chirality(
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    steps, mean_abs_values, counts = plot_shell_bond_translation_chirality(
         input_gsd,
         plot_png,
         neighborhood_radius=neighborhood_radius,
@@ -206,8 +175,7 @@ def write_translation_chirality_measure_outputs(
         np.savez_compressed(
             series_path,
             steps=steps,
-            mean_bond_translation_chirality=means,
-            rms_particle_translation_chirality=rms_values,
+            mean_abs_bond_translation_chirality=mean_abs_values,
             bond_counts=counts,
             neighborhood_radius=neighborhood_radius,
         )
@@ -216,4 +184,4 @@ def write_translation_chirality_measure_outputs(
         measure_gsd,
         neighborhood_radius=neighborhood_radius,
     )
-    return steps, means, rms_values, counts
+    return steps, mean_abs_values, counts

@@ -249,17 +249,17 @@ def main() -> None:
     # print(f"Wrote OVITO dynamic values file to {CYLINDER_PATHS.dynamic_values_gsd}.")
     # plot_center_of_mass_series(CYLINDER_PATHS.in_gsd, CYLINDER_PATHS.com_plot)
     # print(f"Wrote center-of-mass plot to {CYLINDER_PATHS.com_plot}.")
-    plot_velocity_series(
-        CYLINDER_PATHS.in_gsd,
-        CYLINDER_PATHS.x_com_velocity_plot,
-        shell_only=True,
-        relaxation_fit_mode="single",
-        align_with_px=True,
-    )
-    print(
-        "Wrote x center-of-mass velocity plot to "
-        f"{CYLINDER_PATHS.x_com_velocity_plot}."
-    )
+    # plot_velocity_series(
+    #     CYLINDER_PATHS.in_gsd,
+    #     CYLINDER_PATHS.x_com_velocity_plot,
+    #     shell_only=True,
+    #     relaxation_fit_mode="single",
+    #     align_with_px=True,
+    # )
+    # print(
+    #     "Wrote x center-of-mass velocity plot to "
+    #     f"{CYLINDER_PATHS.x_com_velocity_plot}."
+    # )
     # translation_chirality = compute_translation_chirality_trajectory(
     #     CYLINDER_PATHS.in_gsd,
     #     neighborhood_radius=args.translation_chirality_radius,
