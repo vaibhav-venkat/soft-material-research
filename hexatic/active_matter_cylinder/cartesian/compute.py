@@ -32,10 +32,11 @@ def _cartesian_grid_points(
     dx: float,
     dy: float,
     dz: float,
+    cylinder_radius: float,
 ) -> np.ndarray:
     _, x_centers = _axis_edges_and_centers(-0.5 * box_length_x, 0.5 * box_length_x, dx)
-    _, y_centers = _axis_edges_and_centers(-CYLINDER.cylinder_radius, CYLINDER.cylinder_radius, dy)
-    _, z_centers = _axis_edges_and_centers(-CYLINDER.cylinder_radius, CYLINDER.cylinder_radius, dz)
+    _, y_centers = _axis_edges_and_centers(-cylinder_radius, cylinder_radius, dy)
+    _, z_centers = _axis_edges_and_centers(-cylinder_radius, cylinder_radius, dz)
     x_grid, y_grid, z_grid = np.meshgrid(
         x_centers,
         y_centers,
@@ -43,7 +44,7 @@ def _cartesian_grid_points(
         indexing="ij",
     )
     points = np.column_stack((x_grid.ravel(), y_grid.ravel(), z_grid.ravel()))
-    inside_cylinder = points[:, 1] ** 2 + points[:, 2] ** 2 <= CYLINDER.cylinder_radius**2
+    inside_cylinder = points[:, 1] ** 2 + points[:, 2] ** 2 <= cylinder_radius**2
     return points[inside_cylinder]
 
 
@@ -136,6 +137,7 @@ def compute_cartesian_flux_comparison(
     dy: float = ACTIVE_GRID_DY,
     dz: float = ACTIVE_GRID_DZ,
     frame_index: int = -2,
+    cylinder_radius: float = CYLINDER.cylinder_radius,
 ) -> CartesianFluxComparison:
     with gsd.hoomd.open(name=str(input_gsd), mode="r") as source:
         assert len(source) >= 2
@@ -176,7 +178,13 @@ def compute_cartesian_flux_comparison(
             dt,
         )
 
-        grid_points = _cartesian_grid_points(box_length_x, dx, dy, dz)
+        grid_points = _cartesian_grid_points(
+            box_length_x,
+            dx,
+            dy,
+            dz,
+            cylinder_radius=cylinder_radius,
+        )
         ones = np.ones(len(positions), dtype=np.float64)
         rho_density = _density_sum(
             grid_points,
@@ -323,4 +331,3 @@ def save_cartesian_flux_comparison(
         finite_time_stress_flux_density=comparison.finite_time_stress_flux_density,
         virial_stress_cylindrical=comparison.virial_stress_cylindrical,
     )
-

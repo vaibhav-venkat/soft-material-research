@@ -10,19 +10,7 @@ try:
 except ImportError:
     from constants import cylinder
 
-from .translation import compute_translation_chirality_frame
-
-
-def _minimum_image_x(
-    vectors: np.ndarray,
-    box_length_x: float | None = None,
-) -> np.ndarray:
-    vectors = np.asarray(vectors, dtype=np.float64)
-    if box_length_x is None:
-        return vectors
-    wrapped = vectors.copy()
-    wrapped[..., 0] -= box_length_x * np.round(wrapped[..., 0] / box_length_x)
-    return wrapped
+from .translation import compute_translation_chirality_frame, iter_neighbor_bonds
 
 
 def _shell_mask(
@@ -50,24 +38,18 @@ def _shell_bond_translation_chirality_frame(
     if len(shell_positions) < 2:
         return np.nan, 0
 
-    bonds = shell_positions[np.newaxis, :, :] - shell_positions[:, np.newaxis, :]
-    bonds = _minimum_image_x(bonds, box_length_x=box_length_x)
-    bond_lengths = np.linalg.norm(bonds, axis=2)
-    valid_bonds = (
-        np.isfinite(bond_lengths)
-        & (bond_lengths > 0.0)
-        & (bond_lengths <= neighborhood_radius)
-    )
-    values = np.divide(
-        bonds[:, :, 0],
-        bond_lengths,
-        out=np.zeros_like(bond_lengths, dtype=np.float64),
-        where=valid_bonds,
-    )
-    bond_values = values[valid_bonds]
-    if bond_values.size == 0:
+    total = 0.0
+    count = 0
+    for _, _, bond, bond_length in iter_neighbor_bonds(
+        shell_positions,
+        neighborhood_radius=neighborhood_radius,
+        box_length_x=box_length_x,
+    ):
+        total += abs(float(bond[0] / bond_length))
+        count += 1
+    if count == 0:
         return np.nan, 0
-    return float(np.mean(np.abs(bond_values))), int(bond_values.size)
+    return total / count, count
 
 
 def shell_bond_translation_chirality_series(

@@ -23,9 +23,8 @@ INTEGRATOR_TIMESTEP = simulation.timestep
 CYLINDER_CIRCUMFERENCE = 2.0 * math.pi * analysis.cylinder_radius
 # CYLINDER_RADIUS = CYLINDER_CIRCUMFERENCE / (2.0 * math.pi)
 CYLINDER_RADIUS = analysis.cylinder_radius
-TARGET_N = int(simulation.requested_n_particles)
-TARGET_VOLUME = TARGET_N / float(simulation.rho)
-Lx = TARGET_VOLUME / (math.pi * CYLINDER_RADIUS**2)
+TARGET_N = int(simulation.n_particles_for_radius(CYLINDER_RADIUS))
+Lx = simulation.lx
 TRANSVERSE_MARGIN = (
     simulation.transverse_wall_cutoff_margin * analysis.wall_cutoff
     + simulation.transverse_particle_diameter_margin * analysis.particle_diameter

@@ -18,6 +18,7 @@ from ..config import (
 from ..cartesian import (
     compute_cartesian_flux_comparison,
     plot_cartesian_flux_comparison,
+    save_cartesian_flux_comparison,
 )
 from .compute import active_matter_field_series, save_active_matter_fields
 from .movies import plot_active_matter_movies
@@ -58,13 +59,19 @@ def write_active_matter_field_outputs(
     coordinate_system: str = "xyz",
     shear_theta_bins: int = ACTIVE_FLUX_PLOT_THETA_BINS,
     plot = False,
+    cylinder_radius: float | None = None,
 ) -> CartesianFluxComparison:
     data_path = Path(data_dir)
+    if cylinder_radius is None:
+        from ..config import CYLINDER
+
+        cylinder_radius = CYLINDER.cylinder_radius
     fields = active_matter_field_series(
         input_gsd,
         pocket_radius=pocket_radius,
         n_x_bins=n_x_bins,
         n_theta_bins=n_theta_bins,
+        cylinder_radius=cylinder_radius,
     )
     save_active_matter_fields(
         fields,
@@ -78,6 +85,11 @@ def write_active_matter_field_outputs(
         dy=dy,
         dz=dz,
         frame_index=frame_index if frame_index != -1 else -2,
+        cylinder_radius=cylinder_radius,
+    )
+    save_cartesian_flux_comparison(
+        comparison,
+        data_path / "cartesian_flux_comparison.npz",
     )
     shear_decomposition = compute_shear_flux_decomposition(
         input_gsd,
@@ -86,6 +98,7 @@ def write_active_matter_field_outputs(
         dr=dy,
         n_theta_bins=shear_theta_bins,
         frame_index=frame_index if frame_index != -1 else -2,
+        cylinder_radius=cylinder_radius,
     )
     save_shear_flux_decomposition(
         shear_decomposition,

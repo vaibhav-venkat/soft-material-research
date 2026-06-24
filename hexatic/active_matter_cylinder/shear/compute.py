@@ -38,9 +38,10 @@ def _xrtheta_grid(
     dx: float,
     dr: float,
     n_theta_bins: int,
+    cylinder_radius: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     x_edges, x_centers = _axis_edges_and_centers(-0.5 * box_length_x, 0.5 * box_length_x, dx)
-    r_edges, r_centers = _axis_edges_and_centers(0.0, CYLINDER.cylinder_radius, dr)
+    r_edges, r_centers = _axis_edges_and_centers(0.0, cylinder_radius, dr)
     theta_edges, theta_centers = _theta_edges_and_centers(n_theta_bins)
 
     x_grid, r_grid, theta_grid = np.meshgrid(
@@ -85,20 +86,22 @@ def _component_stats(reference: np.ndarray, candidate: np.ndarray) -> tuple[np.n
 def _lj_pair_forces(
     positions: np.ndarray,
     box_length_x: float,
+    cylinder_radius: float,
+    wall_cutoff: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     sigma = float(CYLINDER.sigma)
     epsilon = float(50.0 * CYLINDER_SIM.gamma * CYLINDER_SIM.u0 * sigma)
-    r_cut = float(CYLINDER.wall_cutoff)
+    r_cut = float(wall_cutoff)
     r_cut_sq = r_cut * r_cut
 
     shifted = positions.copy()
     shifted[:, 0] += 0.5 * box_length_x
-    shifted[:, 1] += CYLINDER.cylinder_radius
-    shifted[:, 2] += CYLINDER.cylinder_radius
+    shifted[:, 1] += cylinder_radius
+    shifted[:, 2] += cylinder_radius
     cell_size = r_cut
     n_x = max(1, int(np.floor(box_length_x / cell_size)))
-    n_y = max(1, int(np.ceil(2.0 * CYLINDER.cylinder_radius / cell_size)))
-    n_z = max(1, int(np.ceil(2.0 * CYLINDER.cylinder_radius / cell_size)))
+    n_y = max(1, int(np.ceil(2.0 * cylinder_radius / cell_size)))
+    n_z = max(1, int(np.ceil(2.0 * cylinder_radius / cell_size)))
     cell_indices = np.column_stack(
         (
             np.floor(shifted[:, 0] / box_length_x * n_x).astype(np.int64) % n_x,
@@ -377,6 +380,8 @@ def compute_shear_flux_decomposition(
     dx: float = ACTIVE_GRID_DX,
     dr: float = ACTIVE_GRID_DY,
     n_theta_bins: int = ACTIVE_FLUX_PLOT_THETA_BINS,
+    cylinder_radius: float = CYLINDER.cylinder_radius,
+    wall_cutoff: float = CYLINDER.wall_cutoff,
 ) -> ShearFluxDecomposition:
     with gsd.hoomd.open(name=str(input_gsd), mode="r") as source:
         assert len(source) >= 1
@@ -400,9 +405,20 @@ def compute_shear_flux_decomposition(
             theta_centers,
             grid_coords,
             grid_points,
-        ) = _xrtheta_grid(box_length_x, dx, dr, n_theta_bins)
+        ) = _xrtheta_grid(
+            box_length_x,
+            dx,
+            dr,
+            n_theta_bins,
+            cylinder_radius=cylinder_radius,
+        )
 
-        pair_i, pair_j, pair_delta, pair_force = _lj_pair_forces(positions, box_length_x)
+        pair_i, pair_j, pair_delta, pair_force = _lj_pair_forces(
+            positions,
+            box_length_x,
+            cylinder_radius=cylinder_radius,
+            wall_cutoff=wall_cutoff,
+        )
         reconstructed_particle_pair_forces = _particle_pair_force_sums(
             len(positions),
             pair_i,
@@ -505,7 +521,7 @@ def compute_shear_flux_decomposition(
     j_force_baseline = j_active + logged_force_density / CYLINDER_SIM.gamma
     div_split_residual = div_normal + div_shear - div_full
     j_split_residual = j_active + j_normal + j_shear - j_total
-    near_wall_mask = grid_coords[:, 1] >= (CYLINDER.cylinder_radius - pocket_radius)
+    near_wall_mask = grid_coords[:, 1] >= (cylinder_radius - pocket_radius)
 
     pair_force_correlation, pair_force_slope = _component_stats(
         logged_pair_forces,
@@ -565,6 +581,8 @@ def compute_shear_flux_decomposition_series(
     dx: float = ACTIVE_GRID_DX,
     dr: float = ACTIVE_GRID_DY,
     n_theta_bins: int = ACTIVE_FLUX_PLOT_THETA_BINS,
+    cylinder_radius: float = CYLINDER.cylinder_radius,
+    wall_cutoff: float = CYLINDER.wall_cutoff,
 ) -> list[ShearFluxDecomposition]:
     """Compute the shear/stress decomposition for a sequence of frames."""
     input_gsd = Path(input_gsd)
@@ -580,6 +598,8 @@ def compute_shear_flux_decomposition_series(
             dx=dx,
             dr=dr,
             n_theta_bins=n_theta_bins,
+            cylinder_radius=cylinder_radius,
+            wall_cutoff=wall_cutoff,
         )
         for frame_index in frame_indices
     ]

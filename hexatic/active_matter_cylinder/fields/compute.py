@@ -32,6 +32,8 @@ def active_matter_field_series(
     pocket_radius: float = LOCAL_POCKET_RADIUS,
     n_x_bins: int = ACTIVE_FIELD_X_BINS,
     n_theta_bins: int = ACTIVE_FIELD_THETA_BINS,
+    cylinder_radius: float = CYLINDER.cylinder_radius,
+    wall_cutoff: float = CYLINDER.wall_cutoff,
 ) -> ActiveMatterFields:
     steps: list[int] = []
     x_edges: np.ndarray | None = None
@@ -79,8 +81,8 @@ def active_matter_field_series(
             dynamic_values = hx.get_dynamic_values(
                 positions,
                 contain_all=False,
-                cylinder_radius=CYLINDER.cylinder_radius,
-                cutoff=CYLINDER.wall_cutoff,
+                cylinder_radius=cylinder_radius,
+                cutoff=wall_cutoff,
             )
             pocket_rho, _, pocket_polar_density = _pocket_fields(
                 positions,

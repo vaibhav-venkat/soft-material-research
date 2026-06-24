@@ -55,6 +55,43 @@ from .velocity_polar_force_density import (
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
+        "--npz-only",
+        action="store_true",
+        help="Write active-property and translation-chirality NPZ files only.",
+    )
+    parser.add_argument(
+        "--input-gsd",
+        default=str(CYLINDER_PATHS.in_gsd),
+        help="Input trajectory for --npz-only.",
+    )
+    parser.add_argument(
+        "--cylinder-radius",
+        type=float,
+        default=CYLINDER.cylinder_radius,
+        help="Cylinder radius for --npz-only.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=str(CYLINDER_PATHS.in_gsd.parent),
+        help="Output directory for --npz-only NPZ files.",
+    )
+    parser.add_argument(
+        "--case-id",
+        default="",
+        help="Optional filename prefix for --npz-only outputs.",
+    )
+    parser.add_argument(
+        "--shear-series-stride",
+        type=int,
+        default=1,
+        help="Frame stride for --npz-only shear flux decomposition series.",
+    )
+    parser.add_argument(
+        "--skip-shear-series",
+        action="store_true",
+        help="Skip --npz-only shear flux decomposition series output.",
+    )
+    parser.add_argument(
         "--x-velocity-fit",
         choices=("auto", "single", "double"),
         default="auto",
@@ -230,8 +267,141 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def write_npz_only_outputs(
+    input_gsd,
+    cylinder_radius: float,
+    output_dir,
+    case_id: str = "",
+    shear_series_stride: int = 1,
+    skip_shear_series: bool = False,
+) -> None:
+    from pathlib import Path
+
+    import gsd.hoomd
+
+    from hexatic.active_matter_cylinder import (
+        ACTIVE_FIELD_THETA_BINS,
+        ACTIVE_FIELD_X_BINS,
+        ACTIVE_FLUX_PLOT_THETA_BINS,
+        ACTIVE_GRID_DX,
+        ACTIVE_GRID_DY,
+        ACTIVE_GRID_DZ,
+        LOCAL_POCKET_RADIUS,
+        active_matter_field_series,
+        compute_cartesian_flux_comparison,
+        compute_shear_flux_decomposition,
+        compute_shear_flux_decomposition_series,
+        save_active_matter_fields,
+        save_cartesian_flux_comparison,
+        save_shear_flux_decomposition,
+        save_shear_flux_decomposition_series,
+    )
+    from hexatic.chirality import shell_bond_translation_chirality_series
+
+    input_path = Path(input_gsd)
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    prefix = f"{case_id}_" if case_id else ""
+
+    fields = active_matter_field_series(
+        input_path,
+        pocket_radius=LOCAL_POCKET_RADIUS,
+        n_x_bins=ACTIVE_FIELD_X_BINS,
+        n_theta_bins=ACTIVE_FIELD_THETA_BINS,
+        cylinder_radius=cylinder_radius,
+    )
+    save_active_matter_fields(
+        fields,
+        output_path / f"{prefix}active_matter_fields.npz",
+        pocket_radius=LOCAL_POCKET_RADIUS,
+    )
+
+    comparison = compute_cartesian_flux_comparison(
+        input_path,
+        pocket_radius=LOCAL_POCKET_RADIUS,
+        dx=ACTIVE_GRID_DX,
+        dy=ACTIVE_GRID_DY,
+        dz=ACTIVE_GRID_DZ,
+        frame_index=-2,
+        cylinder_radius=cylinder_radius,
+    )
+    save_cartesian_flux_comparison(
+        comparison,
+        output_path / f"{prefix}cartesian_flux_comparison.npz",
+    )
+
+    shear = compute_shear_flux_decomposition(
+        input_path,
+        pocket_radius=LOCAL_POCKET_RADIUS,
+        dx=ACTIVE_GRID_DX,
+        dr=ACTIVE_GRID_DY,
+        n_theta_bins=ACTIVE_FLUX_PLOT_THETA_BINS,
+        frame_index=-2,
+        cylinder_radius=cylinder_radius,
+    )
+    save_shear_flux_decomposition(
+        shear,
+        output_path / f"{prefix}shear_flux_decomposition.npz",
+    )
+
+    if not skip_shear_series:
+        if shear_series_stride <= 0:
+            raise ValueError("shear_series_stride must be positive.")
+        with gsd.hoomd.open(name=str(input_path), mode="r") as source:
+            frame_indices = range(0, len(source), shear_series_stride)
+        shear_series = compute_shear_flux_decomposition_series(
+            input_path,
+            frame_indices=frame_indices,
+            pocket_radius=LOCAL_POCKET_RADIUS,
+            dx=ACTIVE_GRID_DX,
+            dr=ACTIVE_GRID_DY,
+            n_theta_bins=ACTIVE_FLUX_PLOT_THETA_BINS,
+            cylinder_radius=cylinder_radius,
+        )
+        save_shear_flux_decomposition_series(
+            shear_series,
+            output_path / f"{prefix}shear_flux_decomposition_series.npz",
+        )
+
+    translation_chirality = compute_translation_chirality_trajectory(
+        input_path,
+        neighborhood_radius=CYLINDER.neighbor_count_radius,
+    )
+    np.savez_compressed(
+        output_path / f"{prefix}translation_chirality_fields.npz",
+        steps=translation_chirality.steps,
+        chirality=translation_chirality.chirality,
+        neighborhood_radius=CYLINDER.neighbor_count_radius,
+    )
+
+    shell_steps, shell_values, shell_counts = shell_bond_translation_chirality_series(
+        input_path,
+        neighborhood_radius=CYLINDER.neighbor_count_radius,
+        cylinder_radius=cylinder_radius,
+        shell_delta=CYLINDER.shell_delta,
+    )
+    np.savez_compressed(
+        output_path / f"{prefix}shell_bond_translation_chirality.npz",
+        steps=shell_steps,
+        mean_abs_bond_translation_chirality=shell_values,
+        bond_counts=shell_counts,
+        neighborhood_radius=CYLINDER.neighbor_count_radius,
+        cylinder_radius=cylinder_radius,
+    )
+
+
 def main() -> None:
     args = _parse_args()
+    if args.npz_only:
+        write_npz_only_outputs(
+            input_gsd=args.input_gsd,
+            cylinder_radius=args.cylinder_radius,
+            output_dir=args.output_dir,
+            case_id=args.case_id,
+            shear_series_stride=args.shear_series_stride,
+            skip_shear_series=args.skip_shear_series,
+        )
+        return
 
     # write_active_matter_field_outputs(
     #     CYLINDER_PATHS.in_gsd,
