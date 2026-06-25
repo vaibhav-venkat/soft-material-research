@@ -476,7 +476,13 @@ def moving_defect_frontback_values_for_case(
 
     x_edges = np.asarray(fields.x_edges, dtype=np.float64)
     box_length_x = float(x_edges[-1] - x_edges[0])
-    speed, abs_delta_chirality, velocity_direction, delta_chirality_sign = (
+    (
+        speed,
+        abs_v_residual,
+        abs_delta_chirality,
+        velocity_direction,
+        delta_chirality_sign,
+    ) = (
         moving_defect_frontback_chirality(
             np.ascontiguousarray(coords, dtype=np.float64),
             np.ascontiguousarray(disclinations, dtype=np.bool_),
@@ -494,6 +500,7 @@ def moving_defect_frontback_values_for_case(
     )
     return {
         "speed": speed,
+        "abs_v_residual": abs_v_residual,
         "abs_delta_chirality": abs_delta_chirality,
         "velocity_direction": velocity_direction,
         "delta_chirality_sign": delta_chirality_sign,
@@ -509,6 +516,7 @@ def _frontback_cache_matches(
     with np.load(output_npz) as data:
         required = (
             "speed",
+            "abs_v_residual",
             "abs_delta_chirality",
             "velocity_direction",
             "delta_chirality_sign",
@@ -531,6 +539,7 @@ def _load_frontback_cache(output_npz: Path) -> dict[str, np.ndarray]:
     with np.load(output_npz) as data:
         return {
             "speed": np.asarray(data["speed"], dtype=np.float64),
+            "abs_v_residual": np.asarray(data["abs_v_residual"], dtype=np.float64),
             "abs_delta_chirality": np.asarray(
                 data["abs_delta_chirality"],
                 dtype=np.float64,
@@ -674,6 +683,72 @@ def _plot_moving_frontback_chirality(
     plt.close(fig)
 
 
+def _plot_moving_frontback_residual(
+    arrays: dict[str, np.ndarray],
+    output_png: Path,
+) -> None:
+    output_png.parent.mkdir(parents=True, exist_ok=True)
+    residual_speed = np.asarray(arrays["abs_v_residual"], dtype=np.float64)
+    abs_delta = np.asarray(arrays["abs_delta_chirality"], dtype=np.float64)
+    sample_radii = np.asarray(arrays["sample_radii"], dtype=np.float64)
+
+    finite_values = np.isfinite(residual_speed) & np.isfinite(abs_delta)
+    finite_radii = np.isfinite(sample_radii)
+    radius_values = np.unique(sample_radii[finite_radii])
+    if radius_values.size == 0:
+        radius_values = np.asarray([np.nan], dtype=np.float64)
+
+    n_panels = radius_values.size
+    n_cols = min(4, max(1, int(math.ceil(math.sqrt(n_panels)))))
+    n_rows = int(math.ceil(n_panels / n_cols))
+    fig, axes = plt.subplots(
+        n_rows,
+        n_cols,
+        figsize=(3.2 * n_cols, 2.8 * n_rows),
+        squeeze=False,
+        constrained_layout=True,
+    )
+
+    for axis_idx, radius in enumerate(radius_values):
+        ax = axes.flat[axis_idx]
+        if np.isfinite(radius):
+            mask = finite_values & (sample_radii == radius)
+            radius_label = f"R = {radius:g}"
+        else:
+            mask = finite_values & ~finite_radii
+            radius_label = "R = nan"
+
+        ax.scatter(
+            residual_speed[mask],
+            abs_delta[mask],
+            color="#111111",
+            s=16,
+            alpha=0.65,
+            edgecolors="none",
+        )
+        ax.set_title(radius_label)
+        ax.text(
+            0.04,
+            0.94,
+            f"n = {np.count_nonzero(mask)}",
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize=8,
+            bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.75},
+        )
+        ax.set_xlabel("|v_residual|")
+        ax.set_ylabel("|Delta chi_frontback|")
+        ax.grid(True, alpha=0.25)
+
+    for axis_idx in range(n_panels, axes.size):
+        axes.flat[axis_idx].set_visible(False)
+
+    fig.suptitle("|v_residual| vs |Delta chi_frontback| by radius")
+    fig.savefig(output_png, dpi=300)
+    plt.close(fig)
+
+
 def run_moving_frontback_chirality(
     cases: tuple[RadiusCase, ...],
     frame_start: int = FRAME_START,
@@ -682,6 +757,9 @@ def run_moving_frontback_chirality(
 ) -> dict[str, np.ndarray]:
     output_npz = NPZ_OUTPUT_DIR / "moving_defect_frontback_chirality.npz"
     output_png = PLOT_OUTPUT_DIR / "moving_defect_frontback_chirality.png"
+    residual_output_png = (
+        PLOT_OUTPUT_DIR / "moving_defect_frontback_residual_chirality.png"
+    )
     if (
         not overwrite
         and output_npz.exists()
@@ -690,11 +768,14 @@ def run_moving_frontback_chirality(
         arrays = _load_frontback_cache(output_npz)
         if not output_png.exists():
             _plot_moving_frontback_chirality(arrays, output_png)
+        if not residual_output_png.exists():
+            _plot_moving_frontback_residual(arrays, residual_output_png)
         print(f"using cached moving-defect front/back chirality from {output_npz}")
         return arrays
 
     chunks: dict[str, list[np.ndarray]] = {
         "speed": [],
+        "abs_v_residual": [],
         "abs_delta_chirality": [],
         "velocity_direction": [],
         "delta_chirality_sign": [],
@@ -710,6 +791,7 @@ def run_moving_frontback_chirality(
         n_samples = case_values["speed"].shape[0]
         for name in (
             "speed",
+            "abs_v_residual",
             "abs_delta_chirality",
             "velocity_direction",
             "delta_chirality_sign",
@@ -733,6 +815,7 @@ def run_moving_frontback_chirality(
     )
     _save_frontback_cache(output_npz, cases, arrays, frame_start, frame_stop)
     _plot_moving_frontback_chirality(arrays, output_png)
+    _plot_moving_frontback_residual(arrays, residual_output_png)
     return arrays
 
 

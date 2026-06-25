@@ -862,17 +862,18 @@ def moving_defect_frontback_chirality(
     x_min: float,
     cylinder_radius: float,
     timestep: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     start = min(max(frame_start, 1), coords.shape[0])
     stop = min(max(frame_stop, start), coords.shape[0])
     cell_size = max(chirality_radius, core_radius)
     if cell_size <= 0.0:
         empty = np.empty(0, dtype=np.float64)
-        return empty, empty, empty, empty
+        return empty, empty, empty, empty, empty
 
     n_particles = coords.shape[1]
     max_samples = max(0, stop - start) * n_particles
     speeds = np.empty(max_samples, dtype=np.float64)
+    residual_speeds = np.empty(max_samples, dtype=np.float64)
     abs_delta_chirality = np.empty(max_samples, dtype=np.float64)
     velocity_direction = np.empty(max_samples, dtype=np.float64)
     delta_chirality_sign = np.empty(max_samples, dtype=np.float64)
@@ -1048,6 +1049,10 @@ def moving_defect_frontback_chirality(
             front_count = 0
             back_sum = 0.0
             back_count = 0
+            local_vx_sum = 0.0
+            local_vy_sum = 0.0
+            local_vz_sum = 0.0
+            local_velocity_count = 0
 
             for delta_x in range(-search_cells, search_cells + 1):
                 cell_x = (center_x + delta_x) % n_x
@@ -1072,6 +1077,38 @@ def moving_defect_frontback_chirality(
                                 particle_idx = next_index[particle_idx]
                                 continue
 
+                            prev_particle_x = coords[frame_idx - 1, particle_idx, 0]
+                            prev_particle_theta = coords[
+                                frame_idx - 1, particle_idx, 1
+                            ]
+                            prev_particle_radius = coords[
+                                frame_idx - 1, particle_idx, 2
+                            ]
+                            if (
+                                math.isfinite(prev_particle_x)
+                                and math.isfinite(prev_particle_theta)
+                                and math.isfinite(prev_particle_radius)
+                            ):
+                                particle_vx = x_values[particle_idx] - prev_particle_x
+                                if box_length_x > 0.0:
+                                    particle_vx -= box_length_x * round(
+                                        particle_vx / box_length_x
+                                    )
+                                prev_particle_y = prev_particle_radius * math.sin(
+                                    prev_particle_theta
+                                )
+                                prev_particle_z = prev_particle_radius * math.cos(
+                                    prev_particle_theta
+                                )
+                                local_vx_sum += particle_vx
+                                local_vy_sum += (
+                                    y_values[particle_idx] - prev_particle_y
+                                )
+                                local_vz_sum += (
+                                    z_values[particle_idx] - prev_particle_z
+                                )
+                                local_velocity_count += 1
+
                             chirality_value = chirality[particle_idx]
                             if math.isfinite(chirality_value):
                                 projection = dx * e_x + dy * e_y + dz * e_z
@@ -1087,6 +1124,23 @@ def moving_defect_frontback_chirality(
             if front_count > 0 and back_count > 0:
                 delta_chirality = front_sum / front_count - back_sum / back_count
                 speeds[sample_count] = displacement / delta_t
+                if local_velocity_count > 0:
+                    local_vx = local_vx_sum / local_velocity_count
+                    local_vy = local_vy_sum / local_velocity_count
+                    local_vz = local_vz_sum / local_velocity_count
+                    residual_vx = vx - local_vx
+                    residual_vy = vy - local_vy
+                    residual_vz = vz - local_vz
+                    residual_speeds[sample_count] = (
+                        math.sqrt(
+                            residual_vx * residual_vx
+                            + residual_vy * residual_vy
+                            + residual_vz * residual_vz
+                        )
+                        / delta_t
+                    )
+                else:
+                    residual_speeds[sample_count] = np.nan
                 abs_delta_chirality[sample_count] = abs(delta_chirality)
                 if vx > 0.0:
                     velocity_direction[sample_count] = 1.0
@@ -1104,6 +1158,7 @@ def moving_defect_frontback_chirality(
 
     return (
         speeds[:sample_count],
+        residual_speeds[:sample_count],
         abs_delta_chirality[:sample_count],
         velocity_direction[:sample_count],
         delta_chirality_sign[:sample_count],
