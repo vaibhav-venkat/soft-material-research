@@ -4,6 +4,7 @@ from pathlib import Path
 
 import numpy as np
 
+from hexatic.constants import cylinder
 from hexatic.radii_analysis.cases import RadiusCase
 
 from .best_fit import symbolic_regression_report
@@ -20,8 +21,10 @@ def normalized_count_plots_missing(metric_name: str) -> bool:
         for path in (
             NORMALIZED_PLOT_DIR / f"{metric_name}_per_particle.png",
             NORMALIZED_PLOT_DIR / f"{metric_name}_per_surface_area.png",
+            NORMALIZED_PLOT_DIR / f"{metric_name}_per_shell_volume.png",
             NORMALIZED_FIT_DIR / f"{metric_name}_per_particle_pysr.txt",
             NORMALIZED_FIT_DIR / f"{metric_name}_per_surface_area_pysr.txt",
+            NORMALIZED_FIT_DIR / f"{metric_name}_per_shell_volume_pysr.txt",
         )
     )
 
@@ -48,12 +51,25 @@ def write_normalized_count_plots(
         [2.0 * np.pi * case.radius * case.lx for case in cases],
         dtype=np.float64,
     )
+    shell_volume = np.asarray(
+        [
+            np.pi
+            * case.lx
+            * (
+                case.radius**2
+                - max(0.0, case.radius - cylinder.ANALYSIS.wall_cutoff) ** 2
+            )
+            for case in cases
+        ],
+        dtype=np.float64,
+    )
 
     radii = radii[regular_mask]
     labels = labels[regular_mask]
     groups = groups[regular_mask]
     per_particle = _filter_values(_divide_values(values, n_particles), regular_mask)
     per_surface_area = _filter_values(_divide_values(values, surface_area), regular_mask)
+    per_shell_volume = _filter_values(_divide_values(values, shell_volume), regular_mask)
 
     particle_plot = NORMALIZED_PLOT_DIR / f"{metric_name}_per_particle.png"
     plot_radius_values(
@@ -90,6 +106,25 @@ def write_normalized_count_plots(
         per_surface_area,
         NORMALIZED_FIT_DIR / f"{metric_name}_per_surface_area_pysr.txt",
         title=f"{title} per cylinder surface area: symbolic regression",
+        x_label="R",
+    )
+
+    shell_volume_plot = NORMALIZED_PLOT_DIR / f"{metric_name}_per_shell_volume.png"
+    plot_radius_values(
+        radii,
+        per_shell_volume,
+        shell_volume_plot,
+        f"{title} per shell volume",
+        r"mean count / $V_{shell}$",
+        case_labels=labels,
+        group_names=groups,
+        fits=None,
+    )
+    symbolic_regression_report(
+        radii,
+        per_shell_volume,
+        NORMALIZED_FIT_DIR / f"{metric_name}_per_shell_volume_pysr.txt",
+        title=f"{title} per shell volume: symbolic regression",
         x_label="R",
     )
 
