@@ -50,7 +50,6 @@ from .plotting import (
 from .velocity_polar_force_density import (
     plot_velocity_polar_force_density_series,
 )
-from .radial_exchange_current import plot_radial_exchange_current
 
 
 def _parse_args() -> argparse.Namespace:
@@ -243,32 +242,6 @@ def _parse_args() -> argparse.Namespace:
             "Output image for stacked x/theta velocity, U0P, and direct "
             "wall-plus-particle force density series."
         ),
-    )
-    parser.add_argument(
-        "--radial-exchange-current-plot",
-        default=str(
-            CYLINDER_PATHS.x_com_velocity_plot.with_name(
-                "cylinder_radial_exchange_current.png"
-            )
-        ),
-        help="Output heatmap for Gaussian-kernel radial exchange current.",
-    )
-    parser.add_argument(
-        "--radial-exchange-current-npz",
-        default=str(CYLINDER_PATHS.in_gsd.parent / "radial_exchange_current.npz"),
-        help="Output NPZ for Gaussian-kernel radial exchange current.",
-    )
-    parser.add_argument(
-        "--radial-exchange-current-bin-width",
-        type=float,
-        default=CYLINDER.particle_diameter,
-        help="Radial bin width for radial exchange current.",
-    )
-    parser.add_argument(
-        "--radial-exchange-current-kernel-radius",
-        type=float,
-        default=2.0 * CYLINDER.particle_diameter,
-        help="Gaussian kernel radius for radial exchange current.",
     )
     parser.add_argument(
         "--translation-chirality-radius",
@@ -481,22 +454,6 @@ def main() -> None:
     print(
         "Wrote translation chirality measure GSD to "
         f"{args.translation_chirality_measure_gsd}."
-    )
-    plot_radial_exchange_current(
-        CYLINDER_PATHS.in_gsd,
-        filename=args.radial_exchange_current_plot,
-        npz_filename=args.radial_exchange_current_npz,
-        radial_bin_width=args.radial_exchange_current_bin_width,
-        kernel_radius=args.radial_exchange_current_kernel_radius,
-        cylinder_radius=CYLINDER.cylinder_radius,
-    )
-    print(
-        "Wrote radial exchange current plot to "
-        f"{args.radial_exchange_current_plot}."
-    )
-    print(
-        "Wrote radial exchange current data to "
-        f"{args.radial_exchange_current_npz}."
     )
     # plot_shell_px_change_decomposition(filename=args.shell_px_change_plot)
     # print(

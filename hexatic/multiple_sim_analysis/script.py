@@ -9,6 +9,7 @@ from . import (
     dislocation,
     force_density,
     polarization,
+    radial_exchange_current,
     velocity,
     x_com,
 )
@@ -40,8 +41,21 @@ def _parse_args() -> argparse.Namespace:
             "polarization",
             "x_com",
             "force_density",
+            "radial_exchange_current",
         ),
         help="Metric to skip. Can be passed multiple times.",
+    )
+    parser.add_argument(
+        "--radial-exchange-current-bin-width",
+        type=float,
+        default=radial_exchange_current.ACTIVE_RADIAL_BIN_WIDTH,
+        help="Radial bin width for radial exchange current; defaults to 1 particle diameter.",
+    )
+    parser.add_argument(
+        "--radial-exchange-current-kernel-radius",
+        type=float,
+        default=radial_exchange_current.LOCAL_POCKET_RADIUS,
+        help="Gaussian kernel radius for radial exchange current; defaults to 2 particle diameters.",
     )
     return parser.parse_args()
 
@@ -62,6 +76,17 @@ def run_all(args: argparse.Namespace) -> None:
         ("polarization", polarization.run),
         ("x_com", x_com.run),
         ("force_density", force_density.run),
+        (
+            "radial_exchange_current",
+            lambda cases, frame_start, frame_stop, overwrite: radial_exchange_current.run(
+                cases,
+                frame_start=frame_start,
+                frame_stop=frame_stop,
+                overwrite=overwrite,
+                radial_bin_width=args.radial_exchange_current_bin_width,
+                kernel_radius=args.radial_exchange_current_kernel_radius,
+            ),
+        ),
     )
     skipped = set(args.skip)
     for metric_name, runner in metrics:
