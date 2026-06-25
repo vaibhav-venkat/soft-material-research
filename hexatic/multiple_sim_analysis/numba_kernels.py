@@ -852,6 +852,7 @@ def local_disclination_field_profiles(
 def moving_defect_frontback_chirality(
     coords: np.ndarray,
     disclination_mask: np.ndarray,
+    hexatic_abs: np.ndarray,
     steps: np.ndarray,
     frame_start: int,
     frame_stop: int,
@@ -862,21 +863,78 @@ def moving_defect_frontback_chirality(
     x_min: float,
     cylinder_radius: float,
     timestep: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+]:
     start = min(max(frame_start, 1), coords.shape[0])
     stop = min(max(frame_stop, start), coords.shape[0])
     cell_size = max(chirality_radius, core_radius)
     if cell_size <= 0.0:
         empty = np.empty(0, dtype=np.float64)
-        return empty, empty, empty, empty, empty
+        return (
+            empty,
+            empty,
+            empty,
+            empty,
+            empty,
+            empty,
+            empty,
+            empty,
+            empty,
+            empty,
+            empty,
+            empty,
+            empty,
+            empty,
+            empty,
+            empty,
+            empty,
+            empty,
+            empty,
+            empty,
+        )
 
     n_particles = coords.shape[1]
     max_samples = max(0, stop - start) * n_particles
     speeds = np.empty(max_samples, dtype=np.float64)
+    local_speeds = np.empty(max_samples, dtype=np.float64)
+    defect_local_cosines = np.empty(max_samples, dtype=np.float64)
     residual_speeds = np.empty(max_samples, dtype=np.float64)
+    residual_vx_values = np.empty(max_samples, dtype=np.float64)
+    residual_vy_values = np.empty(max_samples, dtype=np.float64)
+    residual_vz_values = np.empty(max_samples, dtype=np.float64)
     abs_delta_chirality = np.empty(max_samples, dtype=np.float64)
     velocity_direction = np.empty(max_samples, dtype=np.float64)
     delta_chirality_sign = np.empty(max_samples, dtype=np.float64)
+    d_chi_x_values = np.empty(max_samples, dtype=np.float64)
+    d_chi_y_values = np.empty(max_samples, dtype=np.float64)
+    d_chi_z_values = np.empty(max_samples, dtype=np.float64)
+    d_psi6_x_values = np.empty(max_samples, dtype=np.float64)
+    d_psi6_y_values = np.empty(max_samples, dtype=np.float64)
+    d_psi6_z_values = np.empty(max_samples, dtype=np.float64)
+    residual_dot_d_chi_hat = np.empty(max_samples, dtype=np.float64)
+    residual_dot_d_psi6_hat = np.empty(max_samples, dtype=np.float64)
+    residual_cos_d_chi = np.empty(max_samples, dtype=np.float64)
+    residual_cos_d_psi6 = np.empty(max_samples, dtype=np.float64)
     sample_count = 0
 
     y_min = -cylinder_radius
@@ -1053,6 +1111,10 @@ def moving_defect_frontback_chirality(
             local_vy_sum = 0.0
             local_vz_sum = 0.0
             local_velocity_count = 0
+            annulus_chirality_sum = 0.0
+            annulus_chirality_count = 0
+            annulus_psi6_sum = 0.0
+            annulus_psi6_count = 0
 
             for delta_x in range(-search_cells, search_cells + 1):
                 cell_x = (center_x + delta_x) % n_x
@@ -1111,6 +1173,8 @@ def moving_defect_frontback_chirality(
 
                             chirality_value = chirality[particle_idx]
                             if math.isfinite(chirality_value):
+                                annulus_chirality_sum += chirality_value
+                                annulus_chirality_count += 1
                                 projection = dx * e_x + dy * e_y + dz * e_z
                                 if projection > 0.0:
                                     front_sum += chirality_value
@@ -1119,49 +1183,218 @@ def moving_defect_frontback_chirality(
                                     back_sum += chirality_value
                                     back_count += 1
 
+                            psi6_value = hexatic_abs[frame_idx, particle_idx]
+                            if math.isfinite(psi6_value):
+                                annulus_psi6_sum += psi6_value
+                                annulus_psi6_count += 1
+
                             particle_idx = next_index[particle_idx]
 
-            if front_count > 0 and back_count > 0:
-                delta_chirality = front_sum / front_count - back_sum / back_count
+            if local_velocity_count > 0:
                 speeds[sample_count] = displacement / delta_t
-                if local_velocity_count > 0:
-                    local_vx = local_vx_sum / local_velocity_count
-                    local_vy = local_vy_sum / local_velocity_count
-                    local_vz = local_vz_sum / local_velocity_count
-                    residual_vx = vx - local_vx
-                    residual_vy = vy - local_vy
-                    residual_vz = vz - local_vz
-                    residual_speeds[sample_count] = (
-                        math.sqrt(
-                            residual_vx * residual_vx
-                            + residual_vy * residual_vy
-                            + residual_vz * residual_vz
-                        )
-                        / delta_t
-                    )
+                local_vx = local_vx_sum / local_velocity_count
+                local_vy = local_vy_sum / local_velocity_count
+                local_vz = local_vz_sum / local_velocity_count
+                local_displacement = math.sqrt(
+                    local_vx * local_vx + local_vy * local_vy + local_vz * local_vz
+                )
+                local_speeds[sample_count] = local_displacement / delta_t
+                if local_displacement > 0.0:
+                    defect_local_cosines[sample_count] = (
+                        vx * local_vx + vy * local_vy + vz * local_vz
+                    ) / (displacement * local_displacement)
                 else:
-                    residual_speeds[sample_count] = np.nan
-                abs_delta_chirality[sample_count] = abs(delta_chirality)
+                    defect_local_cosines[sample_count] = np.nan
+                residual_vx = vx - local_vx
+                residual_vy = vy - local_vy
+                residual_vz = vz - local_vz
+                residual_speed = (
+                    math.sqrt(
+                        residual_vx * residual_vx
+                        + residual_vy * residual_vy
+                        + residual_vz * residual_vz
+                    )
+                    / delta_t
+                )
+                residual_speeds[sample_count] = residual_speed
+                residual_vx_values[sample_count] = residual_vx / delta_t
+                residual_vy_values[sample_count] = residual_vy / delta_t
+                residual_vz_values[sample_count] = residual_vz / delta_t
+
+                if front_count > 0 and back_count > 0:
+                    delta_chirality = front_sum / front_count - back_sum / back_count
+                    abs_delta_chirality[sample_count] = abs(delta_chirality)
+                    if delta_chirality > 0.0:
+                        delta_chirality_sign[sample_count] = 1.0
+                    elif delta_chirality < 0.0:
+                        delta_chirality_sign[sample_count] = -1.0
+                    else:
+                        delta_chirality_sign[sample_count] = 0.0
+                else:
+                    abs_delta_chirality[sample_count] = np.nan
+                    delta_chirality_sign[sample_count] = np.nan
+
                 if vx > 0.0:
                     velocity_direction[sample_count] = 1.0
                 elif vx < 0.0:
                     velocity_direction[sample_count] = -1.0
                 else:
                     velocity_direction[sample_count] = 0.0
-                if delta_chirality > 0.0:
-                    delta_chirality_sign[sample_count] = 1.0
-                elif delta_chirality < 0.0:
-                    delta_chirality_sign[sample_count] = -1.0
+
+                d_chi_x = 0.0
+                d_chi_y = 0.0
+                d_chi_z = 0.0
+                d_chi_count = 0
+                d_psi6_x = 0.0
+                d_psi6_y = 0.0
+                d_psi6_z = 0.0
+                d_psi6_count = 0
+                mean_chirality = (
+                    annulus_chirality_sum / annulus_chirality_count
+                    if annulus_chirality_count > 0
+                    else np.nan
+                )
+                mean_psi6 = (
+                    annulus_psi6_sum / annulus_psi6_count
+                    if annulus_psi6_count > 0
+                    else np.nan
+                )
+
+                for delta_x in range(-search_cells, search_cells + 1):
+                    cell_x = (center_x + delta_x) % n_x
+                    for delta_y in range(-search_cells, search_cells + 1):
+                        cell_y = center_y + delta_y
+                        if cell_y < 0 or cell_y >= n_y:
+                            continue
+                        for delta_z in range(-search_cells, search_cells + 1):
+                            cell_z = center_z + delta_z
+                            if cell_z < 0 or cell_z >= n_z:
+                                continue
+                            cell_idx = (cell_x * n_y + cell_y) * n_z + cell_z
+                            particle_idx = head[cell_idx]
+                            while particle_idx != -1:
+                                dx = x_values[particle_idx] - x_i
+                                if box_length_x > 0.0:
+                                    dx -= box_length_x * round(dx / box_length_x)
+                                dy = y_values[particle_idx] - y_i
+                                dz = z_values[particle_idx] - z_i
+                                distance_sq = dx * dx + dy * dy + dz * dz
+                                if distance_sq <= core_sq or distance_sq >= outer_sq:
+                                    particle_idx = next_index[particle_idx]
+                                    continue
+
+                                distance = math.sqrt(distance_sq)
+                                if distance > 0.0:
+                                    r_hat_x = dx / distance
+                                    r_hat_y = dy / distance
+                                    r_hat_z = dz / distance
+                                    chirality_value = chirality[particle_idx]
+                                    if (
+                                        math.isfinite(chirality_value)
+                                        and math.isfinite(mean_chirality)
+                                    ):
+                                        delta_value = chirality_value - mean_chirality
+                                        d_chi_x += delta_value * r_hat_x
+                                        d_chi_y += delta_value * r_hat_y
+                                        d_chi_z += delta_value * r_hat_z
+                                        d_chi_count += 1
+
+                                    psi6_value = hexatic_abs[frame_idx, particle_idx]
+                                    if (
+                                        math.isfinite(psi6_value)
+                                        and math.isfinite(mean_psi6)
+                                    ):
+                                        delta_value = psi6_value - mean_psi6
+                                        d_psi6_x += delta_value * r_hat_x
+                                        d_psi6_y += delta_value * r_hat_y
+                                        d_psi6_z += delta_value * r_hat_z
+                                        d_psi6_count += 1
+
+                                particle_idx = next_index[particle_idx]
+
+                if d_chi_count > 0:
+                    d_chi_x /= d_chi_count
+                    d_chi_y /= d_chi_count
+                    d_chi_z /= d_chi_count
+                    d_chi_norm = math.sqrt(
+                        d_chi_x * d_chi_x + d_chi_y * d_chi_y + d_chi_z * d_chi_z
+                    )
+                    if d_chi_norm > 0.0 and residual_speed > 0.0:
+                        residual_dot_d_chi_hat[sample_count] = (
+                            residual_vx_values[sample_count] * d_chi_x
+                            + residual_vy_values[sample_count] * d_chi_y
+                            + residual_vz_values[sample_count] * d_chi_z
+                        ) / d_chi_norm
+                        residual_cos_d_chi[sample_count] = (
+                            residual_dot_d_chi_hat[sample_count] / residual_speed
+                        )
+                    else:
+                        residual_dot_d_chi_hat[sample_count] = np.nan
+                        residual_cos_d_chi[sample_count] = np.nan
                 else:
-                    delta_chirality_sign[sample_count] = 0.0
+                    d_chi_x = np.nan
+                    d_chi_y = np.nan
+                    d_chi_z = np.nan
+                    residual_dot_d_chi_hat[sample_count] = np.nan
+                    residual_cos_d_chi[sample_count] = np.nan
+
+                if d_psi6_count > 0:
+                    d_psi6_x /= d_psi6_count
+                    d_psi6_y /= d_psi6_count
+                    d_psi6_z /= d_psi6_count
+                    d_psi6_norm = math.sqrt(
+                        d_psi6_x * d_psi6_x
+                        + d_psi6_y * d_psi6_y
+                        + d_psi6_z * d_psi6_z
+                    )
+                    if d_psi6_norm > 0.0 and residual_speed > 0.0:
+                        residual_dot_d_psi6_hat[sample_count] = (
+                            residual_vx_values[sample_count] * d_psi6_x
+                            + residual_vy_values[sample_count] * d_psi6_y
+                            + residual_vz_values[sample_count] * d_psi6_z
+                        ) / d_psi6_norm
+                        residual_cos_d_psi6[sample_count] = (
+                            residual_dot_d_psi6_hat[sample_count] / residual_speed
+                        )
+                    else:
+                        residual_dot_d_psi6_hat[sample_count] = np.nan
+                        residual_cos_d_psi6[sample_count] = np.nan
+                else:
+                    d_psi6_x = np.nan
+                    d_psi6_y = np.nan
+                    d_psi6_z = np.nan
+                    residual_dot_d_psi6_hat[sample_count] = np.nan
+                    residual_cos_d_psi6[sample_count] = np.nan
+
+                d_chi_x_values[sample_count] = d_chi_x
+                d_chi_y_values[sample_count] = d_chi_y
+                d_chi_z_values[sample_count] = d_chi_z
+                d_psi6_x_values[sample_count] = d_psi6_x
+                d_psi6_y_values[sample_count] = d_psi6_y
+                d_psi6_z_values[sample_count] = d_psi6_z
                 sample_count += 1
 
     return (
         speeds[:sample_count],
+        local_speeds[:sample_count],
+        defect_local_cosines[:sample_count],
         residual_speeds[:sample_count],
+        residual_vx_values[:sample_count],
+        residual_vy_values[:sample_count],
+        residual_vz_values[:sample_count],
         abs_delta_chirality[:sample_count],
         velocity_direction[:sample_count],
         delta_chirality_sign[:sample_count],
+        d_chi_x_values[:sample_count],
+        d_chi_y_values[:sample_count],
+        d_chi_z_values[:sample_count],
+        d_psi6_x_values[:sample_count],
+        d_psi6_y_values[:sample_count],
+        d_psi6_z_values[:sample_count],
+        residual_dot_d_chi_hat[:sample_count],
+        residual_dot_d_psi6_hat[:sample_count],
+        residual_cos_d_chi[:sample_count],
+        residual_cos_d_psi6[:sample_count],
     )
 
 
