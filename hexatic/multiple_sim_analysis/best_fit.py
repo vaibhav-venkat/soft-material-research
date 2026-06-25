@@ -172,8 +172,8 @@ def symbolic_regression_report(
     ]
     try:
         from pysr import PySRRegressor
-    except ImportError as exc:
-        lines.append(f"PySR import failed: {exc}")
+    except Exception as exc:
+        lines.append(f"PySR import/setup failed: {type(exc).__name__}: {exc}")
         output_path.write_text("\n".join(lines) + "\n")
         return
 
@@ -205,17 +205,17 @@ def symbolic_regression_report(
             lines.extend(["skipped: fewer than 3 finite points or zero x span", ""])
             continue
 
-        model = PySRRegressor(
-            niterations=niterations,
-            maxsize=maxsize,
-            timeout_in_seconds=timeout_seconds,
-            binary_operators=["+", "-", "*", "/"],
-            unary_operators=["exp", "log", "sqrt", "square"],
-            model_selection="best",
-            progress=False,
-            verbosity=0,
-        )
         try:
+            model = PySRRegressor(
+                niterations=niterations,
+                maxsize=maxsize,
+                timeout_in_seconds=timeout_seconds,
+                binary_operators=["+", "-", "*", "/"],
+                unary_operators=["exp", "log", "sqrt", "square"],
+                model_selection="best",
+                progress=False,
+                verbosity=0,
+            )
             model.fit(x_fit.reshape(-1, 1), y_fit, variable_names=[x_label])
             lines.append(_format_equation_table(model.equations_))
         except Exception as exc:

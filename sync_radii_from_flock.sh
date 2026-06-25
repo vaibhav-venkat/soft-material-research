@@ -18,7 +18,6 @@ if [[ "$DRY_RUN" == "1" ]]; then
 fi
 
 SYNC_DIRS=(
-  "hexatic/radii_analysis/hexatic_output"
   "hexatic/radii_analysis/npz_fields"
 )
 
