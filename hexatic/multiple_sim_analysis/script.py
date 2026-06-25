@@ -8,6 +8,7 @@ from . import (
     disclination,
     dislocation,
     force_density,
+    nematic,
     polarization,
     radial_exchange_current,
     velocity,
@@ -39,6 +40,7 @@ def _parse_args() -> argparse.Namespace:
             "disclination",
             "dislocation",
             "polarization",
+            "nematic",
             "x_com",
             "force_density",
             "radial_exchange_current",
@@ -73,6 +75,7 @@ def run_all(args: argparse.Namespace) -> None:
         ("disclination", disclination.run),
         ("dislocation", dislocation.run),
         ("polarization", polarization.run),
+        ("nematic", nematic.run),
         ("x_com", x_com.run),
         (
             "radial_exchange_current",

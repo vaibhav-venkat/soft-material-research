@@ -36,6 +36,79 @@ def mean_by_population(
 
 
 @njit(cache=True)
+def tangent_nematic_means(
+    direction_cylindrical: np.ndarray,
+    shell_mask: np.ndarray,
+    frame_start: int,
+    frame_stop: int,
+) -> tuple[float, float, float, float]:
+    start = min(max(frame_start, 0), direction_cylindrical.shape[0])
+    stop = min(max(frame_stop, start), direction_cylindrical.shape[0])
+    s_shell_sum = 0.0
+    s_shell_count = 0
+    s_core_sum = 0.0
+    s_core_count = 0
+    q_xx_shell_sum = 0.0
+    q_xtheta_shell_sum = 0.0
+    q_shell_count = 0
+
+    for frame_idx in range(start, stop):
+        shell_q_xx_sum = 0.0
+        shell_q_xtheta_sum = 0.0
+        shell_count = 0
+        core_q_xx_sum = 0.0
+        core_q_xtheta_sum = 0.0
+        core_count = 0
+
+        for particle_idx in range(direction_cylindrical.shape[1]):
+            p_x = direction_cylindrical[frame_idx, particle_idx, 0]
+            p_theta = direction_cylindrical[frame_idx, particle_idx, 2]
+            norm = math.sqrt(p_x * p_x + p_theta * p_theta)
+            if not math.isfinite(norm) or norm <= 0.0:
+                continue
+
+            u_x = p_x / norm
+            u_theta = p_theta / norm
+            q_xx = 2.0 * u_x * u_x - 1.0
+            q_xtheta = 2.0 * u_x * u_theta
+
+            if shell_mask[frame_idx, particle_idx]:
+                shell_q_xx_sum += q_xx
+                shell_q_xtheta_sum += q_xtheta
+                shell_count += 1
+            else:
+                core_q_xx_sum += q_xx
+                core_q_xtheta_sum += q_xtheta
+                core_count += 1
+
+        if shell_count:
+            shell_q_xx = shell_q_xx_sum / shell_count
+            shell_q_xtheta = shell_q_xtheta_sum / shell_count
+            s_shell_sum += math.sqrt(
+                shell_q_xx * shell_q_xx + shell_q_xtheta * shell_q_xtheta
+            )
+            s_shell_count += 1
+            q_xx_shell_sum += shell_q_xx
+            q_xtheta_shell_sum += shell_q_xtheta
+            q_shell_count += 1
+
+        if core_count:
+            core_q_xx = core_q_xx_sum / core_count
+            core_q_xtheta = core_q_xtheta_sum / core_count
+            s_core_sum += math.sqrt(
+                core_q_xx * core_q_xx + core_q_xtheta * core_q_xtheta
+            )
+            s_core_count += 1
+
+    return (
+        s_shell_sum / s_shell_count if s_shell_count else np.nan,
+        s_core_sum / s_core_count if s_core_count else np.nan,
+        q_xx_shell_sum / q_shell_count if q_shell_count else np.nan,
+        q_xtheta_shell_sum / q_shell_count if q_shell_count else np.nan,
+    )
+
+
+@njit(cache=True)
 def shell_core_density_means(
     shell_mask: np.ndarray,
     frame_start: int,
