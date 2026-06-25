@@ -37,15 +37,23 @@ def write_normalized_count_plots(
 
     radii = np.asarray([case.radius for case in cases], dtype=np.float64)
     labels = np.asarray([case.label or case.case_id for case in cases])
+    case_ids = np.asarray([case.case_id for case in cases])
     groups = group_names_for_cases(cases)
+    regular_mask = (groups != "circumference") | (case_ids == "circ_60_0D")
+    if not np.any(regular_mask):
+        regular_mask = np.ones(len(cases), dtype=bool)
+
     n_particles = np.asarray([case.n_particles for case in cases], dtype=np.float64)
     surface_area = np.asarray(
         [2.0 * np.pi * case.radius * case.lx for case in cases],
         dtype=np.float64,
     )
 
-    per_particle = _divide_values(values, n_particles)
-    per_surface_area = _divide_values(values, surface_area)
+    radii = radii[regular_mask]
+    labels = labels[regular_mask]
+    groups = groups[regular_mask]
+    per_particle = _filter_values(_divide_values(values, n_particles), regular_mask)
+    per_surface_area = _filter_values(_divide_values(values, surface_area), regular_mask)
 
     particle_plot = NORMALIZED_PLOT_DIR / f"{metric_name}_per_particle.png"
     plot_radius_values(
@@ -100,3 +108,13 @@ def _divide_values(
             where=np.isfinite(denominator) & (denominator != 0.0),
         )
     return output
+
+
+def _filter_values(
+    values: dict[str, np.ndarray],
+    mask: np.ndarray,
+) -> dict[str, np.ndarray]:
+    return {
+        name: np.asarray(series, dtype=np.float64)[mask]
+        for name, series in values.items()
+    }
