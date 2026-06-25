@@ -15,13 +15,6 @@ from .common import (
     group_names_for_cases,
 )
 
-GROUP_STYLES = {
-    "circumference": {"marker": "s", "color": "#1f77b4"},
-    "scaled_radius": {"marker": "s", "color": "#d62728"},
-    "other": {"marker": "^", "color": "#2ca02c"},
-}
-
-
 def plot_radius_values(
     radii: np.ndarray,
     values: dict[str, np.ndarray],
@@ -52,20 +45,17 @@ def plot_radius_values(
     for series_idx, (series_name, series_values) in enumerate(values.items()):
         series_values = np.asarray(series_values, dtype=np.float64)
         base_color = series_colors[series_idx % len(series_colors)]
-        for group_name in np.unique(group_names):
-            mask = group_names == group_name
-            style = GROUP_STYLES.get(str(group_name), GROUP_STYLES["other"])
-            axis.scatter(
-                radii[mask],
-                series_values[mask],
-                label=f"{series_name} ({group_name})",
-                marker=style["marker"],
-                facecolor=base_color,
-                edgecolor=style["color"],
-                linewidth=1.2,
-                s=58,
-                alpha=0.92,
-            )
+        axis.scatter(
+            radii,
+            series_values,
+            label=series_name,
+            marker="s",
+            facecolor=base_color,
+            edgecolor="#222222",
+            linewidth=0.8,
+            s=58,
+            alpha=0.92,
+        )
     for radius, label in zip(radii, case_labels):
         axis.annotate(
             str(label),
