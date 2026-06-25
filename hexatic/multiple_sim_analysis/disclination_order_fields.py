@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import numpy as np
 
 from hexatic.constants import cylinder
@@ -26,6 +27,7 @@ from .disclination import _load_neighbor_counts
 from .numba_kernels import (
     local_disclination_field_contrasts,
     local_disclination_field_profiles,
+    moving_defect_frontback_chirality,
 )
 from .plotting import companion_circumference_plot_path, plot_radius_values
 
@@ -146,7 +148,7 @@ def disclination_shell_profile_values_for_case(
     _validate_particle_frame_shape("coords", coords, expected_shape)
     x_edges = np.asarray(fields.x_edges, dtype=np.float64)
     box_length_x = float(x_edges[-1] - x_edges[0])
-    s_profile, hexatic_profile, chirality_profile = (
+    s_profile, hexatic_profile, chirality_profile, chirality_annulus = (
         local_disclination_field_profiles(
             np.ascontiguousarray(coords, dtype=np.float64),
             np.ascontiguousarray(direction_cylindrical, dtype=np.float64),
@@ -166,6 +168,7 @@ def disclination_shell_profile_values_for_case(
         "S_shell_profile": s_profile,
         "hexatic_order_shell_profile": hexatic_profile,
         "chirality_shell_profile": chirality_profile,
+        "chirality_annulus": np.asarray(chirality_annulus, dtype=np.float64),
     }
 
 
@@ -307,6 +310,398 @@ def _plot_shell_profiles(
     )
 
 
+def _mean_abs_defect_velocity(velocity_arrays: dict[str, np.ndarray]) -> np.ndarray:
+    plus = np.abs(np.asarray(velocity_arrays["plus_1"], dtype=np.float64))
+    minus = np.abs(np.asarray(velocity_arrays["minus_1"], dtype=np.float64))
+    values = np.column_stack((plus, minus))
+    finite = np.isfinite(values)
+    counts = np.count_nonzero(finite, axis=1)
+    sums = np.where(finite, values, 0.0).sum(axis=1)
+    return np.divide(
+        sums,
+        counts,
+        out=np.full(values.shape[0], np.nan, dtype=np.float64),
+        where=counts > 0,
+    )
+
+
+def _median_abs_defect_velocity(velocity_arrays: dict[str, np.ndarray]) -> np.ndarray:
+    plus = np.abs(np.asarray(velocity_arrays["plus_1"], dtype=np.float64))
+    minus = np.abs(np.asarray(velocity_arrays["minus_1"], dtype=np.float64))
+    values = np.column_stack((plus, minus))
+    finite = np.isfinite(values)
+    medians = np.full(values.shape[0], np.nan, dtype=np.float64)
+    for row_idx in range(values.shape[0]):
+        if np.any(finite[row_idx]):
+            medians[row_idx] = float(np.median(values[row_idx, finite[row_idx]]))
+    return medians
+
+
+def _disclination_velocity_arrays(
+    cases: tuple[RadiusCase, ...],
+    frame_start: int,
+    frame_stop: int,
+    overwrite: bool,
+) -> dict[str, np.ndarray]:
+    output_npz = NPZ_OUTPUT_DIR / "disclination_velocity.npz"
+    value_names = ("plus_1", "minus_1")
+    try:
+        arrays = load_cached_metric_values(
+            output_npz,
+            value_names,
+            cases,
+            frame_start,
+            frame_stop,
+            overwrite=overwrite,
+        )
+    except FileExistsError:
+        arrays = None
+    if arrays is not None:
+        return arrays
+
+    from .velocity import disclination_velocity_values_for_case
+
+    values = {name: [] for name in value_names}
+    for case in cases:
+        case_values = disclination_velocity_values_for_case(
+            case,
+            frame_start,
+            frame_stop,
+        )
+        for name in value_names:
+            values[name].append(case_values[name])
+    return {
+        name: np.asarray(series, dtype=np.float64)
+        for name, series in values.items()
+    }
+
+
+def _plot_velocity_chirality_summary(
+    cases: tuple[RadiusCase, ...],
+    arrays: dict[str, np.ndarray],
+    output_png: Path,
+) -> None:
+    plot_radius_values(
+        radii_for_cases(cases),
+        arrays,
+        output_png,
+        "|v_defect| and local chirality vs radius",
+        "value",
+        case_labels=labels_for_cases(cases),
+        group_names=group_names_for_cases(cases),
+        series_colors=("#111111", "#777777", "#0072b2", "#cc0000"),
+    )
+
+
+def run_velocity_chirality_summary(
+    cases: tuple[RadiusCase, ...],
+    shell_profiles: dict[str, np.ndarray],
+    frame_start: int = FRAME_START,
+    frame_stop: int = FRAME_STOP,
+    overwrite: bool = False,
+) -> dict[str, np.ndarray]:
+    output_npz = NPZ_OUTPUT_DIR / "disclination_velocity_chirality.npz"
+    output_png = PLOT_OUTPUT_DIR / "disclination_velocity_chirality.png"
+    value_names = (
+        "abs_v_defect",
+        "median_abs_v_defect",
+        "chirality_annulus",
+        "chirality_annulus_minus_core",
+    )
+    velocity_arrays = _disclination_velocity_arrays(
+        cases,
+        frame_start,
+        frame_stop,
+        overwrite,
+    )
+    chirality_profile = np.asarray(
+        shell_profiles["chirality_shell_profile"],
+        dtype=np.float64,
+    )
+    chirality_core = chirality_profile[:, 0]
+    chirality_annulus = np.asarray(
+        shell_profiles["chirality_annulus"],
+        dtype=np.float64,
+    )
+    arrays = {
+        "abs_v_defect": _mean_abs_defect_velocity(velocity_arrays),
+        "median_abs_v_defect": _median_abs_defect_velocity(velocity_arrays),
+        "chirality_annulus": chirality_annulus,
+        "chirality_annulus_minus_core": chirality_annulus - chirality_core,
+    }
+    save_metric_npz(
+        output_npz,
+        cases,
+        "disclination_velocity_chirality",
+        arrays,
+        {
+            "chirality_core_radius": np.asarray(
+                LOCAL_CONTRAST_LENGTH,
+                dtype=np.float64,
+            ),
+            "chirality_annulus_inner_radius": np.asarray(
+                LOCAL_CONTRAST_LENGTH,
+                dtype=np.float64,
+            ),
+            "chirality_annulus_outer_radius": np.asarray(
+                3.0 * LOCAL_CONTRAST_LENGTH,
+                dtype=np.float64,
+            ),
+        },
+        frame_start=frame_start,
+        frame_stop=frame_stop,
+    )
+    _plot_velocity_chirality_summary(cases, arrays, output_png)
+    return arrays
+
+
+def moving_defect_frontback_values_for_case(
+    case: RadiusCase,
+    frame_start: int = FRAME_START,
+    frame_stop: int = FRAME_STOP,
+) -> dict[str, np.ndarray]:
+    neighbor_counts = _load_neighbor_counts(neighbor_counts_path(case))
+    expected_shape = neighbor_counts.shape
+    disclinations = _disclination_mask(neighbor_counts)
+
+    fields = load_active_fields(active_fields_path(case))
+    coords = np.asarray(fields.coords, dtype=np.float64)
+    _validate_particle_frame_shape("coords", coords, expected_shape)
+    steps = np.asarray(fields.steps, dtype=np.int64)
+    n_frames = min(coords.shape[0], disclinations.shape[0], steps.shape[0])
+    coords = coords[:n_frames]
+    disclinations = disclinations[:n_frames]
+    steps = steps[:n_frames]
+
+    x_edges = np.asarray(fields.x_edges, dtype=np.float64)
+    box_length_x = float(x_edges[-1] - x_edges[0])
+    speed, abs_delta_chirality, velocity_direction, delta_chirality_sign = (
+        moving_defect_frontback_chirality(
+            np.ascontiguousarray(coords, dtype=np.float64),
+            np.ascontiguousarray(disclinations, dtype=np.bool_),
+            np.ascontiguousarray(steps, dtype=np.int64),
+            frame_start,
+            frame_stop,
+            LOCAL_CONTRAST_LENGTH,
+            3.0 * LOCAL_CONTRAST_LENGTH,
+            cylinder.ANALYSIS.neighbor_count_radius,
+            box_length_x,
+            float(x_edges[0]),
+            float(case.radius),
+            float(cylinder.TIMESTEP),
+        )
+    )
+    return {
+        "speed": speed,
+        "abs_delta_chirality": abs_delta_chirality,
+        "velocity_direction": velocity_direction,
+        "delta_chirality_sign": delta_chirality_sign,
+    }
+
+
+def _frontback_cache_matches(
+    output_npz: Path,
+    cases: tuple[RadiusCase, ...],
+    frame_start: int,
+    frame_stop: int,
+) -> bool:
+    with np.load(output_npz) as data:
+        required = (
+            "speed",
+            "abs_delta_chirality",
+            "velocity_direction",
+            "delta_chirality_sign",
+            "sample_case_ids",
+            "sample_radii",
+            "case_ids",
+            "frame_start",
+            "frame_stop",
+        )
+        if not all(name in data for name in required):
+            return False
+        return (
+            int(np.asarray(data["frame_start"]).item()) == int(frame_start)
+            and int(np.asarray(data["frame_stop"]).item()) == int(frame_stop)
+            and np.array_equal(np.asarray(data["case_ids"]), case_ids_for_cases(cases))
+        )
+
+
+def _load_frontback_cache(output_npz: Path) -> dict[str, np.ndarray]:
+    with np.load(output_npz) as data:
+        return {
+            "speed": np.asarray(data["speed"], dtype=np.float64),
+            "abs_delta_chirality": np.asarray(
+                data["abs_delta_chirality"],
+                dtype=np.float64,
+            ),
+            "velocity_direction": np.asarray(
+                data["velocity_direction"],
+                dtype=np.float64,
+            ),
+            "delta_chirality_sign": np.asarray(
+                data["delta_chirality_sign"],
+                dtype=np.float64,
+            ),
+            "sample_radii": np.asarray(data["sample_radii"], dtype=np.float64),
+        }
+
+
+def _save_frontback_cache(
+    output_npz: Path,
+    cases: tuple[RadiusCase, ...],
+    arrays: dict[str, np.ndarray],
+    frame_start: int,
+    frame_stop: int,
+) -> None:
+    NPZ_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        output_npz,
+        metric_name="moving_defect_frontback_chirality",
+        case_ids=case_ids_for_cases(cases),
+        labels=labels_for_cases(cases),
+        group_names=group_names_for_cases(cases),
+        radii=radii_for_cases(cases),
+        frame_start=int(frame_start),
+        frame_stop=int(frame_stop),
+        core_radius=np.asarray(LOCAL_CONTRAST_LENGTH, dtype=np.float64),
+        annulus_inner_radius=np.asarray(LOCAL_CONTRAST_LENGTH, dtype=np.float64),
+        annulus_outer_radius=np.asarray(3.0 * LOCAL_CONTRAST_LENGTH, dtype=np.float64),
+        chirality_radius=np.asarray(
+            cylinder.ANALYSIS.neighbor_count_radius,
+            dtype=np.float64,
+        ),
+        **arrays,
+    )
+
+
+def _plot_moving_frontback_chirality(
+    arrays: dict[str, np.ndarray],
+    output_png: Path,
+) -> None:
+    output_png.parent.mkdir(parents=True, exist_ok=True)
+    speed = np.asarray(arrays["speed"], dtype=np.float64)
+    abs_delta = np.asarray(arrays["abs_delta_chirality"], dtype=np.float64)
+    velocity_direction = np.asarray(arrays["velocity_direction"], dtype=np.float64)
+    delta_sign = np.asarray(arrays["delta_chirality_sign"], dtype=np.float64)
+    sample_radii = np.asarray(arrays["sample_radii"], dtype=np.float64)
+
+    finite_speed = np.isfinite(speed) & np.isfinite(abs_delta)
+    finite_signs = np.isfinite(velocity_direction) & np.isfinite(delta_sign)
+    finite_radii = np.isfinite(sample_radii)
+    color_values = np.where(finite_radii, sample_radii, np.nan)
+    if np.any(finite_radii):
+        vmin = float(np.nanmin(sample_radii[finite_radii]))
+        vmax = float(np.nanmax(sample_radii[finite_radii]))
+    else:
+        vmin = 0.0
+        vmax = 1.0
+
+    fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.2), constrained_layout=True)
+    scatter = axes[0].scatter(
+        speed[finite_speed],
+        abs_delta[finite_speed],
+        c=color_values[finite_speed],
+        cmap="viridis",
+        vmin=vmin,
+        vmax=vmax,
+        s=22,
+        alpha=0.75,
+        edgecolors="none",
+    )
+    axes[0].set_title("Moving defects")
+    axes[0].set_xlabel("|v_defect|")
+    axes[0].set_ylabel("|Delta chi_frontback|")
+    axes[0].grid(True, alpha=0.25)
+
+    sign_indices = np.flatnonzero(finite_signs)
+    jitter = 0.07 * np.sin(sign_indices * 2.399963229728653)
+    axes[1].scatter(
+        velocity_direction[finite_signs] + jitter,
+        delta_sign[finite_signs],
+        c=color_values[finite_signs],
+        cmap="viridis",
+        vmin=vmin,
+        vmax=vmax,
+        s=22,
+        alpha=0.75,
+        edgecolors="none",
+    )
+    axes[1].set_title("Front-back sign")
+    axes[1].set_xlabel("sign(v_defect,x)")
+    axes[1].set_ylabel("sign(Delta chi_frontback)")
+    axes[1].set_xticks([-1.0, 0.0, 1.0])
+    axes[1].set_yticks([-1.0, 0.0, 1.0])
+    axes[1].set_xlim(-1.35, 1.35)
+    axes[1].set_ylim(-1.35, 1.35)
+    axes[1].grid(True, alpha=0.25)
+    fig.colorbar(scatter, ax=axes, label="R")
+    fig.suptitle("Moving-defect front/back translational chirality")
+    fig.savefig(output_png, dpi=300)
+    plt.close(fig)
+
+
+def run_moving_frontback_chirality(
+    cases: tuple[RadiusCase, ...],
+    frame_start: int = FRAME_START,
+    frame_stop: int = FRAME_STOP,
+    overwrite: bool = False,
+) -> dict[str, np.ndarray]:
+    output_npz = NPZ_OUTPUT_DIR / "moving_defect_frontback_chirality.npz"
+    output_png = PLOT_OUTPUT_DIR / "moving_defect_frontback_chirality.png"
+    if (
+        not overwrite
+        and output_npz.exists()
+        and _frontback_cache_matches(output_npz, cases, frame_start, frame_stop)
+    ):
+        arrays = _load_frontback_cache(output_npz)
+        if not output_png.exists():
+            _plot_moving_frontback_chirality(arrays, output_png)
+        print(f"using cached moving-defect front/back chirality from {output_npz}")
+        return arrays
+
+    chunks: dict[str, list[np.ndarray]] = {
+        "speed": [],
+        "abs_delta_chirality": [],
+        "velocity_direction": [],
+        "delta_chirality_sign": [],
+        "sample_radii": [],
+    }
+    sample_case_ids: list[np.ndarray] = []
+    for case in cases:
+        case_values = moving_defect_frontback_values_for_case(
+            case,
+            frame_start,
+            frame_stop,
+        )
+        n_samples = case_values["speed"].shape[0]
+        for name in (
+            "speed",
+            "abs_delta_chirality",
+            "velocity_direction",
+            "delta_chirality_sign",
+        ):
+            chunks[name].append(case_values[name])
+        chunks["sample_radii"].append(
+            np.full(n_samples, float(case.radius), dtype=np.float64)
+        )
+        sample_case_ids.append(np.full(n_samples, case.case_id))
+
+    arrays = {
+        name: (
+            np.concatenate(series)
+            if series
+            else np.asarray([], dtype=np.float64)
+        )
+        for name, series in chunks.items()
+    }
+    arrays["sample_case_ids"] = (
+        np.concatenate(sample_case_ids) if sample_case_ids else np.asarray([])
+    )
+    _save_frontback_cache(output_npz, cases, arrays, frame_start, frame_stop)
+    _plot_moving_frontback_chirality(arrays, output_png)
+    return arrays
+
+
 def run_shell_profiles(
     cases: tuple[RadiusCase, ...],
     frame_start: int = FRAME_START,
@@ -317,6 +712,7 @@ def run_shell_profiles(
         "S_shell_profile",
         "hexatic_order_shell_profile",
         "chirality_shell_profile",
+        "chirality_annulus",
     )
     output_npz = NPZ_OUTPUT_DIR / "disclination_order_shell_profiles.npz"
     output_pngs = (
@@ -324,18 +720,34 @@ def run_shell_profiles(
         PLOT_OUTPUT_DIR / "disclination_hexatic_order_shell_profile.png",
         PLOT_OUTPUT_DIR / "disclination_chirality_shell_profile.png",
     )
-    arrays = load_cached_metric_values(
-        output_npz,
-        value_names,
-        cases,
-        frame_start,
-        frame_stop,
-        overwrite=overwrite,
-    )
+    try:
+        arrays = load_cached_metric_values(
+            output_npz,
+            value_names,
+            cases,
+            frame_start,
+            frame_stop,
+            overwrite=overwrite,
+        )
+    except FileExistsError:
+        arrays = None
     if arrays is not None:
         if _profile_plot_missing(output_pngs):
             _plot_shell_profiles(cases, arrays, output_pngs)
         print(f"using cached disclination shell profiles from {output_npz}")
+        run_velocity_chirality_summary(
+            cases,
+            arrays,
+            frame_start=frame_start,
+            frame_stop=frame_stop,
+            overwrite=overwrite,
+        )
+        run_moving_frontback_chirality(
+            cases,
+            frame_start=frame_start,
+            frame_stop=frame_stop,
+            overwrite=overwrite,
+        )
         return arrays
 
     values = {name: [] for name in value_names}
@@ -376,6 +788,19 @@ def run_shell_profiles(
         frame_stop=frame_stop,
     )
     _plot_shell_profiles(cases, arrays, output_pngs)
+    run_velocity_chirality_summary(
+        cases,
+        arrays,
+        frame_start=frame_start,
+        frame_stop=frame_stop,
+        overwrite=overwrite,
+    )
+    run_moving_frontback_chirality(
+        cases,
+        frame_start=frame_start,
+        frame_stop=frame_stop,
+        overwrite=overwrite,
+    )
     return arrays
 
 
@@ -389,6 +814,7 @@ def run(
         "S_shell_profile",
         "hexatic_order_shell_profile",
         "chirality_shell_profile",
+        "chirality_annulus",
     )
     cases = tuple(
         case

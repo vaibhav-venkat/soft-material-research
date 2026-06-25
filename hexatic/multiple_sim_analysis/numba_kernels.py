@@ -570,7 +570,7 @@ def local_disclination_field_profiles(
     box_length_x: float,
     x_min: float,
     cylinder_radius: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
     start = min(max(frame_start, 0), coords.shape[0])
     stop = min(max(frame_stop, start), coords.shape[0])
     n_bins = bin_edges.shape[0] - 1
@@ -580,15 +580,17 @@ def local_disclination_field_profiles(
     hexatic_counts = np.zeros(n_bins, dtype=np.int64)
     chirality_sums = np.zeros(n_bins, dtype=np.float64)
     chirality_counts = np.zeros(n_bins, dtype=np.int64)
+    annulus_chirality_sum = 0.0
+    annulus_chirality_count = 0
 
     if n_bins <= 0 or chirality_radius <= 0.0:
         empty = np.full(0, np.nan, dtype=np.float64)
-        return empty, empty, empty
+        return empty, empty, empty, np.nan
 
     max_radius = bin_edges[-1]
     if max_radius <= 0.0:
         empty = np.full(n_bins, np.nan, dtype=np.float64)
-        return empty, empty, empty
+        return empty, empty, empty, np.nan
 
     cell_size = max(chirality_radius, bin_edges[1] - bin_edges[0])
     n_particles = coords.shape[1]
@@ -810,6 +812,13 @@ def local_disclination_field_profiles(
                         bin_chirality_sums[bin_idx] / bin_chirality_counts[bin_idx]
                     )
                     chirality_counts[bin_idx] += 1
+            if n_bins >= 3:
+                annulus_count = bin_chirality_counts[1] + bin_chirality_counts[2]
+                if annulus_count > 0:
+                    annulus_chirality_sum += (
+                        bin_chirality_sums[1] + bin_chirality_sums[2]
+                    ) / annulus_count
+                    annulus_chirality_count += 1
 
     s_profile = np.empty(n_bins, dtype=np.float64)
     hexatic_profile = np.empty(n_bins, dtype=np.float64)
@@ -831,7 +840,274 @@ def local_disclination_field_profiles(
             else np.nan
         )
 
-    return s_profile, hexatic_profile, chirality_profile
+    chirality_annulus = (
+        annulus_chirality_sum / annulus_chirality_count
+        if annulus_chirality_count > 0
+        else np.nan
+    )
+    return s_profile, hexatic_profile, chirality_profile, chirality_annulus
+
+
+@njit(cache=True)
+def moving_defect_frontback_chirality(
+    coords: np.ndarray,
+    disclination_mask: np.ndarray,
+    steps: np.ndarray,
+    frame_start: int,
+    frame_stop: int,
+    core_radius: float,
+    annulus_outer_radius: float,
+    chirality_radius: float,
+    box_length_x: float,
+    x_min: float,
+    cylinder_radius: float,
+    timestep: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    start = min(max(frame_start, 1), coords.shape[0])
+    stop = min(max(frame_stop, start), coords.shape[0])
+    cell_size = max(chirality_radius, core_radius)
+    if cell_size <= 0.0:
+        empty = np.empty(0, dtype=np.float64)
+        return empty, empty, empty, empty
+
+    n_particles = coords.shape[1]
+    max_samples = max(0, stop - start) * n_particles
+    speeds = np.empty(max_samples, dtype=np.float64)
+    abs_delta_chirality = np.empty(max_samples, dtype=np.float64)
+    velocity_direction = np.empty(max_samples, dtype=np.float64)
+    delta_chirality_sign = np.empty(max_samples, dtype=np.float64)
+    sample_count = 0
+
+    y_min = -cylinder_radius
+    z_min = -cylinder_radius
+    transverse_width = 2.0 * cylinder_radius
+    n_x = max(1, int(math.ceil(box_length_x / cell_size)))
+    n_y = max(1, int(math.ceil(transverse_width / cell_size)))
+    n_z = max(1, int(math.ceil(transverse_width / cell_size)))
+    n_cells = n_x * n_y * n_z
+    search_cells = int(math.ceil(annulus_outer_radius / cell_size))
+
+    core_sq = core_radius * core_radius
+    outer_sq = annulus_outer_radius * annulus_outer_radius
+    chirality_sq_radius = chirality_radius * chirality_radius
+
+    for frame_idx in range(start, stop):
+        delta_t = (steps[frame_idx] - steps[frame_idx - 1]) * timestep
+        if delta_t <= 0.0:
+            continue
+
+        x_values = np.empty(n_particles, dtype=np.float64)
+        y_values = np.empty(n_particles, dtype=np.float64)
+        z_values = np.empty(n_particles, dtype=np.float64)
+        finite_position = np.zeros(n_particles, dtype=np.bool_)
+        head = np.full(n_cells, -1, dtype=np.int64)
+        next_index = np.full(n_particles, -1, dtype=np.int64)
+
+        for particle_idx in range(n_particles):
+            x_i = coords[frame_idx, particle_idx, 0]
+            theta_i = coords[frame_idx, particle_idx, 1]
+            radius_i = coords[frame_idx, particle_idx, 2]
+            if (
+                not math.isfinite(x_i)
+                or not math.isfinite(theta_i)
+                or not math.isfinite(radius_i)
+            ):
+                continue
+            y_i = radius_i * math.sin(theta_i)
+            z_i = radius_i * math.cos(theta_i)
+            x_values[particle_idx] = x_i
+            y_values[particle_idx] = y_i
+            z_values[particle_idx] = z_i
+            finite_position[particle_idx] = True
+
+            cell_idx = _cell_index(
+                x_i,
+                y_i,
+                z_i,
+                x_min,
+                y_min,
+                z_min,
+                cell_size,
+                n_x,
+                n_y,
+                n_z,
+                box_length_x,
+            )
+            next_index[particle_idx] = head[cell_idx]
+            head[cell_idx] = particle_idx
+
+        chirality = np.full(n_particles, np.nan, dtype=np.float64)
+        for particle_idx in range(n_particles):
+            if not finite_position[particle_idx]:
+                continue
+
+            x_i = x_values[particle_idx]
+            y_i = y_values[particle_idx]
+            z_i = z_values[particle_idx]
+            center_cell = _cell_index(
+                x_i,
+                y_i,
+                z_i,
+                x_min,
+                y_min,
+                z_min,
+                cell_size,
+                n_x,
+                n_y,
+                n_z,
+                box_length_x,
+            )
+            center_x = center_cell // (n_y * n_z)
+            center_y = (center_cell // n_z) % n_y
+            center_z = center_cell % n_z
+            value = 0.0
+
+            for delta_x in range(-1, 2):
+                cell_x = (center_x + delta_x) % n_x
+                for delta_y in range(-1, 2):
+                    cell_y = center_y + delta_y
+                    if cell_y < 0 or cell_y >= n_y:
+                        continue
+                    for delta_z in range(-1, 2):
+                        cell_z = center_z + delta_z
+                        if cell_z < 0 or cell_z >= n_z:
+                            continue
+                        cell_idx = (cell_x * n_y + cell_y) * n_z + cell_z
+                        neighbor_idx = head[cell_idx]
+                        while neighbor_idx != -1:
+                            if neighbor_idx != particle_idx:
+                                dx = x_values[neighbor_idx] - x_i
+                                if box_length_x > 0.0:
+                                    dx -= box_length_x * round(dx / box_length_x)
+                                dy = y_values[neighbor_idx] - y_i
+                                dz = z_values[neighbor_idx] - z_i
+                                distance_sq = dx * dx + dy * dy + dz * dz
+                                if (
+                                    distance_sq > 0.0
+                                    and distance_sq <= chirality_sq_radius
+                                ):
+                                    value += dx / math.sqrt(distance_sq)
+                            neighbor_idx = next_index[neighbor_idx]
+
+            chirality[particle_idx] = value
+
+        for defect_idx in range(n_particles):
+            if (
+                not finite_position[defect_idx]
+                or not disclination_mask[frame_idx, defect_idx]
+            ):
+                continue
+
+            prev_x = coords[frame_idx - 1, defect_idx, 0]
+            prev_theta = coords[frame_idx - 1, defect_idx, 1]
+            prev_radius = coords[frame_idx - 1, defect_idx, 2]
+            if (
+                not math.isfinite(prev_x)
+                or not math.isfinite(prev_theta)
+                or not math.isfinite(prev_radius)
+            ):
+                continue
+
+            x_i = x_values[defect_idx]
+            y_i = y_values[defect_idx]
+            z_i = z_values[defect_idx]
+            prev_y = prev_radius * math.sin(prev_theta)
+            prev_z = prev_radius * math.cos(prev_theta)
+            vx = x_i - prev_x
+            if box_length_x > 0.0:
+                vx -= box_length_x * round(vx / box_length_x)
+            vy = y_i - prev_y
+            vz = z_i - prev_z
+            displacement = math.sqrt(vx * vx + vy * vy + vz * vz)
+            if not math.isfinite(displacement) or displacement <= 0.0:
+                continue
+
+            inv_displacement = 1.0 / displacement
+            e_x = vx * inv_displacement
+            e_y = vy * inv_displacement
+            e_z = vz * inv_displacement
+
+            center_cell = _cell_index(
+                x_i,
+                y_i,
+                z_i,
+                x_min,
+                y_min,
+                z_min,
+                cell_size,
+                n_x,
+                n_y,
+                n_z,
+                box_length_x,
+            )
+            center_x = center_cell // (n_y * n_z)
+            center_y = (center_cell // n_z) % n_y
+            center_z = center_cell % n_z
+
+            front_sum = 0.0
+            front_count = 0
+            back_sum = 0.0
+            back_count = 0
+
+            for delta_x in range(-search_cells, search_cells + 1):
+                cell_x = (center_x + delta_x) % n_x
+                for delta_y in range(-search_cells, search_cells + 1):
+                    cell_y = center_y + delta_y
+                    if cell_y < 0 or cell_y >= n_y:
+                        continue
+                    for delta_z in range(-search_cells, search_cells + 1):
+                        cell_z = center_z + delta_z
+                        if cell_z < 0 or cell_z >= n_z:
+                            continue
+                        cell_idx = (cell_x * n_y + cell_y) * n_z + cell_z
+                        particle_idx = head[cell_idx]
+                        while particle_idx != -1:
+                            dx = x_values[particle_idx] - x_i
+                            if box_length_x > 0.0:
+                                dx -= box_length_x * round(dx / box_length_x)
+                            dy = y_values[particle_idx] - y_i
+                            dz = z_values[particle_idx] - z_i
+                            distance_sq = dx * dx + dy * dy + dz * dz
+                            if distance_sq <= core_sq or distance_sq >= outer_sq:
+                                particle_idx = next_index[particle_idx]
+                                continue
+
+                            chirality_value = chirality[particle_idx]
+                            if math.isfinite(chirality_value):
+                                projection = dx * e_x + dy * e_y + dz * e_z
+                                if projection > 0.0:
+                                    front_sum += chirality_value
+                                    front_count += 1
+                                elif projection < 0.0:
+                                    back_sum += chirality_value
+                                    back_count += 1
+
+                            particle_idx = next_index[particle_idx]
+
+            if front_count > 0 and back_count > 0:
+                delta_chirality = front_sum / front_count - back_sum / back_count
+                speeds[sample_count] = displacement / delta_t
+                abs_delta_chirality[sample_count] = abs(delta_chirality)
+                if vx > 0.0:
+                    velocity_direction[sample_count] = 1.0
+                elif vx < 0.0:
+                    velocity_direction[sample_count] = -1.0
+                else:
+                    velocity_direction[sample_count] = 0.0
+                if delta_chirality > 0.0:
+                    delta_chirality_sign[sample_count] = 1.0
+                elif delta_chirality < 0.0:
+                    delta_chirality_sign[sample_count] = -1.0
+                else:
+                    delta_chirality_sign[sample_count] = 0.0
+                sample_count += 1
+
+    return (
+        speeds[:sample_count],
+        abs_delta_chirality[:sample_count],
+        velocity_direction[:sample_count],
+        delta_chirality_sign[:sample_count],
+    )
 
 
 @njit(cache=True)
