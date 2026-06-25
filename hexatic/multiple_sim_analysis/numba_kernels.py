@@ -222,6 +222,80 @@ def mean_square_frame_mean(
 
 
 @njit(cache=True)
+def disclination_translation_chirality_squared_mean(
+    coords: np.ndarray,
+    disclination_mask: np.ndarray,
+    frame_start: int,
+    frame_stop: int,
+    neighborhood_radius: float,
+    box_length_x: float,
+) -> float:
+    start = min(max(frame_start, 0), coords.shape[0])
+    stop = min(max(frame_stop, start), coords.shape[0])
+    radius_sq = neighborhood_radius * neighborhood_radius
+    total = 0.0
+    frame_count = 0
+
+    for frame_idx in range(start, stop):
+        frame_sum = 0.0
+        value_count = 0
+
+        for particle_idx in range(coords.shape[1]):
+            if not disclination_mask[frame_idx, particle_idx]:
+                continue
+
+            x_i = coords[frame_idx, particle_idx, 0]
+            theta_i = coords[frame_idx, particle_idx, 1]
+            radius_i = coords[frame_idx, particle_idx, 2]
+            if (
+                not math.isfinite(x_i)
+                or not math.isfinite(theta_i)
+                or not math.isfinite(radius_i)
+            ):
+                continue
+
+            y_i = radius_i * math.sin(theta_i)
+            z_i = radius_i * math.cos(theta_i)
+            chirality = 0.0
+
+            for neighbor_idx in range(coords.shape[1]):
+                if neighbor_idx == particle_idx:
+                    continue
+
+                x_j = coords[frame_idx, neighbor_idx, 0]
+                theta_j = coords[frame_idx, neighbor_idx, 1]
+                radius_j = coords[frame_idx, neighbor_idx, 2]
+                if (
+                    not math.isfinite(x_j)
+                    or not math.isfinite(theta_j)
+                    or not math.isfinite(radius_j)
+                ):
+                    continue
+
+                dx = x_j - x_i
+                if box_length_x > 0.0:
+                    dx -= box_length_x * round(dx / box_length_x)
+                y_j = radius_j * math.sin(theta_j)
+                z_j = radius_j * math.cos(theta_j)
+                dy = y_j - y_i
+                dz = z_j - z_i
+                distance_sq = dx * dx + dy * dy + dz * dz
+                if distance_sq <= 0.0 or distance_sq > radius_sq:
+                    continue
+
+                chirality += dx / math.sqrt(distance_sq)
+
+            frame_sum += chirality * chirality
+            value_count += 1
+
+        if value_count:
+            total += frame_sum / value_count
+            frame_count += 1
+
+    return total / frame_count if frame_count else np.nan
+
+
+@njit(cache=True)
 def defect_x_com_velocity(
     x_positions: np.ndarray,
     charges: np.ndarray,

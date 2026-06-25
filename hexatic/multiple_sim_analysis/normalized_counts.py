@@ -21,10 +21,10 @@ def normalized_count_plots_missing(metric_name: str) -> bool:
         for path in (
             NORMALIZED_PLOT_DIR / f"{metric_name}_per_particle.png",
             NORMALIZED_PLOT_DIR / f"{metric_name}_per_surface_area.png",
-            NORMALIZED_PLOT_DIR / f"{metric_name}_per_shell_volume.png",
+            NORMALIZED_PLOT_DIR / f"{metric_name}_per_shell_particle.png",
             NORMALIZED_FIT_DIR / f"{metric_name}_per_particle_pysr.txt",
             NORMALIZED_FIT_DIR / f"{metric_name}_per_surface_area_pysr.txt",
-            NORMALIZED_FIT_DIR / f"{metric_name}_per_shell_volume_pysr.txt",
+            NORMALIZED_FIT_DIR / f"{metric_name}_per_shell_particle_pysr.txt",
         )
     )
 
@@ -51,9 +51,10 @@ def write_normalized_count_plots(
         [2.0 * np.pi * case.radius * case.lx for case in cases],
         dtype=np.float64,
     )
-    shell_volume = np.asarray(
+    shell_particles = np.asarray(
         [
-            np.pi
+            cylinder.RHO
+            * np.pi
             * case.lx
             * (
                 case.radius**2
@@ -69,7 +70,10 @@ def write_normalized_count_plots(
     groups = groups[regular_mask]
     per_particle = _filter_values(_divide_values(values, n_particles), regular_mask)
     per_surface_area = _filter_values(_divide_values(values, surface_area), regular_mask)
-    per_shell_volume = _filter_values(_divide_values(values, shell_volume), regular_mask)
+    per_shell_particle = _filter_values(
+        _divide_values(values, shell_particles),
+        regular_mask,
+    )
 
     particle_plot = NORMALIZED_PLOT_DIR / f"{metric_name}_per_particle.png"
     plot_radius_values(
@@ -109,22 +113,22 @@ def write_normalized_count_plots(
         x_label="R",
     )
 
-    shell_volume_plot = NORMALIZED_PLOT_DIR / f"{metric_name}_per_shell_volume.png"
+    shell_particle_plot = NORMALIZED_PLOT_DIR / f"{metric_name}_per_shell_particle.png"
     plot_radius_values(
         radii,
-        per_shell_volume,
-        shell_volume_plot,
-        f"{title} per shell volume",
-        r"mean count / $V_{shell}$",
+        per_shell_particle,
+        shell_particle_plot,
+        f"{title} per shell particle",
+        r"mean count / $N_{shell}$",
         case_labels=labels,
         group_names=groups,
         fits=None,
     )
     symbolic_regression_report(
         radii,
-        per_shell_volume,
-        NORMALIZED_FIT_DIR / f"{metric_name}_per_shell_volume_pysr.txt",
-        title=f"{title} per shell volume: symbolic regression",
+        per_shell_particle,
+        NORMALIZED_FIT_DIR / f"{metric_name}_per_shell_particle_pysr.txt",
+        title=f"{title} per shell particle: symbolic regression",
         x_label="R",
     )
 
