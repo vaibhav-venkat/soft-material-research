@@ -16,7 +16,7 @@ from .common import (
 )
 
 GROUP_STYLES = {
-    "circumference": {"marker": "o", "color": "#1f77b4"},
+    "circumference": {"marker": "s", "color": "#1f77b4"},
     "scaled_radius": {"marker": "s", "color": "#d62728"},
     "other": {"marker": "^", "color": "#2ca02c"},
 }
