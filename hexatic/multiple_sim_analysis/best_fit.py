@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
+import os
 
 import numpy as np
 from scipy.optimize import curve_fit
@@ -117,3 +119,107 @@ def fit_payload(
             continue
         payload.update(fit.as_payload(prefix=prefix))
     return fits, payload
+
+
+def _pysr_int_env(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, default))
+    except ValueError:
+        return default
+
+
+def _pysr_float_env(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except ValueError:
+        return default
+
+
+def _format_equation_table(equations) -> str:
+    preferred_columns = [
+        column
+        for column in ("complexity", "loss", "score", "equation")
+        if column in equations.columns
+    ]
+    if preferred_columns:
+        equations = equations[preferred_columns]
+    sort_columns = [
+        column for column in ("loss", "complexity") if column in equations.columns
+    ]
+    if sort_columns:
+        equations = equations.sort_values(sort_columns, ascending=True)
+    return equations.to_string(index=False)
+
+
+def symbolic_regression_report(
+    x_values: np.ndarray,
+    named_values: dict[str, np.ndarray],
+    output_txt: str | Path,
+    title: str,
+    x_label: str,
+) -> None:
+    output_path = Path(output_txt)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    lines = [
+        title,
+        "=" * len(title),
+        "",
+        f"x variable: {x_label}",
+        "model: PySRRegressor",
+        "plotting: disabled; equations are written here only",
+        "",
+    ]
+    try:
+        from pysr import PySRRegressor
+    except ImportError as exc:
+        lines.append(f"PySR import failed: {exc}")
+        output_path.write_text("\n".join(lines) + "\n")
+        return
+
+    niterations = _pysr_int_env("MULTIPLE_SIM_ANALYSIS_PYSR_ITERATIONS", 100)
+    maxsize = _pysr_int_env("MULTIPLE_SIM_ANALYSIS_PYSR_MAXSIZE", 20)
+    timeout_seconds = _pysr_float_env(
+        "MULTIPLE_SIM_ANALYSIS_PYSR_TIMEOUT_SECONDS",
+        60.0,
+    )
+
+    lines.extend(
+        [
+            f"niterations: {niterations}",
+            f"maxsize: {maxsize}",
+            f"timeout_seconds: {timeout_seconds}",
+            "sorted by: loss, then complexity",
+            "",
+        ]
+    )
+
+    x_values = np.asarray(x_values, dtype=np.float64)
+    for series_name, series_values in named_values.items():
+        series_values = np.asarray(series_values, dtype=np.float64)
+        finite = np.isfinite(x_values) & np.isfinite(series_values)
+        x_fit = x_values[finite]
+        y_fit = series_values[finite]
+        lines.extend([f"[{series_name}]", f"n_points: {x_fit.size}"])
+        if x_fit.size < 3 or np.ptp(x_fit) <= 0.0:
+            lines.extend(["skipped: fewer than 3 finite points or zero x span", ""])
+            continue
+
+        model = PySRRegressor(
+            niterations=niterations,
+            maxsize=maxsize,
+            timeout_in_seconds=timeout_seconds,
+            binary_operators=["+", "-", "*", "/"],
+            unary_operators=["exp", "log", "sqrt", "square"],
+            model_selection="best",
+            progress=False,
+            verbosity=0,
+        )
+        try:
+            model.fit(x_fit.reshape(-1, 1), y_fit, variable_names=[x_label])
+            lines.append(_format_equation_table(model.equations_))
+        except Exception as exc:
+            lines.append(f"PySR fit failed: {type(exc).__name__}: {exc}")
+        lines.append("")
+
+    output_path.write_text("\n".join(lines) + "\n")

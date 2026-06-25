@@ -27,6 +27,7 @@ ANALYSIS_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = ANALYSIS_DIR / "output"
 NPZ_OUTPUT_DIR = OUTPUT_DIR / "npz"
 PLOT_OUTPUT_DIR = OUTPUT_DIR / "plots"
+FIT_OUTPUT_DIR = OUTPUT_DIR / "fits"
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,7 @@ class AggregateResult:
 def ensure_output_dirs() -> None:
     NPZ_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     PLOT_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    FIT_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def selected_cases(

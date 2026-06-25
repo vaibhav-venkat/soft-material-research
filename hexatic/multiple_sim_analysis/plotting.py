@@ -7,8 +7,9 @@ import numpy as np
 
 from hexatic.constants import cylinder
 
-from .best_fit import ExponentialFit, FitCurve, fit_exponential_radius_trend
+from .best_fit import ExponentialFit, FitCurve, symbolic_regression_report
 from .common import (
+    FIT_OUTPUT_DIR,
     PLOT_OUTPUT_DIR,
     ensure_output_dirs,
     group_names_for_cases,
@@ -65,18 +66,6 @@ def plot_radius_values(
                 s=58,
                 alpha=0.92,
             )
-        if fits is not None and fits.get(series_name) is not None:
-            fit = fits[series_name]
-            assert fit is not None
-            axis.plot(
-                fit.radii,
-                fit.values,
-                color=base_color,
-                linestyle="--",
-                linewidth=1.6,
-                label=f"{series_name} {fit_label}",
-            )
-
     for radius, label in zip(radii, case_labels):
         axis.annotate(
             str(label),
@@ -107,16 +96,29 @@ def companion_circumference_plot_path(output_png: str | Path) -> Path:
     return output_path.with_name(f"{output_path.stem}_circumference{output_path.suffix}")
 
 
+def symbolic_report_path(output_png: str | Path) -> Path:
+    output_path = Path(output_png)
+    if not output_path.is_absolute():
+        output_path = PLOT_OUTPUT_DIR / output_path
+    return FIT_OUTPUT_DIR / f"{output_path.stem}_pysr.txt"
+
+
 def plots_missing(cases, output_png: str | Path) -> bool:
     output_path = Path(output_png)
     if not output_path.is_absolute():
         output_path = PLOT_OUTPUT_DIR / output_path
     if not output_path.exists():
         return True
+    if not symbolic_report_path(output_path).exists():
+        return True
     groups = group_names_for_cases(cases)
-    return bool(np.any(groups == "circumference")) and not companion_circumference_plot_path(
-        output_path
-    ).exists()
+    if not bool(np.any(groups == "circumference")):
+        return False
+    circumference_plot = companion_circumference_plot_path(output_path)
+    return (
+        not circumference_plot.exists()
+        or not symbolic_report_path(circumference_plot).exists()
+    )
 
 
 def _filter_values(
@@ -125,42 +127,6 @@ def _filter_values(
 ) -> dict[str, np.ndarray]:
     return {
         name: np.asarray(series, dtype=np.float64)[mask]
-        for name, series in values.items()
-    }
-
-
-def _exponential_fits(
-    radii: np.ndarray,
-    values: dict[str, np.ndarray],
-) -> dict[str, ExponentialFit | None]:
-    return {
-        name: fit_exponential_radius_trend(radii, series)
-        for name, series in values.items()
-    }
-
-
-def _linear_fit_curve(x_values: np.ndarray, y_values: np.ndarray) -> FitCurve | None:
-    x_values = np.asarray(x_values, dtype=np.float64)
-    y_values = np.asarray(y_values, dtype=np.float64)
-    finite = np.isfinite(x_values) & np.isfinite(y_values)
-    fit_x = x_values[finite]
-    fit_y = y_values[finite]
-    if fit_x.size < 2 or np.ptp(fit_x) <= 0.0:
-        return None
-    slope, intercept = np.polyfit(fit_x, fit_y, deg=1)
-    curve_x = np.linspace(float(np.min(fit_x)), float(np.max(fit_x)), 200)
-    return FitCurve(
-        radii=curve_x,
-        values=slope * curve_x + intercept,
-    )
-
-
-def _linear_fits(
-    x_values: np.ndarray,
-    values: dict[str, np.ndarray],
-) -> dict[str, FitCurve | None]:
-    return {
-        name: _linear_fit_curve(x_values, series)
         for name, series in values.items()
     }
 
@@ -191,7 +157,14 @@ def plot_for_cases(
         ylabel,
         case_labels=labels[regular_mask],
         group_names=group_names[regular_mask],
-        fits=_exponential_fits(regular_radii, regular_values),
+        fits=None,
+    )
+    symbolic_regression_report(
+        regular_radii,
+        regular_values,
+        symbolic_report_path(output_png),
+        title=f"{title}: symbolic regression",
+        x_label="R",
     )
 
     circumference_mask = group_names == "circumference"
@@ -201,15 +174,22 @@ def plot_for_cases(
     circumference_x = (
         2.0 * np.pi * radii[circumference_mask] / cylinder.PARTICLE_DIAMETER
     )
+    circumference_plot_path = companion_circumference_plot_path(output_png)
     plot_radius_values(
         circumference_x,
         circumference_values,
-        companion_circumference_plot_path(output_png),
+        circumference_plot_path,
         f"{title} (circumference sweep)",
         ylabel,
         case_labels=labels[circumference_mask],
         group_names=group_names[circumference_mask],
-        fits=_linear_fits(circumference_x, circumference_values),
+        fits=None,
         xlabel="Circumference C / D",
-        fit_label="linear fit",
+    )
+    symbolic_regression_report(
+        circumference_x,
+        circumference_values,
+        symbolic_report_path(circumference_plot_path),
+        title=f"{title} (circumference sweep): symbolic regression",
+        x_label="C_over_D",
     )

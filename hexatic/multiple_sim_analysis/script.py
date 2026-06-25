@@ -75,7 +75,6 @@ def run_all(args: argparse.Namespace) -> None:
         ("dislocation", dislocation.run),
         ("polarization", polarization.run),
         ("x_com", x_com.run),
-        ("force_density", force_density.run),
         (
             "radial_exchange_current",
             lambda cases, frame_start, frame_stop, overwrite: radial_exchange_current.run(
@@ -87,6 +86,7 @@ def run_all(args: argparse.Namespace) -> None:
                 kernel_radius=args.radial_exchange_current_kernel_radius,
             ),
         ),
+        ("force_density", force_density.run),
     )
     skipped = set(args.skip)
     for metric_name, runner in metrics:
