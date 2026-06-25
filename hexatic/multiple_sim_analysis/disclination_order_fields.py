@@ -14,8 +14,6 @@ from .common import (
     PLOT_OUTPUT_DIR,
     active_fields_path,
     case_ids_for_cases,
-    finite_nanmean,
-    frame_indices,
     group_names_for_cases,
     labels_for_cases,
     load_active_fields,
@@ -25,11 +23,12 @@ from .common import (
     save_metric_npz,
 )
 from .disclination import _load_neighbor_counts
-from .numba_kernels import disclination_translation_chirality_squared_mean
+from .numba_kernels import local_disclination_field_contrasts
 from .plotting import companion_circumference_plot_path, plot_radius_values
 
 
 CIRCUMFERENCE_REFERENCE_CASE_ID = "circ_60_0D"
+LOCAL_CONTRAST_LENGTH = cylinder.ANALYSIS.neighbor_count_radius
 
 
 def hexatic_order_path(case: RadiusCase) -> Path:
@@ -56,58 +55,6 @@ def _load_hexatic_abs(path: str | Path, shape: tuple[int, int]) -> np.ndarray:
 def _disclination_mask(neighbor_counts: np.ndarray) -> np.ndarray:
     charges = cylinder.NEIGHBORS - neighbor_counts
     return np.abs(charges) == 1
-
-
-def _frame_mean_for_masked_values(
-    values: np.ndarray,
-    mask: np.ndarray,
-    frame_start: int,
-    frame_stop: int,
-    *,
-    square: bool = False,
-) -> float:
-    selected = frame_indices(values.shape[0], frame_start, frame_stop)
-    frame_means: list[float] = []
-    for frame_idx in selected:
-        frame_values = np.asarray(values[frame_idx][mask[frame_idx]], dtype=np.float64)
-        finite = np.isfinite(frame_values)
-        if not np.any(finite):
-            continue
-        frame_values = frame_values[finite]
-        if square:
-            frame_values = frame_values * frame_values
-        frame_means.append(float(np.mean(frame_values)))
-    return finite_nanmean(np.asarray(frame_means, dtype=np.float64))
-
-
-def _nematic_s_for_masked_particles(
-    direction_cylindrical: np.ndarray,
-    mask: np.ndarray,
-    frame_start: int,
-    frame_stop: int,
-) -> float:
-    selected = frame_indices(direction_cylindrical.shape[0], frame_start, frame_stop)
-    frame_values: list[float] = []
-    for frame_idx in selected:
-        directions = np.asarray(
-            direction_cylindrical[frame_idx][mask[frame_idx]],
-            dtype=np.float64,
-        )
-        if directions.size == 0:
-            continue
-        p_x = directions[:, 0]
-        p_theta = directions[:, 2]
-        norm = np.hypot(p_x, p_theta)
-        finite = np.isfinite(norm) & (norm > 0.0)
-        if not np.any(finite):
-            continue
-
-        u_x = p_x[finite] / norm[finite]
-        u_theta = p_theta[finite] / norm[finite]
-        q_xx = np.mean(2.0 * u_x * u_x - 1.0)
-        q_xtheta = np.mean(2.0 * u_x * u_theta)
-        frame_values.append(float(np.hypot(q_xx, q_xtheta)))
-    return finite_nanmean(np.asarray(frame_values, dtype=np.float64))
 
 
 def _validate_particle_frame_shape(
@@ -144,36 +91,38 @@ def disclination_order_values_for_case(
     _validate_particle_frame_shape("coords", coords, expected_shape)
     x_edges = np.asarray(fields.x_edges, dtype=np.float64)
     box_length_x = float(x_edges[-1] - x_edges[0])
-
-    return {
-        "S": _nematic_s_for_masked_particles(
-            direction_cylindrical,
-            disclinations,
-            frame_start,
-            frame_stop,
-        ),
-        "hexatic_order": _frame_mean_for_masked_values(
-            hexatic_abs,
-            disclinations,
-            frame_start,
-            frame_stop,
-        ),
-        "chirality_disclinations": disclination_translation_chirality_squared_mean(
+    local_delta_s, local_delta_hexatic, local_delta_chirality = (
+        local_disclination_field_contrasts(
             np.ascontiguousarray(coords, dtype=np.float64),
+            np.ascontiguousarray(direction_cylindrical, dtype=np.float64),
+            np.ascontiguousarray(hexatic_abs, dtype=np.float64),
             np.ascontiguousarray(disclinations, dtype=np.bool_),
             frame_start,
             frame_stop,
+            LOCAL_CONTRAST_LENGTH,
+            2.0 * LOCAL_CONTRAST_LENGTH,
+            5.0 * LOCAL_CONTRAST_LENGTH,
             cylinder.ANALYSIS.neighbor_count_radius,
             box_length_x,
-        ),
+            float(x_edges[0]),
+            float(case.radius),
+        )
+    )
+
+    return {
+        "delta_S_local": local_delta_s,
+        "delta_hexatic_order_local": local_delta_hexatic,
+        "delta_chirality_disclinations_local": local_delta_chirality,
     }
 
 
 def _plot_values(values: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     return {
-        "S": values["S"],
-        "hexatic_order": values["hexatic_order"],
-        "chirality_disclinations": values["chirality_disclinations"],
+        "delta_S_local": values["delta_S_local"],
+        "delta_hexatic_order_local": values["delta_hexatic_order_local"],
+        "delta_chirality_disclinations_local": values[
+            "delta_chirality_disclinations_local"
+        ],
     }
 
 
@@ -214,8 +163,8 @@ def _plot_for_cases_without_fit(
         radii[regular_mask],
         _filter_values(values, regular_mask),
         output_png,
-        "Disclination-particle order metrics vs radius",
-        "mean over disclination particles",
+        "Local disclination-field contrast vs radius",
+        "core mean - annulus mean",
         case_labels=labels[regular_mask],
         group_names=group_names[regular_mask],
     )
@@ -230,8 +179,8 @@ def _plot_for_cases_without_fit(
         circumference_x,
         _filter_values(values, circumference_mask),
         companion_circumference_plot_path(output_png),
-        "Disclination-particle order metrics vs radius (circumference sweep)",
-        "mean over disclination particles",
+        "Local disclination-field contrast vs radius (circumference sweep)",
+        "core mean - annulus mean",
         case_labels=labels[circumference_mask],
         group_names=group_names[circumference_mask],
         xlabel="Circumference C / D",
@@ -244,7 +193,11 @@ def run(
     frame_stop: int = FRAME_STOP,
     overwrite: bool = False,
 ) -> dict[str, np.ndarray]:
-    value_names = ("S", "hexatic_order", "chirality_disclinations")
+    value_names = (
+        "delta_S_local",
+        "delta_hexatic_order_local",
+        "delta_chirality_disclinations_local",
+    )
     cases = tuple(
         case
         for case in cases
@@ -290,6 +243,28 @@ def run(
         cases,
         "disclination_order_fields",
         arrays,
+        {
+            "local_contrast_length": np.asarray(
+                LOCAL_CONTRAST_LENGTH,
+                dtype=np.float64,
+            ),
+            "local_core_radius": np.asarray(
+                LOCAL_CONTRAST_LENGTH,
+                dtype=np.float64,
+            ),
+            "local_annulus_inner_radius": np.asarray(
+                2.0 * LOCAL_CONTRAST_LENGTH,
+                dtype=np.float64,
+            ),
+            "local_annulus_outer_radius": np.asarray(
+                5.0 * LOCAL_CONTRAST_LENGTH,
+                dtype=np.float64,
+            ),
+            "chirality_radius": np.asarray(
+                cylinder.ANALYSIS.neighbor_count_radius,
+                dtype=np.float64,
+            ),
+        },
         frame_start=frame_start,
         frame_stop=frame_stop,
     )

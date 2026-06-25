@@ -72,27 +72,27 @@ def run_all(args: argparse.Namespace) -> None:
         include_long_axis=args.include_long_axis,
     )
     metrics = (
-        ("velocity", velocity.run),
-        ("density_profile", density_profile.run),
-        ("disclination", disclination.run),
+        # ("velocity", velocity.run),
+        # ("density_profile", density_profile.run),
+        # ("disclination", disclination.run),
         ("disclination_order_fields", disclination_order_fields.run),
-        ("dislocation", dislocation.run),
-        ("polarization", polarization.run),
-        ("nematic", nematic.run),
-        ("x_com", x_com.run),
-        (
-            "radial_exchange_current",
-            lambda cases, frame_start, frame_stop, overwrite: radial_exchange_current.run(
-                cases,
-                frame_start=frame_start,
-                frame_stop=frame_stop,
-                overwrite=overwrite,
-                radial_bin_width=args.radial_exchange_current_bin_width,
-                kernel_radius=args.radial_exchange_current_kernel_radius,
-            ),
-        ),
-        ("force_density", force_density.run),
-        ("chirality", chirality.run),
+        # ("dislocation", dislocation.run),
+        # ("polarization", polarization.run),
+        # ("nematic", nematic.run),
+        # ("x_com", x_com.run),
+        # (
+        #     "radial_exchange_current",
+        #     lambda cases, frame_start, frame_stop, overwrite: radial_exchange_current.run(
+        #         cases,
+        #         frame_start=frame_start,
+        #         frame_stop=frame_stop,
+        #         overwrite=overwrite,
+        #         radial_bin_width=args.radial_exchange_current_bin_width,
+        #         kernel_radius=args.radial_exchange_current_kernel_radius,
+        #     ),
+        # ),
+        # ("force_density", force_density.run),
+        # ("chirality", chirality.run),
     )
     skipped = set(args.skip)
     for metric_name, runner in metrics:
