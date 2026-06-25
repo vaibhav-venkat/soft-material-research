@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -546,6 +547,37 @@ def _load_frontback_cache(output_npz: Path) -> dict[str, np.ndarray]:
         }
 
 
+def _average_ranks(values: np.ndarray) -> np.ndarray:
+    values = np.asarray(values, dtype=np.float64)
+    order = np.argsort(values, kind="mergesort")
+    ranks = np.empty(values.shape[0], dtype=np.float64)
+    start = 0
+    while start < values.shape[0]:
+        end = start + 1
+        while end < values.shape[0] and values[order[end]] == values[order[start]]:
+            end += 1
+        ranks[order[start:end]] = 0.5 * (start + end - 1) + 1.0
+        start = end
+    return ranks
+
+
+def _spearman_correlation(x_values: np.ndarray, y_values: np.ndarray) -> float:
+    finite = np.isfinite(x_values) & np.isfinite(y_values)
+    if np.count_nonzero(finite) < 2:
+        return np.nan
+
+    x_ranks = _average_ranks(np.asarray(x_values[finite], dtype=np.float64))
+    y_ranks = _average_ranks(np.asarray(y_values[finite], dtype=np.float64))
+    x_centered = x_ranks - np.mean(x_ranks)
+    y_centered = y_ranks - np.mean(y_ranks)
+    denominator = math.sqrt(
+        float(np.sum(x_centered * x_centered) * np.sum(y_centered * y_centered))
+    )
+    if denominator == 0.0:
+        return np.nan
+    return float(np.sum(x_centered * y_centered) / denominator)
+
+
 def _save_frontback_cache(
     output_npz: Path,
     cases: tuple[RadiusCase, ...],
@@ -581,61 +613,63 @@ def _plot_moving_frontback_chirality(
     output_png.parent.mkdir(parents=True, exist_ok=True)
     speed = np.asarray(arrays["speed"], dtype=np.float64)
     abs_delta = np.asarray(arrays["abs_delta_chirality"], dtype=np.float64)
-    velocity_direction = np.asarray(arrays["velocity_direction"], dtype=np.float64)
-    delta_sign = np.asarray(arrays["delta_chirality_sign"], dtype=np.float64)
     sample_radii = np.asarray(arrays["sample_radii"], dtype=np.float64)
 
     finite_speed = np.isfinite(speed) & np.isfinite(abs_delta)
-    finite_signs = np.isfinite(velocity_direction) & np.isfinite(delta_sign)
     finite_radii = np.isfinite(sample_radii)
-    color_values = np.where(finite_radii, sample_radii, np.nan)
-    if np.any(finite_radii):
-        vmin = float(np.nanmin(sample_radii[finite_radii]))
-        vmax = float(np.nanmax(sample_radii[finite_radii]))
-    else:
-        vmin = 0.0
-        vmax = 1.0
+    radius_values = np.unique(sample_radii[finite_radii])
+    if radius_values.size == 0:
+        radius_values = np.asarray([np.nan], dtype=np.float64)
 
-    fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.2), constrained_layout=True)
-    scatter = axes[0].scatter(
-        speed[finite_speed],
-        abs_delta[finite_speed],
-        c=color_values[finite_speed],
-        cmap="viridis",
-        vmin=vmin,
-        vmax=vmax,
-        s=22,
-        alpha=0.75,
-        edgecolors="none",
+    n_panels = radius_values.size
+    n_cols = min(4, max(1, int(math.ceil(math.sqrt(n_panels)))))
+    n_rows = int(math.ceil(n_panels / n_cols))
+    fig, axes = plt.subplots(
+        n_rows,
+        n_cols,
+        figsize=(3.2 * n_cols, 2.8 * n_rows),
+        squeeze=False,
+        constrained_layout=True,
     )
-    axes[0].set_title("Moving defects")
-    axes[0].set_xlabel("|v_defect|")
-    axes[0].set_ylabel("|Delta chi_frontback|")
-    axes[0].grid(True, alpha=0.25)
 
-    sign_indices = np.flatnonzero(finite_signs)
-    jitter = 0.07 * np.sin(sign_indices * 2.399963229728653)
-    axes[1].scatter(
-        velocity_direction[finite_signs] + jitter,
-        delta_sign[finite_signs],
-        c=color_values[finite_signs],
-        cmap="viridis",
-        vmin=vmin,
-        vmax=vmax,
-        s=22,
-        alpha=0.75,
-        edgecolors="none",
-    )
-    axes[1].set_title("Front-back sign")
-    axes[1].set_xlabel("sign(v_defect,x)")
-    axes[1].set_ylabel("sign(Delta chi_frontback)")
-    axes[1].set_xticks([-1.0, 0.0, 1.0])
-    axes[1].set_yticks([-1.0, 0.0, 1.0])
-    axes[1].set_xlim(-1.35, 1.35)
-    axes[1].set_ylim(-1.35, 1.35)
-    axes[1].grid(True, alpha=0.25)
-    fig.colorbar(scatter, ax=axes, label="R")
-    fig.suptitle("Moving-defect front/back translational chirality")
+    for axis_idx, radius in enumerate(radius_values):
+        ax = axes.flat[axis_idx]
+        if np.isfinite(radius):
+            mask = finite_speed & (sample_radii == radius)
+            radius_label = f"R = {radius:g}"
+        else:
+            mask = finite_speed & ~finite_radii
+            radius_label = "R = nan"
+
+        ax.scatter(
+            speed[mask],
+            abs_delta[mask],
+            color="#111111",
+            s=16,
+            alpha=0.65,
+            edgecolors="none",
+        )
+        rho = _spearman_correlation(speed[mask], abs_delta[mask])
+        rho_label = "nan" if not np.isfinite(rho) else f"{rho:.3f}"
+        ax.set_title(radius_label)
+        ax.text(
+            0.04,
+            0.94,
+            f"Spearman rho = {rho_label}\nn = {np.count_nonzero(mask)}",
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize=8,
+            bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.75},
+        )
+        ax.set_xlabel("|v_defect|")
+        ax.set_ylabel("|Delta chi_frontback|")
+        ax.grid(True, alpha=0.25)
+
+    for axis_idx in range(n_panels, axes.size):
+        axes.flat[axis_idx].set_visible(False)
+
+    fig.suptitle("|v_defect| vs |Delta chi_frontback| by radius")
     fig.savefig(output_png, dpi=300)
     plt.close(fig)
 
