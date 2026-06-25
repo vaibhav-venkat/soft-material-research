@@ -18,6 +18,7 @@ from hexatic.active_matter_cylinder.math_utils import _gaussian_delta_weights
 from hexatic.constants import cylinder
 from hexatic.radii_analysis.cases import RadiusCase
 
+from .best_fit import fit_payload
 from .common import (
     FRAME_START,
     FRAME_STOP,
@@ -26,7 +27,12 @@ from .common import (
     active_fields_path,
     frame_indices,
     load_active_fields,
+    load_cached_metric_values,
+    load_metric_fit_curves,
+    radii_for_cases,
+    save_metric_npz,
 )
+from .plotting import plot_for_cases, plots_missing
 
 
 @dataclass(frozen=True)
@@ -291,6 +297,14 @@ def _case_plot_path(case: RadiusCase) -> Path:
     return PLOT_OUTPUT_DIR / f"{case.case_id}_radial_exchange_current.png"
 
 
+def _aggregate_npz_path() -> Path:
+    return NPZ_OUTPUT_DIR / "radial_exchange_current.npz"
+
+
+def _aggregate_plot_path() -> Path:
+    return PLOT_OUTPUT_DIR / "radial_exchange_current.png"
+
+
 def save_radial_exchange_current(
     series: RadialExchangeCurrentSeries,
     filename: str | Path,
@@ -334,6 +348,58 @@ def load_radial_exchange_current(filename: str | Path) -> RadialExchangeCurrentS
             j_r=np.asarray(data["j_r"], dtype=np.float64),
             source=str(np.asarray(data["source"]).item()),
         )
+
+
+def _validate_cached_case_window(
+    case: RadiusCase,
+    filename: str | Path,
+    frame_start: int,
+    frame_stop: int,
+) -> None:
+    input_path = Path(filename)
+    if not input_path.exists():
+        raise FileNotFoundError(
+            f"Missing cached radial exchange current NPZ for {case.case_id}: "
+            f"{input_path}. Generate the per-case current cache first or skip "
+            "radial_exchange_current."
+        )
+
+    with np.load(input_path) as data:
+        cached_case_id = str(np.asarray(data["case_id"]).item())
+        cached_start = int(np.asarray(data["frame_start"]).item())
+        cached_stop = int(np.asarray(data["frame_stop"]).item())
+
+    if (
+        cached_case_id != case.case_id
+        or cached_start != int(frame_start)
+        or cached_stop != int(frame_stop)
+    ):
+        raise FileExistsError(
+            f"Cached radial exchange current {input_path} does not match the "
+            "requested case/frame window. Use the same --frame-start/--frame-stop "
+            "as the cached current files, or regenerate those per-case caches."
+        )
+
+
+def shell_radial_exchange_current_value_for_case(
+    case: RadiusCase,
+    frame_start: int = FRAME_START,
+    frame_stop: int = FRAME_STOP,
+) -> float:
+    input_path = _case_npz_path(case)
+    _validate_cached_case_window(case, input_path, frame_start, frame_stop)
+    series = load_radial_exchange_current(input_path)
+    shell = (
+        (series.radius_centers >= case.radius - cylinder.ANALYSIS.wall_cutoff)
+        & (series.radius_centers <= case.radius)
+    )
+    if not np.any(shell):
+        return np.nan
+    values = np.asarray(series.j_r[:, shell], dtype=np.float64)
+    finite = np.isfinite(values)
+    if not np.any(finite):
+        return np.nan
+    return float(np.mean(values[finite]))
 
 
 def _cached_series(
@@ -450,6 +516,77 @@ def plot_radial_exchange_current(
 
 
 def run(
+    cases: tuple[RadiusCase, ...],
+    frame_start: int = FRAME_START,
+    frame_stop: int = FRAME_STOP,
+    overwrite: bool = False,
+    radial_bin_width: float = ACTIVE_RADIAL_BIN_WIDTH,
+    kernel_radius: float = LOCAL_POCKET_RADIUS,
+) -> dict[str, np.ndarray]:
+    output_npz = _aggregate_npz_path()
+    output_png = _aggregate_plot_path()
+    value_names = ("shell",)
+    arrays = load_cached_metric_values(
+        output_npz,
+        value_names,
+        cases,
+        frame_start,
+        frame_stop,
+        overwrite=overwrite,
+    )
+    if arrays is not None:
+        if plots_missing(cases, output_png):
+            fits = load_metric_fit_curves(output_npz, value_names)
+            plot_for_cases(
+                cases,
+                arrays,
+                output_png,
+                title="Mean shell radial exchange current vs radius",
+                ylabel="mean shell J_r",
+                fits=fits,
+            )
+        print(f"using cached radial_exchange_current values from {output_npz}")
+        return arrays
+
+    values = {"shell": []}
+    for case in cases:
+        values["shell"].append(
+            shell_radial_exchange_current_value_for_case(
+                case,
+                frame_start=frame_start,
+                frame_stop=frame_stop,
+            )
+        )
+    arrays = {name: np.asarray(series, dtype=np.float64) for name, series in values.items()}
+    fits, payload = fit_payload(radii_for_cases(cases), arrays)
+    payload.update(
+        {
+            "shell_cutoff": np.asarray(cylinder.ANALYSIS.wall_cutoff, dtype=np.float64),
+            "radial_bin_width": np.asarray(radial_bin_width, dtype=np.float64),
+            "kernel_radius": np.asarray(kernel_radius, dtype=np.float64),
+        }
+    )
+    save_metric_npz(
+        output_npz,
+        cases,
+        "radial_exchange_current",
+        arrays,
+        payload,
+        frame_start=frame_start,
+        frame_stop=frame_stop,
+    )
+    plot_for_cases(
+        cases,
+        arrays,
+        output_png,
+        title="Mean shell radial exchange current vs radius",
+        ylabel="mean shell J_r",
+        fits=fits,
+    )
+    return arrays
+
+
+def run_per_case_heatmaps(
     cases: tuple[RadiusCase, ...],
     frame_start: int = FRAME_START,
     frame_stop: int = FRAME_STOP,

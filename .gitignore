@@ -17,3 +17,6 @@ DS_Store
 
 CORE.md
 PLAN.md
+*.pkl
+*.csv
+*.bak

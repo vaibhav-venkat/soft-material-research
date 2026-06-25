@@ -69,7 +69,6 @@ def run_all(args: argparse.Namespace) -> None:
     )
     metrics = (
         ("velocity", velocity.run),
-        ("chirality", chirality.run),
         ("density_profile", density_profile.run),
         ("disclination", disclination.run),
         ("dislocation", dislocation.run),
@@ -87,6 +86,7 @@ def run_all(args: argparse.Namespace) -> None:
             ),
         ),
         ("force_density", force_density.run),
+        ("chirality", chirality.run),
     )
     skipped = set(args.skip)
     for metric_name, runner in metrics:
