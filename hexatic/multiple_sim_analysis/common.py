@@ -19,7 +19,7 @@ from hexatic.radii_analysis.cases import (
 )
 from .best_fit import FitCurve
 
-FRAME_START = 50
+FRAME_START = 70
 FRAME_STOP = 100
 POPULATIONS = ("all", "shell")
 

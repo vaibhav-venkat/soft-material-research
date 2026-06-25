@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import gsd.hoomd
 import numpy as np
 
+from hexatic.active_matter_cylinder.math_utils import _active_direction_from_quaternion
 from hexatic.radii_analysis.cases import RadiusCase
 
 from .best_fit import fit_payload
@@ -11,11 +13,14 @@ from .common import (
     NPZ_OUTPUT_DIR,
     PLOT_OUTPUT_DIR,
     active_fields_path,
+    finite_nanmean,
+    frame_indices,
     load_active_fields,
     load_cached_metric_values,
     load_metric_fit_curves,
     radii_for_cases,
     save_metric_npz,
+    shell_mask_for_positions,
 )
 from .numba_kernels import mean_by_population
 from .plotting import plot_for_cases, plots_missing
@@ -26,13 +31,44 @@ def polarization_values_for_case(
     frame_start: int = FRAME_START,
     frame_stop: int = FRAME_STOP,
 ) -> dict[str, float]:
-    fields = load_active_fields(active_fields_path(case))
+    fields_path = active_fields_path(case)
+    if not fields_path.exists():
+        return _polarization_values_from_gsd(case, frame_start, frame_stop)
+
+    fields = load_active_fields(fields_path)
     px = np.asarray(fields.direction_cylindrical[..., 0], dtype=np.float64)
     shell = np.asarray(fields.shell_mask, dtype=bool)
     all_mean, shell_mean = mean_by_population(px, shell, frame_start, frame_stop)
     return {
         "all": all_mean,
         "shell": shell_mean,
+    }
+
+
+def _polarization_values_from_gsd(
+    case: RadiusCase,
+    frame_start: int,
+    frame_stop: int,
+) -> dict[str, float]:
+    all_values: list[np.ndarray] = []
+    shell_values: list[np.ndarray] = []
+    with gsd.hoomd.open(name=str(case.trajectory_gsd), mode="r") as source:
+        selected = set(frame_indices(len(source), frame_start, frame_stop).tolist())
+        for frame_idx, frame in enumerate(source):
+            if frame_idx not in selected:
+                continue
+            particles = frame.particles
+            if particles.position is None or particles.orientation is None:
+                continue
+            positions = np.asarray(particles.position, dtype=np.float64)
+            px = _active_direction_from_quaternion(particles.orientation)[:, 0]
+            shell = shell_mask_for_positions(positions, case)
+            all_values.append(px)
+            shell_values.append(px[shell])
+
+    return {
+        "all": finite_nanmean(np.concatenate(all_values)) if all_values else np.nan,
+        "shell": finite_nanmean(np.concatenate(shell_values)) if shell_values else np.nan,
     }
 
 
