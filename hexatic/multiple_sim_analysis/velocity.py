@@ -28,7 +28,7 @@ from .common import (
 )
 from .disclination import _load_neighbor_counts
 from .numba_kernels import defect_x_com_velocity, x_velocity_means_from_coords
-from .plotting import plot_for_cases
+from .plotting import plot_for_cases, plots_missing
 
 
 def x_com_velocity_values_for_case(
@@ -241,7 +241,7 @@ def run_disclination_velocity(
         overwrite=overwrite,
     )
     if arrays is not None:
-        if not output_png.exists():
+        if plots_missing(cases, output_png):
             fits = load_metric_fit_curves(output_npz, value_names)
             plot_for_cases(
                 cases,
@@ -303,7 +303,7 @@ def run(
         overwrite=overwrite,
     )
     if arrays is not None:
-        if not output_png.exists():
+        if plots_missing(cases, output_png):
             fits = load_metric_fit_curves(output_npz, value_names)
             plot_for_cases(
                 cases,

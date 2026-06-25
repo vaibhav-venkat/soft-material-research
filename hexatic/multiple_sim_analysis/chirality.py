@@ -19,7 +19,7 @@ from .common import (
     translation_chirality_path,
 )
 from .numba_kernels import mean_abs_frame_mean
-from .plotting import plot_for_cases
+from .plotting import plot_for_cases, plots_missing
 
 
 def chirality_value_for_case(
@@ -59,7 +59,7 @@ def run(
         overwrite=overwrite,
     )
     if arrays is not None:
-        if not output_png.exists():
+        if plots_missing(cases, output_png):
             fits = load_metric_fit_curves(output_npz, value_names)
             plot_for_cases(
                 cases,

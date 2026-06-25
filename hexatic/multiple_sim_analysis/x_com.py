@@ -23,7 +23,7 @@ from .common import (
     save_metric_npz,
     shell_mask_for_positions,
 )
-from .plotting import plot_for_cases
+from .plotting import plot_for_cases, plots_missing
 
 
 def x_com_values_for_case(
@@ -92,7 +92,7 @@ def run(
         overwrite=overwrite,
     )
     if arrays is not None:
-        if not output_png.exists():
+        if plots_missing(cases, output_png):
             fits = load_metric_fit_curves(output_npz, value_names)
             plot_for_cases(
                 cases,

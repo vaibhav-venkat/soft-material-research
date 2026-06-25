@@ -24,7 +24,7 @@ from .common import (
     shell_mask_for_positions,
 )
 from .numba_kernels import shell_core_density_means
-from .plotting import plot_for_cases
+from .plotting import plot_for_cases, plots_missing
 
 
 def shell_core_volumes(case: RadiusCase, box_length_x: float) -> tuple[float, float]:
@@ -127,7 +127,7 @@ def run(
         overwrite=overwrite,
     )
     if arrays is not None:
-        if not output_png.exists():
+        if plots_missing(cases, output_png):
             fits = load_metric_fit_curves(output_npz, value_names)
             plot_for_cases(
                 cases,
