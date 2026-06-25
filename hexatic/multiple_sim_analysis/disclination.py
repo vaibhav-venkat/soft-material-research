@@ -19,6 +19,10 @@ from .common import (
     radii_for_cases,
     save_metric_npz,
 )
+from .normalized_counts import (
+    normalized_count_plots_missing,
+    write_normalized_count_plots,
+)
 from .plotting import plot_for_cases, plots_missing
 
 
@@ -82,6 +86,13 @@ def run(
                 ylabel="mean count",
                 fits=fits,
             )
+        if normalized_count_plots_missing("disclination"):
+            write_normalized_count_plots(
+                cases,
+                arrays,
+                metric_name="disclination",
+                title="Mean disclination counts",
+            )
         print(f"using cached disclination values from {output_npz}")
         return arrays
 
@@ -108,5 +119,11 @@ def run(
         title="Mean disclination counts vs radius",
         ylabel="mean count",
         fits=fits,
+    )
+    write_normalized_count_plots(
+        cases,
+        arrays,
+        metric_name="disclination",
+        title="Mean disclination counts",
     )
     return arrays

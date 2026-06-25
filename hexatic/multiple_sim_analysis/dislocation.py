@@ -22,6 +22,10 @@ from .common import (
     radii_for_cases,
     save_metric_npz,
 )
+from .normalized_counts import (
+    normalized_count_plots_missing,
+    write_normalized_count_plots,
+)
 from .plotting import plot_for_cases, plots_missing
 from .disclination import _load_neighbor_counts
 
@@ -105,6 +109,13 @@ def run(
                 ylabel="mean dislocation count",
                 fits=fits,
             )
+        if normalized_count_plots_missing("dislocation"):
+            write_normalized_count_plots(
+                cases,
+                arrays,
+                metric_name="dislocation",
+                title="Mean dislocation count",
+            )
         print(f"using cached dislocation values from {output_npz}")
         return arrays
 
@@ -134,5 +145,11 @@ def run(
         title="Mean dislocation count vs radius",
         ylabel="mean dislocation count",
         fits=fits,
+    )
+    write_normalized_count_plots(
+        cases,
+        values,
+        metric_name="dislocation",
+        title="Mean dislocation count",
     )
     return values
