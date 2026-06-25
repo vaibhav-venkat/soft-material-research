@@ -18,7 +18,7 @@ from .common import (
     save_metric_npz,
     translation_chirality_path,
 )
-from .numba_kernels import mean_abs_frame_mean
+from .numba_kernels import mean_square_frame_mean
 from .plotting import plot_for_cases, plots_missing
 
 
@@ -38,7 +38,7 @@ def chirality_value_for_case(
         )
         chirality = np.asarray(trajectory.chirality, dtype=np.float64)
 
-    return mean_abs_frame_mean(chirality, frame_start, frame_stop)
+    return mean_square_frame_mean(chirality, frame_start, frame_stop)
 
 
 def run(
@@ -49,7 +49,7 @@ def run(
 ) -> dict[str, np.ndarray]:
     output_npz = NPZ_OUTPUT_DIR / "chirality.npz"
     output_png = PLOT_OUTPUT_DIR / "chirality.png"
-    value_names = ("mean_abs",)
+    value_names = ("mean_square",)
     arrays = load_cached_metric_values(
         output_npz,
         value_names,
@@ -65,15 +65,15 @@ def run(
                 cases,
                 arrays,
                 output_png,
-                title="Mean absolute translational chirality vs radius",
-                ylabel="mean(mean(abs(chirality))) son",
+                title="Mean squared translational chirality vs radius",
+                ylabel="mean(chirality * chirality)",
                 fits=fits,
             )
         print(f"using cached chirality values from {output_npz}")
         return arrays
 
     values = {
-        "mean_abs": np.asarray(
+        "mean_square": np.asarray(
             [
                 chirality_value_for_case(case, frame_start, frame_stop)
                 for case in cases
@@ -95,8 +95,8 @@ def run(
         cases,
         values,
         output_png,
-        title="Mean absolute translational chirality vs radius",
-        ylabel="mean(mean(abs(chirality)))",
+        title="Mean squared translational chirality vs radius",
+        ylabel="mean(chirality * chirality)",
         fits=fits,
     )
     return values

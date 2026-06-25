@@ -3,6 +3,7 @@ import numpy as np
 from hexatic.multiple_sim_analysis.best_fit import fit_exponential_radius_trend
 from hexatic.multiple_sim_analysis.common import frame_indices
 from hexatic.multiple_sim_analysis.density_profile import _density_values_from_shell_counts
+from hexatic.multiple_sim_analysis.numba_kernels import mean_square_frame_mean
 
 
 def test_frame_indices_uses_stop_exclusive_overlap():
@@ -30,3 +31,8 @@ def test_density_profile_uses_count_density_difference():
     assert values["shell"] == 1.0
     assert values["core"] == 0.5
     assert values["shell_minus_core"] == 0.5
+
+
+def test_chirality_metric_uses_mean_square():
+    values = np.asarray([[1.0, -2.0], [3.0, 4.0]])
+    assert mean_square_frame_mean(values, 0, 2) == 7.5

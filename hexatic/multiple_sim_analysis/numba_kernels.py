@@ -123,7 +123,7 @@ def x_velocity_means_from_coords(
 
 
 @njit(cache=True)
-def mean_abs_frame_mean(
+def mean_square_frame_mean(
     values: np.ndarray,
     frame_start: int,
     frame_stop: int,
@@ -139,7 +139,7 @@ def mean_abs_frame_mean(
         for particle_idx in range(values.shape[1]):
             value = values[frame_idx, particle_idx]
             if math.isfinite(value):
-                frame_sum += abs(value)
+                frame_sum += value * value
                 value_count += 1
         if value_count:
             total += frame_sum / value_count
