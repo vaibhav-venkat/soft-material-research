@@ -12,14 +12,13 @@ from .common import (
     FRAME_STOP,
     NPZ_OUTPUT_DIR,
     PLOT_OUTPUT_DIR,
-    finite_nanmean,
-    frame_indices,
     load_cached_metric_values,
     load_metric_fit_curves,
     radii_for_cases,
     save_metric_npz,
     translation_chirality_path,
 )
+from .numba_kernels import mean_abs_frame_mean
 from .plotting import plot_for_cases
 
 
@@ -39,12 +38,7 @@ def chirality_value_for_case(
         )
         chirality = np.asarray(trajectory.chirality, dtype=np.float64)
 
-    selected = frame_indices(chirality.shape[0], frame_start, frame_stop)
-    frame_means = np.asarray(
-        [finite_nanmean(np.abs(chirality[frame_idx])) for frame_idx in selected],
-        dtype=np.float64,
-    )
-    return finite_nanmean(frame_means)
+    return mean_abs_frame_mean(chirality, frame_start, frame_stop)
 
 
 def run(
@@ -72,7 +66,7 @@ def run(
                 arrays,
                 output_png,
                 title="Mean absolute translational chirality vs radius",
-                ylabel="mean(mean(abs(chirality)))",
+                ylabel="mean(mean(abs(chirality))) son",
                 fits=fits,
             )
         print(f"using cached chirality values from {output_npz}")

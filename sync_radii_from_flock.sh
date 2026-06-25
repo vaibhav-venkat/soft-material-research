@@ -3,7 +3,7 @@ set -euo pipefail
 
 LOCAL_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REMOTE_HOST="${REMOTE_HOST:-flock}"
-REMOTE_ROOT="${REMOTE_ROOT:-$LOCAL_ROOT}"
+REMOTE_ROOT="/home/vaibhav/structures_and_functions"
 DRY_RUN="${DRY_RUN:-0}"
 
 RSYNC_ARGS=(
@@ -18,13 +18,8 @@ if [[ "$DRY_RUN" == "1" ]]; then
 fi
 
 SYNC_DIRS=(
-  "hexatic/radii_analysis/gsd"
-  "hexatic/radii_analysis/initial"
   "hexatic/radii_analysis/hexatic_output"
   "hexatic/radii_analysis/npz_fields"
-  "hexatic/radii_analysis/metadata"
-  "hexatic/radii_analysis/logs"
-  "hexatic/multiple_sim_analysis/output"
 )
 
 echo "Syncing radius-analysis outputs from ${REMOTE_HOST}:${REMOTE_ROOT}"

@@ -15,7 +15,6 @@ from .common import (
     NPZ_OUTPUT_DIR,
     PLOT_OUTPUT_DIR,
     active_fields_path,
-    finite_nanmean,
     frame_indices,
     load_active_fields,
     load_cached_metric_values,
@@ -24,6 +23,7 @@ from .common import (
     save_metric_npz,
     shell_mask_for_positions,
 )
+from .numba_kernels import shell_core_density_means
 from .plotting import plot_for_cases
 
 
@@ -51,11 +51,16 @@ def _density_profile_values_from_active_fields(
     frame_stop: int,
 ) -> dict[str, float]:
     fields = load_active_fields(active_fields_path(case))
-    selected = frame_indices(len(fields.steps), frame_start, frame_stop)
     shell = np.asarray(fields.shell_mask, dtype=bool)
     box_length_x = float(fields.x_edges[-1] - fields.x_edges[0])
     shell_volume, core_volume = shell_core_volumes(case, box_length_x)
-    return _density_values_from_shell_counts(shell[selected], shell_volume, core_volume)
+    return _density_values_from_shell_counts(
+        shell,
+        shell_volume,
+        core_volume,
+        frame_start=frame_start,
+        frame_stop=frame_stop,
+    )
 
 
 def _density_profile_values_from_gsd(
@@ -83,27 +88,24 @@ def _density_values_from_shell_counts(
     shell_masks,
     shell_volume: float,
     core_volume: float,
+    frame_start: int = 0,
+    frame_stop: int | None = None,
 ) -> dict[str, float]:
-    shell_density: list[float] = []
-    core_density: list[float] = []
-    shell_minus_core: list[float] = []
-
-    for shell in shell_masks:
-        shell = np.asarray(shell, dtype=bool)
-        n_shell = int(np.count_nonzero(shell))
-        n_core = int(shell.size - n_shell)
-        rho_shell = n_shell / shell_volume if shell_volume > 0.0 else np.nan
-        rho_core = n_core / core_volume if core_volume > 0.0 else np.nan
-        shell_density.append(rho_shell)
-        core_density.append(rho_core)
-        shell_minus_core.append(rho_shell - rho_core)
-
+    shell = np.asarray(shell_masks, dtype=bool)
+    if shell.ndim == 1:
+        shell = shell[np.newaxis, :]
+    stop = shell.shape[0] if frame_stop is None else frame_stop
+    shell_mean, core_mean, diff_mean = shell_core_density_means(
+        shell,
+        frame_start,
+        stop,
+        float(shell_volume),
+        float(core_volume),
+    )
     return {
-        "shell": finite_nanmean(np.asarray(shell_density, dtype=np.float64)),
-        "core": finite_nanmean(np.asarray(core_density, dtype=np.float64)),
-        "shell_minus_core": finite_nanmean(
-            np.asarray(shell_minus_core, dtype=np.float64)
-        ),
+        "shell": shell_mean,
+        "core": core_mean,
+        "shell_minus_core": diff_mean,
     }
 
 

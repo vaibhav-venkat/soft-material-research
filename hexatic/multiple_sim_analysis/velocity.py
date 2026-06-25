@@ -13,7 +13,6 @@ from .common import (
     NPZ_OUTPUT_DIR,
     PLOT_OUTPUT_DIR,
     active_fields_path,
-    center_of_mass_x_from_coords,
     finite_nanmean,
     frame_indices,
     load_active_fields,
@@ -28,6 +27,7 @@ from .common import (
     unwrapped_x_positions,
 )
 from .disclination import _load_neighbor_counts
+from .numba_kernels import defect_x_com_velocity, x_velocity_means_from_coords
 from .plotting import plot_for_cases
 
 
@@ -107,33 +107,22 @@ def _x_com_velocity_values_from_active_fields(
     frame_stop: int,
 ) -> dict[str, float]:
     fields = load_active_fields(active_fields_path(case))
-    selected_endpoints = set(frame_indices(len(fields.steps), frame_start, frame_stop).tolist())
     box_length_x = float(fields.x_edges[-1] - fields.x_edges[0])
     x_positions = np.asarray(fields.coords[..., 0], dtype=np.float64)
     shell_mask = np.asarray(fields.shell_mask, dtype=bool)
     steps = np.asarray(fields.steps, dtype=np.int64)
-    all_velocities: list[float] = []
-    shell_velocities: list[float] = []
-
-    for frame_idx in range(1, len(steps)):
-        if frame_idx not in selected_endpoints:
-            continue
-        delta_t = (steps[frame_idx] - steps[frame_idx - 1]) * float(cylinder.TIMESTEP)
-        if delta_t <= 0.0:
-            all_velocities.append(np.nan)
-            shell_velocities.append(np.nan)
-            continue
-        delta_x = minimum_image_delta(
-            x_positions[frame_idx] - x_positions[frame_idx - 1],
-            box_length_x,
-        )
-        all_velocities.append(finite_nanmean(delta_x / delta_t))
-        shell = shell_mask[frame_idx] & shell_mask[frame_idx - 1]
-        shell_velocities.append(finite_nanmean((delta_x / delta_t)[shell]))
-
+    all_mean, shell_mean = x_velocity_means_from_coords(
+        x_positions,
+        shell_mask,
+        steps,
+        box_length_x,
+        float(cylinder.TIMESTEP),
+        frame_start,
+        frame_stop,
+    )
     return {
-        "all": finite_nanmean(np.asarray(all_velocities, dtype=np.float64)),
-        "shell": finite_nanmean(np.asarray(shell_velocities, dtype=np.float64)),
+        "all": all_mean,
+        "shell": shell_mean,
     }
 
 
@@ -146,29 +135,16 @@ def _defect_x_com_velocity_from_coords(
     frame_start: int,
     frame_stop: int,
 ) -> float:
-    centers = np.full(len(steps), np.nan, dtype=np.float64)
-    for frame_idx in range(len(steps)):
-        mask = charges[frame_idx] == charge
-        centers[frame_idx] = center_of_mass_x_from_coords(coords[frame_idx, mask], box_length_x)
-
-    velocities: list[float] = []
-    for frame_idx in frame_indices(len(steps), frame_start, frame_stop):
-        if frame_idx == 0:
-            continue
-        delta_t = (steps[frame_idx] - steps[frame_idx - 1]) * float(cylinder.TIMESTEP)
-        if (
-            delta_t <= 0.0
-            or not np.isfinite(centers[frame_idx])
-            or not np.isfinite(centers[frame_idx - 1])
-        ):
-            velocities.append(np.nan)
-            continue
-        delta_x = minimum_image_delta(
-            centers[frame_idx] - centers[frame_idx - 1],
-            box_length_x,
-        )
-        velocities.append(float(delta_x / delta_t))
-    return finite_nanmean(np.asarray(velocities, dtype=np.float64))
+    return defect_x_com_velocity(
+        np.ascontiguousarray(coords[..., 0], dtype=np.float64),
+        np.ascontiguousarray(charges, dtype=np.int64),
+        np.ascontiguousarray(steps, dtype=np.int64),
+        box_length_x,
+        float(cylinder.TIMESTEP),
+        int(charge),
+        frame_start,
+        frame_stop,
+    )
 
 
 def disclination_velocity_values_for_case(

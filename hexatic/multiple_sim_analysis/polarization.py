@@ -11,14 +11,13 @@ from .common import (
     NPZ_OUTPUT_DIR,
     PLOT_OUTPUT_DIR,
     active_fields_path,
-    finite_nanmean,
-    frame_indices,
     load_active_fields,
     load_cached_metric_values,
     load_metric_fit_curves,
     radii_for_cases,
     save_metric_npz,
 )
+from .numba_kernels import mean_by_population
 from .plotting import plot_for_cases
 
 
@@ -28,12 +27,12 @@ def polarization_values_for_case(
     frame_stop: int = FRAME_STOP,
 ) -> dict[str, float]:
     fields = load_active_fields(active_fields_path(case))
-    selected = frame_indices(len(fields.steps), frame_start, frame_stop)
     px = np.asarray(fields.direction_cylindrical[..., 0], dtype=np.float64)
     shell = np.asarray(fields.shell_mask, dtype=bool)
+    all_mean, shell_mean = mean_by_population(px, shell, frame_start, frame_stop)
     return {
-        "all": finite_nanmean(px[selected]),
-        "shell": finite_nanmean(np.where(shell[selected], px[selected], np.nan)),
+        "all": all_mean,
+        "shell": shell_mean,
     }
 
 
