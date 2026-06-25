@@ -26,6 +26,7 @@ def plot_radius_values(
     fits: dict[str, ExponentialFit | FitCurve | None] | None = None,
     xlabel: str = "Cylinder radius R",
     fit_label: str = "exp fit",
+    series_colors: list[str] | tuple[str, ...] | None = None,
 ) -> None:
     ensure_output_dirs()
     radii = np.asarray(radii, dtype=np.float64)
@@ -40,7 +41,8 @@ def plot_radius_values(
         case_labels = np.asarray([""] * radii.size)
 
     fig, axis = plt.subplots(figsize=(9.0, 5.4), constrained_layout=True)
-    series_colors = ["#111111", "#0072b2", "#d55e00", "#009e73"]
+    if series_colors is None:
+        series_colors = ["#111111", "#0072b2", "#d55e00", "#009e73"]
 
     for series_idx, (series_name, series_values) in enumerate(values.items()):
         series_values = np.asarray(series_values, dtype=np.float64)

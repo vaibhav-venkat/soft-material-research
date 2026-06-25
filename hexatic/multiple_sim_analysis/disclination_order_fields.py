@@ -23,12 +23,20 @@ from .common import (
     save_metric_npz,
 )
 from .disclination import _load_neighbor_counts
-from .numba_kernels import local_disclination_field_contrasts
+from .numba_kernels import (
+    local_disclination_field_contrasts,
+    local_disclination_field_profiles,
+)
 from .plotting import companion_circumference_plot_path, plot_radius_values
 
 
 CIRCUMFERENCE_REFERENCE_CASE_ID = "circ_60_0D"
 LOCAL_CONTRAST_LENGTH = cylinder.ANALYSIS.neighbor_count_radius
+LOCAL_PROFILE_BIN_EDGES = LOCAL_CONTRAST_LENGTH * np.arange(6, dtype=np.float64)
+LOCAL_PROFILE_BIN_LABELS = np.asarray(
+    ("< a", "a-2a", "2a-3a", "3a-4a", "4a-5a")
+)
+LOCAL_PROFILE_COLORS = ("#111111", "#0072b2", "#d55e00", "#009e73", "#cc0000")
 
 
 def hexatic_order_path(case: RadiusCase) -> Path:
@@ -116,6 +124,51 @@ def disclination_order_values_for_case(
     }
 
 
+def disclination_shell_profile_values_for_case(
+    case: RadiusCase,
+    frame_start: int = FRAME_START,
+    frame_stop: int = FRAME_STOP,
+) -> dict[str, np.ndarray]:
+    neighbor_counts = _load_neighbor_counts(neighbor_counts_path(case))
+    expected_shape = neighbor_counts.shape
+    disclinations = _disclination_mask(neighbor_counts)
+
+    fields = load_active_fields(active_fields_path(case))
+    direction_cylindrical = np.asarray(fields.direction_cylindrical, dtype=np.float64)
+    _validate_particle_frame_shape(
+        "direction_cylindrical",
+        direction_cylindrical,
+        expected_shape,
+    )
+
+    hexatic_abs = _load_hexatic_abs(hexatic_order_path(case), expected_shape)
+    coords = np.asarray(fields.coords, dtype=np.float64)
+    _validate_particle_frame_shape("coords", coords, expected_shape)
+    x_edges = np.asarray(fields.x_edges, dtype=np.float64)
+    box_length_x = float(x_edges[-1] - x_edges[0])
+    s_profile, hexatic_profile, chirality_profile = (
+        local_disclination_field_profiles(
+            np.ascontiguousarray(coords, dtype=np.float64),
+            np.ascontiguousarray(direction_cylindrical, dtype=np.float64),
+            np.ascontiguousarray(hexatic_abs, dtype=np.float64),
+            np.ascontiguousarray(disclinations, dtype=np.bool_),
+            frame_start,
+            frame_stop,
+            np.ascontiguousarray(LOCAL_PROFILE_BIN_EDGES, dtype=np.float64),
+            cylinder.ANALYSIS.neighbor_count_radius,
+            box_length_x,
+            float(x_edges[0]),
+            float(case.radius),
+        )
+    )
+
+    return {
+        "S_shell_profile": s_profile,
+        "hexatic_order_shell_profile": hexatic_profile,
+        "chirality_shell_profile": chirality_profile,
+    }
+
+
 def _plot_values(values: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     return {
         "delta_S_local": values["delta_S_local"],
@@ -187,29 +240,90 @@ def _plot_for_cases_without_fit(
     )
 
 
-def run(
+def _profile_plot_missing(output_pngs: tuple[Path, ...]) -> bool:
+    return any(not output_png.exists() for output_png in output_pngs)
+
+
+def _profile_series(values: np.ndarray) -> dict[str, np.ndarray]:
+    values = np.asarray(values, dtype=np.float64)
+    return {
+        str(label): values[:, bin_idx]
+        for bin_idx, label in enumerate(LOCAL_PROFILE_BIN_LABELS)
+    }
+
+
+def _plot_profile_for_cases(
+    cases: tuple[RadiusCase, ...],
+    profile: np.ndarray,
+    output_png: Path,
+    title: str,
+    ylabel: str,
+) -> None:
+    radii = radii_for_cases(cases)
+    labels = labels_for_cases(cases)
+    case_ids = case_ids_for_cases(cases)
+    group_names = group_names_for_cases(cases)
+    regular_mask = (group_names != "circumference") | (case_ids == "circ_60_0D")
+    if not np.any(regular_mask):
+        regular_mask = np.ones(len(cases), dtype=bool)
+
+    plot_radius_values(
+        radii[regular_mask],
+        _profile_series(profile[regular_mask]),
+        output_png,
+        title,
+        ylabel,
+        case_labels=labels[regular_mask],
+        group_names=group_names[regular_mask],
+        series_colors=LOCAL_PROFILE_COLORS,
+    )
+
+
+def _plot_shell_profiles(
+    cases: tuple[RadiusCase, ...],
+    arrays: dict[str, np.ndarray],
+    output_pngs: tuple[Path, Path, Path],
+) -> None:
+    _plot_profile_for_cases(
+        cases,
+        arrays["S_shell_profile"],
+        output_pngs[0],
+        "Local disclination S profile vs radius",
+        "local S",
+    )
+    _plot_profile_for_cases(
+        cases,
+        arrays["hexatic_order_shell_profile"],
+        output_pngs[1],
+        "Local disclination hexatic profile vs radius",
+        "local hexatic order",
+    )
+    _plot_profile_for_cases(
+        cases,
+        arrays["chirality_shell_profile"],
+        output_pngs[2],
+        "Local disclination chirality profile vs radius",
+        "local mean(chirality * chirality)",
+    )
+
+
+def run_shell_profiles(
     cases: tuple[RadiusCase, ...],
     frame_start: int = FRAME_START,
     frame_stop: int = FRAME_STOP,
     overwrite: bool = False,
 ) -> dict[str, np.ndarray]:
     value_names = (
-        "delta_S_local",
-        "delta_hexatic_order_local",
-        "delta_chirality_disclinations_local",
+        "S_shell_profile",
+        "hexatic_order_shell_profile",
+        "chirality_shell_profile",
     )
-    cases = tuple(
-        case
-        for case in cases
-        if not case.case_id.startswith("circ_")
-        or case.case_id == CIRCUMFERENCE_REFERENCE_CASE_ID
+    output_npz = NPZ_OUTPUT_DIR / "disclination_order_shell_profiles.npz"
+    output_pngs = (
+        PLOT_OUTPUT_DIR / "disclination_S_shell_profile.png",
+        PLOT_OUTPUT_DIR / "disclination_hexatic_order_shell_profile.png",
+        PLOT_OUTPUT_DIR / "disclination_chirality_shell_profile.png",
     )
-    if not cases:
-        print("skipped disclination_order_fields: no C = 60D or radius cases selected")
-        return {name: np.asarray([], dtype=np.float64) for name in value_names}
-
-    output_npz = NPZ_OUTPUT_DIR / "disclination_order_fields.npz"
-    output_png = PLOT_OUTPUT_DIR / "disclination_order_fields.png"
     arrays = load_cached_metric_values(
         output_npz,
         value_names,
@@ -219,14 +333,14 @@ def run(
         overwrite=overwrite,
     )
     if arrays is not None:
-        if _plot_missing(cases, output_png):
-            _plot_for_cases_without_fit(cases, arrays, output_png)
-        print(f"using cached disclination_order_fields values from {output_npz}")
+        if _profile_plot_missing(output_pngs):
+            _plot_shell_profiles(cases, arrays, output_pngs)
+        print(f"using cached disclination shell profiles from {output_npz}")
         return arrays
 
     values = {name: [] for name in value_names}
     for case in cases:
-        case_values = disclination_order_values_for_case(
+        case_values = disclination_shell_profile_values_for_case(
             case,
             frame_start,
             frame_stop,
@@ -241,23 +355,16 @@ def run(
     save_metric_npz(
         output_npz,
         cases,
-        "disclination_order_fields",
+        "disclination_order_shell_profiles",
         arrays,
         {
+            "local_profile_bin_edges": np.asarray(
+                LOCAL_PROFILE_BIN_EDGES,
+                dtype=np.float64,
+            ),
+            "local_profile_bin_labels": LOCAL_PROFILE_BIN_LABELS,
             "local_contrast_length": np.asarray(
                 LOCAL_CONTRAST_LENGTH,
-                dtype=np.float64,
-            ),
-            "local_core_radius": np.asarray(
-                LOCAL_CONTRAST_LENGTH,
-                dtype=np.float64,
-            ),
-            "local_annulus_inner_radius": np.asarray(
-                2.0 * LOCAL_CONTRAST_LENGTH,
-                dtype=np.float64,
-            ),
-            "local_annulus_outer_radius": np.asarray(
-                5.0 * LOCAL_CONTRAST_LENGTH,
                 dtype=np.float64,
             ),
             "chirality_radius": np.asarray(
@@ -268,5 +375,34 @@ def run(
         frame_start=frame_start,
         frame_stop=frame_stop,
     )
-    _plot_for_cases_without_fit(cases, arrays, output_png)
+    _plot_shell_profiles(cases, arrays, output_pngs)
     return arrays
+
+
+def run(
+    cases: tuple[RadiusCase, ...],
+    frame_start: int = FRAME_START,
+    frame_stop: int = FRAME_STOP,
+    overwrite: bool = False,
+) -> dict[str, np.ndarray]:
+    value_names = (
+        "S_shell_profile",
+        "hexatic_order_shell_profile",
+        "chirality_shell_profile",
+    )
+    cases = tuple(
+        case
+        for case in cases
+        if not case.case_id.startswith("circ_")
+        or case.case_id == CIRCUMFERENCE_REFERENCE_CASE_ID
+    )
+    if not cases:
+        print("skipped disclination_order_fields: no C = 60D or radius cases selected")
+        return {name: np.asarray([], dtype=np.float64) for name in value_names}
+
+    return run_shell_profiles(
+        cases,
+        frame_start=frame_start,
+        frame_stop=frame_stop,
+        overwrite=overwrite,
+    )
