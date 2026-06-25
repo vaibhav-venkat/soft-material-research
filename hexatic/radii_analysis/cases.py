@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -16,7 +15,6 @@ METADATA_DIR = ANALYSIS_DIR / "metadata"
 
 RUN_STEPS = int(1e7)
 TRAJECTORY_WRITE_PERIOD = int(1e5)
-DEFAULT_LX = cylinder.SIMULATION.lx
 LONG_AXIS_LX = 500.0 * cylinder.PARTICLE_DIAMETER
 
 
@@ -24,11 +22,15 @@ LONG_AXIS_LX = 500.0 * cylinder.PARTICLE_DIAMETER
 class RadiusCase:
     case_id: str
     radius: float
-    lx: float = DEFAULT_LX
+    lx: float | None = None
     run_steps: int = RUN_STEPS
     trajectory_write_period: int = TRAJECTORY_WRITE_PERIOD
     seed: int = cylinder.SEED
     label: str = ""
+
+    def __post_init__(self) -> None:
+        if self.lx is None:
+            object.__setattr__(self, "lx", cylinder.lx_for_radius(self.radius))
 
     @property
     def n_particles(self) -> int:
@@ -75,22 +77,9 @@ class RadiusCase:
         }
 
 
-def radius_from_circumference_diameters(multiplier: float) -> float:
-    return multiplier * cylinder.PARTICLE_DIAMETER / (2.0 * math.pi)
-
-
 def radius_from_diameters(multiplier: float) -> float:
     return multiplier * cylinder.PARTICLE_DIAMETER
 
-
-CIRCUMFERENCE_CASES: tuple[RadiusCase, ...] = tuple(
-    RadiusCase(
-        case_id=f"circ_{str(value).replace('.', '_')}D",
-        radius=radius_from_circumference_diameters(value),
-        label=f"C = {value}D",
-    )
-    for value in (60.0, 60.25, 60.5, 60.75, 61.0)
-)
 
 SCALED_RADIUS_CASES: tuple[RadiusCase, ...] = tuple(
     RadiusCase(
@@ -101,7 +90,7 @@ SCALED_RADIUS_CASES: tuple[RadiusCase, ...] = tuple(
     for value in (15.0, 20.0, 25.0, 30.0, 35.0)
 )
 
-SWEEP_CASES: tuple[RadiusCase, ...] = CIRCUMFERENCE_CASES + SCALED_RADIUS_CASES
+SWEEP_CASES: tuple[RadiusCase, ...] = SCALED_RADIUS_CASES
 
 LONG_AXIS_CASE = RadiusCase(
     case_id="long_axis_R10D_Lx500D",

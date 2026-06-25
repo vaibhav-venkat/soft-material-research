@@ -9,23 +9,27 @@ SIGMA = 1.0
 PARTICLE_DIAMETER = SIGMA * 2.0 ** (1.0 / 6.0)
 
 RHO = 0.2
-BASELINE_CIRCUMFERENCE_DIAMETERS = 60.0
-BASELINE_CYLINDER_RADIUS = (
-    BASELINE_CIRCUMFERENCE_DIAMETERS * PARTICLE_DIAMETER / (2.0 * np.pi)
-)
-FIXED_LX = 4000 / (RHO * np.pi * BASELINE_CYLINDER_RADIUS**2)
+X_RATIO = 4
+BASELINE_RADIUS_DIAMETERS = 10.0
+BASELINE_CYLINDER_RADIUS = BASELINE_RADIUS_DIAMETERS * PARTICLE_DIAMETER
+
+
+def lx_for_radius(cylinder_radius: float, x_ratio: float = X_RATIO) -> float:
+    return x_ratio * 2.0 * cylinder_radius
 
 
 def n_particles_for_radius(
     cylinder_radius: float,
-    lx: float = FIXED_LX,
+    lx: float | None = None,
     rho: float = RHO,
 ) -> int:
+    if lx is None:
+        lx = lx_for_radius(cylinder_radius)
     return int(round(rho * np.pi * cylinder_radius**2 * lx))
 
 
+LX = lx_for_radius(BASELINE_CYLINDER_RADIUS)
 REQUESTED_N_PARTICLES = n_particles_for_radius(BASELINE_CYLINDER_RADIUS)
-X_RATIO = 4
 SEED = 1
 KT = 1
 GAMMA = 1
@@ -101,7 +105,7 @@ class CylinderAnalysisConfig:
 class CylinderSimulationConfig:
     requested_n_particles: int = REQUESTED_N_PARTICLES
     rho: float = RHO
-    lx: float = FIXED_LX
+    lx: float = LX
     x_ratio: int = X_RATIO
     seed: int = SEED
     kt: int = KT
@@ -119,8 +123,15 @@ class CylinderSimulationConfig:
     min_angular_candidates: int = MIN_ANGULAR_CANDIDATES
     angular_candidate_multiplier: int = ANGULAR_CANDIDATE_MULTIPLIER
 
+    def lx_for_radius(self, cylinder_radius: float) -> float:
+        return lx_for_radius(cylinder_radius, self.x_ratio)
+
     def n_particles_for_radius(self, cylinder_radius: float) -> int:
-        return n_particles_for_radius(cylinder_radius, self.lx, self.rho)
+        return n_particles_for_radius(
+            cylinder_radius,
+            self.lx_for_radius(cylinder_radius),
+            self.rho,
+        )
 
 
 PATHS = CylinderPaths()
