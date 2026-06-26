@@ -10,7 +10,6 @@ from .common import (
     FRAME_START,
     FRAME_STOP,
     NPZ_OUTPUT_DIR,
-    PLOT_OUTPUT_DIR,
     active_fields_path,
     center_of_mass_x,
     center_of_mass_x_from_coords,
@@ -18,12 +17,10 @@ from .common import (
     frame_indices,
     load_active_fields,
     load_cached_metric_values,
-    load_metric_fit_curves,
     radii_for_cases,
     save_metric_npz,
     shell_mask_for_positions,
 )
-from .plotting import plot_for_cases, plots_missing
 
 
 def x_com_values_for_case(
@@ -81,7 +78,6 @@ def run(
     overwrite: bool = False,
 ) -> dict[str, np.ndarray]:
     output_npz = NPZ_OUTPUT_DIR / "x_com.npz"
-    output_png = PLOT_OUTPUT_DIR / "x_com.png"
     value_names = ("all", "shell")
     arrays = load_cached_metric_values(
         output_npz,
@@ -92,16 +88,6 @@ def run(
         overwrite=overwrite,
     )
     if arrays is not None:
-        if plots_missing(cases, output_png):
-            fits = load_metric_fit_curves(output_npz, value_names)
-            plot_for_cases(
-                cases,
-                arrays,
-                output_png,
-                title="X center of mass vs radius",
-                ylabel="mean x COM",
-                fits=fits,
-            )
         print(f"using cached x_com values from {output_npz}")
         return arrays
 
@@ -111,7 +97,7 @@ def run(
         values["all"].append(case_values["all"])
         values["shell"].append(case_values["shell"])
     arrays = {name: np.asarray(series, dtype=np.float64) for name, series in values.items()}
-    fits, payload = fit_payload(radii_for_cases(cases), arrays)
+    _, payload = fit_payload(radii_for_cases(cases), arrays)
     save_metric_npz(
         output_npz,
         cases,
@@ -120,13 +106,5 @@ def run(
         payload,
         frame_start=frame_start,
         frame_stop=frame_stop,
-    )
-    plot_for_cases(
-        cases,
-        arrays,
-        output_png,
-        title="X center of mass vs radius",
-        ylabel="mean x COM",
-        fits=fits,
     )
     return arrays

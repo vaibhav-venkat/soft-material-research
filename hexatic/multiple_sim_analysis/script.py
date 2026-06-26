@@ -2,19 +2,7 @@ from __future__ import annotations
 
 import argparse
 
-from . import (
-    chirality,
-    density_profile,
-    disclination,
-    disclination_order_fields,
-    dislocation,
-    force_density,
-    nematic,
-    polarization,
-    radial_exchange_current,
-    velocity,
-    x_com,
-)
+from . import disclination_order_fields
 from .common import FRAME_START, FRAME_STOP, ensure_output_dirs, selected_cases
 
 
@@ -35,31 +23,9 @@ def _parse_args() -> argparse.Namespace:
         action="append",
         default=[],
         choices=(
-            "velocity",
-            "chirality",
-            "density_profile",
-            "disclination",
             "disclination_order_fields",
-            "dislocation",
-            "polarization",
-            "nematic",
-            "x_com",
-            "force_density",
-            "radial_exchange_current",
         ),
         help="Metric to skip. Can be passed multiple times.",
-    )
-    parser.add_argument(
-        "--radial-exchange-current-bin-width",
-        type=float,
-        default=radial_exchange_current.ACTIVE_RADIAL_BIN_WIDTH,
-        help="Radial bin width for radial exchange current; defaults to 1 particle diameter.",
-    )
-    parser.add_argument(
-        "--radial-exchange-current-kernel-radius",
-        type=float,
-        default=radial_exchange_current.LOCAL_POCKET_RADIUS,
-        help="Gaussian kernel radius for radial exchange current; defaults to 2 particle diameters.",
     )
     return parser.parse_args()
 
@@ -72,27 +38,7 @@ def run_all(args: argparse.Namespace) -> None:
         include_long_axis=args.include_long_axis,
     )
     metrics = (
-        # ("velocity", velocity.run),
-        # ("density_profile", density_profile.run),
-        # ("disclination", disclination.run),
         ("disclination_order_fields", disclination_order_fields.run),
-        # ("dislocation", dislocation.run),
-        # ("polarization", polarization.run),
-        # ("nematic", nematic.run),
-        # ("x_com", x_com.run),
-        # (
-        #     "radial_exchange_current",
-        #     lambda cases, frame_start, frame_stop, overwrite: radial_exchange_current.run(
-        #         cases,
-        #         frame_start=frame_start,
-        #         frame_stop=frame_stop,
-        #         overwrite=overwrite,
-        #         radial_bin_width=args.radial_exchange_current_bin_width,
-        #         kernel_radius=args.radial_exchange_current_kernel_radius,
-        #     ),
-        # ),
-        # ("force_density", force_density.run),
-        # ("chirality", chirality.run),
     )
     skipped = set(args.skip)
     for metric_name, runner in metrics:

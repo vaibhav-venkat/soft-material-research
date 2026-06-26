@@ -22,19 +22,20 @@ from ..common import (
     radii_for_cases,
     save_metric_npz,
 )
-from ..numba_kernels import local_disclination_field_profiles
+from ..disclination import _load_neighbor_counts
 from ..plotting import plot_radius_values
 from .moving import run_moving_frontback_chirality
 from .shared import (
+    CIRCUMFERENCE_REFERENCE_CASE_ID,
     LOCAL_CONTRAST_LENGTH,
     LOCAL_PROFILE_BIN_EDGES,
     LOCAL_PROFILE_BIN_LABELS,
     LOCAL_PROFILE_COLORS,
     _disclination_mask,
     _load_hexatic_abs,
-    _load_neighbor_counts,
     _validate_particle_frame_shape,
     hexatic_order_path,
+    local_disclination_field_profiles,
 )
 from .velocity_summary import run_velocity_chirality_summary
 
@@ -109,7 +110,9 @@ def _plot_profile_for_cases(
     labels = labels_for_cases(cases)
     case_ids = case_ids_for_cases(cases)
     group_names = group_names_for_cases(cases)
-    regular_mask = (group_names != "circumference") | (case_ids == "circ_60_0D")
+    regular_mask = (group_names != "circumference") | (
+        case_ids == CIRCUMFERENCE_REFERENCE_CASE_ID
+    )
     if not np.any(regular_mask):
         regular_mask = np.ones(len(cases), dtype=bool)
 
@@ -254,5 +257,3 @@ def run_shell_profiles(
         overwrite=overwrite,
     )
     return arrays
-
-

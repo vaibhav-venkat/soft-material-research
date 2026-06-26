@@ -4,7 +4,6 @@ from pathlib import Path
 
 import numpy as np
 
-from hexatic.constants import cylinder
 from hexatic.radii_analysis.cases import RadiusCase
 
 from ..common import (
@@ -22,31 +21,26 @@ from ..plotting import plot_radius_values
 from .shared import LOCAL_CONTRAST_LENGTH
 
 
-def _mean_abs_defect_velocity(velocity_arrays: dict[str, np.ndarray]) -> np.ndarray:
+def _abs_defect_velocity_stats(
+    velocity_arrays: dict[str, np.ndarray],
+) -> tuple[np.ndarray, np.ndarray]:
     plus = np.abs(np.asarray(velocity_arrays["plus_1"], dtype=np.float64))
     minus = np.abs(np.asarray(velocity_arrays["minus_1"], dtype=np.float64))
     values = np.column_stack((plus, minus))
     finite = np.isfinite(values)
     counts = np.count_nonzero(finite, axis=1)
     sums = np.where(finite, values, 0.0).sum(axis=1)
-    return np.divide(
+    means = np.divide(
         sums,
         counts,
         out=np.full(values.shape[0], np.nan, dtype=np.float64),
         where=counts > 0,
     )
-
-
-def _median_abs_defect_velocity(velocity_arrays: dict[str, np.ndarray]) -> np.ndarray:
-    plus = np.abs(np.asarray(velocity_arrays["plus_1"], dtype=np.float64))
-    minus = np.abs(np.asarray(velocity_arrays["minus_1"], dtype=np.float64))
-    values = np.column_stack((plus, minus))
-    finite = np.isfinite(values)
     medians = np.full(values.shape[0], np.nan, dtype=np.float64)
     for row_idx in range(values.shape[0]):
         if np.any(finite[row_idx]):
             medians[row_idx] = float(np.median(values[row_idx, finite[row_idx]]))
-    return medians
+    return means, medians
 
 
 def _disclination_velocity_arrays(
@@ -114,12 +108,6 @@ def run_velocity_chirality_summary(
 ) -> dict[str, np.ndarray]:
     output_npz = NPZ_OUTPUT_DIR / "disclination_velocity_chirality.npz"
     output_png = PLOT_OUTPUT_DIR / "disclination_velocity_chirality.png"
-    value_names = (
-        "abs_v_defect",
-        "median_abs_v_defect",
-        "chirality_annulus",
-        "chirality_annulus_minus_core",
-    )
     velocity_arrays = _disclination_velocity_arrays(
         cases,
         frame_start,
@@ -135,9 +123,10 @@ def run_velocity_chirality_summary(
         shell_profiles["chirality_annulus"],
         dtype=np.float64,
     )
+    mean_abs_v_defect, median_abs_v_defect = _abs_defect_velocity_stats(velocity_arrays)
     arrays = {
-        "abs_v_defect": _mean_abs_defect_velocity(velocity_arrays),
-        "median_abs_v_defect": _median_abs_defect_velocity(velocity_arrays),
+        "abs_v_defect": mean_abs_v_defect,
+        "median_abs_v_defect": median_abs_v_defect,
         "chirality_annulus": chirality_annulus,
         "chirality_annulus_minus_core": chirality_annulus - chirality_core,
     }
@@ -165,5 +154,4 @@ def run_velocity_chirality_summary(
     )
     _plot_velocity_chirality_summary(cases, arrays, output_png)
     return arrays
-
 

@@ -18,16 +18,16 @@ from ..common import (
     neighbor_counts_path,
     radii_for_cases,
 )
-from ..numba_kernels import local_disclination_field_contrasts
+from ..disclination import _load_neighbor_counts
 from ..plotting import companion_circumference_plot_path, plot_radius_values
 from .shared import (
     CIRCUMFERENCE_REFERENCE_CASE_ID,
     LOCAL_CONTRAST_LENGTH,
     _disclination_mask,
     _load_hexatic_abs,
-    _load_neighbor_counts,
     _validate_particle_frame_shape,
     hexatic_order_path,
+    local_disclination_field_contrasts,
 )
 
 
@@ -117,7 +117,9 @@ def _plot_for_cases_without_fit(
     labels = labels_for_cases(cases)
     case_ids = case_ids_for_cases(cases)
     group_names = group_names_for_cases(cases)
-    regular_mask = (group_names != "circumference") | (case_ids == "circ_60_0D")
+    regular_mask = (group_names != "circumference") | (
+        case_ids == CIRCUMFERENCE_REFERENCE_CASE_ID
+    )
     if not np.any(regular_mask):
         regular_mask = np.ones(len(cases), dtype=bool)
 

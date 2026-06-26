@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
@@ -21,25 +20,12 @@ from .best_fit import FitCurve
 
 FRAME_START = 70
 FRAME_STOP = 100
-POPULATIONS = ("all", "shell")
 
 ANALYSIS_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = ANALYSIS_DIR / "output"
 NPZ_OUTPUT_DIR = OUTPUT_DIR / "npz"
 PLOT_OUTPUT_DIR = OUTPUT_DIR / "plots"
 FIT_OUTPUT_DIR = OUTPUT_DIR / "fits"
-
-
-@dataclass(frozen=True)
-class AggregateResult:
-    metric_name: str
-    radii: np.ndarray
-    case_ids: np.ndarray
-    labels: np.ndarray
-    group_names: np.ndarray
-    values: dict[str, np.ndarray]
-    fit_payload: dict[str, np.ndarray | float | int | str]
-
 
 def ensure_output_dirs() -> None:
     NPZ_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
