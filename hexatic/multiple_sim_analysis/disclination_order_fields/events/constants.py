@@ -14,6 +14,7 @@ class EventAnalysisConstants:
     annulus_core_radius: float = cylinder.ANALYSIS.neighbor_count_radius
     annulus_outer_radius: float = 3.0 * cylinder.ANALYSIS.neighbor_count_radius
     persistence_frames: int = 2
+    ambiguous_assignment_cap: int = 64
 
 
 DEFAULT_EVENT_CONSTANTS = EventAnalysisConstants()

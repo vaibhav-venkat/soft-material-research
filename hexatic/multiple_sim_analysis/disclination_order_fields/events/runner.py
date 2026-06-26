@@ -6,6 +6,7 @@ import numpy as np
 
 from hexatic.radii_analysis.cases import RadiusCase
 
+from ..shared import build_cell_list
 from ...common import FRAME_START, FRAME_STOP
 from .constants import DEFAULT_EVENT_CONSTANTS, EventAnalysisConstants
 from .events import (
@@ -14,7 +15,7 @@ from .events import (
     defect_event_values,
     load_defect_events_npz,
 )
-from .geometry import cylindrical_to_cartesian, cylinder_distances
+from .geometry import cylindrical_to_cartesian, minimum_image_x_delta
 from .io import event_metric_npz_path, save_event_metric_npz
 from .tracking import DefectTrackTable, track_persistent_defects
 
@@ -82,6 +83,12 @@ def _union_find_labels(n_items: int, edges: list[tuple[int, int]]) -> np.ndarray
     return np.asarray([unique_roots[root] for root in roots], dtype=np.int64)
 
 
+def _cartesian_distance(first: np.ndarray, second: np.ndarray, box_length_x: float) -> float:
+    delta = np.asarray(first, dtype=np.float64) - np.asarray(second, dtype=np.float64)
+    delta[0] = minimum_image_x_delta(delta[0], box_length_x)
+    return float(np.linalg.norm(delta))
+
+
 def cluster_defects_frame(
     positions: np.ndarray,
     charges: np.ndarray,
@@ -106,11 +113,26 @@ def cluster_defects_frame(
         )
 
     cartesian = cylindrical_to_cartesian(positions)
-    distances = cylinder_distances(cartesian, cartesian, box_length_x)
+    bond_length = float(constants.cluster_bond_length)
+    finite_cartesian = cartesian[np.all(np.isfinite(cartesian), axis=1)]
+    radial_extent = (
+        float(np.max(np.abs(finite_cartesian[:, 1:]))) if finite_cartesian.size else bond_length
+    )
+    cell_list = build_cell_list(
+        cartesian,
+        cell_size=bond_length,
+        box_length_x=box_length_x,
+        y_min=-radial_extent - bond_length,
+        y_max=radial_extent + bond_length,
+        z_min=-radial_extent - bond_length,
+        z_max=radial_extent + bond_length,
+    )
     edges: list[tuple[int, int]] = []
     for left in range(positions.shape[0]):
-        for right in range(left + 1, positions.shape[0]):
-            if distances[left, right] < float(constants.cluster_bond_length):
+        for right in cell_list.iter_neighbor_indices(cartesian[left], bond_length):
+            if right <= left:
+                continue
+            if _cartesian_distance(cartesian[left], cartesian[right], box_length_x) < bond_length:
                 edges.append((left, right))
     labels = _union_find_labels(positions.shape[0], edges)
     cluster_ids = np.unique(labels)

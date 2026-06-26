@@ -5,10 +5,12 @@ import numpy as np
 from hexatic.constants import cylinder
 from hexatic.radii_analysis.cases import RadiusCase
 
+from ..shared import build_cell_list
 from ...common import (
     FRAME_START,
     FRAME_STOP,
     active_fields_path,
+    frame_indices,
     load_active_fields,
 )
 from .constants import DEFAULT_EVENT_CONSTANTS, EventAnalysisConstants
@@ -91,12 +93,42 @@ def defect_annulus_masks(
     particle_cartesian = cylindrical_to_cartesian(np.asarray(particle_coords, dtype=np.float64))
     target_cartesian = cylindrical_to_cartesian(
         np.asarray(target_coord, dtype=np.float64)[np.newaxis, :]
+    )[0]
+    outer_radius = float(constants.annulus_outer_radius)
+    core_radius = float(constants.annulus_core_radius)
+
+    distances = np.full(particle_cartesian.shape[0], np.nan, dtype=np.float64)
+    core_mask = np.zeros(particle_cartesian.shape[0], dtype=bool)
+    annulus_mask = np.zeros(particle_cartesian.shape[0], dtype=bool)
+    if particle_cartesian.size == 0:
+        return core_mask, annulus_mask, distances
+
+    finite = particle_cartesian[np.all(np.isfinite(particle_cartesian), axis=1)]
+    radial_extent = float(np.max(np.abs(finite[:, 1:]))) if finite.size else outer_radius
+    cell_list = build_cell_list(
+        particle_cartesian,
+        cell_size=max(float(constants.annulus_core_radius), np.finfo(float).eps),
+        box_length_x=box_length_x,
+        y_min=-radial_extent - outer_radius,
+        y_max=radial_extent + outer_radius,
+        z_min=-radial_extent - outer_radius,
+        z_max=radial_extent + outer_radius,
     )
-    distances = cylinder_distances(particle_cartesian, target_cartesian, box_length_x)[:, 0]
-    core_mask = distances < float(constants.annulus_core_radius)
+    candidate_indices = sorted(set(cell_list.iter_neighbor_indices(target_cartesian, outer_radius)))
+    if not candidate_indices:
+        return core_mask, annulus_mask, distances
+
+    selected = np.asarray(candidate_indices, dtype=np.int64)
+    selected_distances = cylinder_distances(
+        particle_cartesian[selected],
+        target_cartesian[np.newaxis, :],
+        box_length_x,
+    )[:, 0]
+    distances[selected] = selected_distances
+    core_mask[selected] = selected_distances < core_radius
     annulus_mask = (
-        (distances > float(constants.annulus_core_radius))
-        & (distances < float(constants.annulus_outer_radius))
+        (distances > core_radius)
+        & (distances < outer_radius)
         & (np.asarray(charges) == 0)
     )
     return core_mask, annulus_mask, distances
@@ -260,12 +292,18 @@ def compute_d2min_series(
     neighbor_radius: float = DEFAULT_EVENT_CONSTANTS.neighbor_count_radius,
     normalization_length: float = DEFAULT_EVENT_CONSTANTS.neighbor_count_radius,
     min_neighbors: int = 3,
+    frames: np.ndarray | None = None,
 ) -> np.ndarray:
     coords = np.asarray(coords, dtype=np.float64)
     if coords.ndim != 3 or coords.shape[-1] != 3:
         raise ValueError(f"coords must have shape (frames, particles, 3), got {coords.shape}")
     d2min = np.full(coords.shape[:2], np.nan, dtype=np.float64)
-    for frame_idx in range(coords.shape[0] - 1):
+    if frames is None:
+        frame_values = np.arange(coords.shape[0] - 1, dtype=np.int64)
+    else:
+        frame_values = np.asarray(frames, dtype=np.int64)
+        frame_values = frame_values[(frame_values >= 0) & (frame_values < coords.shape[0] - 1)]
+    for frame_idx in frame_values:
         d2min[frame_idx] = compute_d2min_frame(
             coords[frame_idx],
             coords[frame_idx + 1],
@@ -303,6 +341,7 @@ def save_d2min_for_case(
         box_length_x=float(case.lx),
         neighbor_radius=float(constants.neighbor_count_radius),
         normalization_length=float(constants.neighbor_count_radius),
+        frames=frame_indices(np.asarray(coords).shape[0] - 1, frame_start, frame_stop),
     )
     save_event_metric_npz(
         output_path,

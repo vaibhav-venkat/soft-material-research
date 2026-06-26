@@ -8,6 +8,7 @@ import numpy as np
 from hexatic.constants import cylinder
 from hexatic.radii_analysis.cases import RadiusCase
 
+from ..shared import build_cell_list
 from ...common import (
     FRAME_START,
     FRAME_STOP,
@@ -20,7 +21,6 @@ from ...disclination import _load_neighbor_counts
 from .constants import DEFAULT_EVENT_CONSTANTS, EventAnalysisConstants
 from .geometry import (
     cylindrical_to_cartesian,
-    cylinder_distances,
     minimum_image_x_delta,
 )
 from .io import event_metric_npz_path, save_event_metric_npz
@@ -68,6 +68,13 @@ class DefectTrackTable:
     annihilation_partner_id: np.ndarray
     ambiguity_count_by_frame: np.ndarray
     rejected_swap_count_by_frame: np.ndarray
+    observation_offsets: np.ndarray | None = None
+    observation_frame: np.ndarray | None = None
+    observation_particle_index: np.ndarray | None = None
+    observation_positions: np.ndarray | None = None
+    observation_steps: np.ndarray | None = None
+    observation_matched_confident: np.ndarray | None = None
+    observation_velocity: np.ndarray | None = None
 
     @property
     def n_tracks(self) -> int:
@@ -166,6 +173,43 @@ def _second_or_inf(sorted_distances: np.ndarray) -> float:
     return float(sorted_distances[1])
 
 
+def _cartesian_distance(first: np.ndarray, second: np.ndarray, box_length_x: float) -> float:
+    delta = np.asarray(first, dtype=np.float64) - np.asarray(second, dtype=np.float64)
+    delta[0] = minimum_image_x_delta(delta[0], box_length_x)
+    return float(np.linalg.norm(delta))
+
+
+def _candidate_distances(
+    prev_points: np.ndarray,
+    cur_points: np.ndarray,
+    box_length_x: float,
+    match_tol: float,
+) -> np.ndarray:
+    distances = np.full((prev_points.shape[0], cur_points.shape[0]), np.inf, dtype=np.float64)
+    if prev_points.size == 0 or cur_points.size == 0:
+        return distances
+
+    finite_cur = cur_points[np.all(np.isfinite(cur_points), axis=1)]
+    radial_extent = float(np.max(np.abs(finite_cur[:, 1:]))) if finite_cur.size else match_tol
+    cell_list = build_cell_list(
+        cur_points,
+        cell_size=match_tol,
+        box_length_x=box_length_x,
+        y_min=-radial_extent - match_tol,
+        y_max=radial_extent + match_tol,
+        z_min=-radial_extent - match_tol,
+        z_max=radial_extent + match_tol,
+    )
+    for prev_idx, prev_point in enumerate(prev_points):
+        if not np.all(np.isfinite(prev_point)):
+            continue
+        for cur_idx in cell_list.iter_neighbor_indices(prev_point, match_tol):
+            distance = _cartesian_distance(prev_point, cur_points[cur_idx], box_length_x)
+            if distance <= match_tol:
+                distances[prev_idx, cur_idx] = distance
+    return distances
+
+
 def _match_charge_group(
     prev_indices: np.ndarray,
     cur_indices: np.ndarray,
@@ -173,6 +217,7 @@ def _match_charge_group(
     match_tol: float,
     ambiguity_ratio: float,
     use_linear_assignment: bool,
+    ambiguous_assignment_cap: int | None,
 ) -> tuple[list[tuple[int, int, float]], set[int], set[int], int, int]:
     if prev_indices.size == 0 or cur_indices.size == 0:
         return [], set(), set(), 0, 0
@@ -226,6 +271,20 @@ def _match_charge_group(
             j for j, idx in enumerate(cur_indices) if int(idx) not in used_cur
         ]
         if remaining_prev_local and remaining_cur_local:
+            ambiguous_size = max(len(remaining_prev_local), len(remaining_cur_local))
+            if (
+                ambiguous_assignment_cap is not None
+                and ambiguous_assignment_cap >= 0
+                and ambiguous_size > int(ambiguous_assignment_cap)
+            ):
+                ambiguous_pair_count += int(
+                    np.count_nonzero(
+                        candidate_mask[np.ix_(remaining_prev_local, remaining_cur_local)]
+                    )
+                )
+                use_linear_assignment = False
+
+        if remaining_prev_local and remaining_cur_local and use_linear_assignment:
             try:
                 from scipy.optimize import linear_sum_assignment
             except ImportError:
@@ -282,6 +341,7 @@ def _match_defects_frame(
     match_tol: float = DEFAULT_EVENT_CONSTANTS.match_tolerance,
     ambiguity_ratio: float = 1.5,
     use_linear_assignment: bool = True,
+    ambiguous_assignment_cap: int | None = DEFAULT_EVENT_CONSTANTS.ambiguous_assignment_cap,
 ) -> FrameMatchResult:
     """Match same-charge defects between adjacent frames.
 
@@ -320,11 +380,6 @@ def _match_defects_frame(
             rejected_swap_count=0,
         )
 
-    all_distances = cylinder_distances(
-        cur.cartesian_positions,
-        prev.cartesian_positions,
-        box_length_x,
-    ).T
     all_matches: list[tuple[int, int, float]] = []
     rejected_prev: set[int] = set()
     rejected_cur: set[int] = set()
@@ -334,14 +389,21 @@ def _match_defects_frame(
     for charge in np.unique(np.concatenate((prev.charges, cur.charges))):
         prev_group = np.flatnonzero(prev.charges == charge)
         cur_group = np.flatnonzero(cur.charges == charge)
+        group_distances = _candidate_distances(
+            prev.cartesian_positions[prev_group],
+            cur.cartesian_positions[cur_group],
+            box_length_x,
+            match_tol,
+        )
         group_matches, group_rejected_prev, group_rejected_cur, ambiguous, rejected = (
             _match_charge_group(
                 prev_group,
                 cur_group,
-                all_distances[np.ix_(prev_group, cur_group)],
+                group_distances,
                 match_tol,
                 ambiguity_ratio,
                 use_linear_assignment,
+                ambiguous_assignment_cap,
             )
         )
         all_matches.extend(group_matches)
@@ -409,6 +471,7 @@ def track_defect_frames(
     box_length_x: float,
     *,
     match_tol: float = DEFAULT_EVENT_CONSTANTS.match_tolerance,
+    ambiguous_assignment_cap: int | None = DEFAULT_EVENT_CONSTANTS.ambiguous_assignment_cap,
     timestep: float = float(cylinder.TIMESTEP),
     use_linear_assignment: bool = True,
 ) -> DefectTrackTable:
@@ -459,6 +522,7 @@ def track_defect_frames(
             cur,
             box_length_x,
             match_tol=match_tol,
+            ambiguous_assignment_cap=ambiguous_assignment_cap,
             use_linear_assignment=use_linear_assignment,
         )
         ambiguity_count_by_frame[frame_offset] = match.ambiguous_pair_count
@@ -516,6 +580,14 @@ def track_defect_frames(
         frame_stop = frame_axis[0] + reverse_stop
 
     track_id = np.arange(len(track_particle), dtype=np.int64)
+    sparse = _sparse_track_observations(
+        frame_axis,
+        steps,
+        particle_index,
+        positions,
+        matched_confident,
+        velocity,
+    )
     return DefectTrackTable(
         frame_axis=frame_axis,
         steps=steps,
@@ -533,11 +605,88 @@ def track_defect_frames(
         annihilation_partner_id=np.full(track_id.size, -1, dtype=np.int64),
         ambiguity_count_by_frame=ambiguity_count_by_frame,
         rejected_swap_count_by_frame=rejected_swap_count_by_frame,
+        observation_offsets=sparse["track_observation_offsets"],
+        observation_frame=sparse["track_observation_frame"],
+        observation_particle_index=sparse["track_observation_particle_index"],
+        observation_positions=sparse["track_observation_positions"],
+        observation_steps=sparse["track_observation_steps"],
+        observation_matched_confident=sparse["track_observation_matched_confident"],
+        observation_velocity=sparse["track_observation_velocity"],
     )
 
 
-def defect_track_values(table: DefectTrackTable) -> dict[str, np.ndarray]:
+def _sparse_track_observations(
+    frame_axis: np.ndarray,
+    steps: np.ndarray,
+    particle_index: np.ndarray,
+    positions: np.ndarray,
+    matched_confident: np.ndarray,
+    velocity: np.ndarray,
+) -> dict[str, np.ndarray]:
+    offsets = np.zeros(particle_index.shape[0] + 1, dtype=np.int64)
+    frame_values: list[np.ndarray] = []
+    particle_values: list[np.ndarray] = []
+    position_values: list[np.ndarray] = []
+    step_values: list[np.ndarray] = []
+    matched_values: list[np.ndarray] = []
+    velocity_values: list[np.ndarray] = []
+
+    cursor = 0
+    for track_idx in range(particle_index.shape[0]):
+        present = np.flatnonzero(particle_index[track_idx] >= 0)
+        cursor += int(present.size)
+        offsets[track_idx + 1] = cursor
+        frame_values.append(frame_axis[present].astype(np.int64, copy=False))
+        particle_values.append(particle_index[track_idx, present].astype(np.int64, copy=False))
+        position_values.append(positions[track_idx, present].astype(np.float64, copy=False))
+        step_values.append(steps[present].astype(np.int64, copy=False))
+        matched_values.append(matched_confident[track_idx, present].astype(bool, copy=False))
+        velocity_values.append(velocity[track_idx, present].astype(np.float64, copy=False))
+
+    if cursor == 0:
+        return {
+            "track_observation_offsets": offsets,
+            "track_observation_frame": np.asarray([], dtype=np.int64),
+            "track_observation_particle_index": np.asarray([], dtype=np.int64),
+            "track_observation_positions": np.full((0, 3), np.nan, dtype=np.float64),
+            "track_observation_steps": np.asarray([], dtype=np.int64),
+            "track_observation_matched_confident": np.asarray([], dtype=bool),
+            "track_observation_velocity": np.full((0, 3), np.nan, dtype=np.float64),
+        }
+
     return {
+        "track_observation_offsets": offsets,
+        "track_observation_frame": np.concatenate(frame_values).astype(np.int64, copy=False),
+        "track_observation_particle_index": np.concatenate(particle_values).astype(
+            np.int64,
+            copy=False,
+        ),
+        "track_observation_positions": np.concatenate(position_values, axis=0).astype(
+            np.float64,
+            copy=False,
+        ),
+        "track_observation_steps": np.concatenate(step_values).astype(np.int64, copy=False),
+        "track_observation_matched_confident": np.concatenate(matched_values).astype(
+            bool,
+            copy=False,
+        ),
+        "track_observation_velocity": np.concatenate(velocity_values, axis=0).astype(
+            np.float64,
+            copy=False,
+        ),
+    }
+
+
+def defect_track_values(table: DefectTrackTable) -> dict[str, np.ndarray]:
+    sparse = _sparse_track_observations(
+        table.frame_axis,
+        table.steps,
+        table.particle_index,
+        table.positions,
+        table.matched_confident,
+        table.velocity,
+    )
+    values = {
         "frame_axis": table.frame_axis,
         "steps": table.steps,
         "track_id": table.track_id,
@@ -559,6 +708,8 @@ def defect_track_values(table: DefectTrackTable) -> dict[str, np.ndarray]:
         "ambiguity_count_by_frame": table.ambiguity_count_by_frame,
         "rejected_swap_count_by_frame": table.rejected_swap_count_by_frame,
     }
+    values.update(sparse)
+    return values
 
 
 def defect_track_table_from_values(values: dict[str, np.ndarray]) -> DefectTrackTable:
@@ -578,6 +729,33 @@ def defect_track_table_from_values(values: dict[str, np.ndarray]) -> DefectTrack
         ),
         axis=-1,
     )
+    sparse_kwargs = {}
+    if "track_observation_offsets" in values:
+        sparse_kwargs = {
+            "observation_offsets": np.asarray(
+                values["track_observation_offsets"],
+                dtype=np.int64,
+            ),
+            "observation_frame": np.asarray(values["track_observation_frame"], dtype=np.int64),
+            "observation_particle_index": np.asarray(
+                values["track_observation_particle_index"],
+                dtype=np.int64,
+            ),
+            "observation_positions": np.asarray(
+                values["track_observation_positions"],
+                dtype=np.float64,
+            ),
+            "observation_steps": np.asarray(values["track_observation_steps"], dtype=np.int64),
+            "observation_matched_confident": np.asarray(
+                values["track_observation_matched_confident"],
+                dtype=bool,
+            ),
+            "observation_velocity": np.asarray(
+                values["track_observation_velocity"],
+                dtype=np.float64,
+            ),
+        }
+
     return DefectTrackTable(
         frame_axis=np.asarray(values["frame_axis"], dtype=np.int64),
         steps=np.asarray(values["steps"], dtype=np.int64),
@@ -598,6 +776,7 @@ def defect_track_table_from_values(values: dict[str, np.ndarray]) -> DefectTrack
             values["rejected_swap_count_by_frame"],
             dtype=np.int64,
         ),
+        **sparse_kwargs,
     )
 
 
@@ -640,6 +819,7 @@ def track_persistent_defects(
         frames,
         float(case.lx),
         match_tol=float(constants.match_tolerance),
+        ambiguous_assignment_cap=int(constants.ambiguous_assignment_cap),
         timestep=float(cylinder.TIMESTEP),
     )
     save_event_metric_npz(

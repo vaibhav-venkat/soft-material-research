@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import math
 from pathlib import Path
 
@@ -16,6 +17,149 @@ LOCAL_PROFILE_BIN_LABELS = np.asarray(
     ("< a", "a-2a", "2a-3a", "3a-4a", "4a-5a")
 )
 LOCAL_PROFILE_COLORS = ("#111111", "#0072b2", "#d55e00", "#009e73", "#cc0000")
+
+
+@dataclass(frozen=True)
+class CellList:
+    """Linked-cell index for local cylindrical shell queries in Cartesian coordinates."""
+
+    points: np.ndarray
+    head: np.ndarray
+    next_index: np.ndarray
+    cell_size: float
+    n_x: int
+    n_y: int
+    n_z: int
+    x_min: float
+    y_min: float
+    z_min: float
+    box_length_x: float
+
+    @property
+    def n_cells_yz(self) -> int:
+        return int(self.n_y * self.n_z)
+
+    def cell_index(self, point: np.ndarray) -> int:
+        return int(
+            _cell_index(
+                float(point[0]),
+                float(point[1]),
+                float(point[2]),
+                self.x_min,
+                self.y_min,
+                self.z_min,
+                self.cell_size,
+                self.n_x,
+                self.n_y,
+                self.n_z,
+                self.box_length_x,
+            )
+        )
+
+    def iter_neighbor_indices(self, point: np.ndarray, radius: float):
+        if radius < 0.0:
+            raise ValueError("query radius must be non-negative")
+        center_cell = self.cell_index(point)
+        center_x = center_cell // self.n_cells_yz
+        center_y = (center_cell // self.n_z) % self.n_y
+        center_z = center_cell % self.n_z
+        search_cells = int(math.ceil(float(radius) / self.cell_size))
+        for delta_x in range(-search_cells, search_cells + 1):
+            cell_x = (center_x + delta_x) % self.n_x
+            for delta_y in range(-search_cells, search_cells + 1):
+                cell_y = center_y + delta_y
+                if cell_y < 0 or cell_y >= self.n_y:
+                    continue
+                for delta_z in range(-search_cells, search_cells + 1):
+                    cell_z = center_z + delta_z
+                    if cell_z < 0 or cell_z >= self.n_z:
+                        continue
+                    cell_idx = (cell_x * self.n_y + cell_y) * self.n_z + cell_z
+                    item_idx = int(self.head[cell_idx])
+                    while item_idx != -1:
+                        yield item_idx
+                        item_idx = int(self.next_index[item_idx])
+
+
+def build_cell_list(
+    points: np.ndarray,
+    *,
+    cell_size: float,
+    box_length_x: float,
+    x_min: float = 0.0,
+    y_min: float | None = None,
+    z_min: float | None = None,
+    y_max: float | None = None,
+    z_max: float | None = None,
+) -> CellList:
+    """Build a linked-cell list using the shared numba cell-index primitive."""
+    points = np.asarray(points, dtype=np.float64)
+    if points.ndim != 2 or points.shape[1] != 3:
+        raise ValueError(f"points must have shape (items, 3), got {points.shape}")
+    cell_size = float(cell_size)
+    if cell_size <= 0.0:
+        raise ValueError("cell_size must be positive")
+    box_length_x = float(box_length_x)
+
+    finite = points[np.all(np.isfinite(points), axis=1)]
+    if y_min is None:
+        y_min = float(np.min(finite[:, 1])) if finite.size else -0.5 * cell_size
+    if z_min is None:
+        z_min = float(np.min(finite[:, 2])) if finite.size else -0.5 * cell_size
+    if y_max is None:
+        y_max = float(np.max(finite[:, 1])) if finite.size else 0.5 * cell_size
+    if z_max is None:
+        z_max = float(np.max(finite[:, 2])) if finite.size else 0.5 * cell_size
+
+    y_min = float(y_min) - 1e-12
+    z_min = float(z_min) - 1e-12
+    y_width = max(float(y_max) - y_min + 1e-12, cell_size)
+    z_width = max(float(z_max) - z_min + 1e-12, cell_size)
+    x_width = box_length_x if box_length_x > 0.0 else max(
+        float(np.max(finite[:, 0]) - np.min(finite[:, 0])) if finite.size else cell_size,
+        cell_size,
+    )
+
+    n_x = max(1, int(math.ceil(x_width / cell_size)))
+    n_y = max(1, int(math.ceil(y_width / cell_size)))
+    n_z = max(1, int(math.ceil(z_width / cell_size)))
+    head = np.full(n_x * n_y * n_z, -1, dtype=np.int64)
+    next_index = np.full(points.shape[0], -1, dtype=np.int64)
+
+    for item_idx, point in enumerate(points):
+        if not np.all(np.isfinite(point)):
+            continue
+        cell_idx = int(
+            _cell_index(
+                float(point[0]),
+                float(point[1]),
+                float(point[2]),
+                float(x_min),
+                y_min,
+                z_min,
+                cell_size,
+                n_x,
+                n_y,
+                n_z,
+                box_length_x,
+            )
+        )
+        next_index[item_idx] = head[cell_idx]
+        head[cell_idx] = item_idx
+
+    return CellList(
+        points=points,
+        head=head,
+        next_index=next_index,
+        cell_size=cell_size,
+        n_x=n_x,
+        n_y=n_y,
+        n_z=n_z,
+        x_min=float(x_min),
+        y_min=y_min,
+        z_min=z_min,
+        box_length_x=box_length_x,
+    )
 
 
 @njit(cache=True)
