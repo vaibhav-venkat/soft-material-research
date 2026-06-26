@@ -34,6 +34,7 @@ def active_matter_field_series(
     n_theta_bins: int = ACTIVE_FIELD_THETA_BINS,
     cylinder_radius: float = CYLINDER.cylinder_radius,
     wall_cutoff: float = CYLINDER.wall_cutoff,
+    box_length_x: float | None = None,
 ) -> ActiveMatterFields:
     steps: list[int] = []
     x_edges: np.ndarray | None = None
@@ -69,9 +70,15 @@ def active_matter_field_series(
             positions = np.asarray(particles.position, dtype=np.float64)
             assert positions.shape == (n_particles, 3)
 
-            box_length_x = float(frame.configuration.box[0])
+            frame_box_length_x = float(frame.configuration.box[0])
+            field_box_length_x = (
+                frame_box_length_x if box_length_x is None else float(box_length_x)
+            )
             if x_edges is None or x_centers is None:
-                x_edges, x_centers = _x_edges_and_centers(box_length_x, n_x_bins)
+                x_edges, x_centers = _x_edges_and_centers(
+                    field_box_length_x,
+                    n_x_bins,
+                )
 
             directions = _active_direction_from_quaternion(particles.orientation)
             forces = _logged_particle_array(frame, "forces", n_particles)
@@ -87,7 +94,7 @@ def active_matter_field_series(
             pocket_rho, _, pocket_polar_density = _pocket_fields(
                 positions,
                 directions,
-                box_length_x,
+                field_box_length_x,
                 pocket_radius,
             )
             force_velocity = forces[:, :3] / CYLINDER_SIM.gamma
@@ -95,13 +102,13 @@ def active_matter_field_series(
             pocket_force_density = _pocket_vector_density(
                 positions,
                 force_velocity,
-                box_length_x,
+                field_box_length_x,
                 pocket_radius,
             )
             pocket_flux_density = _pocket_vector_density(
                 positions,
                 velocities,
-                box_length_x,
+                field_box_length_x,
                 pocket_radius,
             )
 
