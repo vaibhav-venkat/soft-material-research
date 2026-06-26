@@ -18,7 +18,7 @@ if [[ "$DRY_RUN" == "1" ]]; then
 fi
 
 SYNC_DIRS=(
-  "hexatic/radii_analysis/npz_fields"
+    "hexatic/radii_analysis/npz_fields"
 )
 
 echo "Syncing radius-analysis outputs from ${REMOTE_HOST}:${REMOTE_ROOT}"
