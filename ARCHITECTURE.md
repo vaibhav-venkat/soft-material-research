@@ -12,14 +12,8 @@
 │   ├── chirality # calculate chirality across CCM, chi, translation
 │   ├── constants # useful constants contained for simulations/analysis
 │   ├── cylinder_dynamics # dynamic values like velocity for static cylinder
-│   ├── cylinder_restart_ensemble # deprecated, flipped *.gsd
+│   ├── density_analysis # current focus -> analyze and fit density
 │   ├── lagged_prediction # predictive lagging, using scikit
-│   ├── multiple_sim_analysis # current focus, analyze across multiple *.gsd
-│   │   ├── disclination_order_fields # current focus, on disclination behaviors
-│   │   └── output
-│   │       ├── fits
-│   │       ├── npz
-│   │       └── plots
 │   ├── output
 │   │   ├── cylinder
 │   │   │   ├── chirality_disclinations
@@ -51,6 +45,7 @@
 
 - Numba: aim to use this extensively unless it increases too much complexity.
 - Scipy: aim to use this instead of numpy for more mathematically heavy data structures
+- DO not make overcomplicated files, classes, and verbose functions
 - Pixi:
   - env_name: sap, default
   - command: `pixi shell`

@@ -87,6 +87,7 @@ SCALED_RADIUS_CASES: tuple[RadiusCase, ...] = tuple(
         radius=radius_from_diameters(value),
         label=f"R = {int(value)}D",
     )
+    # for value in (15.0, 20.0, 25.0, 30.0)
     for value in (15.0, 20.0, 25.0, 30.0)
 )
 

@@ -1,444 +1,257 @@
-# Implementation Plan: Disclination Birth/Death Dynamics & Event-Centered Plots
+# Programming Plan — Film Density / Flux Continuity Analysis on `radius_15D`
 
-This plan implements `INSTRUCTIONS.md` for `hexatic/multiple_sim_analysis/disclination_order_fields/`.
-It reuses the existing infrastructure described in `ARCHITECTURE.md` and follows `AGENTS.md`
-(Pixi env `sap`, numba where reasonable, scipy for heavier math, snake_case, dataclasses,
-load existing `.npz`/`.gsd` instead of recomputing, radius-aware parameters, no overwriting
-generated data without `--overwrite`).
-
-Reference hypothesis: defect pattern changes are **source/reaction dominated** (birth / death /
-annihilation / cluster rearrangement) rather than smooth defect drift.
+This plan implements the task in `INSTRUCTIONS.md`, scoped by `AGENTS.md` (repo conventions, Pixi workspace `sap`) and `ARCHITECTURE.md` (module layout, Numba/Scipy/Plotly preferences). It works entirely off existing cached outputs — **no simulations are run**.
 
 ---
 
-## 0. Scope, inputs, and shared conventions
+## 0. Goal (restated)
 
-### 0.1 What exists and is reused (do not rewrite)
-- `hexatic/multiple_sim_analysis/common.py`: `FRAME_START`/`FRAME_STOP`, `frame_indices`,
-  `finite_nanmean`, `minimum_image_delta`, `unwrapped_x_positions`, `active_fields_path`,
-  `neighbor_counts_path`, `hexatic_velocity_gsd_path`, `save_metric_npz`,
-  `load_cached_metric_values`, `load_metric_values`, `load_active_fields`,
-  `trajectory_frame_count`, output dir tree (`NPZ_OUTPUT_DIR`, `PLOT_OUTPUT_DIR`,
-  `FIT_OUTPUT_DIR`).
-- `hexatic/disclination.py`: `_load_neighbor_counts` (frame×particle count table).
-- `hexatic/radii_analysis/cases.py`: `RadiusCase` (carries `radius`, `lx`,
-  `trajectory_write_period`, `run_steps`), `get_case`, `all_cases`, the `_20_0D`
-  / `radius_*` case identifiers, `HEXATIC_OUTPUT_DIR`, `NPZ_FIELDS_DIR`.
-- `hexatic/constants/cylinder.py`: `NEIGHBORS`, `PARTICLE_DIAMETER`,
-  `ANALYSIS.neighbor_count_radius`, `ANALYSIS.wall_cutoff`, `RHO`,
-  `lx_for_radius`, `n_particles_for_radius`.
-- `hexatic/multiple_sim_analysis/plotting.py`: `plot_radius_values`,
-  `plot_for_cases`, `plots_missing`, `companion_circumference_plot_path`.
-- `hexatic/multiple_sim_analysis/disclination_order_fields/shared.py`:
-  cell-list helpers (`_cell_index`), `_disclination_mask`,
-  `_load_hexatic_abs`, `_validate_particle_frame_shape`,
-  `CIRCUMFERENCE_REFERENCE_CASE_ID`, `LOCAL_CONTRAST_LENGTH`,
-  `local_disclination_field_contrasts`, `local_disclination_field_profiles`.
-- Existing field producers already cached on disk as `.npz`:
-  `chirality.py`, `nematic.py`, `radial_exchange_current.py`, `force_density.py`,
-  `density_profile.py`, plus the active-matter fields `.npz` produced by
-  `active_matter_cylinder`. The plan loads these; it does **not** regenerate them.
-- Important cache caveat: most existing `multiple_sim_analysis/output/npz/*.npz`
-  files are aggregate summaries, not frame×particle local fields. For event-centered
-  local sampling, recompute or load particle-local arrays from primary sources
-  (`active_matter_fields`, hexatic/neighbor-count tables, trajectory GSDs) rather
-  than assuming aggregate `.npz` files can provide per-particle values.
-
-### 0.2 Output layout (new)
-All new outputs go under the existing analysis tree so caching/overwrite logic stays uniform:
+Compute, on the unwrapped cylindrical *film* surface of the `radius_15D` cylinder, the following per-bin, per-transition quantities and verify the discrete continuity balance
 
 ```
-hexatic/multiple_sim_analysis/disclination_order_fields/
-  events/                       # new package: defect tracking + events
-    __init__.py
-    tracking.py                 # frame-to-frame defect identity matching
-    events.py                   # birth/death/annihilation classification
-    fields.py                   # event-centered local-field samplers
-    maps.py                     # representative-frame map panels (section 14)
-    plotting.py                 # event-centered + probability plots
-    runner.py                   # orchestrates the whole pipeline + CLI hook
-  output/                       # already exists
-    npz/
-      defect_tracks_<case>.npz
-      defect_events_<case>.npz
-      event_fields_<case>.npz
-      cluster_fields_<case>.npz
-      radial_summary_R20D.npz   # section 5 / 9 quantities vs R
-      probability_summary_R20D.npz
-    plots/
-      events/
-      maps/
-      vs_R/
-      probability/
-      radial_exchange/
-      chirality/
+∂_t ρ_film  +  div J_film   =   S_cross
 ```
 
-### 0.3 Time convention
-- `Δt` (real time between two *saved* frames) =
-  `(steps[t+1] - steps[t]) * timestep`. `steps` come from the `.gsd`/`.npz`
-  trajectory; `trajectory_write_period` lives on `RadiusCase`. Frames in the
-  event tables are stored **both** as frame index and as `step` number so the
-  `t_b − τ, t_b, t_b + τ` windows are unambiguous (per INSTRUCTIONS §2.3).
-- `τ` for event-centered plots is expressed in saved frames (default `τ = 2`
-  frames) and converted to steps when writing the figure axis labels.
+i.e.  (∂_t ρ_film)_b  =  (−div J_film)_b  +  S_cross_b   ⇒   residual ≈ 0.
 
-### 0.4 Key length scales (radius-aware, from constants)
-- `a = cylinder.ANALYSIS.neighbor_count_radius`.
-- Annihilation distance `d_ann = 2.5 * a`.
-- Annihilation time window `≈ 2` saved frames.
-- Persistence threshold `k = 2` consecutive frames for a birth/death to count.
-- Cluster bond length `ℓ_cluster = 4.5 * a`.
-- Annulus: `core = d < a`, `annulus = a < d < 3a`, excluding particles that are
-  themselves disclinations.
+Quantities to compute & cache (per transition `t → t+1`, per (x, θ) bin `b`):
 
----
+| Symbol stored name                  | Definition |
+|---|---|
+| `rho_film_b`      (frame)          | `N_b(t)/A_bin` — film-particle count density |
+| `partial_t_rho_film_b`             | forward finite diff of `rho_film_b` over 1 frame |
+| `J_film_b`      (Jx, Jy)           | mean film velocity × density: `(1/A_bin) Σ_{i∈film∩b} v_i` |
+| `neg_div_J_film_b`                 | `−∂Jx/∂x − ∂Jy/∂y`, finite-diff over 1 frame, `y = Rθ` |
+| `S_cross_b`                         | `(N_in,b − N_out,b)/(A_bin Δt)` shell entry/exit source |
 
-## 1. Cleanup (INSTRUCTIONS §2.1)
+Then produce **4 Plotly (x, θ) maps** (color = magnitude; overlaid arrow field):
 
-1. Read `hexatic/multiple_sim_analysis/disclination_order_fields/` to inventory the
-   current contents (already done during planning: `__init__.py`, `contrast.py`,
-   `moving.py`, `runner.py`, `shared.py`, `shell_profiles.py`,
-   `velocity_summary.py`).
-2. Delete the files inside this directory (their public entry points are summarized
-   in `__init__.py`). Keep the directory itself.
-3. Recreate the package with the new `events/` subpackage and a new top-level
-   `runner.py` + `shared.py` (shared must retain the helpers from §0.1: cell list,
-   `_disclination_mask`, `_load_hexatic_abs`, `_validate_particle_frame_shape`,
-   `local_disclination_field_contrasts`, `local_disclination_field_profiles`,
-   `LOCAL_CONTRAST_LENGTH`). These helpers are imported by sibling modules outside
-   the focus directory? — confirm before deleting; if anything in
-   `multiple_sim_analysis` still imports them, keep `shared.py` intact and only
-   remove the obsolete driver modules (`contrast.py`, `shell_profiles.py`,
-   `velocity_summary.py`) whose jobs are subsumed by the new pipeline.
-4. Do **not** touch `hexatic/output/` simulation GSDs or the radii_analysis
-   metadata. Never delete generated data without an explicit flag.
+1. `partial_t_rho_film_b`
+2. `neg_div_J_film_b`
+3. `S_cross_b`
+4. **residual** = `partial_t_rho_film_b − neg_div_J_film_b − S_cross_b` (≈ 0 by continuity).
+
+> See §6 decision points for sign convention and the meaning of map 4.
 
 ---
 
-## 2. Persistent defect tracking (INSTRUCTIONS §2.2)
+## 1. Sources & key numbers (verified against disk)
 
-**File:** `events/tracking.py`
+All inputs live in `hexatic/density_analysis/`:
 
-### 2.1 Per-frame defect lists
-- Load `neighbor_counts` via `_load_neighbor_counts(neighbor_counts_path(case))`.
-- `charges = cylinder.NEIGHBORS - counts` → `+1` / `−1` / `0`.
-- Build per-frame arrays of defect particle indices, their charge, and their
-  particle coordinates. Coordinates are taken from the cached coords array used
-  by the active-matter fields (frame×particle×(x,θ,r)); reconstruct Euclidean
-  `(x, y=r·sinθ, z=r·cosθ)` for distance math. Use `minimum_image_delta` on `x`
-  (`box_length_x = case.lx`).
-- Before tracking, assert active-field coords frame/particle order exactly matches
-  neighbor-count tables and GSD particle indices: same frame count, same particle
-  count, matching step numbers, and stable particle-index ordering. Abort with a
-  clear error if this fails.
+- `npz/radius_15D_active_matter_fields.npz` — primary source.
+  - `coords`     `(100, 9870, 3)`  float64  — `coords[f, i] = (x, θ, r)` (already unwrapped in θ ∈ [0, 2π)? see §6 Q1; to be verified)
+  - `shell_mask` `(100, 9870)`     bool     — film membership `m_i(t)`
+  - `steps`      `(100,)`          int64    — `[100000, 200000, …, 10000000]`; per-frame gap = `100000`
+  - `x_edges`    `(101,)`  → **100 bins**, span `[−27.7054, +27.7054]` ⇒ **box `Lx = 55.41075`** (authoritative long-axis period)
+  - `theta_edges` `(73,)`  → **72 bins**, span `[0, 2π)`
+  - (aux) `rho`, `active_direction`, `flux_cylindrical`, etc. — not needed; velocities computed fresh (§3).
+- `gsd/trajectory_radius_15D.gsd` — for box walls / sanity only. `box = [55.41075, 56.123104, 56.123104, 0,0,0]`.
 
-### 2.2 Greedy nearest-neighbour matching
-Implement `_match_defects_frame(prev, cur, box_length_x)` in regular Python/NumPy:
-- Build a residual/candidate list over previous-frame defects per charge sign.
-- For each previous defect, find nearest same-sign defect in the current frame
-  within `match_tol = a * 1.5` (configurable; record ambiguous candidates).
-- Greedy assignment by ascending distance (scipy `linear_sum_assignment` for the
-  remaining ambiguous pairs if costs are small).
-- A match is **confident** if the nearest distance is `< match_tol` and the
-  second-nearest is at least `1.5×` the nearest (reject ambiguous identity swaps).
-- Output: arrays of `(prev_idx, cur_idx, distance)` pairs, plus unmatched lists on
-  each side → these feed birth/death.
-- Do not use `@njit` for the matching function if it calls scipy
-  `linear_sum_assignment`; scipy cannot run inside numba. Keep the scipy assignment
-  path in Python, or replace it with a numba-compatible pure greedy assignment.
-- `match_tol = 1.5a` may be fragile at saved-frame spacing; too small creates false
-  births/deaths, too large causes swaps in clusters. Make it configurable and report
-  ambiguity/rejection counts.
-- Rejecting ambiguous identity swaps is good, but the downstream birth/death
-  classifier must not count every rejected swap as a physical event.
+### Constants (from `hexatic/constants/cylinder.py`, `hexatic/radii_analysis/cases.py`)
+- `PARTICLE_DIAMETER = 2^(1/6) ≈ 1.122462` (`SIGMA = 1.0`).
+- Cylinder radius for `radius_15D`: `R = 15 * PARTICLE_DIAMETER ≈ 16.83693` (from `cases.SCALED_RADIUS_CASES` / `radius_from_diameters(15.0)`). **This is the `R` used for `y = Rθ` and `A_bin = Δx·R·Δθ`.**
+- `RHO = 0.2`, `TIMESTEP = 1e-6`, `TRAJECTORY_WRITE_PERIOD = 1e5` (radial case) → **per-frame `Δt = 100000 × 1e-6 = 0.1`** sim-time units. Also derive programmatically as `(steps[t+1] − steps[t]) * TIMESTEP` to stay radius-aware.
 
-### 2.3 Track objects
-Dataclass `DefectTrack`:
+### Discrepancies to respect (per INSTRUCTIONS note)
+- INSTRUCTIONS state `Lx = FIXED_LX = 4000/(RHO·π·BASELINE_CYLINDER_RADIUS²)` already gives ≈50.55 for the *baseline* 10-D cylinder, but the **actual `radius_15D` box `Lx = 55.41075`** (from GSD / `x_edges`). **Use the actual box `Lx`** stored in the npz/GSD; do **not** recompute via the baseline formula. Add the `FIXED_LX` constant for reference/cross-check only.
+- `BASELINE_CYLINDER_RADIUS` (11.22) is for the default 10-D analysis; for `radius_15D` use `R = 15·D = 16.837`. Verify the `shell_mask` targets the **outer surface shell** (mean r where mask True ≈ 15.715, i.e. within one lattice spacing of `R`), consistent with `pocket_radius = 2·D` semantics in `active_matter_cylinder/fields/compute.py`. Confirm before computing (§6 Q2).
+
+---
+
+## 2. New module layout
+
+All new code under a self-contained analysis package:
+
 ```
-track_id, charge, frame_start, frame_stop, particle_index[frame],
-positions (x,θ,r per frame), steps per frame
-matched_confident[frame bool], velocity (x,θ,r per frame)  # NaN where not confident
-annihilation_flag, annihilation_partner_id
+hexatic/density_analysis/
+├── __init__.py                      (new, may already be a package marker)
+├── film_continuity/
+│   ├── __init__.py
+│   ├── config.py                    # dataclasses: FilmContinuityConfig, paths, derived scalars (R, Lx, dt, A_bin)
+│   ├── io_cache.py                  # load active_matter npz; write/read film continuity npz cache
+│   ├── velocity.py                  # finite-difference, minimum-image-unwrapped v_x, v_y (Numba-kernel-ed)
+│   ├── binning.py                   # (x,θ) bin index lookup + per-transition bin sums (Numba)
+│   ├── fields.py                    # rho_film, J_film, neg_div_J, partial_t_rho, S_cross
+│   ├── continuity.py                # assemble all fields into FilmContinuityResult dataclass
+│   └── plots.py                     # Plotly heatmap + quiver overlay (4 maps)
+├── run_film_continuity.py           # CLI entrypoint: compute → cache → plot
+└── output/
+    └── film_continuity/
+        ├── radius_15D_film_continuity.npz     # cache (§5)
+        └── radius_15D_film_continuity_map_*.html  # 4 Plotly maps
 ```
-- Velocity only computed for confidently matched consecutive frames:
-  `v_i(t) = (X_i(t+Δt) − X_i(t)) / Δt`, with `Δt` in real units.
-- New-born / dying / ambiguous frames get `NaN` velocity and are flagged.
-- Persist to `output/npz/defect_tracks_<case>.npz` via `save_metric_npz`
-  (store arrays, not the dataclass, plus `frame_start`/`frame_stop`/case metadata).
 
----
-
-## 3. Birth / death / annihilation events (INSTRUCTIONS §2.3–2.4)
-
-**File:** `events/events.py`
-
-### 3.1 Birth
-- A defect appearing at `t_b` is a birth iff it persists `≥ k=2` frames
-  (including origin frame) — i.e. a new track with `frame_stop − frame_start ≥ 1`
-  in saved-frame units.
-- Record per birth event:
-  `birth_pos (x,θ,r)`, `birth_frame`, `birth_step`, `charge`,
-  `nearest_opposite_defect_index + distance`, `nearest_same_defect_index + distance`.
-- The "nearest opposite/same" are computed *within the birth frame* using the
-  defect-excluded annulus rule (section 3 of INSTRUCTIONS) so clustered defects
-  don't bias each other.
-
-### 3.2 Death
-- A defect that existed `≥ k=2` frames then disappears (unmatched on the
-  "previous side" with no continuation). Deaths cannot be newly born defects that
-  fail the persistence rule; they can only be defects that were "birthed", i.e.
-  survived `k` consecutive frames including their origin frame.
-- Record: `death_pos`, `death_frame`, `death_step`, `charge`,
-  `nearest_opposite_defect_index + distance` *in the frame before death*,
-  `annihilation_bool`.
-
-### 3.3 Annihilation classifier
-- For each death, scan opposite-charge defects in the ~2 frames around death:
-  pair is annihilating iff `min distance over the window ≤ d_ann = 2.5*a`
-  **and** both disappear within the 2-saved-frame window.
-- Mark both member tracks' `annihilation_flag` and store partner id.
-- Deaths that pair with a birth (a `+` and `−` appearing simultaneously close)
-  are *not* annihilations; keep them as birth events.
-- Annihilation matching can be many-to-one in dense clusters; the plan needs
-  tie-breaking by track ID/distance/time.
-- "Deaths that pair with a birth are not annihilations" may hide
-  replacement/reaction events unless separately labeled.
-
-### 3.4 Output
-`output/npz/defect_events_<case>.npz` with parallel arrays:
-`birth_frames, birth_steps, birth_x, birth_theta, birth_r, birth_charge,
- birth_nearest_opp_dist, birth_nearest_same_dist,
- death_frames, death_steps, death_pos..., death_charge,
- death_nearest_opp_dist, death_annihilated, death_partner_idx`.
-
----
-
-## 4. Clean local neighborhoods (INSTRUCTIONS §3)
-
-**File:** `events/fields.py`
-
-### 4.1 Defect-excluded annulus
-For a target defect `i`:
+### CLI (`run_film_continuity.py`)
 ```
-core_mask     : d_ij < a
-annulus_mask  : a < d_ij < 3a
-d_ij          : Euclidean/cylinder-aware distance from target defect to particle j
-exclude       : particles that are themselves defects (charge != 0) from the annulus
+pixi run python -m hexatic.density_analysis.run_film_continuity \
+    --case radius_15D \
+    [--overwrite] [--no-cache] [--frame-idx N] [--plot]
 ```
-Use the existing cell list (`shared._cell_index`) with `cell_size = a`.
-If the annulus has zero non-disclination particles after exclusion, record the
-annulus average as `NaN` unless a downstream count/rate explicitly requires zero;
-always persist the contributing count so empty-neighborhood cases are visible.
-
-### 4.2 Background velocity
-For each annulus compute `u_mean = |mean(v_j)|`, `u_rms = mean(|v_j|)`,
-`u_fluct = sqrt(mean(|v_j − mean(v_j)|²))`. Existing `velocity.py` `.npz` outputs
-are aggregate summaries, not frame×particle velocity arrays, so derive
-frame×particle velocities from active-field `coords`/`steps` or the GSD as needed.
-
-### 4.3 Local-field samplers
-Provide a single sampler that, given `(case, frame, target_xy)` returns a
-dict of annulus-averaged scalars (reuse particle-local field arrays loaded once
-per case in the runner; recompute from primary sources where only aggregate `.npz`
-files exist):
-- `rho`, `J_r` (radial exchange current), `D²_min`,
-- `S` (tangent nematic order), `Q` tensor components,
-- `|ψ6|` (hexatic order), `χ` (chirality, from `chirality.py` cache),
-- `stress/flow`: `F_density` (from `force_density.py` + wall term),
-  `u_rms`, `u_fluct`, `nearest_defect_distance`.
-- `strain` for the birth window is taken as cumulative `D²_min` over the lag.
-- `rho`, `J_r`, `S`, `Q`, `F_density`, etc. mix particle-local arrays, radial-bin
-  arrays, and aggregate arrays. The sampler needs a clear interpolation/binning
-  convention.
-
-### 4.4 D²_min (per INSTRUCTIONS §4.5)
-New computation if not already cached: for particle `i`, neighbors `j` at `t`,
-compare to `t+Δt`, solve least squares for `F_i` (scipy `scipy.linalg.lstsq` on the
-per-neighbor displacement vectors), `D²_min(i) = (1/n) Σ |Δr_ij − F_i r_ij|²`.
-Wrap the inner summation in numba (`@njit`) for the per-frame traversal, with
-the 3×3 least-squares solved by a small closed-form normal-equation matrix
-(numba-compatible; avoid scipy inside the hot loop). Cache the resulting
-frame×particle array to `output/npz/D2min_<case>.npz` (separate file so it can be
-reused across plots without recompute gated on `--overwrite`).
-- Only calculate `D²_min` up to the second-to-last frame because it compares frame
-  `t` to `t+Δt`.
-- Computing `D²_min` requires actual neighbor identities, not just neighbor counts.
-- `D²_min` is undefined on the final frame and can be unstable for too few or
-  nearly collinear neighbors.
-**UPDATE**:
-For shell particles (defects), compute D^2_minin local physical coordinates: `X = (x, Rθ)`
-Also normalize `D²_min / a²`
+`--overwrite` required to overwrite existing cache/figures (per repo data rule). Defaults are radius-aware: load case via `hexatic.radii_analysis.cases.get_case("radius_15D")` for `R`, `lx`, `n_particles`; override `lx` with the actual GSD box when present.
 
 ---
 
-## 5. Aggregate per-frame and per-radius quantities (INSTRUCTIONS §4–5)
+## 3. Physics / math specifications
 
-**File:** `events/runner.py` (case-level) + top-level `runner.py` (R sweep).
+### 3.1 Geometry & bins
+- Reuse stored `x_edges` (100 → `N_x=100`), `theta_edges` (72 → `N_θ=72`).
+- `bin b = (ix, iθ)`. Bin widths: `Δx[ix] = x_edges[ix+1]−x_edges[ix]`, `Δθ[iθ] = theta_edges[iθ+1]−theta_edges[iθ]` (uniform but keep array form for generality).
+- Surface area of bin `b`: `A_bin[b] = Δx[ix] * R * Δθ[iθ]` (`y = Rθ`).
+- Coordinates on film surface: `(x, y) = (x, R·θ)`. `θ` wrapped to `[0, 2π)` before binning; `x` wrapped to `[−Lx/2, Lx/2)`.
 
-### 5.1 Per-frame per-case (sect. 4)
-For each `(R)` and frame compute:
-- `N_+, N_−, N_total` and binned densities `n_+(x,θ,t), n_−(x,θ,t)`
-  (use the active-fields grid `(x_centers, θ_centers)` and bin defects).
-- Event counts per frame: `B_+, B_−, D_+, D_−, A_+, A_−`, `A_top`,
-  `a_top = A_top / N_total` with a zero-defect guard (`NaN` when `N_total == 0`,
-  unless a plot explicitly requires zero).
-- Defect motion fields: `|v_defect|, v_x, v_θ, net displacement`, plus
-  `v_parallel = v·û_local`, `v_perp`, `cos(v_defect, u_local)` (local direction
-  from cached active direction field).
-- Clusters (next subsection).
-- Active-field `rho` is currently particle-local pocket density, not an `(x, theta)`
-  grid, so defect density binning needs its own grid arrays.
-- `v_theta` must be converted consistently, likely `R * dtheta/dt`, before dot
-  products with tangent directions.
+### 3.2 Velocities (finite-difference, NOT from GSD `velocity` field)
+For each particle `i`, transition `t → t+1`:
+```
+dx_raw   = x_i(t+1) − x_i(t)
+dx_i     = dx_raw  − Lx · round(dx_raw / Lx)          # minimum-image unwrap in long axis
+dθ_raw   = θ_i(t+1) − θ_i(t)
+dθ_i     = dθ_raw  − 2π · round(dθ_raw / 2π)          # unwrap θ across periodic seam
+v_x,i(t) = dx_i / Δt
+v_y,i(t) = R · dθ_i / Δt
+```
+Velocities are aligned to frame `t` (forward difference), giving **`n_frames − 1 = 99` transitions**, indexed `t = 0..98` mapping to the `t → t+1` interval. Use **Numba** `@njit` loops (per ARCHITECTURE.md) for the unwrap + binning kernel. Prefer `scipy.ndimage` / numpy for finite-differencing the gridded fields where simpler.
 
-### 5.2 Clusters (sect. 4.4)
-- Union-find over same-frame defects with bond `dist < ℓ_cluster = 4.5a` (numba
-  implementation, periodic in `x`).
-- Per cluster: `size, charge = N_+ − N_−, total = N_+ + N_−, COM, velocity`.
-- Persist `output/npz/cluster_fields_<case>.npz`.
-- Cluster COM on periodic `x` and angular `theta` needs circular/periodic
-  averaging; naive means will fail across boundaries.
+> If `coords[..., 0]` proves already absolute/not minimum-image-safe (§6 Q1), the `Lx·round` correction is still valid and idempotent for small per-frame displacements, so keep it unconditionally.
 
-### 5.3 Radius plots vs R (sect. 5.1–5.2)
-Reuse `plot_radius_values` over all `radius_*` cases plus the `circ_60` reference
-excluded case as needed (`CIRCUMFERENCE_REFERENCE_CASE_ID`). Plots:
-- `mean N_+(R), mean N_−(R)`, `B(R), D(R), A(R)`, `A_top(R)`, `mean lifetime(R)`.
-- `A_top(R)`, `median |v_defect|(R)`, `median track lifetime(R)`,
-  `median displacement before death(R)`.
-- `motion_activity(R) = median(|v_defect|) / a` and the combined
-  `a_top(R) / motion_activity(R)` panel.
+### 3.3 Per-bin field definitions (per transition `t`)
+For each transition index `t` (between physical frames `t` and `t+1`):
 
-Persist the R-summary to `output/npz/radial_summary_R20D.npz`.
+**Counts/density** (film = particles with `shell_mask[phys_frame] == True`):
+```
+ρ_film,b(t)      = N_b(t) / A_bin[b]
+  where N_b(t) = #{ i : shell_mask[i,t]==1  AND  bin(i, t)==b }
+  bin(i, t) uses coords[t, i, 0] (x) and coords[t, i, 1] (θ) — position at the SAME physical frame t as the count.
+```
 
----
+**Current (mean velocity flux):**
+```
+Jx,b(t) = (1/A_bin[b]) Σ_{i∈film∩b at t} v_x,i(t)
+Jy,b(t) = (1/A_bin[b]) Σ_{i∈film∩b at t} v_y,i(t)
+```
+(J uses the same membership/bin at frame `t` as the density; v is the forward-diff velocity starting at `t`.)
 
-## 6. Event-centered plots (INSTRUCTIONS §6) — primary deliverable
+**Time derivative of density:**
+```
+∂_t ρ_film,b(t) = (ρ_film,b(t+1) − ρ_film,b(t)) / Δt     # forward diff over 1 frame
+```
+(Needed on the transition index; uses `ρ_film` at frames `t` and `t+1`, so `t = 0..98`.)
 
-**File:** `events/plotting.py` (R = 20D case only, per INSTRUCTIONS §6.1).
+**Divergence of J (finite-diff over 1 frame across spatial bins), `y = Rθ`:**
+```
+∂Jx/∂x|_b   = (Jx_{b with ix+1} − Jx_{b with ix-1}) / (2 Δx)        # or forward diff; pick one (§6 Q3)
+∂Jy/∂y|_b   = (1/R) · ∂Jy/∂θ|_b
+            = (1/R) · (Jy_{b with iθ+1} − Jy_{b with iθ-1}) / (2 Δθ)
+neg_div_J_film,b(t) = −∂Jx/∂x − ∂Jy/∂y
+```
+Wrap spatial indices cyclically (`ix → (ix±1) mod N_x`, `iθ → (iθ±1) mod N_θ`) — both axes are periodic.
 
-### 6.1 Birth-triggered averages
-For each birth at `t_b`, collect annulus scalars at frames `t_b − τ .. t_b .. t_b + τ`
-(`τ` frames; default 2) at the future birth location X_b using local spatial interpolation or nearest local particles.
-Average over all births. Stitch timesteps/frames via the sampler in §4.3.
-Event windows near frame 0 or the last frame need truncation or exclusion rules.
+Alternative per INSTRUCTIONS ("both calculated over finite-difference 1 frame"): interpret `div J` itself as a **time** finite difference too — but the standard reading is *spatial* divergence of `J(t)`. Decision §6 Q3; default = spatial central difference on each transition.
 
-Plots (relative time on x):
-`ρ, J_r, u_rms, u_fluct, S, |ψ6|, χ, D²_min, strain` vs `t − t_b`.
-Mandatory examples from INSTRUCTIONS: `|ψ6|, χ, D²_min, u_rms, J_r, ρ`.
+**Cross-shell source `S_cross`:**
+```
+m_i(t)   = shell_mask[i, t]
+entry_e_i(t) = 1  if  m_i(t)==0  AND  m_i(t+1)==1   # particle joins film
+exit_e_i(t)  = 1  if  m_i(t)==1  AND  m_i(t+1)==0   # particle leaves film
 
-### 6.2 Death-triggered averages
-Same machinery at the dying-defect position. Mandatory plots:
-`nearest opposite-charge distance, |ψ6|, χ, D²_min, u_rms, density` vs `t − t_d`.
+# bin an entry event by its position at t+1; an exit event by its position at t:
+N_in,b(t)  = #{ entry events i with bin(i, t+1)==b }
+N_out,b(t) = #{ exit  events i with bin(i, t  )==b }
+S_cross,b(t) = (N_in,b(t) − N_out,b(t)) / (A_bin[b] · Δt)
+```
 
-### 6.3 Separation of annihilation vs non-annihilation death
-Split death curves into `annihilated` and `non-annihilated` subpopulations
-(classified in §3.3); plot both with distinct colors so the source/reaction
-hypothesis is testable.
+**Continuity residual (verification/sanity, map 4):**
+```
+RHS_b(t)   = neg_div_J_film,b(t) + S_cross,b(t)        # = −div J + S_cross
+residual_b = ∂_t ρ_film,b(t)  −  RHS_b(t)              # ≈ 0 (within discretization noise)
+```
+(Consistency check: `mean |residual| ≪ mean |∂_t ρ|`. If large, revisit unwrapping / sign convention — §6 Q4.)
 
----
+### 3.4 Output cache (`output/film_continuity/radius_15D_film_continuity.npz`)
+Arrays, all lead axis = transition index `t ∈ [0, 99]`:
 
-## 7. Radial exchange / shell-build-up plots (INSTRUCTIONS §9, R = 20D)
+| key | shape |
+|---|---|
+| `transition_steps` | `(99, 2)` — `(steps[t], steps[t+1])` |
+| `dt` | `()` scalar |
+| `cylinder_radius` `R`, `lx` `Lx`, `pocket_radius`, `particle_diameter` | scalars |
+| `x_edges`, `x_centers`, `theta_edges`, `theta_centers` | binning grids |
+| `A_bin` | `(100, 72)` |
+| `rho_film_b` | `(99, 100, 72)` (frame-`t` density on each transition) |
+| `partial_t_rho_film_b` | `(99, 100, 72)` |
+| `J_film_b` | `(99, 100, 72, 2)` — components `(Jx, Jy)` |
+| `neg_div_J_film_b` | `(99, 100, 72)` |
+| `S_cross_b` | `(99, 100, 72)` |
+| `residual_b` | `(99, 100, 72)` |
+| `n_film_frame`, `film_count_per_bin_frame` | diagnostics |
 
-- `J_r = ρ v_r`, split into `J_in` (shell→core), `J_out` (core→shell), `J_abs`.
-- Compute four event-aligned series: `J_r near future birth`, `near future death`,
-  `near stable defects`, `far from defects` (control).
-- Plots:
-  `birth rate vs |J_r|`, `birth rate vs J_in`, `birth rate vs J_out`,
-  `death rate vs |J_r|`, `defect density vs shell density`,
-  `birth rate vs shell thickness`.
-- Shell mask from `common.shell_mask_for_positions`; shell thickness computed as
-  `mean(r_outer − r_inner)` via existing density/thickness profile utility or, if
-  missing, a light helper added to `density_profile.py`.
-- `common.shell_mask_for_positions` exists, but "shell thickness" utility may not;
-  this may become new implementation work.
-
----
-
-## 8. Probability plots (INSTRUCTIONS §10.2, R = 20D)
-
-Bucket birth/death/annihilation events by the local pre-event field value at the
-event position in the frame before the event; normalize by total time-exposure
-of all particles in that same bucket (control) → probability.
-
-Plots:
-`birth prob vs |ψ6|, vs 1−|ψ6|, vs |∇ψ6|`,
-`death prob vs |ψ6|`, `annihilation prob vs |ψ6|`.
-`|∇ψ6|` computed by central differences of the cached `|ψ6|` frame grid.
-Probability normalization by "all particles in same bucket" needs care to avoid
-mixing particle-local fields with event-location fields.
-Gradients need periodic handling in `x` and `theta`, plus smoothing/NaN handling.
-
-Output: `output/npz/probability_summary_R20D.npz` + plots under `plots/probability/`.
+Write only if missing or `--overwrite`.
 
 ---
 
-## 9. Chirality plots (INSTRUCTIONS §11, R = 20D)
+## 4. Plotting (`plots.py`, Plotly — no matplotlib)
 
-Same probability machinery with chirality fields:
-`birth prob vs χ, vs |χ|, vs ∂tχ, vs |∇χ|`,
-`death prob vs χ`, `annihilation prob vs χ`.
-Event-centered: `χ(t−t_birth), χ(t−t_death), χ_annulus(t−t_birth), χ_annulus(t−t_death)`.
+For each requested quantity Q ∈ {`partial_t_rho_film_b`, `neg_div_J_film_b`, `S_cross_b`, `residual_b`} produce an interactive HTML map (default: per-transition averaged over a configurable frame range, plus single-frame optional output):
 
----
-
-## 10. Maps for representative frames (INSTRUCTIONS §14)
-
-**File:** `events/maps.py`. For `R = 20D` (and a couple representative frames):
-panels `particles+defects`, `|ψ6|+defects`, `χ+defects`, `u_rms or D²_min+defects`,
-`J_r+defects`, `density+defects`, and an overlay of birth/death events for that frame.
-Use matplotlib scatter on unwrapped `(x, y)` with colorbars; reuse plotting style
-already present in `multiple_sim_analysis/plotting.py`.
+- **Heatmap**: `plotly.graph_objects.Heatmap` with `x = x_centers` (µm in `x`), `y = theta_centers` (or `y = R·theta_centers` for a true flatted-surface aspect), `z = Q.mean(axis=0)` (over transitions in range), color = **magnitude** (`abs(Q)`). Use `diverging` colormap (`RdBu_r`) for signed `Q`; magnitude shown via a separate `colorscale='Viridis'` passed on `abs(Q)`.
+  - Follow INSTRUCTIONS: "color corresponding to value" / "magnitude as the color". Provide selectable mode (signed vs magnitude) via buttons (`updatemenus`).
+- **Arrow overlay**: `plotly.figure_factory.create_quiver` (or a manual `Scatter` with marker arrows) using the **`J_film_b`** field `(Jx, Jy)` sampled on a coarsened `(x, y=Rθ)` grid (e.g. every 4th bin) to avoid clutter, *independent* of the heatmap quantity (the arrow tells direction of the film current; per INSTRUCTIONS "for (x, theta) there should be an arrow telling about the direction").
+- Axes labeled `x`, `θ` (and optionally `y = Rθ`; keep primary axis `x` vs `θ`). Title names the quantity and the transition/frame range.
+- Save to `output/film_continuity/radius_15D_film_continuity_map_<quantity>.html`.
 
 ---
 
-## 11. Wiring & CLI
+## 5. Implementation order (tasks)
 
-- The new top-level `disclination_order_fields/runner.py` exposes
-  `run(cases, frame_start, frame_stop, overwrite)` returning a summary dict,
-  following the existing `run` signature expected by `multiple_sim_analysis/script.py`.
-- Extend `script.py`/`__main__.py` CLI with flags:
-  `--overwrite`, `--case`, `--all`, `--frame-start`, `--frame-stop`,
-  `--tau` (event half-window in frames), `--event-case radius_20D`
-  (the case used for event-centered plots; configurable).
-- Default event case = `radius_20D` (verify exact `case_id` in `cases.py`;
-  grep confirms radius cases are formatted `radius_<N>D`).
-- Caching discipline: each `.npz` write goes through `save_metric_npz`; reads go
-  through `load_cached_metric_values`/`load_metric_values`; plots gated via
-  `plots_missing` so re-runs are cheap (consistent with `disclination.py` pattern).
-
----
-
-## 12. Testing (light, in `tests/`)
-
-- `test_defect_tracking.py`: synthetic 2-frame neighbor counts + positions,
-  assert confident matches, birth/death classification, annihilation flag when a
-  `+`/`−` pair co-annihilates within `d_ann`.
-- `test_d2min.py`: known affine shear → `D²_min ≈ 0`; random displacement → `> 0`.
-- `test_annulus.py`: defect-excluded annulus uses `d`, excludes defect particles,
-  and records an empty annulus as `NaN` plus zero contributing count.
-- `test_clusters.py`: union-find bond length gating over periodic `x`.
-- Run with `pixi run python -m pytest tests/` and gate syntax with
-  `pixi run python -m compileall hexatic/multiple_sim_analysis`.
+1. **`config.py`** — `@dataclass(frozen=True) FilmContinuityConfig` with `case_id`, paths, and a `@dataclass FilmContinuityScalars` holding `R, Lx, dt, A_bin, x_edges, theta_edges`. Load case via `hexatic.radii_analysis.cases.get_case`. Resolve `lx` from GSD box if it disagrees with case (warn). Pin `TIMESTEP`, compute `dt`.
+2. **`io_cache.py`** — `load_active_matter_fields(path)` returns the subset needed (`steps, coords, shell_mask, x_edges, theta_edges, pocket_radius`). `write_cache`/`load_cache` with existence + `--overwrite` guard.
+3. **`velocity.py`** — Numba `compute_velocities(coords, shell_mask, Lx, R, dt)` → `vx, vy` shaped `(99, 9870)` aligned to transition `t`, with minimum-image unwrap in `x` and `θ`. Add a tiny fallback pure-numpy path for tests.
+4. **`binning.py`** — Numba `particle_bin_indices(x, theta, x_edges, theta_edges)` (vectorized `searchsorted` + cyclic wrap). `accumulate_counts_and_sums` returning per-transition `counts`, `sum_vx`, `sum_vy` (shape `(99, 100, 72)`), restricting to `shell_mask[t]` membership; also entry/exit counting using `shell_mask[t] vs [t+1]`.
+5. **`fields.py`** — pure functions:
+   - `rho_film(counts, A_bin)`
+   - `J_film(counts, sum_vx, sum_vy, A_bin)`
+   - `partial_t_rho(rho_film, dt)`
+   - `neg_div_J(J_film, dx, dtheta, R)` — central or forward diff (see §6 Q3); cyclic boundaries.
+   - `S_cross(n_in, n_out, A_bin, dt)`
+6. **`continuity.py`** — orchestrate into `FilmContinuityResult` dataclass; assemble all arrays + diagnostics (per-bin film counts, global residual stats).
+7. **`plots.py`** — 4 Plotly maps as specified (+ an optional combined 2×2 subplot HTML).
+8. **`run_film_continuity.py`** — argparse CLI; default behavior loads cache if present else computes. `pixi run python -m hexatic.density_analysis.run_film_continuity --case radius_15D --plot`.
+9. **Tests** (`tests/test_film_continuity.py`): a 2-particle toy analytic case on a flat periodic strip asserting `∂_t ρ ≈ −div J + S_cross` to machine precision; a wrap-around displacement test for `velocity.py`.
+10. **Sanity**: run `pixi run python -m compileall hexatic/density_analysis`; then the CLI on `radius_15D`; print residual statistics (mean abs residual / mean abs ∂_t ρ). Do **not** commit generated npz/html.
 
 ---
 
-## 13. Execution order (build increments)
+## 7. Compliance with repo rules (AGENTS.md)
 
-1. **Cleanup** (sect. 1) — preserve `shared.py` helpers; remove obsolete drivers.
-2. **Tracking** (sect. 2) — `defect_tracks_<case>.npz`; unit test.
-3. **Events** (sect. 3) — annihilation classifier; unit test.
-4. **D²_min** (sect. 4.4) — cached `.npz`; unit test.
-5. **Local-field sampler** (sect. 4.1–4.3) — reuse existing field caches.
-6. **Cluster + per-frame aggregate** (sect. 5.1–5.2).
-7. **R-sweep plots** (sect. 5.3).
-8. **Event-centered averages** (sect. 6) — headline plots.
-9. **Radial exchange / shell plots** (sect. 7).
-10. **Probability + chirality plots** (sect. 8, 9).
-11. **Maps** (sect. 10).
-12. **CLI wiring + caching** (sect. 11).
-13. **Tests & `compileall`** (sect. 12).
+- Pixi workspace `sap`; syntax-check via `pixi run python -m compileall hexatic/density_analysis`.
+- No expensive simulations; load existing npz only.
+- Outputs in a clearly named package dir (`hexatic/density_analysis/output/film_continuity/`); never overwrite cached sim data; cache writes guarded by `--overwrite` (the film-continuity cache is *analysis* output, recomputable, so allow regeneration but log clearly).
+- Inspect `hexatic/constants/` first (done: `R, PARTICLE_DIAMETER, RHO, TIMESTEP` from `cylinder.py` + `cases.py`); radius-aware (`get_case("radius_15D")`) — no global default-radius reliance.
+- Style: 4-space indent, type hints, `@dataclass` containers, `snake_case`, minimal comments only for non-obvious physics (unwrapping, sign convention, `y = Rθ`).
+- Use Numba for hot loops (per ARCHITECTURE.md), Scipy where math-heavy (finite-diff/cyclic gradient could use `scipy.ndimage`/`np.gradient`); Plotly for plots (explicit requirement).
 
-Each step is independently cacheable and runnable; jobs that need only print
-checks can run via `pixi run python -m hexatic.multiple_sim_analysis --help`
-without launching GPU sims (per `AGENTS.md`).
+---
+
+## 8. Edge cases & assumptions (verified against data)
+
+Data probe of `radius_15D_active_matter_fields.npz` (run before drafting this section):
+
+| Probe | Result | Implication |
+| `x` range | `[−27.7053, +27.7053]` = `[−Lx/2, Lx/2]` | **x is wrapped** to the periodic cell (not an unwrapped trajectory). |
+| raw `|Δx| > Lx/2` fraction | **1.28 %** of particle-transitions | Real seam crossings in x. Min-image unwrap in `velocity.py` is *required*, not optional. |
+| raw `|Δθ| > π` fraction | **0.36 %** | Seam crossings in θ; min-image unwrap on θ *required*. |
+
+
+. Edge cases the plan must explicitly handle
+1. **Periodic seam crossings in x (~1.3%) and θ (~0.4%)** — min-image unwrap `dx − Lx·round(dx/Lx)` and `dθ − 2π·round(dθ/2π)` is *essential*. 
+2. **Empty / near-empty bins** — a thin shell over a 100×72 grid spans ~4700 particles ⇒ mean ~0.65 particles/bin, so many bins are *empty*. Consequences:
+   - `ρ_film_b = 0/A = 0` is fine, but **central-difference `div J`** at a 0-bin flanked by populated bins yields a *spurious large gradient* (artifact peaks at film/void boundaries).
+   - Mitigation: mask/flag bins with `N_b < min_count` (`< 2`) in plots and in residual statistics 
+3. **Cyclic spatial boundaries for `div J`** — wrap `ix±1 mod N_x`, `iθ±1 mod N_θ`; both axes are genuinely periodic. (Plan states this; ensure implementation uses `np.roll`/mod indexing, not edge-truncation.)
+6. **`v` from `Δx`, not GSD `velocity`** — explicitly required. But note `coords` may already be *coarsened* relative to the integrator (HOOMD writes every `1e5` steps, `dt_sim = 1e-6` ⇒ `Δt = 0.1` sim time, ~1000 Brownian times per saved frame). Over such a hop, particle displacement is large; this is a **coarse-grained velocity** (a *current*), not the instantaneous velocity. 
+7. **Last transition boundary** — `partial_t_rho` needs `ρ` at frame `t+1`; the final transition `t=98→99` is the last valid one. So all derived fields have `n_frames − 1 = 99` rows 
+8. **`r` not used for binning** — binning is purely `(x, θ)` on the film. Particles whose `x`/`θ` lie in a bin while `r` is just outside the shell are correctly excluded by pre-filter on `shell_mask`. Make sure to bin **after** applying the film mask, not before, otherwise `J_film` includes interior-particle tangential drift. 
+10. **Quiver density** — arrow overlay on a 100×72 grid = 7200 arrows. Must *coarsen* (every k-th bin, k≥4) and normalize arrow length, else the Plotly figure is unreadable
+
+### D. Decision-prompt from probe
+- **Non-zero baseline residual is expected** given entry/exit asymmetry and short Δt discretization. Define success criterion up front as e.g. `median |residual| / median |∂_t ρ| < 0.2` (configurable), *not* "residual ≈ 0 to machine precision". Adjust §5.6 to emit this normalized metric.
