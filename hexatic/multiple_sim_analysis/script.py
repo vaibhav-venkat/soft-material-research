@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 
-from . import disclination_order_fields
+from . import disclination_order_fields, velocity
 from .common import FRAME_START, FRAME_STOP, ensure_output_dirs, selected_cases
 
 
@@ -38,6 +38,7 @@ def run_all(args: argparse.Namespace) -> None:
         include_long_axis=args.include_long_axis,
     )
     metrics = (
+        ("disclination_velocity", velocity.run_disclination_velocity),
         ("disclination_order_fields", disclination_order_fields.run),
     )
     skipped = set(args.skip)

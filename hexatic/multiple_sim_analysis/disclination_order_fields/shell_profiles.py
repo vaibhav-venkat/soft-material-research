@@ -24,7 +24,7 @@ from ..common import (
 )
 from ..disclination import _load_neighbor_counts
 from ..plotting import plot_radius_values
-from .moving import run_moving_frontback_chirality
+from .moving import run_moving_defect_velocity_annulus
 from .shared import (
     CIRCUMFERENCE_REFERENCE_CASE_ID,
     LOCAL_CONTRAST_LENGTH,
@@ -197,7 +197,7 @@ def run_shell_profiles(
             frame_stop=frame_stop,
             overwrite=overwrite,
         )
-        run_moving_frontback_chirality(
+        run_moving_defect_velocity_annulus(
             cases,
             frame_start=frame_start,
             frame_stop=frame_stop,
@@ -250,7 +250,7 @@ def run_shell_profiles(
         frame_stop=frame_stop,
         overwrite=overwrite,
     )
-    run_moving_frontback_chirality(
+    run_moving_defect_velocity_annulus(
         cases,
         frame_start=frame_start,
         frame_stop=frame_stop,
