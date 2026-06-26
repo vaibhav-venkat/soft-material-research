@@ -63,16 +63,29 @@ def accumulate_counts_and_sums(
         raise ValueError("vy must match vx shape.")
 
     if _accumulate_counts_and_sums_numba is not None:
-        arrays = _accumulate_counts_and_sums_numba(
+        binned = _empty_binned_transition_sums(
+            coords.shape[0],
+            x_edges.size - 1,
+            theta_edges.size - 1,
+        )
+        _accumulate_counts_and_sums_numba(
             coords,
             shell_mask,
             vx,
             vy,
             x_edges,
             theta_edges,
+            binned.counts,
+            binned.sum_vx,
+            binned.sum_vy,
+            binned.n_in,
+            binned.n_out,
+            binned.x_face_crossings,
+            binned.theta_face_crossings,
+            binned.film_count_per_bin_frame,
         )
     else:
-        arrays = _accumulate_counts_and_sums_numpy(
+        binned = _accumulate_counts_and_sums_numpy(
             coords,
             shell_mask,
             vx,
@@ -80,7 +93,24 @@ def accumulate_counts_and_sums(
             x_edges,
             theta_edges,
         )
-    return BinnedTransitionSums(*arrays)
+    return binned
+
+
+def _empty_binned_transition_sums(
+    n_frames: int,
+    nx: int,
+    nt: int,
+) -> BinnedTransitionSums:
+    return BinnedTransitionSums(
+        counts=np.zeros((n_frames - 1, nx, nt), dtype=np.int64),
+        sum_vx=np.zeros((n_frames - 1, nx, nt), dtype=np.float64),
+        sum_vy=np.zeros((n_frames - 1, nx, nt), dtype=np.float64),
+        n_in=np.zeros((n_frames - 1, nx, nt), dtype=np.int64),
+        n_out=np.zeros((n_frames - 1, nx, nt), dtype=np.int64),
+        x_face_crossings=np.zeros((n_frames - 1, nx, nt), dtype=np.int64),
+        theta_face_crossings=np.zeros((n_frames - 1, nx, nt), dtype=np.int64),
+        film_count_per_bin_frame=np.zeros((n_frames, nx, nt), dtype=np.int64),
+    )
 
 
 def _wrapped_values(values: np.ndarray, edges: np.ndarray) -> np.ndarray:
@@ -108,18 +138,11 @@ def _accumulate_counts_and_sums_numpy(
     vy: np.ndarray,
     x_edges: np.ndarray,
     theta_edges: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> BinnedTransitionSums:
     n_frames, n_particles = coords.shape[:2]
     nx = x_edges.size - 1
     nt = theta_edges.size - 1
-    counts = np.zeros((n_frames - 1, nx, nt), dtype=np.int64)
-    sum_vx = np.zeros((n_frames - 1, nx, nt), dtype=np.float64)
-    sum_vy = np.zeros((n_frames - 1, nx, nt), dtype=np.float64)
-    n_in = np.zeros((n_frames - 1, nx, nt), dtype=np.int64)
-    n_out = np.zeros((n_frames - 1, nx, nt), dtype=np.int64)
-    x_faces = np.zeros((n_frames - 1, nx, nt), dtype=np.int64)
-    theta_faces = np.zeros((n_frames - 1, nx, nt), dtype=np.int64)
-    frame_counts = np.zeros((n_frames, nx, nt), dtype=np.int64)
+    binned = _empty_binned_transition_sums(n_frames, nx, nt)
 
     for frame in range(n_frames):
         ix, itheta = particle_bin_indices(
@@ -130,7 +153,7 @@ def _accumulate_counts_and_sums_numpy(
         )
         for particle in range(n_particles):
             if shell_mask[frame, particle]:
-                frame_counts[frame, ix[particle], itheta[particle]] += 1
+                binned.film_count_per_bin_frame[frame, ix[particle], itheta[particle]] += 1
 
     for frame in range(n_frames - 1):
         ix_t, itheta_t = particle_bin_indices(
@@ -151,23 +174,23 @@ def _accumulate_counts_and_sums_numpy(
             if in_film_t:
                 ixp = ix_t[particle]
                 itp = itheta_t[particle]
-                counts[frame, ixp, itp] += 1
-                sum_vx[frame, ixp, itp] += vx[frame, particle]
-                sum_vy[frame, ixp, itp] += vy[frame, particle]
+                binned.counts[frame, ixp, itp] += 1
+                binned.sum_vx[frame, ixp, itp] += vx[frame, particle]
+                binned.sum_vy[frame, ixp, itp] += vy[frame, particle]
             if in_film_t and in_film_next:
                 _accumulate_crossing_path_numpy(
-                    x_faces[frame],
-                    theta_faces[frame],
+                    binned.x_face_crossings[frame],
+                    binned.theta_face_crossings[frame],
                     ix_t[particle],
                     itheta_t[particle],
                     ix_next[particle],
                     itheta_next[particle],
                 )
             if (not in_film_t) and in_film_next:
-                n_in[frame, ix_next[particle], itheta_next[particle]] += 1
+                binned.n_in[frame, ix_next[particle], itheta_next[particle]] += 1
             elif in_film_t and (not in_film_next):
-                n_out[frame, ix_t[particle], itheta_t[particle]] += 1
-    return counts, sum_vx, sum_vy, n_in, n_out, x_faces, theta_faces, frame_counts
+                binned.n_out[frame, ix_t[particle], itheta_t[particle]] += 1
+    return binned
 
 
 def _signed_bin_delta(start: int, stop: int, n_bins: int) -> int:
@@ -303,19 +326,17 @@ if njit is not None:
         vy: np.ndarray,
         x_edges: np.ndarray,
         theta_edges: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        counts: np.ndarray,
+        sum_vx: np.ndarray,
+        sum_vy: np.ndarray,
+        n_in: np.ndarray,
+        n_out: np.ndarray,
+        x_faces: np.ndarray,
+        theta_faces: np.ndarray,
+        frame_counts: np.ndarray,
+    ) -> None:
         n_frames = coords.shape[0]
         n_particles = coords.shape[1]
-        nx = x_edges.size - 1
-        nt = theta_edges.size - 1
-        counts = np.zeros((n_frames - 1, nx, nt), dtype=np.int64)
-        sum_vx = np.zeros((n_frames - 1, nx, nt), dtype=np.float64)
-        sum_vy = np.zeros((n_frames - 1, nx, nt), dtype=np.float64)
-        n_in = np.zeros((n_frames - 1, nx, nt), dtype=np.int64)
-        n_out = np.zeros((n_frames - 1, nx, nt), dtype=np.int64)
-        x_faces = np.zeros((n_frames - 1, nx, nt), dtype=np.int64)
-        theta_faces = np.zeros((n_frames - 1, nx, nt), dtype=np.int64)
-        frame_counts = np.zeros((n_frames, nx, nt), dtype=np.int64)
 
         for frame in range(n_frames):
             for particle in range(n_particles):
@@ -354,7 +375,6 @@ if njit is not None:
                     n_in[frame, ix_next, itheta_next] += 1
                 elif in_film_t and (not in_film_next):
                     n_out[frame, ix_t, itheta_t] += 1
-        return counts, sum_vx, sum_vy, n_in, n_out, x_faces, theta_faces, frame_counts
 
 else:
     _particle_bin_indices_numba = None
