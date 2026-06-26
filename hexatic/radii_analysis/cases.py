@@ -60,7 +60,7 @@ class RadiusCase:
     def analysis_log(self) -> Path:
         return LOG_DIR / f"{self.case_id}_analysis.log"
 
-    def as_metadata(self) -> dict[str, float | int | str]:
+    def as_metadata(self) -> dict[str, float | int | str | None]:
         return {
             "case_id": self.case_id,
             "label": self.label or self.case_id,
@@ -87,7 +87,7 @@ SCALED_RADIUS_CASES: tuple[RadiusCase, ...] = tuple(
         radius=radius_from_diameters(value),
         label=f"R = {int(value)}D",
     )
-    for value in (15.0, 20.0, 25.0, 30.0, 35.0)
+    for value in (15.0, 20.0, 25.0, 30.0)
 )
 
 SWEEP_CASES: tuple[RadiusCase, ...] = SCALED_RADIUS_CASES

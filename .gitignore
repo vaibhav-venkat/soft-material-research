@@ -16,7 +16,6 @@ DS_Store
 *.json
 
 CORE.md
-PLAN.md
 *.pkl
 *.csv
 *.bak

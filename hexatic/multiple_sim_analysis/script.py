@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 
-from . import disclination_order_fields, velocity
+from . import disclination_order_fields, velocity,x_com, polarization, dislocation, density_profile, disclination, nematic, force_density, chirality, radial_exchange_current
 from .common import FRAME_START, FRAME_STOP, ensure_output_dirs, selected_cases
 
 
@@ -38,8 +38,28 @@ def run_all(args: argparse.Namespace) -> None:
         include_long_axis=args.include_long_axis,
     )
     metrics = (
-        ("disclination_velocity", velocity.run_disclination_velocity),
+        # ("velocity", velocity.run),
+        # ("density_profile", density_profile.run),
+        # ("disclination", disclination.run),
         ("disclination_order_fields", disclination_order_fields.run),
+        # ("dislocation", dislocation.run),
+        # ("polarization", polarization.run),
+        # ("nematic", nematic.run),
+        # ("x_com", x_com.run),
+        # (
+        #     "radial_exchange_current",
+        #     lambda cases, frame_start, frame_stop, overwrite: radial_exchange_current.run(
+        #         cases,
+        #         frame_start=frame_start,
+        #         frame_stop=frame_stop,
+        #         overwrite=overwrite,
+        #         radial_bin_width=radial_exchange_current.ACTIVE_RADIAL_BIN_WIDTH,
+        #         kernel_radius=radial_exchange_current.LOCAL_POCKET_RADIUS
+        #     ),
+        # ),
+        # ("force_density", force_density.run),
+        # ("chirality", chirality.run),
+        # ("disclination_order_fields", disclination_order_fields.run),
     )
     skipped = set(args.skip)
     for metric_name, runner in metrics:

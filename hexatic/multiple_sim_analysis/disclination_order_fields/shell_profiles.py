@@ -171,9 +171,9 @@ def run_shell_profiles(
     )
     output_npz = NPZ_OUTPUT_DIR / "disclination_order_shell_profiles.npz"
     output_pngs = (
-        PLOT_OUTPUT_DIR / "disclination_S_shell_profile.png",
-        PLOT_OUTPUT_DIR / "disclination_hexatic_order_shell_profile.png",
-        PLOT_OUTPUT_DIR / "disclination_chirality_shell_profile.png",
+        PLOT_OUTPUT_DIR / "disc" /  "disclination_S_shell_profile.png",
+        PLOT_OUTPUT_DIR / "disc" / "disclination_hexatic_order_shell_profile.png",
+        PLOT_OUTPUT_DIR / "disc"" / disclination_chirality_shell_profile.png",
     )
     try:
         arrays = load_cached_metric_values(

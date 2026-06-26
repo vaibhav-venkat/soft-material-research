@@ -18,8 +18,8 @@ from hexatic.radii_analysis.cases import (
 )
 from .best_fit import FitCurve
 
-FRAME_START = 70
-FRAME_STOP = 100
+FRAME_START = 30
+FRAME_STOP = 49
 
 ANALYSIS_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = ANALYSIS_DIR / "output"
