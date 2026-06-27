@@ -1,43 +1,76 @@
-# Plan - Fitting J to values
+# Plan - Fitting J to density gradients
 
-Within [density_analysis](~/structures_and_functions/hexatic/density_analysis), create a file called `run_fitting.py` and a folder called `fitted`.
-- `run_fitting.py` should be similar to run_film_continuity.py
-- Within fitting, this functionality should be present:
-For each frame/translation:
-`rho(x,y, t)` must be calculated according to the guassian kernel functionality present within [common.py](~/structures_and_functions/hexatic/active_matter_cylinder/common.py). 
+## Goal
+Within `hexatic/density_analysis/`, create `run_fitting.py` and a `fitting/` submodule. Fit the relationship `J_x ≈ c_x ∂_x ρ` and `J_y ≈ c_y ∂_y ρ` using FFT-based gradients and linear least squares.
 
-**NOTE**: This field may already exist within the npz folder, specifically within the active_matter_fields.npz. It MUST use the guassian_kernel, however. You can double check this within he active_matter_cylinder folder. (if not, recalculate)
+## Structure
+Mirror `film_continuity/` submodule layout:
+- `fitting/config.py` — `FittingConfig` dataclass (case_id, npz_path, gsd_path, output_dir)
+- `fitting/fields.py` — gaussian rho computation, FFT gradient helpers
+- `fitting/fit.py` — core regression logic, returns `FittingResult` dataclass
+- `fitting/plots.py` — residual heatmap plots
+- `fitting/io_cache.py` — npz cache load/write (reuse pattern from film_continuity)
+- `run_fitting.py` — CLI entrypoint, argparse with `--case`, `--overwrite`, `--no-cache`, `--plot`
 
-Also, use `y = R theta`. If this can be done after loading from the npz, use the npz. If not, recalculate.
+## Steps
 
-For the same grid and same time transition:
-``
-J_x(x,y,t+1/2)
-J_y(x,y,t+1/2)
-``
-Using the same grid as `rho`
+### 1. Load or compute ρ(x, y, t)
+- Load from `{case_id}_active_matter_fields.npz` if the gaussian-smoothed density field exists there.
+- If not present, recompute using `_density_sum` from `active_matter_cylinder/math_utils.py` (which uses `_gaussian_delta_weights`).
+- The grid is the same (x_edges, theta_edges) used by film_continuity. Convert θ → y via `y = R * θ`.
 
-## Then, compute density gradients:
-For each frame, take the 2d FFT of the guassian-smoothed density field
-`rho_hat = fft2[rho(x, y)]` (preferably use scipy)
-Then build the wavenumber arrays:
-``
-kx = 2*pi m / Lx
-ky = 2 * pi * n / Ly
-Ly = 2 * pi * R
-Lx = defined Lx within the constants file; or, as in the film_continuity, from the cached x_edges
-(partial_x rho)_hat = i kx rho_hat
-(partial_y rho)_hat = i ky rho_hat
-partial_x rho = IFFT2((partial_x rho)_hat)
-partial_y rho = IFFT2((partial_y rho)_hat)
-``
+### 2. Load J_x, J_y at t+1/2
+- These should already exist in the active_matter_fields npz as flux arrays (computed from face crossings over the transition).
+- If missing, compute from particle velocities using the same binning approach as film_continuity.
+- J^{t+1/2} represents the flux over the transition t → t+1.
 
-Then make the regression target and fit:
-`J_x = c_x partial_x rho`
-`J_y = c_y partial_y rho`
+### 3. Compute FFT gradients
+For each frame's ρ(x, y) on the (nx, nθ) grid:
+```
+ρ_hat = scipy.fft.fft2(ρ)
+kx = 2π m / Lx       (m = 0..nx-1)
+ky = 2π n / Ly       (n = 0..nθ-1), Ly = 2π R
+(∂_x ρ)_hat = 1j * kx * ρ_hat
+(∂_y ρ)_hat = 1j * ky * ρ_hat
+∂_x ρ = scipy.fft.ifft2((∂_x ρ)_hat).real
+∂_y ρ = scipy.fft.ifft2((∂_y ρ)_hat).real
+```
+- `Lx` from cached `x_edges[-1] - x_edges[0]`, or from `cylinder.lx_for_radius(case.radius)`.
+- `R` = `case.radius`.
 
-Use the linear least squares regression for now.
-Then plot
-`c_x partial_x rho vs J_x_measured`
-`c_y partial_y rho vs J_y measured`
-And I mean the residual on a heatmap.
+### 4. Linear least squares fit
+For each transition (frame pair t → t+1):
+1. Compute average gradient at t+1/2: `∂_x ρ^{t+1/2} = (∂_x ρ^t + ∂_x ρ^{t+1}) / 2`
+2. Fit: `J_x ≈ c_x * ∂_x ρ^{t+1/2}` and `J_y ≈ c_y * ∂_y ρ^{t+1/2}`
+3. Use `scipy.linalg.lstsq` on flattened arrays: `J_x_flat = c_x * (∂_x ρ^{t+1/2})_flat`
+
+Store `c_x`, `c_y` per transition and as a global aggregate.
+
+### 5. Plot residual heatmaps
+- `residual_x = J_x_measured - c_x * ∂_x ρ` on the (x, θ) grid
+- `residual_y = J_y_measured - c_y * ∂_y ρ` on the (x, θ) grid
+- Also plot a value of `c_x` and `c_y`, two additional plots, on the (x, theta) grid
+- Save as static plots (matplotlib imshow/pcolormesh) to `fitting/output/{case_id}_fit_residual_x.png` etc.
+
+## Assumptions
+- Grid is uniform and periodic in x (period Lx) and θ (period 2π).
+- Frames are uniformly spaced in time (already enforced by film_continuity).
+- The gaussian smoothing radius used for ρ matches the one in active_matter_fields npz. Default: `pocket_radius` from the npz, or fall back to `0.5 * cylinder_radius`.
+- J arrays have shape `(n_transitions, nx, nθ, 2)` where last dim is (Jx, Jy).
+- ρ arrays have shape `(n_frames, nx, nθ)`.
+
+## Edge Cases
+- **Missing fields in npz**: If `rho_gaussian` or `J_film` keys are absent, recompute from raw particle data (positions + velocities in the GSD).
+- **Non-uniform frame spacing**: Raise `ValueError` with a clear message (same as film_continuity).
+- **Empty or near-empty bins**: Mask bins with `count < min_count` (default 2) before fitting to avoid division noise.
+- **Single frame**: Need at least 2 frames for a transition; raise if fewer.
+
+## Constants & Config
+- Import `RadiusCase` from `hexatic.radii_analysis.cases` (via `get_case(case_id)`).
+- Import cylinder constants from `hexatic.constants.cylinder`.
+- `DEFAULT_CASE_ID = "radius_15D"` (same default as film_continuity).
+- Output dir: `density_analysis/output/fitting/`.
+
+## Validation
+- `pixi run python -m compileall hexatic/density_analysis` should pass.
+- Running with `--case radius_15D --plot` should produce residual PNGs without error.
