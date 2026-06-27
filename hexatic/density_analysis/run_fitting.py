@@ -38,6 +38,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--frame-idx", type=int, default=None)
     parser.add_argument("--npz-path", default=None)
     parser.add_argument("--gsd-path", default=None)
+    parser.add_argument(
+        "--bins",
+        type=float,
+        default=0.0,
+        help="Spatial Gaussian smoothing sigma in grid bins for the actual fitting arrays.",
+    )
     return parser
 
 
@@ -49,6 +55,7 @@ def main(argv: list[str] | None = None) -> int:
         npz_path=args.npz_path,
         gsd_path=args.gsd_path,
         candidate_names=selected_candidates,
+        smoothing_bins=args.bins,
     )
 
     print(f"[fitting] Case: {config.case_id}")

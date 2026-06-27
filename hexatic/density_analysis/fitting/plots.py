@@ -22,7 +22,7 @@ def write_all_plots(
     destination_dir = Path(output_dir)
     written = []
     quantities = PLOT_QUANTITIES + tuple(
-        f"coef_{name}_{component}"
+        f"contribution_{name}_{component}"
         for name in result.candidate_names
         for component in ("x", "y")
     )
@@ -60,6 +60,7 @@ def write_quantity_plot(
     color_limits = _robust_color_limits(
         selected,
         symmetric="residual" in quantity,
+        zero_floor=quantity.startswith("contribution_"),
     )
 
     fig, axis = plt.subplots(figsize=(10, 5))
@@ -72,11 +73,11 @@ def write_quantity_plot(
         vmin=color_limits[0],
         vmax=color_limits[1],
     )
-    colorbar = fig.colorbar(mesh, ax=axis, label=quantity)
+    colorbar = fig.colorbar(mesh, ax=axis, label=_quantity_label(quantity))
     colorbar.ax.set_title("clipped", fontsize=8)
     axis.set_xlabel("x")
     axis.set_ylabel("theta")
-    axis.set_title(f"{quantity} {title_suffix}")
+    axis.set_title(f"{_quantity_label(quantity)} {title_suffix}")
     fig.tight_layout()
 
     destination = Path(output_path)
@@ -91,6 +92,7 @@ def _robust_color_limits(
     values: np.ndarray,
     *,
     symmetric: bool,
+    zero_floor: bool = False,
     percentile: float = ROBUST_PERCENTILE,
 ) -> tuple[float, float]:
     finite = np.asarray(values, dtype=float)
@@ -105,6 +107,14 @@ def _robust_color_limits(
         if not np.isfinite(limit) or limit == 0.0:
             limit = 1.0
         return -limit, limit
+
+    if zero_floor:
+        high = float(np.nanpercentile(finite, percentile))
+        if not np.isfinite(high) or high == 0.0:
+            high = float(np.nanmax(finite))
+        if not np.isfinite(high) or high == 0.0:
+            high = 1.0
+        return 0.0, high
 
     low = float(np.nanpercentile(finite, 100.0 - percentile))
     high = float(np.nanpercentile(finite, percentile))
@@ -121,9 +131,32 @@ def _quantity_values(result: FittingResult, quantity: str) -> np.ndarray:
         return _normalized_residual(result.residual_x, result.J[..., 0], result.mask)
     if quantity == "normalized_residual_y":
         return _normalized_residual(result.residual_y, result.J[..., 1], result.mask)
+    if quantity.startswith("contribution_"):
+        return _contribution_values(result, quantity)
     if quantity.startswith("coef_"):
         return _coefficient_values(result, quantity)
     raise ValueError(f"Unsupported fitting quantity: {quantity}")
+
+
+def _quantity_label(quantity: str) -> str:
+    if quantity.startswith("normalized_residual_"):
+        return f"local_{quantity}"
+    return quantity
+
+
+def _contribution_values(result: FittingResult, quantity: str) -> np.ndarray:
+    suffix = quantity.removeprefix("contribution_")
+    for component_idx, component in enumerate(("x", "y")):
+        marker = f"_{component}"
+        if suffix.endswith(marker):
+            candidate = suffix[: -len(marker)]
+            if candidate in result.coef_map and candidate in result.mid_fields:
+                contribution = (
+                    result.coef_map[candidate][None, ..., component_idx]
+                    * result.mid_fields[candidate][..., component_idx]
+                )
+                return np.abs(contribution)
+    raise ValueError(f"Unsupported contribution quantity: {quantity}")
 
 
 def _coefficient_values(result: FittingResult, quantity: str) -> np.ndarray:
@@ -149,7 +182,7 @@ def _normalized_residual(
     scale = float(np.nanmean(np.abs(measured[valid]))) if np.any(valid) else float("nan")
     if not np.isfinite(scale) or scale == 0.0:
         scale = 1.0
-    print(f"[fitting] Normalizing residual by mean(|J|)={scale:.6g}.")
+    print(f"[fitting] Normalizing local residual by mean(|J|)={scale:.6g}.")
     normalized = residual / scale
     return np.where(valid, normalized, np.nan)
 

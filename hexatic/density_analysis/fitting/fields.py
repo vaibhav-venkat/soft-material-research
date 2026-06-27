@@ -296,14 +296,17 @@ def load_or_compute_fields(config: FittingConfig) -> FittingFields:
     )
     frame_fields["chiral_P_perp"] = chiral_P_perp
     frame_fields["D_P"] = D[..., np.newaxis] * P
+    frame_fields["D_force_density"] = D[..., np.newaxis] * force_density
     frame_fields["D_chiral_P_perp"] = D[..., np.newaxis] * chiral_P_perp
     mid_fields = {
+        "D": _mid(frame_fields["D"]),
         "grad_rho": _mid(frame_fields["grad_rho"]),
         "grad_hexatic_order": _mid(frame_fields["grad_hexatic_order"]),
         "grad_D": _mid(frame_fields["grad_D"]),
         "P": _mid(frame_fields["P"]),
         "chiral_P_perp": _mid(frame_fields["chiral_P_perp"]),
         "force_density": _mid(frame_fields["force_density"]),
+        "D_force_density": _mid(frame_fields["D_force_density"]),
         "D_P": _mid(frame_fields["D_P"]),
         "D_chiral_P_perp": _mid(frame_fields["D_chiral_P_perp"]),
     }

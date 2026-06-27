@@ -39,7 +39,11 @@ class FieldRegistry:
         self,
         candidate_names: tuple[str, ...] | None = None,
     ) -> tuple[str, ...]:
-        names = candidate_names or self.names_for_role(ROLE_CANDIDATE)
+        names = (
+            self.names_for_role(ROLE_CANDIDATE)
+            if candidate_names is None
+            else candidate_names
+        )
         if not names:
             raise ValueError("At least one fitting candidate is required.")
         for name in names:
@@ -50,10 +54,11 @@ class FieldRegistry:
 
 
 DEFAULT_CANDIDATES = (
-    "grad_rho",
     "P",
     "chiral_P_perp",
     "force_density",
+    "D_force_density",
+    "grad_rho",
     "grad_hexatic_order",
     "grad_D",
     "D_P",
@@ -81,6 +86,12 @@ FIELD_REGISTRY = FieldRegistry(
             at_frames=False,
         ),
         FieldSpec("force_density", ROLE_CANDIDATE, "force density", at_frames=False),
+        FieldSpec(
+            "D_force_density",
+            ROLE_CANDIDATE,
+            "squared disclination-charge force density",
+            at_frames=False,
+        ),
         FieldSpec(
             "grad_hexatic_order",
             ROLE_CANDIDATE,

@@ -31,6 +31,7 @@ class FittingConfig:
     candidate_names: tuple[str, ...] | None = DEFAULT_CANDIDATES
     stlsq_threshold: float = DEFAULT_STLSQ_THRESHOLD
     stlsq_max_iter: int = DEFAULT_STLSQ_MAX_ITER
+    smoothing_bins: float = 0.0
 
     def __post_init__(self) -> None:
         if self.npz_path is not None:
@@ -58,6 +59,8 @@ class FittingConfig:
             raise ValueError("stlsq_threshold must be non-negative.")
         if self.stlsq_max_iter < 1:
             raise ValueError("stlsq_max_iter must be at least 1.")
+        if self.smoothing_bins < 0.0:
+            raise ValueError("smoothing_bins must be non-negative.")
 
     @property
     def case(self) -> RadiusCase:
@@ -101,6 +104,9 @@ class FittingConfig:
 
     @property
     def cache_path(self) -> Path:
+        if self.smoothing_bins > 0.0:
+            bins_text = f"{self.smoothing_bins:g}".replace(".", "p")
+            return self.output_dir / f"{self.case_id}_fitting_bins_{bins_text}.npz"
         return self.output_dir / f"{self.case_id}_fitting.npz"
 
     @property
