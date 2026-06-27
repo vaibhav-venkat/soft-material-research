@@ -8,17 +8,31 @@ from .fitting.io_cache import load_cache, write_cache
 from .fitting.plots import write_all_plots
 from .fitting.types import DEFAULT_CANDIDATES
 
-# CANDIDATES = DEFAULT_CANDIDATES
-
-CANDIDATES =  (
-    "grad_rho",
-    "P",
-    "chiral_P_perp",
-    "force_density",
-    "grad_hexatic_order",
+CANDIDATES = DEFAULT_CANDIDATES
+DROP_FIT_CANDIDATE: tuple[str, ...] = (
+    # "grad_hexatic_order",
 )
+# CANDIDATES =  (
+#     "grad_rho",
+#     "P",
+#     "chiral_P_perp",
+#     "force_density",
+#     "grad_hexatic_order",
+# )
 
 
+def fit_candidates() -> tuple[str, ...]:
+    dropped = set(DROP_FIT_CANDIDATE)
+    unknown = dropped.difference(CANDIDATES)
+    if unknown:
+        raise ValueError(
+            "DROP_FIT_CANDIDATE contains unknown candidates: "
+            + ", ".join(sorted(unknown))
+        )
+    candidates = tuple(name for name in CANDIDATES if name not in dropped)
+    if not candidates:
+        raise ValueError("DROP_FIT_CANDIDATE removed every fitting candidate.")
+    return candidates
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -37,11 +51,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    selected_candidates = fit_candidates()
     config = FittingConfig(
         case_id=args.case,
         npz_path=args.npz_path,
         gsd_path=args.gsd_path,
-        candidate_names=CANDIDATES,
+        candidate_names=selected_candidates,
     )
 
     print(f"[fitting] Case: {config.case_id}")
@@ -50,6 +65,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[fitting] Loading fitting cache from {config.cache_path}...")
         try:
             result = FittingResult.from_cache_arrays(load_cache(config.cache_path))
+            if result.candidate_names != selected_candidates:
+                raise ValueError(
+                    "cached candidate set "
+                    f"{result.candidate_names} does not match requested "
+                    f"{selected_candidates}"
+                )
         except ValueError as exc:
             print(f"[fitting] Cache is stale: {exc}")
             print("[fitting] Recomputing and replacing stale cache...")

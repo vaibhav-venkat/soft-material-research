@@ -91,6 +91,10 @@ class FittingConfig:
         return self.output_dir / f"{self.case_id}_fitting.npz"
 
     @property
+    def gaussian_fields_cache_path(self) -> Path:
+        return self.output_dir / f"{self.case_id}_gaussian_fields.npz"
+
+    @property
     def film_continuity_cache_path(self) -> Path:
         return (
             DENSITY_ANALYSIS_DIR

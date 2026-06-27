@@ -78,6 +78,12 @@ def load_or_compute_fields(config: FittingConfig) -> FittingFields:
         f"dt={scalars.dt:.6g}."
     )
     active_arrays = load_npz_arrays(config.active_matter_path)
+    gaussian_cache = load_gaussian_field_cache(
+        config,
+        active.steps,
+        scalars.x_edges,
+        scalars.theta_edges,
+    )
 
     rho = _grid_array_from_keys(
         active_arrays,
@@ -87,22 +93,39 @@ def load_or_compute_fields(config: FittingConfig) -> FittingFields:
         ntheta=scalars.theta_centers.size,
     )
     if rho is None:
-        print(
-            "[fitting] No cached grid rho found; recomputing Gaussian density "
-            "on the film grid..."
+        rho = _cached_grid_field(
+            gaussian_cache,
+            "rho_gaussian",
+            frame_count=active.steps.size,
+            nx=scalars.x_centers.size,
+            ntheta=scalars.theta_centers.size,
         )
-        rho_values = np.ones(active.coords.shape[:2], dtype=float)
-        rho = gaussian_rho_frames(
-            active.coords,
-            active.shell_mask,
-            rho_values,
-            scalars.x_centers,
-            scalars.theta_centers,
-            scalars.lx,
-            scalars.cylinder_radius,
-            _pocket_radius(active.pocket_radius, scalars.cylinder_radius),
-        )
-        print(f"[fitting] Gaussian rho computed with shape {rho.shape}.")
+        if rho is None:
+            print(
+                "[fitting] No cached grid rho found; recomputing Gaussian density "
+                "on the film grid..."
+            )
+            rho = gaussian_rho_frames(
+                active.coords,
+                active.shell_mask,
+                np.ones(active.coords.shape[:2], dtype=float),
+                scalars.x_centers,
+                scalars.theta_centers,
+                scalars.lx,
+                scalars.cylinder_radius,
+                _pocket_radius(active.pocket_radius, scalars.cylinder_radius),
+            )
+            gaussian_cache["rho_gaussian"] = rho
+            write_gaussian_field_cache(
+                config,
+                active.steps,
+                scalars.x_edges,
+                scalars.theta_edges,
+                gaussian_cache,
+            )
+            print(f"[fitting] Gaussian rho computed with shape {rho.shape}.")
+        else:
+            print(f"[fitting] Using fitting Gaussian rho cache with shape {rho.shape}.")
     else:
         print(f"[fitting] Using cached grid rho with shape {rho.shape}.")
 
@@ -113,16 +136,37 @@ def load_or_compute_fields(config: FittingConfig) -> FittingFields:
         active.coords.shape[1],
     )
     print("[fitting] Computing Gaussian hexatic-order field on the film grid...")
-    hexatic_density = gaussian_rho_frames(
-        active.coords,
-        active.shell_mask,
-        np.ones(active.coords.shape[:2], dtype=float),
-        scalars.x_centers,
-        scalars.theta_centers,
-        scalars.lx,
-        scalars.cylinder_radius,
-        _pocket_radius(active.pocket_radius, scalars.cylinder_radius),
+    hexatic_density = _cached_grid_field(
+        gaussian_cache,
+        "hexatic_density",
+        frame_count=active.steps.size,
+        nx=scalars.x_centers.size,
+        ntheta=scalars.theta_centers.size,
     )
+    if hexatic_density is None:
+        hexatic_density = gaussian_rho_frames(
+            active.coords,
+            active.shell_mask,
+            np.ones(active.coords.shape[:2], dtype=float),
+            scalars.x_centers,
+            scalars.theta_centers,
+            scalars.lx,
+            scalars.cylinder_radius,
+            _pocket_radius(active.pocket_radius, scalars.cylinder_radius),
+        )
+        gaussian_cache["hexatic_density"] = hexatic_density
+        write_gaussian_field_cache(
+            config,
+            active.steps,
+            scalars.x_edges,
+            scalars.theta_edges,
+            gaussian_cache,
+        )
+    else:
+        print(
+            "[fitting] Using fitting Gaussian hexatic-density cache "
+            f"with shape {hexatic_density.shape}."
+        )
     hexatic_order = gaussian_weighted_scalar_frames(
         active.coords,
         active.shell_mask,
@@ -255,6 +299,79 @@ def load_or_compute_fields(config: FittingConfig) -> FittingFields:
         counts=counts,
         pocket_radius=active.pocket_radius,
     )
+
+
+def load_gaussian_field_cache(
+    config: FittingConfig,
+    steps: np.ndarray,
+    x_edges: np.ndarray,
+    theta_edges: np.ndarray,
+) -> dict[str, np.ndarray]:
+    path = config.gaussian_fields_cache_path
+    if not path.exists():
+        return {}
+    arrays = load_npz_arrays(path)
+    if not _gaussian_cache_metadata_matches(arrays, steps, x_edges, theta_edges):
+        print(f"[fitting] Ignoring stale Gaussian field cache {path}.")
+        return {}
+    print(f"[fitting] Loading Gaussian field cache from {path}.")
+    return arrays
+
+
+def write_gaussian_field_cache(
+    config: FittingConfig,
+    steps: np.ndarray,
+    x_edges: np.ndarray,
+    theta_edges: np.ndarray,
+    arrays: dict[str, np.ndarray],
+) -> None:
+    path = config.gaussian_fields_cache_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        path,
+        steps=np.asarray(steps),
+        x_edges=np.asarray(x_edges),
+        theta_edges=np.asarray(theta_edges),
+        **{
+            key: value
+            for key, value in arrays.items()
+            if key not in {"steps", "x_edges", "theta_edges"}
+        },
+    )
+    print(f"[fitting] Wrote Gaussian field cache to {path}.")
+
+
+def _gaussian_cache_metadata_matches(
+    arrays: dict[str, np.ndarray],
+    steps: np.ndarray,
+    x_edges: np.ndarray,
+    theta_edges: np.ndarray,
+) -> bool:
+    required = ("steps", "x_edges", "theta_edges")
+    if any(key not in arrays for key in required):
+        return False
+    return (
+        np.array_equal(np.asarray(arrays["steps"]), np.asarray(steps))
+        and np.array_equal(np.asarray(arrays["x_edges"]), np.asarray(x_edges))
+        and np.array_equal(np.asarray(arrays["theta_edges"]), np.asarray(theta_edges))
+    )
+
+
+def _cached_grid_field(
+    arrays: dict[str, np.ndarray],
+    name: str,
+    *,
+    frame_count: int,
+    nx: int,
+    ntheta: int,
+) -> np.ndarray | None:
+    values = arrays.get(name)
+    if values is None:
+        return None
+    values = np.asarray(values, dtype=float)
+    if values.shape != (frame_count, nx, ntheta):
+        return None
+    return values
 
 
 def gaussian_rho_frames(
