@@ -148,6 +148,13 @@ def load_or_compute_fields(config: FittingConfig) -> FittingFields:
         scalars.x_edges,
         scalars.theta_edges,
     )
+    force_density = force_density_grid_frames(
+        active.coords,
+        active.shell_mask,
+        active_arrays,
+        scalars.x_edges,
+        scalars.theta_edges,
+    )
     chirality = load_or_compute_chirality_frames(
         config,
         scalars.x_centers.size,
@@ -163,6 +170,7 @@ def load_or_compute_fields(config: FittingConfig) -> FittingFields:
         "rho": rho,
         "grad_rho": np.stack((grad_x, grad_y), axis=-1),
         "P": P,
+        "force_density": force_density,
         "chirality": chirality,
     }
     chiral_P_perp = np.stack(
@@ -177,6 +185,7 @@ def load_or_compute_fields(config: FittingConfig) -> FittingFields:
         "grad_rho": _mid(frame_fields["grad_rho"]),
         "P": _mid(frame_fields["P"]),
         "chiral_P_perp": _mid(frame_fields["chiral_P_perp"]),
+        "force_density": _mid(frame_fields["force_density"]),
     }
     print(
         "[fitting] Gradient fields ready: "
@@ -278,28 +287,72 @@ def polarization_grid_frames(
 ) -> np.ndarray:
     if "polar_mean" not in arrays or "polar_cylindrical" not in arrays:
         raise KeyError("active matter fields must include polar_mean and polar_cylindrical.")
+    return _particle_cylindrical_vector_grid_frames(
+        coords,
+        shell_mask,
+        cartesian_values=arrays["polar_mean"],
+        cylindrical_values=arrays["polar_cylindrical"],
+        x_edges=x_edges,
+        theta_edges=theta_edges,
+        field_name="polarization",
+    )
+
+
+def force_density_grid_frames(
+    coords: np.ndarray,
+    shell_mask: np.ndarray,
+    arrays: dict[str, np.ndarray],
+    x_edges: np.ndarray,
+    theta_edges: np.ndarray,
+) -> np.ndarray:
+    if "force_density" not in arrays or "force_density_cylindrical" not in arrays:
+        raise KeyError(
+            "active matter fields must include force_density and "
+            "force_density_cylindrical."
+        )
+    return _particle_cylindrical_vector_grid_frames(
+        coords,
+        shell_mask,
+        cartesian_values=arrays["force_density"],
+        cylindrical_values=arrays["force_density_cylindrical"],
+        x_edges=x_edges,
+        theta_edges=theta_edges,
+        field_name="force_density",
+    )
+
+
+def _particle_cylindrical_vector_grid_frames(
+    coords: np.ndarray,
+    shell_mask: np.ndarray,
+    *,
+    cartesian_values: np.ndarray,
+    cylindrical_values: np.ndarray,
+    x_edges: np.ndarray,
+    theta_edges: np.ndarray,
+    field_name: str,
+) -> np.ndarray:
     coords = np.asarray(coords, dtype=float)
     shell_mask = np.asarray(shell_mask, dtype=bool)
-    polar_mean = np.asarray(arrays["polar_mean"], dtype=float)
-    polar_cylindrical = np.asarray(arrays["polar_cylindrical"], dtype=float)
-    if polar_mean.shape != coords.shape or polar_cylindrical.shape != coords.shape:
-        raise ValueError("polar_mean and polar_cylindrical must match coords shape.")
+    cartesian_values = np.asarray(cartesian_values, dtype=float)
+    cylindrical_values = np.asarray(cylindrical_values, dtype=float)
+    if cartesian_values.shape != coords.shape or cylindrical_values.shape != coords.shape:
+        raise ValueError(f"{field_name} arrays must match coords shape.")
     if shell_mask.shape != coords.shape[:2]:
         raise ValueError("shell_mask must match coords frame/particle axes.")
 
     frames, _, _ = coords.shape
     nx = len(x_edges) - 1
     ntheta = len(theta_edges) - 1
-    P = np.full((frames, nx, ntheta, 2), np.nan, dtype=float)
+    field = np.full((frames, nx, ntheta, 2), np.nan, dtype=float)
     lx = float(x_edges[-1] - x_edges[0])
     for frame_idx in range(frames):
         values = np.column_stack(
             (
-                polar_mean[frame_idx, :, 0],
-                polar_cylindrical[frame_idx, :, 2],
+                cartesian_values[frame_idx, :, 0],
+                cylindrical_values[frame_idx, :, 2],
             )
         )
-        P[frame_idx] = _bin_vector_mean(
+        field[frame_idx] = _bin_vector_mean(
             coords[frame_idx],
             values,
             shell_mask[frame_idx],
@@ -307,7 +360,7 @@ def polarization_grid_frames(
             theta_edges,
             lx,
         )
-    return np.nan_to_num(P, nan=0.0)
+    return np.nan_to_num(field, nan=0.0)
 
 
 def load_or_compute_chirality_frames(

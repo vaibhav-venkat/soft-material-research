@@ -16,7 +16,7 @@ from .io_cache import (
 )
 
 
-CACHE_VERSION = 3
+CACHE_VERSION = 4
 COMPONENTS = ("x", "y")
 
 
@@ -373,7 +373,7 @@ def _coefficient_maps(
                     ]
                 )
                 target = measured[valid_transitions, ix, itheta, component]
-                coefficients = stlsq(
+                coefficients = normalized_stlsq_physical(
                     design,
                     target,
                     threshold=threshold,
@@ -402,7 +402,7 @@ def _global_coefficients(
             ]
         )
         target = measured[..., component][mask].ravel()
-        solved = stlsq(
+        solved = normalized_stlsq_physical(
             design,
             target,
             threshold=threshold,
@@ -423,6 +423,34 @@ def _fitted_from_maps(
     for name in candidate_names:
         fitted += coef_map[name][None, ...] * mid_fields[name]
     return fitted
+
+
+def normalized_stlsq_physical(
+    design: np.ndarray,
+    measured: np.ndarray,
+    *,
+    threshold: float,
+    max_iter: int,
+) -> np.ndarray:
+    normalized_design, scales = _normalize_design_columns(design)
+    normalized_coefficients = stlsq(
+        normalized_design,
+        measured,
+        threshold=threshold,
+        max_iter=max_iter,
+    )
+    return normalized_coefficients / scales
+
+
+def _normalize_design_columns(design: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    design = np.asarray(design, dtype=float)
+    finite = np.all(np.isfinite(design), axis=1)
+    scales = np.ones(design.shape[1], dtype=float)
+    if np.any(finite):
+        rms = np.sqrt(np.nanmean(design[finite] ** 2, axis=0))
+        valid_scales = np.isfinite(rms) & (rms > 0.0)
+        scales[valid_scales] = rms[valid_scales]
+    return design / scales[None, :], scales
 
 
 def _validate_candidates(

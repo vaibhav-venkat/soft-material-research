@@ -49,7 +49,7 @@ class FieldRegistry:
         return candidate_names
 
 
-DEFAULT_CANDIDATES = ("grad_rho", "P", "chiral_P_perp")
+DEFAULT_CANDIDATES = ("grad_rho", "P", "chiral_P_perp", "force_density")
 
 FIELD_REGISTRY = FieldRegistry(
     (
@@ -64,5 +64,6 @@ FIELD_REGISTRY = FieldRegistry(
             "chiral perpendicular polarization",
             at_frames=False,
         ),
+        FieldSpec("force_density", ROLE_CANDIDATE, "force density", at_frames=False),
     )
 )
