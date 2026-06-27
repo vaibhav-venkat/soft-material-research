@@ -25,6 +25,7 @@ class FittingConfig:
     gsd_path: str | Path | None = None
     chirality_path: str | Path | None = None
     hexatic_order_path: str | Path | None = None
+    neighbor_count_path: str | Path | None = None
     output_dir: str | Path = OUTPUT_DIR
     min_count: int = DEFAULT_MIN_COUNT
     candidate_names: tuple[str, ...] | None = DEFAULT_CANDIDATES
@@ -43,6 +44,12 @@ class FittingConfig:
                 self,
                 "hexatic_order_path",
                 Path(self.hexatic_order_path),
+            )
+        if self.neighbor_count_path is not None:
+            object.__setattr__(
+                self,
+                "neighbor_count_path",
+                Path(self.neighbor_count_path),
             )
         object.__setattr__(self, "output_dir", Path(self.output_dir))
         if self.candidate_names is not None:
@@ -79,6 +86,12 @@ class FittingConfig:
         if self.hexatic_order_path is not None:
             return self.hexatic_order_path
         return HEXATIC_OUTPUT_DIR / f"{self.case_id}_hexatic_order.txt"
+
+    @property
+    def neighbor_count_table_path(self) -> Path:
+        if self.neighbor_count_path is not None:
+            return self.neighbor_count_path
+        return HEXATIC_OUTPUT_DIR / f"{self.case_id}_neighbor_counts.txt"
 
     @property
     def selected_candidate_names(self) -> tuple[str, ...]:

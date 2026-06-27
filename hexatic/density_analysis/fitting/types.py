@@ -40,13 +40,13 @@ class FieldRegistry:
         candidate_names: tuple[str, ...] | None = None,
     ) -> tuple[str, ...]:
         names = candidate_names or self.names_for_role(ROLE_CANDIDATE)
-        if not candidate_names:
+        if not names:
             raise ValueError("At least one fitting candidate is required.")
-        for name in candidate_names:
+        for name in names:
             spec = self.get(name)
             if spec.role != ROLE_CANDIDATE:
                 raise ValueError(f"{name!r} is registered as {spec.role!r}, not a candidate.")
-        return candidate_names
+        return names
 
 
 DEFAULT_CANDIDATES = (
@@ -55,6 +55,9 @@ DEFAULT_CANDIDATES = (
     "chiral_P_perp",
     "force_density",
     "grad_hexatic_order",
+    "grad_D",
+    "D_P",
+    "D_chiral_P_perp",
 )
 
 FIELD_REGISTRY = FieldRegistry(
@@ -82,6 +85,25 @@ FIELD_REGISTRY = FieldRegistry(
             "grad_hexatic_order",
             ROLE_CANDIDATE,
             "hexatic-order gradient",
+            at_frames=False,
+        ),
+        FieldSpec("D", ROLE_AUXILIARY, "squared disclination charge", components=(), at_frames=True),
+        FieldSpec(
+            "grad_D",
+            ROLE_CANDIDATE,
+            "squared disclination-charge gradient",
+            at_frames=False,
+        ),
+        FieldSpec(
+            "D_P",
+            ROLE_CANDIDATE,
+            "squared disclination-charge polarization",
+            at_frames=False,
+        ),
+        FieldSpec(
+            "D_chiral_P_perp",
+            ROLE_CANDIDATE,
+            "squared disclination-charge chiral perpendicular polarization",
             at_frames=False,
         ),
     )

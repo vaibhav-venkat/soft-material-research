@@ -16,7 +16,7 @@ from .io_cache import (
 )
 
 
-CACHE_VERSION = 5
+CACHE_VERSION = 6
 COMPONENTS = ("x", "y")
 
 

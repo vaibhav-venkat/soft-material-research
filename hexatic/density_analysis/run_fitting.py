@@ -10,15 +10,7 @@ from .fitting.types import DEFAULT_CANDIDATES
 
 CANDIDATES = DEFAULT_CANDIDATES
 DROP_FIT_CANDIDATE: tuple[str, ...] = (
-    # "grad_hexatic_order",
 )
-# CANDIDATES =  (
-#     "grad_rho",
-#     "P",
-#     "chiral_P_perp",
-#     "force_density",
-#     "grad_hexatic_order",
-# )
 
 
 def fit_candidates() -> tuple[str, ...]:
