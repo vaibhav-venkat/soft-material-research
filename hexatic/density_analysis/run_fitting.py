@@ -8,8 +8,17 @@ from .fitting.io_cache import load_cache, write_cache
 from .fitting.plots import write_all_plots
 from .fitting.types import DEFAULT_CANDIDATES
 
+# CANDIDATES = DEFAULT_CANDIDATES
 
-CANDIDATES = DEFAULT_CANDIDATES
+CANDIDATES =  (
+    "grad_rho",
+    "P",
+    "chiral_P_perp",
+    "force_density",
+    "grad_hexatic_order",
+)
+
+
 
 
 def build_parser() -> argparse.ArgumentParser:

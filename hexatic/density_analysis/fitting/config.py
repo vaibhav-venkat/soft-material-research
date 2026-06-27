@@ -10,6 +10,7 @@ from .types import DEFAULT_CANDIDATES, FIELD_REGISTRY
 
 
 DENSITY_ANALYSIS_DIR = Path(__file__).resolve().parents[1]
+HEXATIC_OUTPUT_DIR = DENSITY_ANALYSIS_DIR / "hexatic_output"
 OUTPUT_DIR = DENSITY_ANALYSIS_DIR / "output" / "fitting"
 DEFAULT_CASE_ID = "radius_15D"
 DEFAULT_MIN_COUNT = 2
@@ -23,6 +24,7 @@ class FittingConfig:
     npz_path: str | Path | None = None
     gsd_path: str | Path | None = None
     chirality_path: str | Path | None = None
+    hexatic_order_path: str | Path | None = None
     output_dir: str | Path = OUTPUT_DIR
     min_count: int = DEFAULT_MIN_COUNT
     candidate_names: tuple[str, ...] | None = DEFAULT_CANDIDATES
@@ -36,6 +38,12 @@ class FittingConfig:
             object.__setattr__(self, "gsd_path", Path(self.gsd_path))
         if self.chirality_path is not None:
             object.__setattr__(self, "chirality_path", Path(self.chirality_path))
+        if self.hexatic_order_path is not None:
+            object.__setattr__(
+                self,
+                "hexatic_order_path",
+                Path(self.hexatic_order_path),
+            )
         object.__setattr__(self, "output_dir", Path(self.output_dir))
         if self.candidate_names is not None:
             object.__setattr__(self, "candidate_names", tuple(self.candidate_names))
@@ -65,6 +73,12 @@ class FittingConfig:
         if self.chirality_path is not None:
             return self.chirality_path
         return NPZ_DIR / f"{self.case_id}_chirality_fields.npz"
+
+    @property
+    def hexatic_order_table_path(self) -> Path:
+        if self.hexatic_order_path is not None:
+            return self.hexatic_order_path
+        return HEXATIC_OUTPUT_DIR / f"{self.case_id}_hexatic_order.txt"
 
     @property
     def selected_candidate_names(self) -> tuple[str, ...]:

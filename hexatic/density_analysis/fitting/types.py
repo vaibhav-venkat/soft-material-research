@@ -49,7 +49,13 @@ class FieldRegistry:
         return candidate_names
 
 
-DEFAULT_CANDIDATES = ("grad_rho", "P", "chiral_P_perp", "force_density")
+DEFAULT_CANDIDATES = (
+    "grad_rho",
+    "P",
+    "chiral_P_perp",
+    "force_density",
+    "grad_hexatic_order",
+)
 
 FIELD_REGISTRY = FieldRegistry(
     (
@@ -57,6 +63,13 @@ FIELD_REGISTRY = FieldRegistry(
         FieldSpec("rho", ROLE_AUXILIARY, "density", components=(), at_frames=True),
         FieldSpec("chirality", ROLE_AUXILIARY, "chirality", components=(), at_frames=True),
         FieldSpec("grad_rho", ROLE_CANDIDATE, "density gradient", at_frames=False),
+        FieldSpec(
+            "hexatic_order",
+            ROLE_AUXILIARY,
+            "hexatic order",
+            components=(),
+            at_frames=True,
+        ),
         FieldSpec("P", ROLE_CANDIDATE, "polarization", at_frames=False),
         FieldSpec(
             "chiral_P_perp",
@@ -65,5 +78,11 @@ FIELD_REGISTRY = FieldRegistry(
             at_frames=False,
         ),
         FieldSpec("force_density", ROLE_CANDIDATE, "force density", at_frames=False),
+        FieldSpec(
+            "grad_hexatic_order",
+            ROLE_CANDIDATE,
+            "hexatic-order gradient",
+            at_frames=False,
+        ),
     )
 )

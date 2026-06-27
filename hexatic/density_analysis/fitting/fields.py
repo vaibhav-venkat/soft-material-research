@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 from scipy import fft
@@ -90,9 +91,11 @@ def load_or_compute_fields(config: FittingConfig) -> FittingFields:
             "[fitting] No cached grid rho found; recomputing Gaussian density "
             "on the film grid..."
         )
+        rho_values = np.ones(active.coords.shape[:2], dtype=float)
         rho = gaussian_rho_frames(
             active.coords,
             active.shell_mask,
+            rho_values,
             scalars.x_centers,
             scalars.theta_centers,
             scalars.lx,
@@ -102,6 +105,36 @@ def load_or_compute_fields(config: FittingConfig) -> FittingFields:
         print(f"[fitting] Gaussian rho computed with shape {rho.shape}.")
     else:
         print(f"[fitting] Using cached grid rho with shape {rho.shape}.")
+
+    print(f"[fitting] Loading hexatic order from {config.hexatic_order_table_path}...")
+    hexatic_values = load_hexatic_order_frames(
+        config.hexatic_order_table_path,
+        active.steps,
+        active.coords.shape[1],
+    )
+    print("[fitting] Computing Gaussian hexatic-order field on the film grid...")
+    hexatic_density = gaussian_rho_frames(
+        active.coords,
+        active.shell_mask,
+        np.ones(active.coords.shape[:2], dtype=float),
+        scalars.x_centers,
+        scalars.theta_centers,
+        scalars.lx,
+        scalars.cylinder_radius,
+        _pocket_radius(active.pocket_radius, scalars.cylinder_radius),
+    )
+    hexatic_order = gaussian_weighted_scalar_frames(
+        active.coords,
+        active.shell_mask,
+        hexatic_values,
+        hexatic_density,
+        scalars.x_centers,
+        scalars.theta_centers,
+        scalars.lx,
+        scalars.cylinder_radius,
+        _pocket_radius(active.pocket_radius, scalars.cylinder_radius),
+    )
+    print(f"[fitting] Gaussian hexatic-order field computed with shape {hexatic_order.shape}.")
 
     J = _grid_array_from_keys(
         active_arrays,
@@ -141,6 +174,12 @@ def load_or_compute_fields(config: FittingConfig) -> FittingFields:
         cylinder_radius=scalars.cylinder_radius,
         theta_period=float(scalars.theta_edges[-1] - scalars.theta_edges[0]),
     )
+    grad_hexatic_x, grad_hexatic_y = fft_gradients(
+        hexatic_order,
+        lx=scalars.lx,
+        cylinder_radius=scalars.cylinder_radius,
+        theta_period=float(scalars.theta_edges[-1] - scalars.theta_edges[0]),
+    )
     P = polarization_grid_frames(
         active.coords,
         active.shell_mask,
@@ -168,7 +207,9 @@ def load_or_compute_fields(config: FittingConfig) -> FittingFields:
 
     frame_fields = {
         "rho": rho,
+        "hexatic_order": hexatic_order,
         "grad_rho": np.stack((grad_x, grad_y), axis=-1),
+        "grad_hexatic_order": np.stack((grad_hexatic_x, grad_hexatic_y), axis=-1),
         "P": P,
         "force_density": force_density,
         "chirality": chirality,
@@ -183,13 +224,15 @@ def load_or_compute_fields(config: FittingConfig) -> FittingFields:
     frame_fields["chiral_P_perp"] = chiral_P_perp
     mid_fields = {
         "grad_rho": _mid(frame_fields["grad_rho"]),
+        "grad_hexatic_order": _mid(frame_fields["grad_hexatic_order"]),
         "P": _mid(frame_fields["P"]),
         "chiral_P_perp": _mid(frame_fields["chiral_P_perp"]),
         "force_density": _mid(frame_fields["force_density"]),
     }
     print(
         "[fitting] Gradient fields ready: "
-        f"grad_rho {mid_fields['grad_rho'].shape}."
+        f"grad_rho {mid_fields['grad_rho'].shape}, "
+        f"grad_hexatic_order {mid_fields['grad_hexatic_order'].shape}."
     )
     print(
         "[fitting] Candidate fields ready: "
@@ -217,6 +260,98 @@ def load_or_compute_fields(config: FittingConfig) -> FittingFields:
 def gaussian_rho_frames(
     coords: np.ndarray,
     shell_mask: np.ndarray,
+    values: np.ndarray,
+    x_centers: np.ndarray,
+    theta_centers: np.ndarray,
+    lx: float,
+    cylinder_radius: float,
+    pocket_radius: float,
+) -> np.ndarray:
+    return gaussian_scalar_frames(
+        coords,
+        shell_mask,
+        values,
+        x_centers,
+        theta_centers,
+        lx,
+        cylinder_radius,
+        pocket_radius,
+    )
+
+
+def load_hexatic_order_frames(
+    hexatic_order_path: str | Path,
+    steps: np.ndarray,
+    n_particles: int,
+) -> np.ndarray:
+    table = np.loadtxt(hexatic_order_path, dtype=np.float64)
+    if table.ndim == 1:
+        table = table[np.newaxis, :]
+    if table.ndim != 2 or table.shape[1] < 6:
+        raise ValueError(
+            "hexatic order table must have columns "
+            "frame step particle psi_real psi_imag psi_abs."
+        )
+
+    steps = np.asarray(steps, dtype=np.int64)
+    frame_indices = table[:, 0].astype(np.int64)
+    table_steps = table[:, 1].astype(np.int64)
+    particle_indices = table[:, 2].astype(np.int64)
+    psi_abs = np.asarray(table[:, 5], dtype=np.float64)
+    if np.any(frame_indices < 0) or np.any(frame_indices >= steps.size):
+        raise ValueError("hexatic order table contains out-of-range frame indices.")
+    if np.any(particle_indices < 0) or np.any(particle_indices >= n_particles):
+        raise ValueError("hexatic order table contains out-of-range particle indices.")
+    if not np.array_equal(table_steps, steps[frame_indices]):
+        raise ValueError("hexatic order table steps do not match active-field steps.")
+
+    flat_indices = frame_indices * n_particles + particle_indices
+    if np.unique(flat_indices).size != flat_indices.size:
+        raise ValueError("hexatic order table contains duplicate frame/particle rows.")
+
+    values = np.full((steps.size, n_particles), np.nan, dtype=np.float64)
+    values[frame_indices, particle_indices] = psi_abs
+    if np.any(~np.isfinite(values)):
+        raise ValueError("hexatic order table does not cover every frame/particle pair.")
+    return values
+
+
+def gaussian_weighted_scalar_frames(
+    coords: np.ndarray,
+    shell_mask: np.ndarray,
+    values: np.ndarray,
+    density: np.ndarray,
+    x_centers: np.ndarray,
+    theta_centers: np.ndarray,
+    lx: float,
+    cylinder_radius: float,
+    pocket_radius: float,
+) -> np.ndarray:
+    numerator = gaussian_scalar_frames(
+        coords,
+        shell_mask,
+        values,
+        x_centers,
+        theta_centers,
+        lx,
+        cylinder_radius,
+        pocket_radius,
+    )
+    density = np.asarray(density, dtype=np.float64)
+    if density.shape != numerator.shape:
+        raise ValueError("density must match Gaussian scalar field shape.")
+    return np.divide(
+        numerator,
+        density,
+        out=np.zeros_like(numerator),
+        where=np.isfinite(density) & (density > 0.0),
+    )
+
+
+def gaussian_scalar_frames(
+    coords: np.ndarray,
+    shell_mask: np.ndarray,
+    values: np.ndarray,
     x_centers: np.ndarray,
     theta_centers: np.ndarray,
     lx: float,
@@ -225,30 +360,32 @@ def gaussian_rho_frames(
 ) -> np.ndarray:
     coords = np.asarray(coords, dtype=np.float64)
     shell_mask = np.asarray(shell_mask, dtype=bool)
+    values = np.asarray(values, dtype=np.float64)
     if coords.ndim != 3 or coords.shape[2] < 3:
         raise ValueError("coords must have shape (frames, particles, >=3).")
     if shell_mask.shape != coords.shape[:2]:
         raise ValueError("shell_mask must match coords frame/particle axes.")
+    if values.shape != coords.shape[:2]:
+        raise ValueError("values must match coords frame/particle axes.")
 
     grid_points = _surface_grid_points(x_centers, theta_centers, cylinder_radius)
-    rho = np.zeros((coords.shape[0], x_centers.size, theta_centers.size), dtype=float)
+    field = np.zeros((coords.shape[0], x_centers.size, theta_centers.size), dtype=float)
     for frame_idx in range(coords.shape[0]):
         print(
-            "[fitting]   Gaussian rho frame "
+            "[fitting]   Gaussian scalar frame "
             f"{frame_idx + 1}/{coords.shape[0]}..."
         )
-        mask = shell_mask[frame_idx]
+        mask = shell_mask[frame_idx] & np.isfinite(values[frame_idx])
         positions = _cylindrical_coords_to_cartesian(coords[frame_idx, mask])
-        values = np.ones(positions.shape[0], dtype=float)
         density = _density_sum(
             grid_points,
             positions,
-            values,
+            values[frame_idx, mask],
             lx,
             pocket_radius,
         )
-        rho[frame_idx] = density.reshape(x_centers.size, theta_centers.size)
-    return rho
+        field[frame_idx] = density.reshape(x_centers.size, theta_centers.size)
+    return field
 
 
 def fft_gradients(
