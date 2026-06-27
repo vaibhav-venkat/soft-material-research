@@ -6,6 +6,10 @@ from .fitting.config import DEFAULT_CASE_ID, FittingConfig
 from .fitting.fit import FittingResult, compute_fitting
 from .fitting.io_cache import load_cache, write_cache
 from .fitting.plots import write_all_plots
+from .fitting.types import DEFAULT_CANDIDATES
+
+
+CANDIDATES = DEFAULT_CANDIDATES
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -28,6 +32,7 @@ def main(argv: list[str] | None = None) -> int:
         case_id=args.case,
         npz_path=args.npz_path,
         gsd_path=args.gsd_path,
+        candidate_names=CANDIDATES,
     )
 
     print(f"[fitting] Case: {config.case_id}")

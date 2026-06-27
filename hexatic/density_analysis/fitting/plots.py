@@ -8,7 +8,7 @@ import numpy as np
 from .fit import FittingResult
 
 
-PLOT_QUANTITIES = ("normalized_residual_x", "normalized_residual_y", "c_x", "c_y")
+PLOT_QUANTITIES = ("normalized_residual_x", "normalized_residual_y")
 ROBUST_PERCENTILE = 98.0
 
 
@@ -21,7 +21,12 @@ def write_all_plots(
 ) -> list[Path]:
     destination_dir = Path(output_dir)
     written = []
-    for quantity in PLOT_QUANTITIES:
+    quantities = PLOT_QUANTITIES + tuple(
+        f"coef_{name}_{component}"
+        for name in result.candidate_names
+        for component in ("x", "y")
+    )
+    for quantity in quantities:
         print(f"[fitting] Writing {quantity} plot...")
         written.append(
             write_quantity_plot(
@@ -116,11 +121,20 @@ def _quantity_values(result: FittingResult, quantity: str) -> np.ndarray:
         return _normalized_residual(result.residual_x, result.J[..., 0], result.mask)
     if quantity == "normalized_residual_y":
         return _normalized_residual(result.residual_y, result.J[..., 1], result.mask)
-    if quantity == "c_x":
-        return result.c_x
-    if quantity == "c_y":
-        return result.c_y
+    if quantity.startswith("coef_"):
+        return _coefficient_values(result, quantity)
     raise ValueError(f"Unsupported fitting quantity: {quantity}")
+
+
+def _coefficient_values(result: FittingResult, quantity: str) -> np.ndarray:
+    suffix = quantity.removeprefix("coef_")
+    for component_idx, component in enumerate(("x", "y")):
+        marker = f"_{component}"
+        if suffix.endswith(marker):
+            candidate = suffix[: -len(marker)]
+            if candidate in result.coef_map:
+                return result.coef_map[candidate][..., component_idx]
+    raise ValueError(f"Unsupported coefficient quantity: {quantity}")
 
 
 def _normalized_residual(

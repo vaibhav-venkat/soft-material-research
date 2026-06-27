@@ -8,9 +8,16 @@ from scipy import linalg
 
 from .config import FittingConfig
 from .fields import load_or_compute_fields
+from .io_cache import (
+    flatten_array_dict,
+    flatten_float_dict,
+    reconstruct_array_dict,
+    reconstruct_float_dict,
+)
 
 
-CACHE_VERSION = 2
+CACHE_VERSION = 3
+COMPONENTS = ("x", "y")
 
 
 @dataclass(frozen=True)
@@ -23,31 +30,79 @@ class FittingResult:
     x_centers: np.ndarray
     theta_edges: np.ndarray
     theta_centers: np.ndarray
-    rho: np.ndarray
     J: np.ndarray
-    grad_x: np.ndarray
-    grad_y: np.ndarray
-    grad_x_mid: np.ndarray
-    grad_y_mid: np.ndarray
-    c_x: np.ndarray
-    c_y: np.ndarray
-    c_x_global: float
-    c_y_global: float
-    fitted_x: np.ndarray
-    fitted_y: np.ndarray
-    residual_x: np.ndarray
-    residual_y: np.ndarray
+    frame_fields: dict[str, np.ndarray]
+    mid_fields: dict[str, np.ndarray]
+    candidate_names: tuple[str, ...]
+    coef_map: dict[str, np.ndarray]
+    coef_global: dict[str, float]
+    fitted: np.ndarray
+    residual: np.ndarray
     mask: np.ndarray
     counts: np.ndarray | None
     residual_x_mean_abs: float
     residual_y_mean_abs: float
     residual_x_median_abs: float
     residual_y_median_abs: float
+    stlsq_threshold: float
+    stlsq_max_iter: int
     particle_diameter: float | None = None
     pocket_radius: float | None = None
 
+    @property
+    def rho(self) -> np.ndarray:
+        return self.frame_fields["rho"]
+
+    @property
+    def grad_x(self) -> np.ndarray:
+        return self.frame_fields["grad_rho"][..., 0]
+
+    @property
+    def grad_y(self) -> np.ndarray:
+        return self.frame_fields["grad_rho"][..., 1]
+
+    @property
+    def grad_x_mid(self) -> np.ndarray:
+        return self.mid_fields["grad_rho"][..., 0]
+
+    @property
+    def grad_y_mid(self) -> np.ndarray:
+        return self.mid_fields["grad_rho"][..., 1]
+
+    @property
+    def residual_x(self) -> np.ndarray:
+        return self.residual[..., 0]
+
+    @property
+    def residual_y(self) -> np.ndarray:
+        return self.residual[..., 1]
+
+    @property
+    def fitted_x(self) -> np.ndarray:
+        return self.fitted[..., 0]
+
+    @property
+    def fitted_y(self) -> np.ndarray:
+        return self.fitted[..., 1]
+
+    @property
+    def c_x(self) -> np.ndarray:
+        return self.coef_map["grad_rho"][..., 0]
+
+    @property
+    def c_y(self) -> np.ndarray:
+        return self.coef_map["grad_rho"][..., 1]
+
+    @property
+    def c_x_global(self) -> float:
+        return self.coef_global.get("grad_rho_x", float("nan"))
+
+    @property
+    def c_y_global(self) -> float:
+        return self.coef_global.get("grad_rho_y", float("nan"))
+
     def as_cache_arrays(self) -> dict[str, Any]:
-        return {
+        arrays: dict[str, Any] = {
             "cache_version": CACHE_VERSION,
             "transition_steps": self.transition_steps,
             "dt": self.dt,
@@ -57,20 +112,10 @@ class FittingResult:
             "x_centers": self.x_centers,
             "theta_edges": self.theta_edges,
             "theta_centers": self.theta_centers,
-            "rho": self.rho,
             "J": self.J,
-            "grad_x": self.grad_x,
-            "grad_y": self.grad_y,
-            "grad_x_mid": self.grad_x_mid,
-            "grad_y_mid": self.grad_y_mid,
-            "c_x": self.c_x,
-            "c_y": self.c_y,
-            "c_x_global": self.c_x_global,
-            "c_y_global": self.c_y_global,
-            "fitted_x": self.fitted_x,
-            "fitted_y": self.fitted_y,
-            "residual_x": self.residual_x,
-            "residual_y": self.residual_y,
+            "candidate_names": np.asarray(self.candidate_names),
+            "fitted": self.fitted,
+            "residual": self.residual,
             "mask": self.mask,
             "counts": np.asarray([])
             if self.counts is None
@@ -79,33 +124,50 @@ class FittingResult:
             "residual_y_mean_abs": self.residual_y_mean_abs,
             "residual_x_median_abs": self.residual_x_median_abs,
             "residual_y_median_abs": self.residual_y_median_abs,
+            "stlsq_threshold": self.stlsq_threshold,
+            "stlsq_max_iter": self.stlsq_max_iter,
             "particle_diameter": np.nan
             if self.particle_diameter is None
             else self.particle_diameter,
             "pocket_radius": np.nan if self.pocket_radius is None else self.pocket_radius,
         }
+        arrays.update(flatten_array_dict(self.frame_fields, "frame_fields"))
+        arrays.update(flatten_array_dict(self.mid_fields, "mid_fields"))
+        arrays.update(flatten_array_dict(self.coef_map, "coef_map"))
+        arrays.update(flatten_float_dict(self.coef_global, "coef_global"))
+        return arrays
 
     @classmethod
-    def from_cache_arrays(cls, arrays: dict[str, Any]) -> "FittingResult":
+    def from_cache_arrays(cls, arrays: dict[str, Any]) -> FittingResult:
         kwargs = dict(arrays)
         cache_version = int(np.asarray(kwargs.pop("cache_version", 0)))
         if cache_version < CACHE_VERSION:
             raise ValueError(
                 "Cached fitting result is from an older coefficient layout; recompute it."
             )
+        frame_fields = reconstruct_array_dict(kwargs, "frame_fields")
+        mid_fields = reconstruct_array_dict(kwargs, "mid_fields")
+        coef_map = reconstruct_array_dict(kwargs, "coef_map")
+        coef_global = reconstruct_float_dict(kwargs, "coef_global")
+        for prefix in ("frame_fields", "mid_fields", "coef_map", "coef_global"):
+            for key in tuple(kwargs):
+                if key.startswith(f"{prefix}__"):
+                    kwargs.pop(key)
+
         for key in (
             "dt",
             "cylinder_radius",
             "lx",
-            "c_x_global",
-            "c_y_global",
             "residual_x_mean_abs",
             "residual_y_mean_abs",
             "residual_x_median_abs",
             "residual_y_median_abs",
+            "stlsq_threshold",
         ):
             if key in kwargs:
                 kwargs[key] = float(np.asarray(kwargs[key]))
+        if "stlsq_max_iter" in kwargs:
+            kwargs["stlsq_max_iter"] = int(np.asarray(kwargs["stlsq_max_iter"]))
         for key in ("particle_diameter", "pocket_radius"):
             if key in kwargs:
                 value = float(np.asarray(kwargs[key]))
@@ -114,7 +176,14 @@ class FittingResult:
             kwargs["counts"] = None
         if "mask" in kwargs:
             kwargs["mask"] = np.asarray(kwargs["mask"], dtype=bool)
-        return cls(**kwargs)
+        kwargs["candidate_names"] = tuple(str(name) for name in kwargs["candidate_names"])
+        return cls(
+            **kwargs,
+            frame_fields=frame_fields,
+            mid_fields=mid_fields,
+            coef_map=coef_map,
+            coef_global=coef_global,
+        )
 
     def summary(self) -> str:
         residual_stats = _normalized_residual_summary(
@@ -123,9 +192,11 @@ class FittingResult:
             self.J,
             self.mask,
         )
+        coef_text = ", ".join(
+            f"{name}={self.coef_global[name]:.6g}" for name in sorted(self.coef_global)
+        )
         return (
-            f"c_x_global={self.c_x_global:.6g}, "
-            f"c_y_global={self.c_y_global:.6g}, "
+            f"coef_global[{coef_text}], "
             f"mean_abs_J_x={residual_stats['mean_abs_J_x']:.6g}, "
             f"mean_abs_J_y={residual_stats['mean_abs_J_y']:.6g}, "
             f"normalized_residual_x mean={residual_stats['residual_x_mean']:.6g}, "
@@ -140,32 +211,56 @@ class FittingResult:
 def compute_fitting(config: FittingConfig) -> FittingResult:
     print(f"[fitting] Starting fit for case {config.case_id!r}.")
     fields = load_or_compute_fields(config)
+    candidate_names = config.selected_candidate_names
+    _validate_candidates(fields.mid_fields, candidate_names, fields.J.shape)
+    print(f"[fitting] Candidate set: {', '.join(candidate_names)}.")
     print(f"[fitting] Building fit mask with min_count={config.min_count}...")
-    mask = _fit_mask(fields.counts, fields.grad_x_mid.shape, config.min_count)
+    mask = _fit_mask(fields.counts, fields.J.shape[:3], config.min_count)
     print(f"[fitting] Fit mask keeps {np.count_nonzero(mask)}/{mask.size} bins.")
-    print("[fitting] Solving local least-squares coefficient maps over transitions...")
-    c_x = _coefficient_map(fields.grad_x_mid, fields.J[..., 0], mask)
-    c_y = _coefficient_map(fields.grad_y_mid, fields.J[..., 1], mask)
+
     print(
-        "[fitting] Local coefficient maps ready: "
-        f"c_x finite {np.count_nonzero(np.isfinite(c_x))}/{c_x.size}, "
-        f"c_y finite {np.count_nonzero(np.isfinite(c_y))}/{c_y.size}."
+        "[fitting] Solving local STLSQ coefficient maps over transitions "
+        f"(threshold={config.stlsq_threshold:.6g}, max_iter={config.stlsq_max_iter})..."
     )
-    print("[fitting] Solving global least-squares coefficients...")
-    c_x_global = _coefficient(fields.grad_x_mid[mask], fields.J[..., 0][mask])
-    c_y_global = _coefficient(fields.grad_y_mid[mask], fields.J[..., 1][mask])
+    coef_map = _coefficient_maps(
+        fields.mid_fields,
+        fields.J,
+        mask,
+        candidate_names,
+        threshold=config.stlsq_threshold,
+        max_iter=config.stlsq_max_iter,
+    )
+    finite_counts = ", ".join(
+        f"{name} {np.count_nonzero(np.isfinite(coef_map[name]))}/{coef_map[name].size}"
+        for name in candidate_names
+    )
+    print(f"[fitting] Local coefficient maps ready: {finite_counts}.")
+
+    print("[fitting] Solving global STLSQ coefficients...")
+    coef_global = _global_coefficients(
+        fields.mid_fields,
+        fields.J,
+        mask,
+        candidate_names,
+        threshold=config.stlsq_threshold,
+        max_iter=config.stlsq_max_iter,
+    )
     print(
         "[fitting] Global coefficients: "
-        f"c_x={c_x_global:.6g}, c_y={c_y_global:.6g}."
+        + ", ".join(f"{name}={value:.6g}" for name, value in coef_global.items())
+        + "."
     )
 
     print("[fitting] Computing fitted fields and residual diagnostics...")
-    fitted_x = c_x[None, :, :] * fields.grad_x_mid
-    fitted_y = c_y[None, :, :] * fields.grad_y_mid
-    residual_x = fields.J[..., 0] - fitted_x
-    residual_y = fields.J[..., 1] - fitted_y
-    diagnostics = _residual_diagnostics(residual_x, residual_y, mask)
-    residual_stats = _normalized_residual_summary(residual_x, residual_y, fields.J, mask)
+    fitted = _fitted_from_maps(fields.mid_fields, coef_map, candidate_names)
+    residual = fields.J - fitted
+    diagnostics = _residual_diagnostics(residual[..., 0], residual[..., 1], mask)
+    residual_stats = _normalized_residual_summary(
+        residual[..., 0],
+        residual[..., 1],
+        fields.J,
+        mask,
+    )
     print(
         "[fitting] Residual summary: "
         f"mean_abs_J_x={residual_stats['mean_abs_J_x']:.6g}, "
@@ -187,64 +282,162 @@ def compute_fitting(config: FittingConfig) -> FittingResult:
         x_centers=fields.x_centers,
         theta_edges=fields.theta_edges,
         theta_centers=fields.theta_centers,
-        rho=fields.rho,
         J=fields.J,
-        grad_x=fields.grad_x,
-        grad_y=fields.grad_y,
-        grad_x_mid=fields.grad_x_mid,
-        grad_y_mid=fields.grad_y_mid,
-        c_x=c_x,
-        c_y=c_y,
-        c_x_global=c_x_global,
-        c_y_global=c_y_global,
-        fitted_x=fitted_x,
-        fitted_y=fitted_y,
-        residual_x=residual_x,
-        residual_y=residual_y,
+        frame_fields=fields.frame_fields,
+        mid_fields=fields.mid_fields,
+        candidate_names=candidate_names,
+        coef_map=coef_map,
+        coef_global=coef_global,
+        fitted=fitted,
+        residual=residual,
         mask=mask,
         counts=fields.counts,
         residual_x_mean_abs=diagnostics["residual_x_mean_abs"],
         residual_y_mean_abs=diagnostics["residual_y_mean_abs"],
         residual_x_median_abs=diagnostics["residual_x_median_abs"],
         residual_y_median_abs=diagnostics["residual_y_median_abs"],
+        stlsq_threshold=config.stlsq_threshold,
+        stlsq_max_iter=config.stlsq_max_iter,
         pocket_radius=fields.pocket_radius,
     )
 
 
-def _coefficient_map(
-    gradient: np.ndarray,
+def stlsq(
+    design: np.ndarray,
+    measured: np.ndarray,
+    *,
+    threshold: float,
+    max_iter: int,
+) -> np.ndarray:
+    design = np.asarray(design, dtype=float)
+    measured = np.asarray(measured, dtype=float)
+    if design.ndim != 2:
+        raise ValueError("design must be two-dimensional.")
+    if measured.ndim != 1 or measured.shape[0] != design.shape[0]:
+        raise ValueError("measured must be one-dimensional and match design rows.")
+
+    finite = np.isfinite(measured) & np.all(np.isfinite(design), axis=1)
+    design = design[finite]
+    measured = measured[finite]
+    n_features = design.shape[1]
+    coefficients = np.zeros(n_features, dtype=float)
+    if design.shape[0] == 0 or n_features == 0:
+        return coefficients
+
+    active = np.any(np.abs(design) > 0.0, axis=0)
+    if not np.any(active):
+        return coefficients
+
+    for _ in range(max_iter):
+        active_indices = np.flatnonzero(active)
+        solved, *_ = linalg.lstsq(design[:, active_indices], measured)
+        next_coefficients = np.zeros(n_features, dtype=float)
+        next_coefficients[active_indices] = solved
+        next_active = np.abs(next_coefficients) >= threshold
+        next_active &= np.any(np.abs(design) > 0.0, axis=0)
+        if np.array_equal(next_active, active):
+            coefficients = next_coefficients
+            break
+        coefficients = next_coefficients
+        active = next_active
+        if not np.any(active):
+            coefficients[:] = 0.0
+            break
+    return coefficients
+
+
+def _coefficient_maps(
+    mid_fields: dict[str, np.ndarray],
     measured: np.ndarray,
     mask: np.ndarray,
+    candidate_names: tuple[str, ...],
+    *,
+    threshold: float,
+    max_iter: int,
+) -> dict[str, np.ndarray]:
+    _, nx, ntheta, _ = measured.shape
+    maps = {
+        name: np.full((nx, ntheta, 2), np.nan, dtype=float)
+        for name in candidate_names
+    }
+    for ix in range(nx):
+        for itheta in range(ntheta):
+            valid_transitions = mask[:, ix, itheta]
+            if not np.any(valid_transitions):
+                continue
+            for component in range(2):
+                design = np.column_stack(
+                    [
+                        mid_fields[name][valid_transitions, ix, itheta, component]
+                        for name in candidate_names
+                    ]
+                )
+                target = measured[valid_transitions, ix, itheta, component]
+                coefficients = stlsq(
+                    design,
+                    target,
+                    threshold=threshold,
+                    max_iter=max_iter,
+                )
+                for candidate_idx, name in enumerate(candidate_names):
+                    maps[name][ix, itheta, component] = coefficients[candidate_idx]
+    return maps
+
+
+def _global_coefficients(
+    mid_fields: dict[str, np.ndarray],
+    measured: np.ndarray,
+    mask: np.ndarray,
+    candidate_names: tuple[str, ...],
+    *,
+    threshold: float,
+    max_iter: int,
+) -> dict[str, float]:
+    coefficients: dict[str, float] = {}
+    for component, component_name in enumerate(COMPONENTS):
+        design = np.column_stack(
+            [
+                mid_fields[name][..., component][mask].ravel()
+                for name in candidate_names
+            ]
+        )
+        target = measured[..., component][mask].ravel()
+        solved = stlsq(
+            design,
+            target,
+            threshold=threshold,
+            max_iter=max_iter,
+        )
+        for candidate_idx, name in enumerate(candidate_names):
+            coefficients[f"{name}_{component_name}"] = float(solved[candidate_idx])
+    return coefficients
+
+
+def _fitted_from_maps(
+    mid_fields: dict[str, np.ndarray],
+    coef_map: dict[str, np.ndarray],
+    candidate_names: tuple[str, ...],
 ) -> np.ndarray:
-    gradient = np.asarray(gradient, dtype=float)
-    measured = np.asarray(measured, dtype=float)
-    mask = np.asarray(mask, dtype=bool)
-    if gradient.shape != measured.shape or gradient.shape != mask.shape:
-        raise ValueError("gradient, measured, and mask must have matching shapes.")
-
-    finite = mask & np.isfinite(gradient) & np.isfinite(measured)
-    weighted_gradient = np.where(finite, gradient, 0.0)
-    weighted_measured = np.where(finite, measured, 0.0)
-    numerator = np.sum(weighted_gradient * weighted_measured, axis=0)
-    denominator = np.sum(weighted_gradient * weighted_gradient, axis=0)
-    return np.divide(
-        numerator,
-        denominator,
-        out=np.full_like(numerator, np.nan, dtype=float),
-        where=denominator > 0.0,
-    )
+    first = mid_fields[candidate_names[0]]
+    fitted = np.zeros_like(first, dtype=float)
+    for name in candidate_names:
+        fitted += coef_map[name][None, ...] * mid_fields[name]
+    return fitted
 
 
-def _coefficient(gradient: np.ndarray, measured: np.ndarray) -> float:
-    gradient = np.asarray(gradient, dtype=float).ravel()
-    measured = np.asarray(measured, dtype=float).ravel()
-    finite = np.isfinite(gradient) & np.isfinite(measured)
-    gradient = gradient[finite]
-    measured = measured[finite]
-    if gradient.size == 0 or np.allclose(gradient, 0.0):
-        return float("nan")
-    coefficient, *_ = linalg.lstsq(gradient[:, None], measured)
-    return float(coefficient[0])
+def _validate_candidates(
+    mid_fields: dict[str, np.ndarray],
+    candidate_names: tuple[str, ...],
+    measured_shape: tuple[int, ...],
+) -> None:
+    for name in candidate_names:
+        if name not in mid_fields:
+            raise KeyError(f"Candidate field {name!r} was not computed.")
+        if mid_fields[name].shape != measured_shape:
+            raise ValueError(
+                f"Candidate {name!r} shape {mid_fields[name].shape} "
+                f"does not match measured shape {measured_shape}."
+            )
 
 
 def _nan_stat(values: np.ndarray, function) -> float:

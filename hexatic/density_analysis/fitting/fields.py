@@ -6,6 +6,8 @@ import numpy as np
 from scipy import fft
 
 from hexatic.active_matter_cylinder.math_utils import _density_sum
+from hexatic.chirality.compute import compute_chirality_fields
+from hexatic.chirality.config import ChiralityConfig
 
 from ..film_continuity.config import FilmContinuityConfig, scalars_from_active_fields
 from ..film_continuity.continuity import FilmContinuityResult, compute_film_continuity
@@ -40,12 +42,9 @@ class FittingFields:
     x_centers: np.ndarray
     theta_edges: np.ndarray
     theta_centers: np.ndarray
-    rho: np.ndarray
     J: np.ndarray
-    grad_x: np.ndarray
-    grad_y: np.ndarray
-    grad_x_mid: np.ndarray
-    grad_y_mid: np.ndarray
+    frame_fields: dict[str, np.ndarray]
+    mid_fields: dict[str, np.ndarray]
     counts: np.ndarray | None
     pocket_radius: float | None = None
 
@@ -142,11 +141,51 @@ def load_or_compute_fields(config: FittingConfig) -> FittingFields:
         cylinder_radius=scalars.cylinder_radius,
         theta_period=float(scalars.theta_edges[-1] - scalars.theta_edges[0]),
     )
-    grad_x_mid = 0.5 * (grad_x[1:] + grad_x[:-1])
-    grad_y_mid = 0.5 * (grad_y[1:] + grad_y[:-1])
+    P = polarization_grid_frames(
+        active.coords,
+        active.shell_mask,
+        active_arrays,
+        scalars.x_edges,
+        scalars.theta_edges,
+    )
+    chirality = load_or_compute_chirality_frames(
+        config,
+        scalars.x_centers.size,
+        scalars.theta_centers.size,
+    )
+    _validate_frame_field_steps(
+        "chirality",
+        chirality.shape[0],
+        active.steps.size,
+    )
+
+    frame_fields = {
+        "rho": rho,
+        "grad_rho": np.stack((grad_x, grad_y), axis=-1),
+        "P": P,
+        "chirality": chirality,
+    }
+    chiral_P_perp = np.stack(
+        (
+            chirality * (-P[..., 1]),
+            chirality * P[..., 0],
+        ),
+        axis=-1,
+    )
+    frame_fields["chiral_P_perp"] = chiral_P_perp
+    mid_fields = {
+        "grad_rho": _mid(frame_fields["grad_rho"]),
+        "P": _mid(frame_fields["P"]),
+        "chiral_P_perp": _mid(frame_fields["chiral_P_perp"]),
+    }
     print(
         "[fitting] Gradient fields ready: "
-        f"grad_x_mid {grad_x_mid.shape}, grad_y_mid {grad_y_mid.shape}."
+        f"grad_rho {mid_fields['grad_rho'].shape}."
+    )
+    print(
+        "[fitting] Candidate fields ready: "
+        + ", ".join(f"{name} {field.shape}" for name, field in mid_fields.items())
+        + "."
     )
 
     return FittingFields(
@@ -158,12 +197,9 @@ def load_or_compute_fields(config: FittingConfig) -> FittingFields:
         x_centers=scalars.x_centers,
         theta_edges=scalars.theta_edges,
         theta_centers=scalars.theta_centers,
-        rho=rho,
         J=J,
-        grad_x=grad_x,
-        grad_y=grad_y,
-        grad_x_mid=grad_x_mid,
-        grad_y_mid=grad_y_mid,
+        frame_fields=frame_fields,
+        mid_fields=mid_fields,
         counts=counts,
         pocket_radius=active.pocket_radius,
     )
@@ -231,6 +267,152 @@ def fft_gradients(
     grad_x = fft.ifft2(1j * kx[None, :, None] * rho_hat, axes=(1, 2)).real
     grad_y = fft.ifft2(1j * ky[None, None, :] * rho_hat, axes=(1, 2)).real
     return grad_x, grad_y
+
+
+def polarization_grid_frames(
+    coords: np.ndarray,
+    shell_mask: np.ndarray,
+    arrays: dict[str, np.ndarray],
+    x_edges: np.ndarray,
+    theta_edges: np.ndarray,
+) -> np.ndarray:
+    if "polar_mean" not in arrays or "polar_cylindrical" not in arrays:
+        raise KeyError("active matter fields must include polar_mean and polar_cylindrical.")
+    coords = np.asarray(coords, dtype=float)
+    shell_mask = np.asarray(shell_mask, dtype=bool)
+    polar_mean = np.asarray(arrays["polar_mean"], dtype=float)
+    polar_cylindrical = np.asarray(arrays["polar_cylindrical"], dtype=float)
+    if polar_mean.shape != coords.shape or polar_cylindrical.shape != coords.shape:
+        raise ValueError("polar_mean and polar_cylindrical must match coords shape.")
+    if shell_mask.shape != coords.shape[:2]:
+        raise ValueError("shell_mask must match coords frame/particle axes.")
+
+    frames, _, _ = coords.shape
+    nx = len(x_edges) - 1
+    ntheta = len(theta_edges) - 1
+    P = np.full((frames, nx, ntheta, 2), np.nan, dtype=float)
+    lx = float(x_edges[-1] - x_edges[0])
+    for frame_idx in range(frames):
+        values = np.column_stack(
+            (
+                polar_mean[frame_idx, :, 0],
+                polar_cylindrical[frame_idx, :, 1],
+            )
+        )
+        P[frame_idx] = _bin_vector_mean(
+            coords[frame_idx],
+            values,
+            shell_mask[frame_idx],
+            x_edges,
+            theta_edges,
+            lx,
+        )
+    return np.nan_to_num(P, nan=0.0)
+
+
+def load_or_compute_chirality_frames(
+    config: FittingConfig,
+    nx: int,
+    ntheta: int,
+    metric_name: str = "instant_helix_relative",
+) -> np.ndarray:
+    if config.chirality_fields_path.exists():
+        print(f"[fitting] Loading chirality fields from {config.chirality_fields_path}...")
+        arrays = load_npz_arrays(config.chirality_fields_path)
+        return _chirality_from_arrays(arrays, metric_name, nx, ntheta)
+
+    print(
+        "[fitting] Chirality fields cache missing; recomputing "
+        f"{metric_name!r} on the fitting grid..."
+    )
+    fields = compute_chirality_fields(
+        config.trajectory_path,
+        config=ChiralityConfig(n_x_bins=nx, n_theta_bins=ntheta),
+    )
+    metric_index = {name: idx for idx, name in enumerate(fields.metric_names)}
+    if metric_name not in metric_index:
+        raise KeyError(f"Computed chirality fields do not include {metric_name!r}.")
+    return np.nan_to_num(
+        np.asarray(fields.xtheta_values[metric_index[metric_name]], dtype=float),
+        nan=0.0,
+    )
+
+
+def _chirality_from_arrays(
+    arrays: dict[str, np.ndarray],
+    metric_name: str,
+    nx: int,
+    ntheta: int,
+) -> np.ndarray:
+    if "xtheta_values" not in arrays or "metric_names" not in arrays:
+        raise KeyError("chirality npz must include xtheta_values and metric_names.")
+    metric_names = tuple(str(name) for name in arrays["metric_names"])
+    if metric_name not in metric_names:
+        raise KeyError(f"chirality npz does not include metric {metric_name!r}.")
+    values = np.asarray(arrays["xtheta_values"], dtype=float)
+    field = values[metric_names.index(metric_name)]
+    if field.ndim != 3 or field.shape[1:] != (nx, ntheta):
+        raise ValueError(
+            f"chirality field shape {field.shape} does not match grid (*, {nx}, {ntheta})."
+        )
+    return np.nan_to_num(field, nan=0.0)
+
+
+def _bin_vector_mean(
+    coords: np.ndarray,
+    values: np.ndarray,
+    mask: np.ndarray,
+    x_edges: np.ndarray,
+    theta_edges: np.ndarray,
+    lx: float,
+) -> np.ndarray:
+    nx = len(x_edges) - 1
+    ntheta = len(theta_edges) - 1
+    result = np.zeros((nx, ntheta, 2), dtype=float)
+    counts = np.zeros((nx, ntheta), dtype=np.int64)
+    finite = (
+        mask
+        & np.isfinite(coords[:, 0])
+        & np.isfinite(coords[:, 1])
+        & np.all(np.isfinite(values), axis=1)
+    )
+    if not np.any(finite):
+        return result
+
+    x0 = float(x_edges[0])
+    x_values = ((coords[finite, 0] - x0) % lx) + x0
+    x_idx = np.searchsorted(x_edges, x_values, side="right") - 1
+    x_idx = np.clip(x_idx, 0, nx - 1)
+    theta_period = float(theta_edges[-1] - theta_edges[0])
+    theta0 = float(theta_edges[0])
+    theta_values = ((coords[finite, 1] - theta0) % theta_period) + theta0
+    theta_idx = np.searchsorted(theta_edges, theta_values, side="right") - 1
+    theta_idx = np.clip(theta_idx, 0, ntheta - 1)
+
+    np.add.at(counts, (x_idx, theta_idx), 1)
+    for component in range(2):
+        np.add.at(result[..., component], (x_idx, theta_idx), values[finite, component])
+        result[..., component] = np.divide(
+            result[..., component],
+            counts,
+            out=np.zeros((nx, ntheta), dtype=float),
+            where=counts > 0,
+        )
+    return result
+
+
+def _mid(values: np.ndarray) -> np.ndarray:
+    values = np.asarray(values, dtype=float)
+    if values.shape[0] < 2:
+        raise ValueError("At least two frames are required for midpoint fields.")
+    return 0.5 * (values[1:] + values[:-1])
+
+
+def _validate_frame_field_steps(name: str, frame_count: int, expected: int) -> None:
+    if frame_count != expected:
+        raise ValueError(
+            f"{name} has {frame_count} frames, expected {expected} to match active fields."
+        )
 
 
 def _load_or_compute_film_result(config: FittingConfig) -> FilmContinuityResult:
