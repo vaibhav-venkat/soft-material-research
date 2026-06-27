@@ -296,7 +296,7 @@ def polarization_grid_frames(
         values = np.column_stack(
             (
                 polar_mean[frame_idx, :, 0],
-                polar_cylindrical[frame_idx, :, 1],
+                polar_cylindrical[frame_idx, :, 2],
             )
         )
         P[frame_idx] = _bin_vector_mean(
