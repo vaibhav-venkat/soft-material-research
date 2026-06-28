@@ -48,7 +48,7 @@ def _compute_velocities_numpy(
 
 if njit is not None:
 
-    @njit(cache=True)
+    @njit(cache=False)
     def _compute_velocities_numba(
         coords: np.ndarray,
         lx: float,

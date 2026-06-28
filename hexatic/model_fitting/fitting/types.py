@@ -53,18 +53,6 @@ class FieldRegistry:
         return names
 
 
-DEFAULT_CANDIDATES = (
-    "P",
-    "chiral_P_perp",
-    "force_density",
-    "D_force_density",
-    "grad_rho",
-    "grad_hexatic_order",
-    "grad_D",
-    "D_P",
-    "D_chiral_P_perp",
-)
-
 FIELD_REGISTRY = FieldRegistry(
     (
         FieldSpec("J", ROLE_TARGET, "film flux", at_frames=False),

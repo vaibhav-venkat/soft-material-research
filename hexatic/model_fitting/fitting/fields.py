@@ -51,14 +51,8 @@ class FittingFields:
 
 
 def load_or_compute_fields(config: FittingConfig) -> FittingFields:
-    print(f"[fitting] Loading active fields from {config.active_matter_path}...")
+    print("[fitting] Loading active fields...")
     active = load_active_matter_fields(config.active_matter_path)
-    print(
-        "[fitting] Active fields loaded: "
-        f"{active.steps.size} frames, "
-        f"{active.coords.shape[1]} particles, "
-        f"grid {active.x_edges.size - 1} x {active.theta_edges.size - 1}."
-    )
     scalars = scalars_from_active_fields(
         FilmContinuityConfig(
             case_id=config.case_id,
@@ -71,12 +65,7 @@ def load_or_compute_fields(config: FittingConfig) -> FittingFields:
         theta_edges=active.theta_edges,
         pocket_radius=active.pocket_radius,
     )
-    print(
-        "[fitting] Scalars resolved: "
-        f"R={scalars.cylinder_radius:.6g}, "
-        f"Lx={scalars.lx:.6g}, "
-        f"dt={scalars.dt:.6g}."
-    )
+
     active_arrays = load_npz_arrays(config.active_matter_path)
     gaussian_cache = load_gaussian_field_cache(
         config,
@@ -99,23 +88,11 @@ def load_or_compute_fields(config: FittingConfig) -> FittingFields:
         nx=scalars.x_centers.size,
         ntheta=scalars.theta_centers.size,
     )
-    if cached_rho is None and gaussian_density is None:
-        print(
-            "[fitting] No cached grid rho found; recomputing Gaussian density "
-            "on the film grid..."
-        )
-    elif cached_rho is None:
-        print(f"[fitting] Using fitting Gaussian rho cache with shape {gaussian_density.shape}.")
-    else:
-        print(f"[fitting] Using cached grid rho with shape {cached_rho.shape}.")
-
-    print(f"[fitting] Loading hexatic order from {config.hexatic_order_table_path}...")
     hexatic_values = load_hexatic_order_frames(
         config.hexatic_order_table_path,
         active.steps,
         active.coords.shape[1],
     )
-    print(f"[fitting] Loading neighbor counts from {config.neighbor_count_table_path}...")
     neighbor_counts = load_neighbor_count_frames(
         config.neighbor_count_table_path,
         active.steps,
@@ -145,11 +122,7 @@ def load_or_compute_fields(config: FittingConfig) -> FittingFields:
     if D_numerator is None:
         missing_gaussian_inputs["D_numerator"] = D_values
     if missing_gaussian_inputs:
-        print(
-            "[fitting] Computing Gaussian scalar fields on the film grid: "
-            + ", ".join(missing_gaussian_inputs)
-            + "."
-        )
+        print("[fitting] Computing Gaussian fields on grid...")
         computed_gaussian = gaussian_scalar_field_frames(
             active.coords,
             active.shell_mask,
@@ -189,17 +162,13 @@ def load_or_compute_fields(config: FittingConfig) -> FittingFields:
             scalars.theta_edges,
             gaussian_cache,
         )
-    else:
-        print("[fitting] Using cached Gaussian scalar fields.")
+
     if gaussian_density is None or hexatic_numerator is None or D_numerator is None:
         raise ValueError("Gaussian scalar cache did not provide required fields.")
     rho = cached_rho if cached_rho is not None else gaussian_density
     hexatic_order = _divide_by_density(hexatic_numerator, gaussian_density)
     D = _divide_by_density(D_numerator, gaussian_density)
-    print(
-        "[fitting] Gaussian scalar fields ready: "
-        f"rho {rho.shape}, hexatic_order {hexatic_order.shape}, D {D.shape}."
-    )
+
 
     J = _grid_array_from_keys(
         active_arrays,
@@ -209,8 +178,7 @@ def load_or_compute_fields(config: FittingConfig) -> FittingFields:
         ntheta=scalars.theta_centers.size,
         vector_components=2,
     )
-    if J is not None:
-        print(f"[fitting] Using cached J grid with shape {J.shape}.")
+
 
     counts = _grid_array_from_keys(
         active_arrays,
@@ -219,20 +187,16 @@ def load_or_compute_fields(config: FittingConfig) -> FittingFields:
         nx=scalars.x_centers.size,
         ntheta=scalars.theta_centers.size,
     )
-    if counts is not None:
-        print(f"[fitting] Using cached bin counts with shape {counts.shape}.")
     if J is None or counts is None:
-        print("[fitting] Loading film-continuity fallback for J/counts...")
         film_result = _load_or_compute_film_result(config)
         if J is None:
             J = film_result.J_film_b
-            print(f"[fitting] Loaded fallback J grid with shape {J.shape}.")
         if counts is None:
             counts = film_result.film_count_per_bin_b
-            print(f"[fitting] Loaded fallback bin counts with shape {counts.shape}.")
 
     _validate_rho_and_flux(rho, J)
-    print("[fitting] Computing FFT gradients...")
+
+    print("[fitting] Computing gradient and vector fields...")
     grad_x, grad_y = fft_gradients(
         rho,
         lx=scalars.lx,
@@ -276,6 +240,7 @@ def load_or_compute_fields(config: FittingConfig) -> FittingFields:
         active.steps.size,
     )
 
+    print("[fitting] Assembling frame and mid-frame fields...")
     frame_fields = {
         "rho": rho,
         "hexatic_order": hexatic_order,
@@ -299,6 +264,8 @@ def load_or_compute_fields(config: FittingConfig) -> FittingFields:
     frame_fields["D_force_density"] = D[..., np.newaxis] * force_density
     frame_fields["D_chiral_P_perp"] = D[..., np.newaxis] * chiral_P_perp
     mid_fields = {
+        "rho": _mid(frame_fields["rho"]),
+        "hexatic_order": _mid(frame_fields["hexatic_order"]),
         "D": _mid(frame_fields["D"]),
         "grad_rho": _mid(frame_fields["grad_rho"]),
         "grad_hexatic_order": _mid(frame_fields["grad_hexatic_order"]),
@@ -310,17 +277,7 @@ def load_or_compute_fields(config: FittingConfig) -> FittingFields:
         "D_P": _mid(frame_fields["D_P"]),
         "D_chiral_P_perp": _mid(frame_fields["D_chiral_P_perp"]),
     }
-    print(
-        "[fitting] Gradient fields ready: "
-        f"grad_rho {mid_fields['grad_rho'].shape}, "
-        f"grad_hexatic_order {mid_fields['grad_hexatic_order'].shape}, "
-        f"grad_D {mid_fields['grad_D'].shape}."
-    )
-    print(
-        "[fitting] Candidate fields ready: "
-        + ", ".join(f"{name} {field.shape}" for name, field in mid_fields.items())
-        + "."
-    )
+
 
     return FittingFields(
         transition_steps=np.stack((active.steps[:-1], active.steps[1:]), axis=1),
@@ -350,9 +307,7 @@ def load_gaussian_field_cache(
         return {}
     arrays = load_npz_arrays(path)
     if not _gaussian_cache_metadata_matches(arrays, steps, x_edges, theta_edges):
-        print(f"[fitting] Ignoring stale Gaussian field cache {path}.")
         return {}
-    print(f"[fitting] Loading Gaussian field cache from {path}.")
     return arrays
 
 
@@ -376,7 +331,7 @@ def write_gaussian_field_cache(
             if key not in {"steps", "x_edges", "theta_edges"}
         },
     )
-    print(f"[fitting] Wrote Gaussian field cache to {path}.")
+
 
 
 def _gaussian_cache_metadata_matches(
@@ -577,10 +532,6 @@ def gaussian_scalar_field_frames(
         for name in names
     }
     for frame_idx in range(coords.shape[0]):
-        print(
-            "[fitting]   Gaussian scalar frame "
-            f"{frame_idx + 1}/{coords.shape[0]}..."
-        )
         stacked_values = np.column_stack(
             [value_arrays[idx][frame_idx] for idx in range(len(names))]
         )
@@ -621,10 +572,6 @@ def gaussian_scalar_frames(
     grid_points = _surface_grid_points(x_centers, theta_centers, cylinder_radius)
     field = np.zeros((coords.shape[0], x_centers.size, theta_centers.size), dtype=float)
     for frame_idx in range(coords.shape[0]):
-        print(
-            "[fitting]   Gaussian scalar frame "
-            f"{frame_idx + 1}/{coords.shape[0]}..."
-        )
         mask = shell_mask[frame_idx] & np.isfinite(values[frame_idx])
         positions = _cylindrical_coords_to_cartesian(coords[frame_idx, mask])
         density = _density_sum(
@@ -757,14 +704,12 @@ def load_or_compute_chirality_frames(
     metric_name: str = "instant_helix_relative",
 ) -> np.ndarray:
     if config.chirality_fields_path.exists():
-        print(f"[fitting] Loading chirality fields from {config.chirality_fields_path}...")
+        print("[fitting] Loading chirality fields...")
         arrays = load_npz_arrays(config.chirality_fields_path)
         return _chirality_from_arrays(arrays, metric_name, nx, ntheta)
 
-    print(
-        "[fitting] Chirality fields cache missing; recomputing "
-        f"{metric_name!r} on the fitting grid..."
-    )
+
+    print("[fitting] Computing chirality fields...")
     fields = compute_chirality_fields(
         config.trajectory_path,
         config=ChiralityConfig(n_x_bins=nx, n_theta_bins=ntheta),
@@ -857,14 +802,9 @@ def _validate_frame_field_steps(name: str, frame_count: int, expected: int) -> N
 
 def _load_or_compute_film_result(config: FittingConfig) -> FilmContinuityResult:
     if config.film_continuity_cache_path.exists():
-        print(
-            "[fitting] Using film-continuity cache "
-            f"{config.film_continuity_cache_path}."
-        )
         return FilmContinuityResult.from_cache_arrays(
             load_npz_arrays(config.film_continuity_cache_path)
         )
-    print("[fitting] Film-continuity cache missing; computing fallback fields...")
     return compute_film_continuity(
         FilmContinuityConfig(
             case_id=config.case_id,
@@ -937,3 +877,53 @@ def _pocket_radius(pocket_radius: float | None, cylinder_radius: float) -> float
     if pocket_radius is not None and np.isfinite(pocket_radius) and pocket_radius > 0.0:
         return float(pocket_radius)
     return 0.5 * float(cylinder_radius)
+
+
+def compute_scalar_modifiers(
+    mid_fields: dict[str, np.ndarray],
+    mask: np.ndarray | None = None,
+) -> tuple[int, dict[str, np.ndarray]]:
+    rho = np.asarray(mid_fields["rho"], dtype=float)
+    D = np.asarray(mid_fields["D"], dtype=float)
+    hexatic_order = np.asarray(mid_fields["hexatic_order"], dtype=float)
+
+    if mask is None:
+        mask = np.ones(rho.shape, dtype=bool)
+    else:
+        mask = np.asarray(mask, dtype=bool)
+
+    if rho.shape != mask.shape or D.shape != mask.shape or hexatic_order.shape != mask.shape:
+        raise ValueError("mid_fields and mask must have the same shape.")
+
+    # G_0 = 1 (constant)
+    G_0 = np.ones_like(rho)
+
+    # G_d = D / RMS(D)  (RMS over masked bins, per transition)
+    D_valid = mask & np.isfinite(D)
+    rms_D = np.sqrt(_masked_frame_mean(D**2, D_valid))
+    rms_D = np.where(np.isfinite(rms_D) & (rms_D > 0.0), rms_D, 1.0)
+    G_d = D / rms_D[:, None, None]
+
+    # G_2 = hexatic_order (directly, already dimensionless)
+    G_2 = hexatic_order
+
+    # G_rho = (rho - rho_0) / rho_0  where rho_0 = spatial mean over mask
+    rho_valid = mask & np.isfinite(rho)
+    rho_0 = _masked_frame_mean(rho, rho_valid)
+    rho_0 = np.where(np.isfinite(rho_0) & (rho_0 > 0.0), rho_0, 1.0)
+    G_rho = (rho - rho_0[:, None, None]) / rho_0[:, None, None]
+
+    return 5, {"G_0": G_0, "G_1": G_d, "G_2": G_2, "G_3": G_rho, "G_4": G_d * hexatic_order}
+
+
+def _masked_frame_mean(values: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    values = np.asarray(values, dtype=float)
+    mask = np.asarray(mask, dtype=bool)
+    counts = np.count_nonzero(mask, axis=(1, 2))
+    sums = np.sum(np.where(mask, values, 0.0), axis=(1, 2))
+    return np.divide(
+        sums,
+        counts,
+        out=np.full(values.shape[0], np.nan, dtype=float),
+        where=counts > 0,
+    )

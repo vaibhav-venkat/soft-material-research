@@ -21,12 +21,7 @@ def write_all_plots(
 ) -> list[Path]:
     destination_dir = Path(output_dir)
     written = []
-    quantities = PLOT_QUANTITIES + tuple(
-        f"contribution_{name}_{component}"
-        for name in result.candidate_names
-        for component in ("x", "y")
-    )
-    for quantity in quantities:
+    for quantity in PLOT_QUANTITIES:
         print(f"[fitting] Writing {quantity} plot...")
         written.append(
             write_quantity_plot(
@@ -54,7 +49,7 @@ def write_quantity_plot(
     )
     title_suffix = _frame_title_suffix(result, frame_idx)
     if values.ndim == 2:
-        title_suffix = "(local coefficient map)"
+        title_suffix = ""
     x_centers = np.asarray(result.x_centers, dtype=float)
     theta_centers = np.asarray(result.theta_centers, dtype=float)
     color_limits = _robust_color_limits(
@@ -131,43 +126,11 @@ def _quantity_values(result: FittingResult, quantity: str) -> np.ndarray:
         return _normalized_residual(result.residual_x, result.J[..., 0], result.mask)
     if quantity == "normalized_residual_y":
         return _normalized_residual(result.residual_y, result.J[..., 1], result.mask)
-    if quantity.startswith("contribution_"):
-        return _contribution_values(result, quantity)
-    if quantity.startswith("coef_"):
-        return _coefficient_values(result, quantity)
     raise ValueError(f"Unsupported fitting quantity: {quantity}")
 
 
 def _quantity_label(quantity: str) -> str:
-    if quantity.startswith("normalized_residual_"):
-        return f"local_{quantity}"
     return quantity
-
-
-def _contribution_values(result: FittingResult, quantity: str) -> np.ndarray:
-    suffix = quantity.removeprefix("contribution_")
-    for component_idx, component in enumerate(("x", "y")):
-        marker = f"_{component}"
-        if suffix.endswith(marker):
-            candidate = suffix[: -len(marker)]
-            if candidate in result.coef_map and candidate in result.mid_fields:
-                contribution = (
-                    result.coef_map[candidate][None, ..., component_idx]
-                    * result.mid_fields[candidate][..., component_idx]
-                )
-                return np.abs(contribution)
-    raise ValueError(f"Unsupported contribution quantity: {quantity}")
-
-
-def _coefficient_values(result: FittingResult, quantity: str) -> np.ndarray:
-    suffix = quantity.removeprefix("coef_")
-    for component_idx, component in enumerate(("x", "y")):
-        marker = f"_{component}"
-        if suffix.endswith(marker):
-            candidate = suffix[: -len(marker)]
-            if candidate in result.coef_map:
-                return result.coef_map[candidate][..., component_idx]
-    raise ValueError(f"Unsupported coefficient quantity: {quantity}")
 
 
 def _normalized_residual(
@@ -182,7 +145,6 @@ def _normalized_residual(
     scale = float(np.nanmean(np.abs(measured[valid]))) if np.any(valid) else float("nan")
     if not np.isfinite(scale) or scale == 0.0:
         scale = 1.0
-    print(f"[fitting] Normalizing local residual by mean(|J|)={scale:.6g}.")
     normalized = residual / scale
     return np.where(valid, normalized, np.nan)
 

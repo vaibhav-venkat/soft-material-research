@@ -239,11 +239,11 @@ def _accumulate_crossing_path_numpy(
 
 if njit is not None:
 
-    @njit(cache=True)
+    @njit(cache=False)
     def _wrap_scalar(value: float, start: float, period: float) -> float:
         return ((value - start) % period) + start
 
-    @njit(cache=True)
+    @njit(cache=False)
     def _bin_index(value: float, edges: np.ndarray) -> int:
         n_bins = edges.size - 1
         wrapped = _wrap_scalar(value, edges[0], edges[-1] - edges[0])
@@ -258,7 +258,7 @@ if njit is not None:
         idx = lo - 1
         return idx % n_bins
 
-    @njit(cache=True)
+    @njit(cache=False)
     def _particle_bin_indices_numba(
         x: np.ndarray,
         theta: np.ndarray,
@@ -273,7 +273,7 @@ if njit is not None:
             itheta[particle] = _bin_index(theta[particle], theta_edges)
         return ix, itheta
 
-    @njit(cache=True)
+    @njit(cache=False)
     def _signed_bin_delta_numba(start: int, stop: int, n_bins: int) -> int:
         delta = stop - start
         if delta > n_bins // 2:
@@ -282,7 +282,7 @@ if njit is not None:
             delta += n_bins
         return delta
 
-    @njit(cache=True)
+    @njit(cache=False)
     def _accumulate_crossing_path_numba(
         x_faces: np.ndarray,
         theta_faces: np.ndarray,
@@ -318,7 +318,7 @@ if njit is not None:
                 theta_faces[ix, face_itheta] -= 1
                 itheta = face_itheta
 
-    @njit(cache=True)
+    @njit(cache=False)
     def _accumulate_counts_and_sums_numba(
         coords: np.ndarray,
         shell_mask: np.ndarray,

@@ -6,7 +6,7 @@ from pathlib import Path
 from hexatic.radii_analysis.cases import RadiusCase, get_case
 
 from ..film_continuity.config import GSD_DIR, NPZ_DIR
-from .types import DEFAULT_CANDIDATES, FIELD_REGISTRY
+from .types import FIELD_REGISTRY
 
 
 DENSITY_ANALYSIS_DIR = Path(__file__).resolve().parents[1]
@@ -28,7 +28,8 @@ class FittingConfig:
     neighbor_count_path: str | Path | None = None
     output_dir: str | Path = OUTPUT_DIR
     min_count: int = DEFAULT_MIN_COUNT
-    candidate_names: tuple[str, ...] | None = DEFAULT_CANDIDATES
+    candidate_names: tuple[str, ...] | None = None
+    g_modifier_indices: tuple[int, ...] = (0, 1, 2, 3, 4)
     stlsq_threshold: float = DEFAULT_STLSQ_THRESHOLD
     stlsq_max_iter: int = DEFAULT_STLSQ_MAX_ITER
     smoothing_bins: float = 0.0
@@ -55,6 +56,16 @@ class FittingConfig:
         object.__setattr__(self, "output_dir", Path(self.output_dir))
         if self.candidate_names is not None:
             object.__setattr__(self, "candidate_names", tuple(self.candidate_names))
+        object.__setattr__(
+            self, "g_modifier_indices", tuple(self.g_modifier_indices)
+        )
+        if not self.g_modifier_indices:
+            raise ValueError("At least one G modifier index is required.")
+        for idx in self.g_modifier_indices:
+            if not isinstance(idx, int) or idx < 0 or idx > 4:
+                raise ValueError(
+                    f"g_modifier_indices must be ints 0..4, got {idx!r}."
+                )
         if self.stlsq_threshold < 0.0:
             raise ValueError("stlsq_threshold must be non-negative.")
         if self.stlsq_max_iter < 1:

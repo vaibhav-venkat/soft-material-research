@@ -8,17 +8,13 @@ from scipy import linalg
 from scipy.ndimage import gaussian_filter
 
 from .config import FittingConfig
-from .fields import load_or_compute_fields
-from .io_cache import (
-    flatten_array_dict,
-    flatten_float_dict,
-    reconstruct_array_dict,
-    reconstruct_float_dict,
-)
+from .fields import compute_scalar_modifiers, load_or_compute_fields
+from .io_cache import flatten_array_dict, reconstruct_array_dict
 
 
-CACHE_VERSION = 12
+CACHE_VERSION = 15
 COMPONENTS = ("x", "y")
+G_MODIFIER_NAMES = ("G_0", "G_1", "G_2", "G_3", "G_4")
 SMOOTH_WEIGHT_FLOOR = 1.0e-12
 
 
@@ -37,7 +33,6 @@ class FittingResult:
     mid_fields: dict[str, np.ndarray]
     candidate_names: tuple[str, ...]
     coef_map: dict[str, np.ndarray]
-    coef_global: dict[str, float]
     fitted: np.ndarray
     residual: np.ndarray
     mask: np.ndarray
@@ -57,22 +52,6 @@ class FittingResult:
         return self.frame_fields["rho"]
 
     @property
-    def grad_x(self) -> np.ndarray:
-        return self.frame_fields["grad_rho"][..., 0]
-
-    @property
-    def grad_y(self) -> np.ndarray:
-        return self.frame_fields["grad_rho"][..., 1]
-
-    @property
-    def grad_x_mid(self) -> np.ndarray:
-        return self.mid_fields["grad_rho"][..., 0]
-
-    @property
-    def grad_y_mid(self) -> np.ndarray:
-        return self.mid_fields["grad_rho"][..., 1]
-
-    @property
     def residual_x(self) -> np.ndarray:
         return self.residual[..., 0]
 
@@ -87,22 +66,6 @@ class FittingResult:
     @property
     def fitted_y(self) -> np.ndarray:
         return self.fitted[..., 1]
-
-    @property
-    def c_x(self) -> np.ndarray:
-        return self.coef_map["grad_rho"][..., 0]
-
-    @property
-    def c_y(self) -> np.ndarray:
-        return self.coef_map["grad_rho"][..., 1]
-
-    @property
-    def c_x_global(self) -> float:
-        return self.coef_global.get("grad_rho_x", float("nan"))
-
-    @property
-    def c_y_global(self) -> float:
-        return self.coef_global.get("grad_rho_y", float("nan"))
 
     def as_cache_arrays(self) -> dict[str, Any]:
         arrays: dict[str, Any] = {
@@ -138,7 +101,6 @@ class FittingResult:
         arrays.update(flatten_array_dict(self.frame_fields, "frame_fields"))
         arrays.update(flatten_array_dict(self.mid_fields, "mid_fields"))
         arrays.update(flatten_array_dict(self.coef_map, "coef_map"))
-        arrays.update(flatten_float_dict(self.coef_global, "coef_global"))
         return arrays
 
     @classmethod
@@ -152,13 +114,7 @@ class FittingResult:
         frame_fields = reconstruct_array_dict(kwargs, "frame_fields")
         mid_fields = reconstruct_array_dict(kwargs, "mid_fields")
         coef_map = reconstruct_array_dict(kwargs, "coef_map")
-        coef_global = reconstruct_float_dict(kwargs, "coef_global")
-        for prefix in (
-            "frame_fields",
-            "mid_fields",
-            "coef_map",
-            "coef_global",
-        ):
+        for prefix in ("frame_fields", "mid_fields", "coef_map"):
             for key in tuple(kwargs):
                 if key.startswith(f"{prefix}__"):
                     kwargs.pop(key)
@@ -192,7 +148,6 @@ class FittingResult:
             frame_fields=frame_fields,
             mid_fields=mid_fields,
             coef_map=coef_map,
-            coef_global=coef_global,
         )
 
     def summary(self) -> str:
@@ -202,152 +157,68 @@ class FittingResult:
             self.J,
             self.mask,
         )
-        global_fitted = _fitted_from_global(
-            self.mid_fields,
-            self.coef_global,
-            self.candidate_names,
-        )
-        global_residual = self.J - global_fitted
-        global_residual_stats = _normalized_residual_summary(
-            global_residual[..., 0],
-            global_residual[..., 1],
-            self.J,
-            self.mask,
-        )
-        coef_x_text = _component_coefficient_text(
-            self.coef_global,
-            self.candidate_names,
-            0,
-        )
-        coef_y_text = _component_coefficient_text(
-            self.coef_global,
-            self.candidate_names,
-            1,
-        )
         return (
-            f"coef_global_x[{coef_x_text}], "
-            f"coef_global_y[{coef_y_text}], "
-            f"mean_abs_J_x={residual_stats['mean_abs_J_x']:.6g}, "
-            f"mean_abs_J_y={residual_stats['mean_abs_J_y']:.6g}, "
-            "local_normalized_residual_x "
+            f"normalized_residual_x "
             f"mean={residual_stats['residual_x_mean']:.6g}, "
-            f"median={residual_stats['residual_x_median']:.6g}, "
-            f"mean abs={residual_stats['residual_x_mean_abs']:.6g}, "
-            "local_normalized_residual_y "
+            f"mean_abs={residual_stats['residual_x_mean_abs']:.6g}, "
+            f"median={residual_stats['residual_x_median']:.6g}; "
+            f"normalized_residual_y "
             f"mean={residual_stats['residual_y_mean']:.6g}, "
-            f"median={residual_stats['residual_y_median']:.6g}, "
-            f"mean abs={residual_stats['residual_y_mean_abs']:.6g}, "
-            "global_normalized_residual_x "
-            f"mean abs={global_residual_stats['residual_x_mean_abs']:.6g}, "
-            "global_normalized_residual_y "
-            f"mean abs={global_residual_stats['residual_y_mean_abs']:.6g}"
+            f"mean_abs={residual_stats['residual_y_mean_abs']:.6g}, "
+            f"median={residual_stats['residual_y_median']:.6g}"
         )
 
 
 def compute_fitting(config: FittingConfig) -> FittingResult:
-    print(f"[fitting] Starting fit for case {config.case_id!r}.")
     fields = load_or_compute_fields(config)
     candidate_names = config.selected_candidate_names
     _validate_candidates(fields.mid_fields, candidate_names, fields.J.shape)
-    print(f"[fitting] Candidate set: {', '.join(candidate_names)}.")
-    print(f"[fitting] Building fit mask with min_count={config.min_count}...")
     mask = _fit_mask(fields.counts, fields.J.shape[:3], config.min_count)
-    print(f"[fitting] Fit mask keeps {np.count_nonzero(mask)}/{mask.size} bins.")
+    print(f"[fitting] Fit mask: {int(np.count_nonzero(mask))}/{mask.size} bins.")
     J_fit = fields.J
     mid_fields_fit = fields.mid_fields
-    if config.smoothing_bins > 0.0:
-        print(
-            "[fitting] Applying weighted periodic Gaussian smoothing to fitting arrays "
-            f"(sigma={config.smoothing_bins:g} bins)."
-        )
-        J_fit, mid_fields_fit = _smooth_fitting_arrays(
-            fields.J,
-            fields.mid_fields,
+    g_modifier_indices = config.g_modifier_indices
+    if not np.any(mask):
+        print("[fitting] Mask empty: returning zero fit.")
+        coef_map = _zero_coefficients(candidate_names, g_modifier_indices)
+        fitted = np.zeros_like(J_fit, dtype=float)
+    else:
+        if config.smoothing_bins > 0.0:
+            print(f"[fitting] Smoothing with sigma={config.smoothing_bins:g} bins...")
+            J_fit, mid_fields_fit = _smooth_fitting_arrays(
+                fields.J,
+                fields.mid_fields,
+                mask,
+                candidate_names,
+                sigma_bins=config.smoothing_bins,
+            )
+            scalar_names = ("rho", "D", "hexatic_order")
+            for name in scalar_names:
+                mid_fields_fit[name] = _smooth_scalar_field(
+                    mid_fields_fit[name], mask, config.smoothing_bins
+                )
+        print("[fitting] Computing scalar modifiers...")
+        num, G_modifiers = compute_scalar_modifiers(mid_fields_fit, mask)
+        print("[fitting] Solving global STLSQ coefficients...")
+        coef_map = _global_coefficients(
+            mid_fields_fit,
+            J_fit,
             mask,
             candidate_names,
-            sigma_bins=config.smoothing_bins,
+            g_modifier_indices=g_modifier_indices,
+            G_modifiers=G_modifiers,
+            threshold=config.stlsq_threshold,
+            max_iter=config.stlsq_max_iter,
         )
-
-    print(
-        "[fitting] Solving local STLSQ coefficient maps over transitions "
-        f"(threshold={config.stlsq_threshold:.6g}, max_iter={config.stlsq_max_iter})..."
-    )
-    coef_map = _coefficient_maps(
-        mid_fields_fit,
-        J_fit,
-        mask,
-        candidate_names,
-        threshold=config.stlsq_threshold,
-        max_iter=config.stlsq_max_iter,
-    )
-    finite_counts = ", ".join(
-        f"{name} {np.count_nonzero(np.isfinite(coef_map[name]))}/{coef_map[name].size}"
-        for name in candidate_names
-    )
-    print(f"[fitting] Local coefficient maps ready: {finite_counts}.")
-
-    print("[fitting] Solving component-specific global STLSQ coefficients...")
-    coef_global = _global_coefficients(
-        mid_fields_fit,
-        J_fit,
-        mask,
-        candidate_names,
-        threshold=config.stlsq_threshold,
-        max_iter=config.stlsq_max_iter,
-    )
-    print(
-        "[fitting] Global x coefficients: "
-        + _component_coefficient_text(coef_global, candidate_names, 0)
-        + "."
-    )
-    print(
-        "[fitting] Global y coefficients: "
-        + _component_coefficient_text(coef_global, candidate_names, 1)
-        + "."
-    )
-
-    print("[fitting] Computing local fitted fields and residual diagnostics...")
-    fitted = _fitted_from_maps(
-        mid_fields_fit,
-        coef_map,
-        candidate_names,
-    )
+        fitted = _fitted_from_coef(
+            mid_fields_fit,
+            coef_map,
+            candidate_names,
+            G_modifiers=G_modifiers,
+            g_modifier_indices=g_modifier_indices,
+        )
     residual = J_fit - fitted
     diagnostics = _residual_diagnostics(residual[..., 0], residual[..., 1], mask)
-    residual_stats = _normalized_residual_summary(
-        residual[..., 0],
-        residual[..., 1],
-        J_fit,
-        mask,
-    )
-    print(
-        "[fitting] Local residual summary: "
-        f"mean_abs_J_x={residual_stats['mean_abs_J_x']:.6g}, "
-        f"normalized_residual_x mean={residual_stats['residual_x_mean']:.6g}, "
-        f"median={residual_stats['residual_x_median']:.6g}, "
-        f"mean abs={residual_stats['residual_x_mean_abs']:.6g}; "
-        f"mean_abs_J_y={residual_stats['mean_abs_J_y']:.6g}, "
-        f"normalized_residual_y mean={residual_stats['residual_y_mean']:.6g}, "
-        f"median={residual_stats['residual_y_median']:.6g}, "
-        f"mean abs={residual_stats['residual_y_mean_abs']:.6g}."
-    )
-    global_fitted = _fitted_from_global(
-        mid_fields_fit,
-        coef_global,
-        candidate_names,
-    )
-    global_residual = J_fit - global_fitted
-    global_residual_stats = _normalized_residual_summary(
-        global_residual[..., 0],
-        global_residual[..., 1],
-        J_fit,
-        mask,
-    )
-    print(
-        "[fitting] Global normalized residual mean abs: "
-        f"x={global_residual_stats['residual_x_mean_abs']:.6g}, "
-        f"y={global_residual_stats['residual_y_mean_abs']:.6g}."
-    )
 
     return FittingResult(
         transition_steps=fields.transition_steps,
@@ -363,7 +234,6 @@ def compute_fitting(config: FittingConfig) -> FittingResult:
         mid_fields=mid_fields_fit,
         candidate_names=candidate_names,
         coef_map=coef_map,
-        coef_global=coef_global,
         fitted=fitted,
         residual=residual,
         mask=mask,
@@ -421,21 +291,6 @@ def stlsq(
             coefficients[:] = 0.0
             break
     return coefficients
-
-
-def _coefficient_key(name: str, component: int) -> str:
-    return f"{name}_{COMPONENTS[component]}"
-
-
-def _component_coefficient_text(
-    coefficients: dict[str, float],
-    candidate_names: tuple[str, ...],
-    component: int,
-) -> str:
-    return ", ".join(
-        f"{name}={coefficients[_coefficient_key(name, component)]:.6g}"
-        for name in candidate_names
-    )
 
 
 def _smooth_fitting_arrays(
@@ -501,98 +356,65 @@ def _smooth_scalar_field(
     )
 
 
-def _coefficient_maps(
-    mid_fields: dict[str, np.ndarray],
-    measured: np.ndarray,
-    mask: np.ndarray,
-    candidate_names: tuple[str, ...],
-    *,
-    threshold: float,
-    max_iter: int,
-) -> dict[str, np.ndarray]:
-    _, nx, ntheta, _ = measured.shape
-    maps = {
-        name: np.full((nx, ntheta, 2), np.nan, dtype=float)
-        for name in candidate_names
-    }
-    for ix in range(nx):
-        for itheta in range(ntheta):
-            valid_transitions = mask[:, ix, itheta]
-            if not np.any(valid_transitions):
-                continue
-            for component in range(2):
-                design = np.column_stack(
-                    [
-                        mid_fields[name][valid_transitions, ix, itheta, component]
-                        for name in candidate_names
-                    ]
-                )
-                target = measured[valid_transitions, ix, itheta, component]
-                coefficients = normalized_stlsq_physical(
-                    design,
-                    target,
-                    threshold=threshold,
-                    max_iter=max_iter,
-                )
-                for candidate_idx, name in enumerate(candidate_names):
-                    maps[name][ix, itheta, component] = coefficients[candidate_idx]
-    return maps
-
-
 def _global_coefficients(
     mid_fields: dict[str, np.ndarray],
     measured: np.ndarray,
     mask: np.ndarray,
     candidate_names: tuple[str, ...],
     *,
+    g_modifier_indices: tuple[int, ...],
+    G_modifiers: dict[str, np.ndarray],
     threshold: float,
     max_iter: int,
-) -> dict[str, float]:
-    coefficients: dict[str, float] = {}
-    for component, component_name in enumerate(COMPONENTS):
-        design = np.column_stack(
-            [
-                mid_fields[name][..., component][mask].ravel()
-                for name in candidate_names
-            ]
+) -> dict[str, np.ndarray]:
+    coef_map = _zero_coefficients(candidate_names, g_modifier_indices)
+    coef_keys = tuple(coef_map)
+    if not np.any(mask):
+        return coef_map
+    for component in range(2):
+        columns = []
+        for name in candidate_names:
+            V = mid_fields[name][..., component]
+            for m_idx in g_modifier_indices:
+                G = G_modifiers[f"G_{m_idx}"]
+                columns.append((V * G)[mask])
+        design = np.column_stack(columns)
+        target = measured[..., component][mask]
+        coefficients = normalized_stlsq_physical(
+            design, target, threshold=threshold, max_iter=max_iter,
         )
-        target = measured[..., component][mask].ravel()
-        solved = normalized_stlsq_physical(
-            design,
-            target,
-            threshold=threshold,
-            max_iter=max_iter,
-        )
-        for candidate_idx, name in enumerate(candidate_names):
-            coefficients[f"{name}_{component_name}"] = float(solved[candidate_idx])
-    return coefficients
+        for col_idx, key in enumerate(coef_keys):
+            coef_map[key][component] = coefficients[col_idx]
+    return coef_map
 
 
-def _fitted_from_maps(
+def _zero_coefficients(
+    candidate_names: tuple[str, ...],
+    g_modifier_indices: tuple[int, ...],
+) -> dict[str, np.ndarray]:
+    return {
+        f"{name}_m{m_idx}": np.zeros(2, dtype=float)
+        for name in candidate_names
+        for m_idx in g_modifier_indices
+    }
+
+
+def _fitted_from_coef(
     mid_fields: dict[str, np.ndarray],
     coef_map: dict[str, np.ndarray],
     candidate_names: tuple[str, ...],
+    *,
+    G_modifiers: dict[str, np.ndarray],
+    g_modifier_indices: tuple[int, ...],
 ) -> np.ndarray:
     first = mid_fields[candidate_names[0]]
     fitted = np.zeros_like(first, dtype=float)
     for name in candidate_names:
-        fitted += coef_map[name][None, ...] * mid_fields[name]
-    return fitted
-
-
-def _fitted_from_global(
-    mid_fields: dict[str, np.ndarray],
-    coefficients: dict[str, float],
-    candidate_names: tuple[str, ...],
-) -> np.ndarray:
-    first = mid_fields[candidate_names[0]]
-    fitted = np.zeros_like(first, dtype=float)
-    for name in candidate_names:
-        for component, component_name in enumerate(COMPONENTS):
-            fitted[..., component] += (
-                coefficients[f"{name}_{component_name}"]
-                * mid_fields[name][..., component]
-            )
+        V = mid_fields[name]
+        for m_idx in g_modifier_indices:
+            G = G_modifiers[f"G_{m_idx}"]
+            c = coef_map[f"{name}_m{m_idx}"]
+            fitted += c[None, None, None, :] * G[..., None] * V
     return fitted
 
 
@@ -656,8 +478,6 @@ def _fit_mask(
     if counts.shape != shape:
         raise ValueError(f"counts shape {counts.shape} does not match {shape}.")
     mask = counts >= min_count
-    if not np.any(mask):
-        return np.ones(shape, dtype=bool)
     return mask
 
 
@@ -670,6 +490,13 @@ def _residual_diagnostics(
     residual_y = np.asarray(residual_y, dtype=float)
     x_mask = mask & np.isfinite(residual_x)
     y_mask = mask & np.isfinite(residual_y)
+    if not np.any(x_mask) and not np.any(y_mask):
+        return {
+            "residual_x_mean_abs": float("nan"),
+            "residual_y_mean_abs": float("nan"),
+            "residual_x_median_abs": float("nan"),
+            "residual_y_median_abs": float("nan"),
+        }
     x_abs = np.abs(residual_x[x_mask])
     y_abs = np.abs(residual_y[y_mask])
     return {

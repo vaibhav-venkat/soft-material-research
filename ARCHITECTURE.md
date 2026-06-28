@@ -12,7 +12,10 @@
 │   ├── chirality # calculate chirality across CCM, chi, translation
 │   ├── constants # useful constants contained for simulations/analysis
 │   ├── cylinder_dynamics # dynamic values like velocity for static cylinder
-│   ├── density_analysis # current focus -> analyze and fit density
+│   ├── density_analysis # deprecated 
+│   ├── model_fitting # current focus -> analyze and fit models
+│   │   ├── film_continuity -> # not current focus, calculates partial_t rho, S_cross, J
+│   │   ├── fitting -> # current focus, used for fitting models
 │   ├── lagged_prediction # predictive lagging, using scikit
 │   ├── output
 │   │   ├── cylinder
