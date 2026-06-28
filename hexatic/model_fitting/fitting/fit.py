@@ -1,4 +1,4 @@
-"""Orchestrate fitting of film fluxes to hydrodynamic fields."""
+"""Orchestrate hydrodynamic density/polarization model fitting."""
 
 from __future__ import annotations
 
@@ -41,7 +41,6 @@ class FittingResult:
     density_contributions: np.ndarray
     polarization_contributions: np.ndarray
     curl_residual: np.ndarray
-    smoothing_bins: float = 0.0
     ridge_alpha: float = 1.0e-6
     stlsq_threshold: float = 1.0e-8
     stlsq_max_iter: int = 20
@@ -80,7 +79,6 @@ class FittingResult:
             "density_contributions": self.density_contributions,
             "polarization_contributions": self.polarization_contributions,
             "curl_residual": self.curl_residual,
-            "smoothing_bins": self.smoothing_bins,
             "ridge_alpha": self.ridge_alpha,
             "stlsq_threshold": self.stlsq_threshold,
             "stlsq_max_iter": self.stlsq_max_iter,
@@ -104,7 +102,7 @@ class FittingResult:
         density = _regression_from_cache(kwargs, "density")
         polarization = _regression_from_cache(kwargs, "polarization")
         for key in (
-            "dt", "cylinder_radius", "lx", "smoothing_bins",
+            "dt", "cylinder_radius", "lx",
             "ridge_alpha", "stlsq_threshold",
         ):
             if key in kwargs:
@@ -183,9 +181,7 @@ def compute_fitting(config: FittingConfig) -> FittingResult:
     ntheta = fields.theta_centers.size
     ly = fields.cylinder_radius * (fields.theta_edges[-1] - fields.theta_edges[0])
     kx, ky = ops.build_k_vectors(nx, ntheta, fields.lx, ly)
-    dRy_dx, dRy_dy = ops.fft_gradient(residual[..., 1], kx, ky)
-    dRx_dx, dRx_dy = ops.fft_gradient(residual[..., 0], kx, ky)
-    curl_residual = dRy_dx - dRx_dy
+    curl_residual = ops.fft_curl(residual, kx, ky)
 
     return FittingResult(
         transition_steps=fields.transition_steps,
@@ -205,7 +201,6 @@ def compute_fitting(config: FittingConfig) -> FittingResult:
         density_contributions=density_contributions,
         polarization_contributions=polarization_contributions,
         curl_residual=curl_residual,
-        smoothing_bins=config.smoothing_bins,
         ridge_alpha=config.ridge_alpha,
         stlsq_threshold=config.stlsq_threshold,
         stlsq_max_iter=config.stlsq_max_iter,

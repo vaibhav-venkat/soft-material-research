@@ -114,6 +114,14 @@ def _scatter_plot(
 # Residual map (2D field, transition mean)
 # ---------------------------------------------------------------------------
 
+def _masked_transition_mean(field: np.ndarray, mask: np.ndarray | None) -> np.ndarray:
+    """Mean over transition axis, respecting per-element mask."""
+    field = np.asarray(field, dtype=float)
+    if mask is not None:
+        field = np.where(mask, field, np.nan)
+    return np.nanmean(field, axis=0)
+
+
 def _residual_map(
     residual: np.ndarray,
     title: str,
@@ -121,11 +129,7 @@ def _residual_map(
     *,
     mask: np.ndarray | None = None,
 ) -> Path:
-    values = np.nanmean(np.asarray(residual, dtype=float), axis=0)
-    if mask is not None:
-        m = np.all(mask, axis=0)
-        values[~m] = np.nan
-
+    values = _masked_transition_mean(residual, mask)
     vmin, vmax = _robust_color_limits(values, symmetric=True)
     fig, ax = plt.subplots(figsize=(6, 4))
     im = ax.imshow(values.T, origin="lower", aspect="auto", vmin=vmin, vmax=vmax,
@@ -146,17 +150,18 @@ def _residual_map(
 
 def _density_contribution_plots(result: FittingResult, path: Path) -> Path:
     n_terms = result.density_contributions.shape[-1]
+    # Two rows: absolute contributions + normalized contributions
     ncols = min(n_terms, 3)
-    nrows = (n_terms + ncols - 1) // ncols
-    fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 3.5 * nrows),
+    fig, axes = plt.subplots(2, ncols, figsize=(5 * ncols, 7.0),
                              squeeze=False)
+    target = result.density_target
+    target_mean = _masked_transition_mean(target, result.mask)
     for i in range(n_terms):
         row, col = divmod(i, ncols)
-        ax = axes[row][col]
-        contrib = np.nanmean(result.density_contributions[..., i], axis=0)
-        if result.mask is not None:
-            m = np.all(result.mask, axis=0)
-            contrib[~m] = np.nan
+        # Row 0: absolute contributions
+        ax = axes[0][col]
+        contrib = _masked_transition_mean(result.density_contributions[..., i],
+                                          result.mask)
         vmin, vmax = _robust_color_limits(contrib, symmetric=True)
         im = ax.imshow(contrib.T, origin="lower", aspect="auto",
                        vmin=vmin, vmax=vmax, cmap="RdBu_r")
@@ -164,9 +169,25 @@ def _density_contribution_plots(result: FittingResult, path: Path) -> Path:
         ax.set_title(result.density.labels[i])
         ax.set_xlabel("x bin")
         ax.set_ylabel("theta bin")
-    for i in range(n_terms, nrows * ncols):
-        axes.flat[i].set_visible(False)
-    fig.suptitle("Density term contributions", fontsize=12)
+        # Row 1: normalized contribution (contrib / target)
+        ax2 = axes[1][col]
+        norm = np.divide(
+            contrib, target_mean,
+            out=np.full_like(contrib, np.nan),
+            where=np.isfinite(target_mean) & (np.abs(target_mean) > 1e-12),
+        )
+        vmin2, vmax2 = _robust_color_limits(norm, symmetric=True)
+        im2 = ax2.imshow(norm.T, origin="lower", aspect="auto",
+                         vmin=vmin2, vmax=vmax2, cmap="RdBu_r")
+        plt.colorbar(im2, ax=ax2)
+        ax2.set_title(f"{result.density.labels[i]} / Y_rho")
+        ax2.set_xlabel("x bin")
+        ax2.set_ylabel("theta bin")
+    # hide unused subplots
+    for i in range(n_terms, ncols):
+        axes[0, i].set_visible(False)
+        axes[1, i].set_visible(False)
+    fig.suptitle("Density term contributions  (absolute / normalized)", fontsize=12)
     fig.tight_layout()
     fig.savefig(path, dpi=150)
     plt.close(fig)
@@ -179,11 +200,7 @@ def _density_contribution_plots(result: FittingResult, path: Path) -> Path:
 
 def _curl_residual_plot(result: FittingResult, path: Path) -> Path:
     curl = np.asarray(result.curl_residual, dtype=float)
-    curl_mean = np.nanmean(curl, axis=0)
-    if result.mask is not None:
-        m = np.all(result.mask, axis=0)
-        curl_mean[~m] = np.nan
-
+    curl_mean = _masked_transition_mean(curl, result.mask)
     vmin, vmax = _robust_color_limits(curl_mean, symmetric=True)
     fig, ax = plt.subplots(figsize=(6, 4))
     im = ax.imshow(curl_mean.T, origin="lower", aspect="auto",

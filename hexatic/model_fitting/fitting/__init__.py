@@ -1,4 +1,4 @@
-"""Fit film fluxes to density-gradient fields."""
+"""Hydrodynamic density/polarization model fitting from smoothed fields."""
 
 from .config import DEFAULT_CASE_ID, FittingConfig
 from .fields import HydrodynamicFields

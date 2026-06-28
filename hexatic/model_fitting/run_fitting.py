@@ -7,7 +7,13 @@ from pathlib import Path
 
 import numpy as np
 
-from .fitting.config import DEFAULT_CASE_ID, FittingConfig
+from .fitting.config import (
+    DEFAULT_CASE_ID,
+    DEFAULT_RIDGE_ALPHA,
+    DEFAULT_STLSQ_MAX_ITER,
+    DEFAULT_STLSQ_THRESHOLD,
+    FittingConfig,
+)
 from .fitting.fields import load_or_compute_fields
 from .fitting.fit import FittingResult, compute_fitting
 from .fitting.io_cache import load_cache, write_cache
@@ -16,33 +22,27 @@ from .fitting.plots import write_all_plots
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Fit hydrodynamic model to film flux data."
+        description="Fit hydrodynamic density/polarization model."
     )
     parser.add_argument("--case", default=DEFAULT_CASE_ID)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--no-plot", action="store_true")
     parser.add_argument(
-        "--bins",
-        type=float,
-        default=0.0,
-        help="Spatial Gaussian smoothing sigma in grid bins for fitting arrays.",
-    )
-    parser.add_argument(
         "--ridge-alpha",
         type=float,
-        default=1.0e-6,
+        default=DEFAULT_RIDGE_ALPHA,
         help="Ridge regularization strength.",
     )
     parser.add_argument(
         "--stlsq-threshold",
         type=float,
-        default=1.0e-8,
+        default=DEFAULT_STLSQ_THRESHOLD,
         help="STLSQ sparsification threshold.",
     )
     parser.add_argument(
         "--stlsq-max-iter",
         type=int,
-        default=20,
+        default=DEFAULT_STLSQ_MAX_ITER,
         help="Maximum STLSQ iterations.",
     )
     return parser
@@ -52,7 +52,6 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     config = FittingConfig(
         case_id=args.case,
-        smoothing_bins=args.bins,
         ridge_alpha=args.ridge_alpha,
         stlsq_threshold=args.stlsq_threshold,
         stlsq_max_iter=args.stlsq_max_iter,
@@ -107,7 +106,6 @@ def _write_model_report(
     # Settings
     _add("\nRegression Settings")
     _add("-" * 40)
-    _add(f"  smoothing_bins    = {result.smoothing_bins}")
     _add(f"  ridge_alpha       = {result.ridge_alpha}")
     _add(f"  stlsq_threshold   = {result.stlsq_threshold}")
     _add(f"  stlsq_max_iter    = {result.stlsq_max_iter}")

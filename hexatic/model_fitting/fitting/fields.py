@@ -6,7 +6,6 @@ transition fields, time derivatives, geometry metadata, and shared mask.
 """
 
 from __future__ import annotations
-from hexatic.model_fitting.film_continuity import FilmContinuityScalars
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,11 +16,22 @@ from hexatic.active_matter_cylinder.math_utils import _density_sum
 from hexatic.chirality.compute import compute_chirality_fields
 from hexatic.chirality.config import ChiralityConfig
 
-from ..film_continuity.config import FilmContinuityConfig, scalars_from_active_fields
+from ..film_continuity.config import (
+    FilmContinuityConfig,
+    FilmContinuityScalars,
+    scalars_from_active_fields,
+)
 from ..film_continuity.continuity import FilmContinuityResult, compute_film_continuity
 from ..film_continuity.io_cache import ActiveMatterFields, load_active_matter_fields
 from . import operators as ops
 from .config import FittingConfig
+from .fields_cache import (
+    _cached_grid_field,
+    _load_gaussian_field_cache,
+    _load_hydrodynamic_cache,
+    _save_gaussian_field_cache,
+    _save_hydrodynamic_cache,
+)
 from .io_cache import load_npz_arrays
 
 
@@ -117,16 +127,9 @@ def load_or_compute_fields(config: FittingConfig) -> HydrodynamicFields:
         scalars.x_centers.size, scalars.theta_centers.size, scalars.lx, ly,
     )
 
-    # --- load Gaussian-smoothed scalars on grid ---
-    rho, hexatic_order, D = _load_smoothed_scalars(
+    # --- load Gaussian-smoothed scalars and polarization on grid ---
+    rho, hexatic_order, D, P = _load_smoothed_scalars(
         config, active, scalars, active_arrays, pocket_radius,
-    )
-
-    # --- polarization on grid ---
-    print("[fitting] Gridding polarization...")
-    P = _polarization_grid_frames(
-        active.coords, active.shell_mask, active_arrays,
-        scalars.x_edges, scalars.theta_edges,
     )
 
     # --- chirality on grid ---
@@ -265,131 +268,37 @@ def _load_s_cross(config: FittingConfig) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# Cache I/O for hydrodynamic fields
-# ---------------------------------------------------------------------------
-
-def _save_hydrodynamic_cache(path: Path, fields: HydrodynamicFields) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    arrays: dict[str, np.ndarray] = {
-        "transition_steps": fields.transition_steps,
-        "dt": np.asarray(fields.dt),
-        "cylinder_radius": np.asarray(fields.cylinder_radius),
-        "lx": np.asarray(fields.lx),
-        "x_edges": fields.x_edges,
-        "x_centers": fields.x_centers,
-        "theta_edges": fields.theta_edges,
-        "theta_centers": fields.theta_centers,
-        "rho": fields.rho,
-        "P": fields.P,
-        "chirality": fields.chirality,
-        "D": fields.D,
-        "hexatic_order": fields.hexatic_order,
-        "S_cross": fields.S_cross,
-        "partial_t_rho": fields.partial_t_rho,
-        "partial_t_P": fields.partial_t_P,
-        "grad_rho": fields.grad_rho,
-        "grad_D": fields.grad_D,
-        "grad_hexatic_order": fields.grad_hexatic_order,
-        "div_P": fields.div_P,
-        "div_chiral_P_perp": fields.div_chiral_P_perp,
-        "laplacian_rho": fields.laplacian_rho,
-        "laplacian_D": fields.laplacian_D,
-        "laplacian_hexatic_order": fields.laplacian_hexatic_order,
-        "P_dot_grad_P": fields.P_dot_grad_P,
-        "P_perp_dot_grad_P": fields.P_perp_dot_grad_P,
-        "laplacian_P": fields.laplacian_P,
-        "laplacian_P_perp": fields.laplacian_P_perp,
-        "mid_rho": fields.mid_rho,
-        "mid_chirality": fields.mid_chirality,
-        "mid_D": fields.mid_D,
-        "mid_hexatic_order": fields.mid_hexatic_order,
-        "mid_P": fields.mid_P,
-        "mask": fields.mask,
-        "pocket_radius": np.asarray(
-            fields.pocket_radius if fields.pocket_radius is not None else np.nan
-        ),
-    }
-    np.savez_compressed(path, **arrays)
-
-
-def _load_hydrodynamic_cache(path: Path) -> HydrodynamicFields:
-    arrays = load_npz_arrays(path)
-    pocket_radius_val = float(np.asarray(arrays["pocket_radius"]))
-    pocket_radius = None if np.isnan(pocket_radius_val) else pocket_radius_val
-    return HydrodynamicFields(
-        transition_steps=arrays["transition_steps"],
-        dt=float(np.asarray(arrays["dt"])),
-        cylinder_radius=float(np.asarray(arrays["cylinder_radius"])),
-        lx=float(np.asarray(arrays["lx"])),
-        x_edges=arrays["x_edges"],
-        x_centers=arrays["x_centers"],
-        theta_edges=arrays["theta_edges"],
-        theta_centers=arrays["theta_centers"],
-        rho=arrays["rho"],
-        P=arrays["P"],
-        chirality=arrays["chirality"],
-        D=arrays["D"],
-        hexatic_order=arrays["hexatic_order"],
-        S_cross=arrays["S_cross"],
-        partial_t_rho=arrays["partial_t_rho"],
-        partial_t_P=arrays["partial_t_P"],
-        grad_rho=arrays["grad_rho"],
-        grad_D=arrays["grad_D"],
-        grad_hexatic_order=arrays["grad_hexatic_order"],
-        div_P=arrays["div_P"],
-        div_chiral_P_perp=arrays["div_chiral_P_perp"],
-        laplacian_rho=arrays["laplacian_rho"],
-        laplacian_D=arrays["laplacian_D"],
-        laplacian_hexatic_order=arrays["laplacian_hexatic_order"],
-        P_dot_grad_P=arrays["P_dot_grad_P"],
-        P_perp_dot_grad_P=arrays["P_perp_dot_grad_P"],
-        laplacian_P=arrays["laplacian_P"],
-        laplacian_P_perp=arrays["laplacian_P_perp"],
-        mid_rho=arrays["mid_rho"],
-        mid_chirality=arrays["mid_chirality"],
-        mid_D=arrays["mid_D"],
-        mid_hexatic_order=arrays["mid_hexatic_order"],
-        mid_P=arrays["mid_P"],
-        mask=np.asarray(arrays["mask"], dtype=bool),
-        pocket_radius=pocket_radius,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Smoothed scalar loading
+# Smoothed scalar / polarization loading
 # ---------------------------------------------------------------------------
 
 def _load_smoothed_scalars(
     config: FittingConfig,
     active: ActiveMatterFields,
-    scalars:  FilmContinuityScalars,
+    scalars: FilmContinuityScalars,
     active_arrays: dict[str, np.ndarray],
     pocket_radius: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Load or compute rho, hexatic_order, D via Gaussian smoothing."""
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Load or compute rho, hexatic_order, D, P via Gaussian smoothing."""
     gaussian_cache = _load_gaussian_field_cache(
-        config, active.steps, scalars.x_edges, scalars.theta_edges,
+        config.gaussian_fields_cache_path,
+        active.steps, scalars.x_edges, scalars.theta_edges,
     )
 
-    gaussian_density = _cached_grid_field(
-        gaussian_cache, "rho_gaussian",
-        frame_count=active.steps.size,
-        nx=scalars.x_centers.size,
-        ntheta=scalars.theta_centers.size,
-    )
-    hexatic_numerator = _cached_grid_field(
-        gaussian_cache, "hexatic_order_numerator",
-        frame_count=active.steps.size,
-        nx=scalars.x_centers.size,
-        ntheta=scalars.theta_centers.size,
-    )
-    D_numerator = _cached_grid_field(
-        gaussian_cache, "D_numerator",
-        frame_count=active.steps.size,
-        nx=scalars.x_centers.size,
-        ntheta=scalars.theta_centers.size,
-    )
+    def _cached(name: str) -> np.ndarray | None:
+        return _cached_grid_field(
+            gaussian_cache, name,
+            frame_count=active.steps.size,
+            nx=scalars.x_centers.size,
+            ntheta=scalars.theta_centers.size,
+        )
 
+    gaussian_density = _cached("rho_gaussian")
+    hexatic_numerator = _cached("hexatic_order_numerator")
+    D_numerator = _cached("D_numerator")
+    Px_numerator = _cached("P_x_numerator")
+    Py_numerator = _cached("P_y_numerator")
+
+    # particle-level source values
     hexatic_values = _load_hexatic_order_frames(
         config.hexatic_order_table_path, active.steps, active.coords.shape[1],
     )
@@ -397,6 +306,8 @@ def _load_smoothed_scalars(
         config.neighbor_count_table_path, active.steps, active.coords.shape[1],
     )
     D_values = (6.0 - neighbor_counts) ** 2
+    Px_values = np.asarray(active_arrays["polar_mean"][..., 0], dtype=float)
+    Py_values = np.asarray(active_arrays["polar_cylindrical"][..., 2], dtype=float)
 
     missing: dict[str, np.ndarray] = {}
     if gaussian_density is None:
@@ -405,6 +316,10 @@ def _load_smoothed_scalars(
         missing["hexatic_order_numerator"] = hexatic_values
     if D_numerator is None:
         missing["D_numerator"] = D_values
+    if Px_numerator is None:
+        missing["P_x_numerator"] = Px_values
+    if Py_numerator is None:
+        missing["P_y_numerator"] = Py_values
 
     if missing:
         print("[fitting] Computing Gaussian fields on grid...")
@@ -414,110 +329,30 @@ def _load_smoothed_scalars(
             scalars.lx, scalars.cylinder_radius, pocket_radius,
         )
         gaussian_cache.update(computed)
-        gaussian_density = _cached_grid_field(
-            gaussian_cache, "rho_gaussian",
-            frame_count=active.steps.size,
-            nx=scalars.x_centers.size,
-            ntheta=scalars.theta_centers.size,
-        )
-        hexatic_numerator = _cached_grid_field(
-            gaussian_cache, "hexatic_order_numerator",
-            frame_count=active.steps.size,
-            nx=scalars.x_centers.size,
-            ntheta=scalars.theta_centers.size,
-        )
-        D_numerator = _cached_grid_field(
-            gaussian_cache, "D_numerator",
-            frame_count=active.steps.size,
-            nx=scalars.x_centers.size,
-            ntheta=scalars.theta_centers.size,
-        )
+        gaussian_density = _cached("rho_gaussian")
+        hexatic_numerator = _cached("hexatic_order_numerator")
+        D_numerator = _cached("D_numerator")
+        Px_numerator = _cached("P_x_numerator")
+        Py_numerator = _cached("P_y_numerator")
         _save_gaussian_field_cache(
-            config, active.steps, scalars.x_edges, scalars.theta_edges,
+            config.gaussian_fields_cache_path,
+            active.steps, scalars.x_edges, scalars.theta_edges,
             gaussian_cache,
         )
 
     assert gaussian_density is not None
     assert hexatic_numerator is not None
     assert D_numerator is not None
+    assert Px_numerator is not None
+    assert Py_numerator is not None
 
     rho = gaussian_density
     hexatic_order = _divide_by_density(hexatic_numerator, gaussian_density)
     D = _divide_by_density(D_numerator, gaussian_density)
-    return rho, hexatic_order, D
-
-
-# ---------------------------------------------------------------------------
-# Gaussian field cache
-# ---------------------------------------------------------------------------
-
-def _load_gaussian_field_cache(
-    config: FittingConfig,
-    steps: np.ndarray,
-    x_edges: np.ndarray,
-    theta_edges: np.ndarray,
-) -> dict[str, np.ndarray]:
-    path = config.gaussian_fields_cache_path
-    if not path.exists():
-        return {}
-    arrays = load_npz_arrays(path)
-    if not _gaussian_cache_metadata_matches(arrays, steps, x_edges, theta_edges):
-        return {}
-    return arrays
-
-
-def _save_gaussian_field_cache(
-    config: FittingConfig,
-    steps: np.ndarray,
-    x_edges: np.ndarray,
-    theta_edges: np.ndarray,
-    arrays: dict[str, np.ndarray],
-) -> None:
-    path = config.gaussian_fields_cache_path
-    path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(
-        path,
-        steps=np.asarray(steps),
-        x_edges=np.asarray(x_edges),
-        theta_edges=np.asarray(theta_edges),
-        **{
-            k: v for k, v in arrays.items()
-            if k not in {"steps", "x_edges", "theta_edges"}
-        },
-    )
-
-
-def _gaussian_cache_metadata_matches(
-    arrays: dict[str, np.ndarray],
-    steps: np.ndarray,
-    x_edges: np.ndarray,
-    theta_edges: np.ndarray,
-) -> bool:
-    required = ("steps", "x_edges", "theta_edges")
-    if any(k not in arrays for k in required):
-        return False
-    return (
-        np.array_equal(np.asarray(arrays["steps"]), np.asarray(steps))
-        and np.array_equal(np.asarray(arrays["x_edges"]), np.asarray(x_edges))
-        and np.array_equal(np.asarray(arrays["theta_edges"]), np.asarray(theta_edges))
-    )
-
-
-def _cached_grid_field(
-    arrays: dict[str, np.ndarray],
-    name: str,
-    *,
-    frame_count: int,
-    nx: int,
-    ntheta: int,
-) -> np.ndarray | None:
-    values = arrays.get(name)
-    if values is None:
-        return None
-    values = np.asarray(values, dtype=float)
-    if values.shape != (frame_count, nx, ntheta):
-        return None
-    return values
+    P_x = _divide_by_density(Px_numerator, gaussian_density)
+    P_y = _divide_by_density(Py_numerator, gaussian_density)
+    P = np.stack((P_x, P_y), axis=-1)
+    return rho, hexatic_order, D, P
 
 
 # ---------------------------------------------------------------------------
@@ -637,94 +472,6 @@ def _divide_by_density(numerator: np.ndarray, density: np.ndarray) -> np.ndarray
 # ---------------------------------------------------------------------------
 # Polarization gridding
 # ---------------------------------------------------------------------------
-
-def _polarization_grid_frames(
-    coords: np.ndarray,
-    shell_mask: np.ndarray,
-    arrays: dict[str, np.ndarray],
-    x_edges: np.ndarray,
-    theta_edges: np.ndarray,
-) -> np.ndarray:
-    assert "polar_mean" in arrays and "polar_cylindrical" in arrays
-    return _particle_cylindrical_vector_grid_frames(
-        coords, shell_mask,
-        cartesian_values=arrays["polar_mean"],
-        cylindrical_values=arrays["polar_cylindrical"],
-        x_edges=x_edges,
-        theta_edges=theta_edges,
-    )
-
-
-def _particle_cylindrical_vector_grid_frames(
-    coords: np.ndarray,
-    shell_mask: np.ndarray,
-    *,
-    cartesian_values: np.ndarray,
-    cylindrical_values: np.ndarray,
-    x_edges: np.ndarray,
-    theta_edges: np.ndarray,
-) -> np.ndarray:
-    coords = np.asarray(coords, dtype=float)
-    shell_mask = np.asarray(shell_mask, dtype=bool)
-    cartesian_values = np.asarray(cartesian_values, dtype=float)
-    cylindrical_values = np.asarray(cylindrical_values, dtype=float)
-    frames, _, _ = coords.shape
-    nx = len(x_edges) - 1
-    ntheta = len(theta_edges) - 1
-    field = np.full((frames, nx, ntheta, 2), np.nan, dtype=float)
-    lx = float(x_edges[-1] - x_edges[0])
-    for frame_idx in range(frames):
-        values = np.column_stack(
-            (cartesian_values[frame_idx, :, 0], cylindrical_values[frame_idx, :, 2])
-        )
-        field[frame_idx] = _bin_vector_mean(
-            coords[frame_idx], values, shell_mask[frame_idx],
-            x_edges, theta_edges, lx,
-        )
-    return np.nan_to_num(field, nan=0.0)
-
-
-def _bin_vector_mean(
-    coords: np.ndarray,
-    values: np.ndarray,
-    mask: np.ndarray,
-    x_edges: np.ndarray,
-    theta_edges: np.ndarray,
-    lx: float,
-) -> np.ndarray:
-    nx = len(x_edges) - 1
-    ntheta = len(theta_edges) - 1
-    result = np.zeros((nx, ntheta, 2), dtype=float)
-    counts = np.zeros((nx, ntheta), dtype=np.int64)
-    finite = (
-        mask
-        & np.isfinite(coords[:, 0])
-        & np.isfinite(coords[:, 1])
-        & np.all(np.isfinite(values), axis=1)
-    )
-    if not np.any(finite):
-        return result
-
-    x0 = float(x_edges[0])
-    x_values = ((coords[finite, 0] - x0) % lx) + x0
-    x_idx = np.clip(np.searchsorted(x_edges, x_values, side="right") - 1, 0, nx - 1)
-    theta_period = float(theta_edges[-1] - theta_edges[0])
-    theta0 = float(theta_edges[0])
-    theta_values = ((coords[finite, 1] - theta0) % theta_period) + theta0
-    theta_idx = np.clip(
-        np.searchsorted(theta_edges, theta_values, side="right") - 1, 0, ntheta - 1,
-    )
-
-    np.add.at(counts, (x_idx, theta_idx), 1)
-    for component in range(2):
-        np.add.at(result[..., component], (x_idx, theta_idx), values[finite, component])
-        result[..., component] = np.divide(
-            result[..., component], counts,
-            out=np.zeros((nx, ntheta), dtype=float),
-            where=counts > 0,
-        )
-    return result
-
 
 # ---------------------------------------------------------------------------
 # Chirality

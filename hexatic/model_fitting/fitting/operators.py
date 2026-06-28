@@ -111,6 +111,19 @@ def fft_directional_derivative(
     return np.stack((result_x, result_y), axis=-1)
 
 
+def fft_curl(
+    vec_field: np.ndarray, kx: np.ndarray, ky: np.ndarray
+) -> np.ndarray:
+    """Curl of 2D vector field: dV_y/dx - dV_x/dy.
+
+    Input shape (T, nx, ntheta, 2), output scalar (T, nx, ntheta).
+    """
+    dVy_dx, dVy_dy = fft_gradient(vec_field[..., 1], kx, ky)
+    dVx_dx, dVx_dy = fft_gradient(vec_field[..., 0], kx, ky)
+    return dVy_dx - dVx_dy
+
+
+
 def validate_grid_shape(
     field: Any, *, expected_ndim: int = 3, name: str = "field"
 ) -> None:

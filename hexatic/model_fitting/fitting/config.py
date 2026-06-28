@@ -27,7 +27,6 @@ class FittingConfig:
     neighbor_count_path: Path | None = None
     output_dir: Path = OUTPUT_DIR
     density_threshold: float = 0.0
-    smoothing_bins: float = 0.0
     ridge_alpha: float = DEFAULT_RIDGE_ALPHA
     stlsq_threshold: float = DEFAULT_STLSQ_THRESHOLD
     stlsq_max_iter: int = DEFAULT_STLSQ_MAX_ITER
@@ -54,8 +53,6 @@ class FittingConfig:
         object.__setattr__(self, "output_dir", Path(self.output_dir))
         if self.density_threshold < 0.0:
             raise ValueError("density_threshold must be non-negative.")
-        if self.smoothing_bins < 0.0:
-            raise ValueError("smoothing_bins must be non-negative.")
         if self.ridge_alpha < 0.0:
             raise ValueError("ridge_alpha must be non-negative.")
         if self.stlsq_threshold < 0.0:
@@ -99,9 +96,6 @@ class FittingConfig:
 
     @property
     def cache_path(self) -> Path:
-        if self.smoothing_bins > 0.0:
-            bins_text = f"{self.smoothing_bins:g}".replace(".", "p")
-            return self.output_dir / f"{self.case_id}_fitting_bins_{bins_text}.npz"
         return self.output_dir / f"{self.case_id}_fitting.npz"
 
     @property
