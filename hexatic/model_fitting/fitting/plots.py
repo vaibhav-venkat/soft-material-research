@@ -8,7 +8,6 @@ import numpy as np
 from .fit import FittingResult
 
 
-PLOT_QUANTITIES = ("normalized_residual_x", "normalized_residual_y")
 ROBUST_PERCENTILE = 98.0
 
 
@@ -16,71 +15,14 @@ def write_all_plots(
     result: FittingResult,
     output_dir: str | Path,
     *,
-    frame_idx: int | None = None,
     case_id: str = "radius_15D",
 ) -> list[Path]:
+    """Write all diagnostic plots. Currently a no-op until Phase 7."""
+    _ = result  # plots rebuilt in later phases
     destination_dir = Path(output_dir)
-    written = []
-    for quantity in PLOT_QUANTITIES:
-        print(f"[fitting] Writing {quantity} plot...")
-        written.append(
-            write_quantity_plot(
-                result,
-                quantity,
-                destination_dir / f"{case_id}_fit_{quantity}.png",
-                frame_idx=frame_idx,
-            )
-        )
-    return written
-
-
-def write_quantity_plot(
-    result: FittingResult,
-    quantity: str,
-    output_path: str | Path,
-    *,
-    frame_idx: int | None = None,
-) -> Path:
-    values = _quantity_values(result, quantity)
-    selected = (
-        values
-        if values.ndim == 2
-        else _select_transition_values(values, frame_idx)
-    )
-    title_suffix = _frame_title_suffix(result, frame_idx)
-    if values.ndim == 2:
-        title_suffix = ""
-    x_centers = np.asarray(result.x_centers, dtype=float)
-    theta_centers = np.asarray(result.theta_centers, dtype=float)
-    color_limits = _robust_color_limits(
-        selected,
-        symmetric="residual" in quantity,
-        zero_floor=quantity.startswith("contribution_"),
-    )
-
-    fig, axis = plt.subplots(figsize=(10, 5))
-    mesh = axis.pcolormesh(
-        x_centers,
-        theta_centers,
-        selected.T,
-        shading="auto",
-        cmap="RdBu_r" if "residual" in quantity else "viridis",
-        vmin=color_limits[0],
-        vmax=color_limits[1],
-    )
-    colorbar = fig.colorbar(mesh, ax=axis, label=_quantity_label(quantity))
-    colorbar.ax.set_title("clipped", fontsize=8)
-    axis.set_xlabel("x")
-    axis.set_ylabel("theta")
-    axis.set_title(f"{_quantity_label(quantity)} {title_suffix}")
-    fig.tight_layout()
-
-    destination = Path(output_path)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(destination, dpi=200)
-    plt.close(fig)
-    print(f"[fitting] Wrote {destination}.")
-    return destination
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    print("[fitting] No plots implemented yet (Phase 1 cleanup).")
+    return []
 
 
 def _robust_color_limits(
@@ -119,34 +61,6 @@ def _robust_color_limits(
     if not np.isfinite(low) or not np.isfinite(high) or np.isclose(low, high):
         return 0.0, 1.0
     return low, high
-
-
-def _quantity_values(result: FittingResult, quantity: str) -> np.ndarray:
-    if quantity == "normalized_residual_x":
-        return _normalized_residual(result.residual_x, result.J[..., 0], result.mask)
-    if quantity == "normalized_residual_y":
-        return _normalized_residual(result.residual_y, result.J[..., 1], result.mask)
-    raise ValueError(f"Unsupported fitting quantity: {quantity}")
-
-
-def _quantity_label(quantity: str) -> str:
-    return quantity
-
-
-def _normalized_residual(
-    residual: np.ndarray,
-    measured: np.ndarray,
-    mask: np.ndarray,
-) -> np.ndarray:
-    residual = np.asarray(residual, dtype=float)
-    measured = np.asarray(measured, dtype=float)
-    mask = np.asarray(mask, dtype=bool)
-    valid = mask & np.isfinite(residual) & np.isfinite(measured)
-    scale = float(np.nanmean(np.abs(measured[valid]))) if np.any(valid) else float("nan")
-    if not np.isfinite(scale) or scale == 0.0:
-        scale = 1.0
-    normalized = residual / scale
-    return np.where(valid, normalized, np.nan)
 
 
 def _select_transition_values(values: np.ndarray, frame_idx: int | None) -> np.ndarray:

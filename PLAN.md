@@ -47,7 +47,7 @@ These fields should be the only representation used by the regressions.
 
 Finite-volume machinery can still provide the measured crossing source, but finite-volume fluxes/divergences should not become features.
 
-model_fitting/film_continuity computes some of these values already, along with the fitting folder, but everythign should be self-contained in `model_fitting/fitting`. You can look at the other folders for help, if needed.
+`model_fitting/film_continuity` computes some of these values already, along with the fitting folder, but everything should be self-contained in `model_fitting/fitting`. You can look at the other folders for help, if needed.
 
 ## Derived Quantities
 
@@ -61,6 +61,9 @@ Compute these from the smoothed representation:
 - `grad hexatic_order`.
 - `div P`.
 - `div(chirality * P_perp)`.
+- `laplacian rho`.
+- `laplacian D`.
+- `laplacian hexatic_order`.
 - `(P · grad)P`.
 - `(P_perp · grad)P`.
 - `laplacian P`.
@@ -72,7 +75,7 @@ RHS terms should be evaluated on transition-midpoint fields.
 
 All derivatives should route through the same operator module.
 
-This, along with the previous fields, should be saved into an appropriate *.npz within output/npz/[file].npz
+This, along with the previous fields, should be saved into an appropriate `*.npz` cache within `hexatic/model_fitting/output/fitting/`.
 
 ## Density Fit
 
@@ -122,7 +125,7 @@ Do not fit separate `P_x` and `P_y` coefficient vectors.
 
 ## Shared Mask
 
-Use one valid-sample mask for all fits, having a required valid density, valid polarization components.
+Use one valid-sample mask for all fits, requiring valid density and valid polarization components.
 
 If extra validity checks are needed, keep them common unless there is a strong reason not to.
 
@@ -223,7 +226,7 @@ This should be the main file edited when changing the PDE library.
 
 ### `regression.py`
 
-Own regression mechanics: flattening helpers if generic, finite-row filtering, RMS normalization, ridge fitting, STLSQsparsification, physical coefficient recovery, and degenerate-regression handling.
+Own regression mechanics: flattening helpers if generic, finite-row filtering, RMS normalization, ridge fitting, STLSQ sparsification, physical coefficient recovery, and degenerate-regression handling.
 
 This module should not know the physics of density or polarization.
 
