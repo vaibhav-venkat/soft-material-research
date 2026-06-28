@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 
 from .fitting.config import DEFAULT_CASE_ID, FittingConfig
+from .fitting.fields import load_or_compute_fields
 from .fitting.fit import FittingResult, compute_fitting
 from .fitting.io_cache import load_cache, write_cache
 from .fitting.plots import write_all_plots
@@ -35,7 +36,8 @@ def main(argv: list[str] | None = None) -> int:
     if config.cache_path.exists() and not args.overwrite:
         print("[fitting] Loading cached fit result...")
         try:
-            result = FittingResult.from_cache_arrays(load_cache(config.cache_path))
+            fields = load_or_compute_fields(config)
+            result = FittingResult.from_cache_arrays(load_cache(config.cache_path), fields)
             print("[fitting] Cache loaded.")
         except ValueError:
             print("[fitting] Cache stale; recomputing...")

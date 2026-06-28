@@ -12,6 +12,9 @@ DENSITY_ANALYSIS_DIR = Path(__file__).resolve().parents[1]
 HEXATIC_OUTPUT_DIR = DENSITY_ANALYSIS_DIR / "hexatic_output"
 OUTPUT_DIR = DENSITY_ANALYSIS_DIR / "output" / "fitting"
 DEFAULT_CASE_ID = "radius_15D"
+DEFAULT_RIDGE_ALPHA = 1.0e-6
+DEFAULT_STLSQ_THRESHOLD = 1.0e-8
+DEFAULT_STLSQ_MAX_ITER = 20
 
 
 @dataclass(frozen=True)
@@ -25,6 +28,9 @@ class FittingConfig:
     output_dir: str | Path = OUTPUT_DIR
     density_threshold: float = 0.0
     smoothing_bins: float = 0.0
+    ridge_alpha: float = DEFAULT_RIDGE_ALPHA
+    stlsq_threshold: float = DEFAULT_STLSQ_THRESHOLD
+    stlsq_max_iter: int = DEFAULT_STLSQ_MAX_ITER
 
     def __post_init__(self) -> None:
         if self.npz_path is not None:
@@ -50,6 +56,12 @@ class FittingConfig:
             raise ValueError("density_threshold must be non-negative.")
         if self.smoothing_bins < 0.0:
             raise ValueError("smoothing_bins must be non-negative.")
+        if self.ridge_alpha < 0.0:
+            raise ValueError("ridge_alpha must be non-negative.")
+        if self.stlsq_threshold < 0.0:
+            raise ValueError("stlsq_threshold must be non-negative.")
+        if self.stlsq_max_iter < 1:
+            raise ValueError("stlsq_max_iter must be at least 1.")
 
     @property
     def case(self) -> RadiusCase:
