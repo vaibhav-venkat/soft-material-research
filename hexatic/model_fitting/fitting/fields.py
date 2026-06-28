@@ -19,7 +19,7 @@ from hexatic.chirality.config import ChiralityConfig
 
 from ..film_continuity.config import FilmContinuityConfig, scalars_from_active_fields
 from ..film_continuity.continuity import FilmContinuityResult, compute_film_continuity
-from ..film_continuity.io_cache import load_active_matter_fields
+from ..film_continuity.io_cache import ActiveMatterFields, load_active_matter_fields
 from . import operators as ops
 from .config import FittingConfig
 from .io_cache import load_npz_arrays
@@ -139,7 +139,7 @@ def load_or_compute_fields(config: FittingConfig) -> HydrodynamicFields:
 
     # --- measured crossing source (transition field) ---
     print("[fitting] Loading S_cross...")
-    S_cross = _load_s_cross(config, scalars)
+    S_cross = _load_s_cross(config)
 
     # --- frame fields and mid-frame fields ---
     print("[fitting] Computing derivatives...")
@@ -247,7 +247,7 @@ def load_or_compute_fields(config: FittingConfig) -> HydrodynamicFields:
 # S_cross loading
 # ---------------------------------------------------------------------------
 
-def _load_s_cross(config: FittingConfig, scalars: object) -> np.ndarray:
+def _load_s_cross(config: FittingConfig) -> np.ndarray:
     """Load measured crossing source from film-continuity cache."""
     fc_cache = config.film_continuity_cache_path
     if fc_cache.exists():
@@ -361,7 +361,7 @@ def _load_hydrodynamic_cache(path: Path) -> HydrodynamicFields:
 
 def _load_smoothed_scalars(
     config: FittingConfig,
-    active: object,
+    active: ActiveMatterFields,
     scalars:  FilmContinuityScalars,
     active_arrays: dict[str, np.ndarray],
     pocket_radius: float,
