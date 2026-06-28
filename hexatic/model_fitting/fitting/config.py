@@ -23,6 +23,7 @@ class FittingConfig:
     hexatic_order_path: str | Path | None = None
     neighbor_count_path: str | Path | None = None
     output_dir: str | Path = OUTPUT_DIR
+    density_threshold: float = 0.0
     smoothing_bins: float = 0.0
 
     def __post_init__(self) -> None:
@@ -45,6 +46,8 @@ class FittingConfig:
                 Path(self.neighbor_count_path),
             )
         object.__setattr__(self, "output_dir", Path(self.output_dir))
+        if self.density_threshold < 0.0:
+            raise ValueError("density_threshold must be non-negative.")
         if self.smoothing_bins < 0.0:
             raise ValueError("smoothing_bins must be non-negative.")
 
@@ -92,3 +95,16 @@ class FittingConfig:
     @property
     def gaussian_fields_cache_path(self) -> Path:
         return self.output_dir / f"{self.case_id}_gaussian_fields.npz"
+
+    @property
+    def hydrodynamic_fields_cache_path(self) -> Path:
+        return self.output_dir / f"{self.case_id}_hydrodynamic_fields.npz"
+
+    @property
+    def film_continuity_cache_path(self) -> Path:
+        return (
+            DENSITY_ANALYSIS_DIR
+            / "output"
+            / "film_continuity"
+            / f"{self.case_id}_film_continuity.npz"
+        )

@@ -44,7 +44,10 @@ def fft_divergence(
 
     Returns scalar field (T, nx, ntheta).
     """
-    assert vec_field.ndim == 4 and vec_field.shape[3] == 2:
+    if vec_field.ndim != 4 or vec_field.shape[3] != 2:
+        raise ValueError(
+            f"vec_field must have shape (T, nx, ntheta, 2), got {vec_field.shape}."
+        )
     kx = np.asarray(kx, dtype=float)
     ky = np.asarray(ky, dtype=float)
     vx_hat = fft.fft2(vec_field[..., 0], axes=(1, 2))
@@ -112,4 +115,8 @@ def validate_grid_shape(
     field: Any, *, expected_ndim: int = 3, name: str = "field"
 ) -> None:
     field = np.asarray(field)
-    assert field.ndim == expected_ndim
+    if field.ndim != expected_ndim:
+        raise ValueError(
+            f"{name} must have {expected_ndim} dimensions, got {field.ndim} "
+            f"with shape {field.shape}."
+        )

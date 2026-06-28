@@ -10,7 +10,7 @@ from scipy import linalg
 from scipy.ndimage import gaussian_filter
 
 from .config import FittingConfig
-from .fields import load_or_compute_fields
+from .fields import HydrodynamicFields, load_or_compute_fields
 from .io_cache import flatten_array_dict, reconstruct_array_dict
 
 
@@ -28,18 +28,14 @@ class FittingResult:
     x_centers: np.ndarray
     theta_edges: np.ndarray
     theta_centers: np.ndarray
-    J: np.ndarray
-    frame_fields: dict[str, np.ndarray]
-    mid_fields: dict[str, np.ndarray]
+    fields: HydrodynamicFields
     mask: np.ndarray
-    counts: np.ndarray | None
     smoothing_bins: float = 0.0
-    particle_diameter: float | None = None
     pocket_radius: float | None = None
 
     @property
     def rho(self) -> np.ndarray:
-        return self.frame_fields["rho"]
+        return self.fields.rho
 
     def as_cache_arrays(self) -> dict[str, Any]:
         arrays: dict[str, Any] = {
@@ -52,67 +48,43 @@ class FittingResult:
             "x_centers": self.x_centers,
             "theta_edges": self.theta_edges,
             "theta_centers": self.theta_centers,
-            "J": self.J,
             "mask": self.mask,
-            "counts": np.asarray([])
-            if self.counts is None
-            else np.asarray(self.counts),
             "smoothing_bins": self.smoothing_bins,
-            "particle_diameter": np.nan
-            if self.particle_diameter is None
-            else self.particle_diameter,
             "pocket_radius": np.nan if self.pocket_radius is None else self.pocket_radius,
         }
-        arrays.update(flatten_array_dict(self.frame_fields, "frame_fields"))
-        arrays.update(flatten_array_dict(self.mid_fields, "mid_fields"))
         return arrays
 
     @classmethod
-    def from_cache_arrays(cls, arrays: dict[str, Any]) -> FittingResult:
+    def from_cache_arrays(
+        cls, arrays: dict[str, Any], fields: HydrodynamicFields,
+    ) -> FittingResult:
         kwargs = dict(arrays)
         cache_version = int(np.asarray(kwargs.pop("cache_version", 0)))
         if cache_version < CACHE_VERSION:
             raise ValueError(
                 "Cached fitting result is from an older layout; recompute it."
             )
-        frame_fields = reconstruct_array_dict(kwargs, "frame_fields")
-        mid_fields = reconstruct_array_dict(kwargs, "mid_fields")
-        for prefix in ("frame_fields", "mid_fields"):
-            for key in tuple(kwargs):
-                if key.startswith(f"{prefix}__"):
-                    kwargs.pop(key)
-
+        kwargs.pop("fields", None)
         for key in ("dt", "cylinder_radius", "lx", "smoothing_bins"):
             if key in kwargs:
                 kwargs[key] = float(np.asarray(kwargs[key]))
-        for key in ("particle_diameter", "pocket_radius"):
-            if key in kwargs:
-                value = float(np.asarray(kwargs[key]))
-                kwargs[key] = None if np.isnan(value) else value
-        if "counts" in kwargs and np.asarray(kwargs["counts"]).size == 0:
-            kwargs["counts"] = None
+        pocket_radius_val = float(np.asarray(kwargs.get("pocket_radius", np.nan)))
+        kwargs["pocket_radius"] = None if np.isnan(pocket_radius_val) else pocket_radius_val
         if "mask" in kwargs:
             kwargs["mask"] = np.asarray(kwargs["mask"], dtype=bool)
-        return cls(
-            **kwargs,
-            frame_fields=frame_fields,
-            mid_fields=mid_fields,
-        )
+        return cls(fields=fields, **kwargs)
 
     def summary(self) -> str:
         masked_bins = int(np.count_nonzero(self.mask)) if self.mask is not None else 0
         total_bins = self.mask.size if self.mask is not None else 0
         return (
-            f"mask: {masked_bins}/{total_bins} bins, "
+            f"mask: {masked_bins}/{total_bins} valid samples, "
             f"smoothing_bins={self.smoothing_bins}"
         )
 
 
 def compute_fitting(config: FittingConfig) -> FittingResult:
     fields = load_or_compute_fields(config)
-    mask = _fit_mask(fields.counts, fields.J.shape[:3])
-    print(f"[fitting] Fit mask: {int(np.count_nonzero(mask))}/{mask.size} bins.")
-
     return FittingResult(
         transition_steps=fields.transition_steps,
         dt=fields.dt,
@@ -122,11 +94,8 @@ def compute_fitting(config: FittingConfig) -> FittingResult:
         x_centers=fields.x_centers,
         theta_edges=fields.theta_edges,
         theta_centers=fields.theta_centers,
-        J=fields.J,
-        frame_fields=fields.frame_fields,
-        mid_fields=fields.mid_fields,
-        mask=mask,
-        counts=fields.counts,
+        fields=fields,
+        mask=fields.mask,
         smoothing_bins=config.smoothing_bins,
         pocket_radius=fields.pocket_radius,
     )
@@ -208,13 +177,4 @@ def _normalize_design_columns(
     return design / scales[None, :], scales
 
 
-def _fit_mask(
-    counts: np.ndarray | None,
-    shape: tuple[int, int, int],
-) -> np.ndarray:
-    if counts is None:
-        return np.ones(shape, dtype=bool)
-    counts = np.asarray(counts)
-    if counts.shape != shape:
-        raise ValueError(f"counts shape {counts.shape} does not match {shape}.")
-    return counts > 0
+
