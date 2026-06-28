@@ -6,12 +6,12 @@ transition fields, time derivatives, geometry metadata, and shared mask.
 """
 
 from __future__ import annotations
+from hexatic.model_fitting.film_continuity import FilmContinuityScalars
 
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-from scipy import fft
 
 from hexatic.active_matter_cylinder.math_utils import _density_sum
 from hexatic.chirality.compute import compute_chirality_fields
@@ -362,7 +362,7 @@ def _load_hydrodynamic_cache(path: Path) -> HydrodynamicFields:
 def _load_smoothed_scalars(
     config: FittingConfig,
     active: object,
-    scalars: object,
+    scalars:  FilmContinuityScalars,
     active_arrays: dict[str, np.ndarray],
     pocket_radius: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:

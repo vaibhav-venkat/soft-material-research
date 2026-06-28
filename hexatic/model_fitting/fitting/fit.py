@@ -47,10 +47,6 @@ class FittingResult:
     stlsq_max_iter: int = 20
     pocket_radius: float | None = None
 
-    @property
-    def rho(self) -> np.ndarray:
-        return self.fields.rho
-
     def as_cache_arrays(self) -> dict[str, Any]:
         arrays: dict[str, Any] = {
             "cache_version": CACHE_VERSION,
