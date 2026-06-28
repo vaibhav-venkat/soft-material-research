@@ -128,16 +128,8 @@ def load_or_compute_fields(config: FittingConfig) -> HydrodynamicFields:
     )
 
     # --- load Gaussian-smoothed scalars and polarization on grid ---
-    rho, hexatic_order, D, P = _load_smoothed_scalars(
+    rho, hexatic_order, D, P, chirality = _load_smoothed_scalars(
         config, active, scalars, active_arrays, pocket_radius,
-    )
-
-    # --- chirality on grid ---
-    chirality = _load_or_compute_chirality_frames(
-        config, scalars.x_centers.size, scalars.theta_centers.size,
-    )
-    assert chirality.shape[0] == active.steps.size, (
-        f"chirality frames {chirality.shape[0]} != steps {active.steps.size}"
     )
 
     # --- measured crossing source (transition field) ---
@@ -189,12 +181,33 @@ def load_or_compute_fields(config: FittingConfig) -> HydrodynamicFields:
     mid_P_perp = np.stack((-mid_P[..., 1], mid_P[..., 0]), axis=-1)
     laplacian_P_perp = ops.fft_vector_laplacian(mid_P_perp, kx, ky)
 
-    # --- shared mask: valid density and valid polarization ---
-    mask = (
-        np.isfinite(mid_rho)
-        & (mid_rho > config.density_threshold)
-        & np.isfinite(mid_P[..., 0])
-        & np.isfinite(mid_P[..., 1])
+    # --- shared mask: valid density and polarization rows use identical samples ---
+    mask = _shared_valid_mask(
+        density_threshold=config.density_threshold,
+        mid_rho=mid_rho,
+        scalar_fields=(
+            partial_t_rho,
+            S_cross,
+            mid_chirality,
+            mid_D,
+            mid_hexatic_order,
+            div_P,
+            div_chiral_P_perp,
+            laplacian_rho,
+            laplacian_D,
+            laplacian_hexatic_order,
+        ),
+        vector_fields=(
+            mid_P,
+            partial_t_P,
+            grad_rho,
+            grad_D,
+            grad_hexatic_order,
+            P_dot_grad_P,
+            P_perp_dot_grad_P,
+            laplacian_P,
+            laplacian_P_perp,
+        ),
     )
     masked_count = int(np.count_nonzero(mask))
     total_count = mask.size
@@ -277,8 +290,8 @@ def _load_smoothed_scalars(
     scalars: FilmContinuityScalars,
     active_arrays: dict[str, np.ndarray],
     pocket_radius: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Load or compute rho, hexatic_order, D, P via Gaussian smoothing."""
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Load or compute rho, hexatic_order, D, P, chirality via Gaussian smoothing."""
     gaussian_cache = _load_gaussian_field_cache(
         config.gaussian_fields_cache_path,
         active.steps, scalars.x_edges, scalars.theta_edges,
@@ -297,6 +310,7 @@ def _load_smoothed_scalars(
     D_numerator = _cached("D_numerator")
     Px_numerator = _cached("P_x_numerator")
     Py_numerator = _cached("P_y_numerator")
+    chirality_numerator = _cached("chirality_numerator")
 
     # particle-level source values
     hexatic_values = _load_hexatic_order_frames(
@@ -308,6 +322,16 @@ def _load_smoothed_scalars(
     D_values = (6.0 - neighbor_counts) ** 2
     Px_values = np.asarray(active_arrays["polar_mean"][..., 0], dtype=float)
     Py_values = np.asarray(active_arrays["polar_cylindrical"][..., 2], dtype=float)
+    if chirality_numerator is None:
+        chirality_grid = _load_or_compute_chirality_frames(
+            config, scalars.x_centers.size, scalars.theta_centers.size,
+        )
+        assert chirality_grid.shape[0] == active.steps.size, (
+            f"chirality frames {chirality_grid.shape[0]} != steps {active.steps.size}"
+        )
+        chirality_values = _particle_values_from_grid_field(
+            chirality_grid, active.coords, scalars.x_edges, scalars.theta_edges,
+        )
 
     missing: dict[str, np.ndarray] = {}
     if gaussian_density is None:
@@ -320,6 +344,8 @@ def _load_smoothed_scalars(
         missing["P_x_numerator"] = Px_values
     if Py_numerator is None:
         missing["P_y_numerator"] = Py_values
+    if chirality_numerator is None:
+        missing["chirality_numerator"] = chirality_values
 
     if missing:
         print("[fitting] Computing Gaussian fields on grid...")
@@ -345,14 +371,16 @@ def _load_smoothed_scalars(
     assert D_numerator is not None
     assert Px_numerator is not None
     assert Py_numerator is not None
+    assert chirality_numerator is not None
 
     rho = gaussian_density
     hexatic_order = _divide_by_density(hexatic_numerator, gaussian_density)
     D = _divide_by_density(D_numerator, gaussian_density)
     P_x = _divide_by_density(Px_numerator, gaussian_density)
     P_y = _divide_by_density(Py_numerator, gaussian_density)
+    chirality = _divide_by_density(chirality_numerator, gaussian_density)
     P = np.stack((P_x, P_y), axis=-1)
-    return rho, hexatic_order, D, P
+    return rho, hexatic_order, D, P, chirality
 
 
 # ---------------------------------------------------------------------------
@@ -470,6 +498,58 @@ def _divide_by_density(numerator: np.ndarray, density: np.ndarray) -> np.ndarray
 
 
 # ---------------------------------------------------------------------------
+def _particle_values_from_grid_field(
+    grid_field: np.ndarray,
+    coords: np.ndarray,
+    x_edges: np.ndarray,
+    theta_edges: np.ndarray,
+) -> np.ndarray:
+    """Sample a gridded scalar at particle (x, theta) bins for later smoothing."""
+    grid_field = np.asarray(grid_field, dtype=np.float64)
+    coords = np.asarray(coords, dtype=np.float64)
+    x_edges = np.asarray(x_edges, dtype=np.float64)
+    theta_edges = np.asarray(theta_edges, dtype=np.float64)
+    assert grid_field.ndim == 3
+    assert coords.ndim == 3 and coords.shape[2] >= 2
+    assert grid_field.shape[0] == coords.shape[0]
+    assert grid_field.shape[1:] == (x_edges.size - 1, theta_edges.size - 1)
+
+    values = np.empty(coords.shape[:2], dtype=np.float64)
+    for frame_idx in range(coords.shape[0]):
+        ix = _periodic_bin_indices(coords[frame_idx, :, 0], x_edges)
+        itheta = _periodic_bin_indices(coords[frame_idx, :, 1], theta_edges)
+        values[frame_idx] = grid_field[frame_idx, ix, itheta]
+    return np.nan_to_num(values, nan=0.0)
+
+
+def _periodic_bin_indices(values: np.ndarray, edges: np.ndarray) -> np.ndarray:
+    period = float(edges[-1] - edges[0])
+    assert period > 0.0
+    wrapped = edges[0] + np.mod(np.asarray(values, dtype=np.float64) - edges[0], period)
+    indices = np.searchsorted(edges, wrapped, side="right") - 1
+    return np.mod(indices, edges.size - 1)
+
+
+def _shared_valid_mask(
+    *,
+    density_threshold: float,
+    mid_rho: np.ndarray,
+    scalar_fields: tuple[np.ndarray, ...] = (),
+    vector_fields: tuple[np.ndarray, ...] = (),
+) -> np.ndarray:
+    mid_rho = np.asarray(mid_rho, dtype=float)
+    mask = np.isfinite(mid_rho) & (mid_rho > density_threshold)
+    for field in scalar_fields:
+        field = np.asarray(field, dtype=float)
+        assert field.shape == mid_rho.shape
+        mask &= np.isfinite(field)
+    for field in vector_fields:
+        field = np.asarray(field, dtype=float)
+        assert field.shape[:-1] == mid_rho.shape and field.shape[-1] == 2
+        mask &= np.all(np.isfinite(field), axis=-1)
+    return mask
+
+
 # Polarization gridding
 # ---------------------------------------------------------------------------
 

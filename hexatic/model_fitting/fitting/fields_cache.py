@@ -8,7 +8,7 @@ import numpy as np
 
 from .io_cache import load_npz_arrays
 
-HYDRO_CACHE_VERSION = 1
+HYDRO_CACHE_VERSION = 2
 
 
 def _save_hydrodynamic_cache(path: Path, fields) -> None:

@@ -19,7 +19,7 @@ from . import operators as ops
 from .regression import RegressionResult, fit_scalar_library, fit_vector_library
 
 
-CACHE_VERSION = 18
+CACHE_VERSION = 19
 
 
 @dataclass(frozen=True)
