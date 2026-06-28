@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-from scipy import linalg
+import pysindy as ps
 
 from .library import ScalarLibrary, VectorLibrary
 
@@ -121,43 +121,47 @@ def _fit_rows(
     if not np.any(nonzero):
         return coefficients, scales, active, int(X.shape[0])
 
-    coef_n = _ridge(Xn, y, nonzero, ridge_alpha)
+    coef_n = _pysindy_coefficients(
+        Xn,
+        y,
+        ridge_alpha=ridge_alpha,
+        stlsq_threshold=stlsq_threshold,
+        stlsq_max_iter=stlsq_max_iter,
+    )
+    coef_n[~nonzero] = 0.0
     active = nonzero & (np.abs(coef_n) >= stlsq_threshold)
-    if not np.any(active):
-        return coefficients, scales, active, int(X.shape[0])
-
-    for _ in range(stlsq_max_iter):
-        next_coef_n = _ridge(Xn, y, active, ridge_alpha)
-        next_active = nonzero & (np.abs(next_coef_n) >= stlsq_threshold)
-        if np.array_equal(next_active, active):
-            coef_n = next_coef_n
-            break
-        coef_n = next_coef_n
-        active = next_active
-        if not np.any(active):
-            coef_n[:] = 0.0
-            break
 
     coefficients = coef_n / scales
     coefficients[~np.isfinite(coefficients)] = 0.0
     return coefficients, scales, active, int(X.shape[0])
 
 
-def _ridge(X: np.ndarray, y: np.ndarray, active: np.ndarray, alpha: float) -> np.ndarray:
-    coef = np.zeros(X.shape[1], dtype=float)
-    idx = np.flatnonzero(active)
-    if idx.size == 0:
-        return coef
-    Xa = X[:, idx]
-    lhs = Xa.T @ Xa
-    if alpha > 0.0:
-        lhs = lhs + float(alpha) * np.eye(idx.size)
-    rhs = Xa.T @ y
-    try:
-        coef[idx] = linalg.solve(lhs, rhs, assume_a="pos", check_finite=False)
-    except linalg.LinAlgError:
-        coef[idx], *_ = linalg.lstsq(Xa, y, check_finite=False)
-    return coef
+def _pysindy_coefficients(
+    X: np.ndarray,
+    y: np.ndarray,
+    *,
+    ridge_alpha: float,
+    stlsq_threshold: float,
+    stlsq_max_iter: int,
+) -> np.ndarray:
+    optimizer = ps.STLSQ(
+        threshold=stlsq_threshold,
+        alpha=ridge_alpha,
+        max_iter=stlsq_max_iter,
+        normalize_columns=False,
+    )
+    # optimizer = ps.SR3(
+    #     reg_weight_lam=stlsq_threshold,
+    #     regularizer="L0",
+    #     max_iter=stlsq_max_iter,
+    #     normalize_columns=False,
+    # )
+    optimizer.fit(X, y)
+    coefficients = np.ravel(np.asarray(optimizer.coef_, dtype=float))
+    if coefficients.size != X.shape[1]:
+        raise ValueError("PySINDy optimizer returned unexpected coefficient shape.")
+    coefficients[~np.isfinite(coefficients)] = 0.0
+    return coefficients
 
 
 def _scalar_metrics(target: np.ndarray, prediction: np.ndarray, mask: np.ndarray) -> dict[str, float]:

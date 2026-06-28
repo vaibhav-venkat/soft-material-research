@@ -21,3 +21,6 @@ plotly = ">=6.8.0,<7"
 scikit-learn = ">=1.9.0,<2"
 numba = ">=0.65.1,<0.66"
 pysr = ">=1.5.10,<2"
+
+[pypi-dependencies]
+pysindy = { version = ">=2.1.0, <3", extras = ["miosr", "sbr", "cvxpy"] }
