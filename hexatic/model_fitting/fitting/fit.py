@@ -15,10 +15,11 @@ from .library import (
     density_target,
     polarization_target,
 )
+from . import operators as ops
 from .regression import RegressionResult, fit_scalar_library, fit_vector_library
 
 
-CACHE_VERSION = 17
+CACHE_VERSION = 18
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,9 @@ class FittingResult:
     polarization_target: np.ndarray
     density: RegressionResult
     polarization: RegressionResult
+    density_contributions: np.ndarray
+    polarization_contributions: np.ndarray
+    curl_residual: np.ndarray
     smoothing_bins: float = 0.0
     ridge_alpha: float = 1.0e-6
     stlsq_threshold: float = 1.0e-8
@@ -77,6 +81,9 @@ class FittingResult:
             "polarization_scales": self.polarization.scales,
             "polarization_active": self.polarization.active,
             "polarization_rows_used": self.polarization.rows_used,
+            "density_contributions": self.density_contributions,
+            "polarization_contributions": self.polarization_contributions,
+            "curl_residual": self.curl_residual,
             "smoothing_bins": self.smoothing_bins,
             "ridge_alpha": self.ridge_alpha,
             "stlsq_threshold": self.stlsq_threshold,
@@ -120,18 +127,26 @@ class FittingResult:
             )
         for prefix in ("density", "polarization"):
             for key in tuple(kwargs):
-                if key.startswith(f"{prefix}_") and key != f"{prefix}_target":
+                if key.startswith(f"{prefix}_") and key not in (
+                    f"{prefix}_target", f"{prefix}_contributions",
+                ):
                     kwargs.pop(key)
         return cls(fields=fields, density=density, polarization=polarization, **kwargs)
 
     def summary(self) -> str:
         masked_bins = int(np.count_nonzero(self.mask)) if self.mask is not None else 0
         total_bins = self.mask.size if self.mask is not None else 0
+        curl_stats = ""
+        if self.curl_residual is not None:
+            c = self.curl_residual[self.mask]
+            if c.size > 0:
+                curl_stats = f", curl_resid: mean={np.nanmean(c):.4g}, rms={np.sqrt(np.nanmean(c**2)):.4g}"
         return (
             f"mask: {masked_bins}/{total_bins} valid samples, "
             f"density_r2={self.density.metrics.get('r2', np.nan):.6g}, "
             f"polarization_r2=({self.polarization.metrics.get('r2_x', np.nan):.6g}, "
             f"{self.polarization.metrics.get('r2_y', np.nan):.6g})"
+            f"{curl_stats}"
         )
 
 
@@ -157,6 +172,25 @@ def compute_fitting(config: FittingConfig) -> FittingResult:
         stlsq_threshold=config.stlsq_threshold,
         stlsq_max_iter=config.stlsq_max_iter,
     )
+
+    # contribution maps
+    density_contributions = (
+        density_lib.values * density_fit.coefficients[None, None, None, :]
+    )
+    polarization_contributions = (
+        polarization_lib.values * polarization_fit.coefficients[None, None, None, :, None]
+    )
+
+    # curl of polarization residual
+    residual = y_polarization - polarization_fit.prediction
+    nx = fields.x_centers.size
+    ntheta = fields.theta_centers.size
+    ly = fields.cylinder_radius * (fields.theta_edges[-1] - fields.theta_edges[0])
+    kx, ky = ops.build_k_vectors(nx, ntheta, fields.lx, ly)
+    dRy_dx, dRy_dy = ops.fft_gradient(residual[..., 1], kx, ky)
+    dRx_dx, dRx_dy = ops.fft_gradient(residual[..., 0], kx, ky)
+    curl_residual = dRy_dx - dRx_dy
+
     return FittingResult(
         transition_steps=fields.transition_steps,
         dt=fields.dt,
@@ -172,6 +206,9 @@ def compute_fitting(config: FittingConfig) -> FittingResult:
         polarization_target=y_polarization,
         density=density_fit,
         polarization=polarization_fit,
+        density_contributions=density_contributions,
+        polarization_contributions=polarization_contributions,
+        curl_residual=curl_residual,
         smoothing_bins=config.smoothing_bins,
         ridge_alpha=config.ridge_alpha,
         stlsq_threshold=config.stlsq_threshold,
