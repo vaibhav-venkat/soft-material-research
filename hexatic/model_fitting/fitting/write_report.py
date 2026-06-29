@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import numpy as np
 
 from . import operators as ops
@@ -125,10 +126,13 @@ def write_model_report(
     add(f"  gaussian data:     {_result_path(dest, case_id, 'gaussian_fields.npz')}")
     add("")
 
+    _plot_jsys(result, dest, case_id, models)
+
     txt_path.write_text("\n".join(lines))
     md_path.write_text(_markdown_report(case_id, models, rho_stats, source_stats, y_stats, txt_path, md_path))
     print(f"[fitting] Report saved: {txt_path}")
     print(f"[fitting] Markdown report saved: {md_path}")
+    print(f"[fitting] J_sys plot saved: {dest / f'{case_id}_jsys.png'}")
     return txt_path
 
 
@@ -436,6 +440,75 @@ def _markdown_stats_table(rows: list[tuple[str, dict[str, float]]]) -> str:
             f"`{stats['min']:.6g}` | `{stats['max']:.6g}` |"
         )
     return "\n".join(lines)
+
+
+def _plot_jsys(result: FittingResult, dest: Path, case_id: str, models: tuple[DensityModelSummary, ...]) -> Path | None:
+    """Save a quiver plot of J_sys for each stochastic model."""
+    # try/except for matplotlib backend issues in headless environments
+    try:
+        current_lib = build_current_library(result.fields)
+    except (AttributeError, Exception):
+        return None
+    import matplotlib
+    matplotlib.use("Agg")
+
+    base_currents = []
+    j_fit = _current_from_fit(current_lib, result.density.coefficients)
+    base_currents.append(j_fit)
+    base_currents.append(np.zeros_like(result.fields.material_current))  # EOM = J_m proxy
+
+    no_force_fit = _fit_without_force_density(result, current_lib)
+    if no_force_fit is not None:
+        no_force_result, no_force_lib = no_force_fit
+        base_currents.append(_current_from_fit(no_force_lib, no_force_result.coefficients))
+    else:
+        base_currents.append(np.zeros_like(result.fields.material_current))
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5), squeeze=False)
+    titles = [
+        "Model 1: J_fit residual\nJ_sys(x,θ)",
+        "Model 2: J_EOM residual\nJ_sys(x,θ)",
+        "Model 3: no force residual\nJ_sys(x,θ)",
+    ]
+
+    x_centers = result.fields.x_centers
+    theta_centers = result.fields.theta_centers
+    X, Theta = np.meshgrid(x_centers, theta_centers, indexing="ij")
+
+    for idx, (base, ax, title) in enumerate(zip(base_currents, axes[0], titles)):
+        j_res = result.fields.material_current - base
+        j_sys = np.mean(j_res, axis=0)  # (nx, ntheta, 2)
+        mag = np.sqrt(j_sys[..., 0] ** 2 + j_sys[..., 1] ** 2)
+
+        # subsample for readability
+        step = max(1, x_centers.size // 15)
+        s = slice(None, None, step)
+
+        vx = j_sys[s, s, 0]
+        vy = j_sys[s, s, 1]
+        vmag = mag[s, s]
+        # per-panel adaptive scale: map 95th percentile magnitude to ~0.5 inches
+        p95 = float(np.percentile(vmag[vmag > 0], 95)) if np.any(vmag > 0) else 1.0
+        scale = max(p95 / 0.5, 1e-12)
+
+        q = ax.quiver(
+            X[s, s], Theta[s, s],
+            vx, vy,
+            vmag, cmap="viridis",
+            scale=scale, scale_units="inches",
+            width=0.005,
+        )
+        ax.set_xlabel("x")
+        ax.set_ylabel("θ")
+        ax.set_title(title, fontsize=10)
+        plt.colorbar(q, ax=ax, label="|J_sys|")
+
+    fig.suptitle(f"Persistent residual current J_sys — case {case_id}", fontsize=12)
+    fig.tight_layout()
+    path = dest / f"{case_id}_jsys.png"
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    return path
 
 
 def _result_path(output_dir: str | Path, case_id: str, suffix: str) -> Path:

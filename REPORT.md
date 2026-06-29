@@ -121,6 +121,14 @@ Same as Model 1 but with `f` and `D f` omitted from the library before fitting.
 3. **Stochastic flux magnitude** `rms(-∇·ξ)` is comparable to the total residual divergence, indicating a significant fast/unresolved component.
 4. **Fraction J_sys/J_res** ranges from 0.46–0.66 across models, meaning the persistent systematic residual captures about half to two-thirds of the residual magnitude. The rest is truly fluctuating.
 
+## J_sys Vector Field Plot
+
+The spatial structure of J_sys for all three models is saved as a quiver plot:
+
+**`hexatic/model_fitting/output/fitting/radius_15D_jsys.png`**
+
+This is a 3-panel figure showing the persistent residual current vector field `J_sys(x, θ)` for Models 1–3. Arrow color indicates magnitude. A shared persistent spatial structure across models suggests a common physical origin (radial-boundary effects, projection geometry, or an unlogged systematic force), while differences reflect the quality of each deterministic base current.
+
 ## Outputs
 
 Regenerate with:
@@ -129,10 +137,15 @@ Regenerate with:
 pixi run python -m hexatic.model_fitting.run_fitting --overwrite --no-plot
 ```
 
-Files:
+Generated files:
 
-- `hexatic/model_fitting/output/fitting/radius_15D_model_report.txt`
-- `hexatic/model_fitting/output/fitting/radius_15D_model_report.md`
-- `hexatic/model_fitting/output/fitting/radius_15D_fitting.npz`
-- `hexatic/model_fitting/output/fitting/radius_15D_hydrodynamic_fields.npz`
-- `hexatic/model_fitting/output/fitting/radius_15D_gaussian_fields.npz`
+| file | description |
+|---|---|
+| `radius_15D_model_report.txt` | text report |
+| `radius_15D_model_report.md` | markdown report |
+| `radius_15D_jsys.png` | J_sys vector field plot |
+| `radius_15D_fitting.npz` | fitting cache |
+| `radius_15D_hydrodynamic_fields.npz` | hydrodynamic fields |
+| `radius_15D_gaussian_fields.npz` | Gaussian-smoothed fields |
+
+All in `hexatic/model_fitting/output/fitting/`.
