@@ -3,6 +3,11 @@
 The density fit now uses the vector current library: fit J, then evaluate
 partial_t rho - S_cross through -div J. The older scalar density library remains
 available for comparison/tests, but the main workflow uses ``build_current_library``.
+
+Convention: the upstream active-matter field named ``polar_mean`` is built from
+Gaussian-weighted orientation sums before fitting. The fitting field ``P`` is
+therefore used directly as the polar-density-like current candidate; the current
+library does not multiply it by rho again.
 """
 
 from __future__ import annotations
@@ -73,22 +78,22 @@ POLARIZATION_TERM_LABELS = (
 )
 
 CURRENT_TERM_NAMES = (
-    "rho_P",
-    "chiral_rho_P_perp",
+    "P",
+    "chiral_P_perp",
     "force_density",
-    "D_rho_P",
-    "D_chiral_rho_P_perp",
+    "D_P",
+    "D_chiral_P_perp",
     "D_force_density",
     "minus_grad_rho",
     "minus_grad_hexatic_order",
     "minus_grad_D",
 )
 CURRENT_TERM_LABELS = (
-    "rho P",
-    "chirality (rho P)_perp",
+    "P",
+    "chirality P_perp",
     "force_density",
-    "D rho P",
-    "D chirality (rho P)_perp",
+    "D P",
+    "D chirality P_perp",
     "D force_density",
     "-grad rho",
     "-grad hexatic_order",
@@ -137,16 +142,16 @@ def build_polarization_library(fields: HydrodynamicFields) -> VectorLibrary:
 
 
 def build_current_library(fields: HydrodynamicFields) -> VectorLibrary:
-    rho_P = fields.mid_rho[..., None] * fields.mid_P
-    rho_P_perp = np.stack((-rho_P[..., 1], rho_P[..., 0]), axis=-1)
-    chiral_rho_P_perp = fields.mid_chirality[..., None] * rho_P_perp
+    P = fields.mid_P
+    P_perp = np.stack((-P[..., 1], P[..., 0]), axis=-1)
+    chiral_P_perp = fields.mid_chirality[..., None] * P_perp
     values = np.stack(
         (
-            rho_P,
-            chiral_rho_P_perp,
+            P,
+            chiral_P_perp,
             fields.mid_force_density,
-            fields.mid_D[..., None] * rho_P,
-            fields.mid_D[..., None] * chiral_rho_P_perp,
+            fields.mid_D[..., None] * P,
+            fields.mid_D[..., None] * chiral_P_perp,
             fields.mid_D[..., None] * fields.mid_force_density,
             -fields.grad_rho,
             -fields.grad_hexatic_order,

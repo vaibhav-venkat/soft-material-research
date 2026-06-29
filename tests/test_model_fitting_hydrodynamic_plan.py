@@ -7,8 +7,10 @@ from types import SimpleNamespace
 import numpy as np
 
 from hexatic.model_fitting.fitting import fields as fields_module
+from hexatic.model_fitting.fitting.library import build_current_library
 from hexatic.model_fitting.fitting.fit import FittingResult
 from hexatic.model_fitting.fitting.regression import RegressionResult
+from hexatic.model_fitting.fitting.write_report import write_model_report
 
 
 class HydrodynamicPlanTests(unittest.TestCase):
@@ -220,6 +222,111 @@ class HydrodynamicPlanTests(unittest.TestCase):
         )
 
         np.testing.assert_allclose(source, (rho[1:] - rho[:-1]) / dt)
+
+    def test_current_library_uses_p_not_rho_times_p_for_polar_terms(self):
+        scalar = np.asarray([[[2.0]]], dtype=float)
+        vector = np.asarray([[[[3.0, 5.0]]]], dtype=float)
+        force = np.asarray([[[[7.0, 11.0]]]], dtype=float)
+        fields = SimpleNamespace(
+            mid_rho=scalar,
+            mid_P=vector,
+            mid_chirality=np.asarray([[[13.0]]], dtype=float),
+            mid_D=np.asarray([[[17.0]]], dtype=float),
+            mid_force_density=force,
+            grad_rho=np.asarray([[[[19.0, 23.0]]]], dtype=float),
+            grad_hexatic_order=np.asarray([[[[29.0, 31.0]]]], dtype=float),
+            grad_D=np.asarray([[[[37.0, 41.0]]]], dtype=float),
+        )
+
+        library = build_current_library(fields)
+
+        self.assertEqual(library.names[0], "P")
+        self.assertEqual(library.names[1], "chiral_P_perp")
+        self.assertEqual(library.names[3], "D_P")
+        self.assertEqual(library.names[4], "D_chiral_P_perp")
+        np.testing.assert_allclose(library.values[..., 0, :], vector)
+        np.testing.assert_allclose(library.values[..., 1, :], [[[[ -65.0, 39.0 ]]]])
+        np.testing.assert_allclose(library.values[..., 3, :], 17.0 * vector)
+
+    def test_report_writes_three_stochastic_density_models_without_polarization(self):
+        with self.subTest("report formats"):
+            import tempfile
+
+            scalar = np.ones((1, 1, 1), dtype=float)
+            vector = np.ones((1, 1, 1, 2), dtype=float)
+            density = RegressionResult(
+                names=("P",),
+                labels=("P",),
+                coefficients=np.asarray([1.0]),
+                prediction=scalar,
+                residual=scalar,
+                metrics={"correlation": 1.0, "r2": 1.0, "normalized_mae": 0.0},
+                scales=np.asarray([1.0]),
+                active=np.asarray([True]),
+                rows_used=2,
+            )
+            polarization = RegressionResult(
+                names=("P",),
+                labels=("P",),
+                coefficients=np.asarray([2.0]),
+                prediction=vector,
+                residual=vector,
+                metrics={
+                    "correlation": 1.0,
+                    "r2_x": 0.2,
+                    "r2_y": 0.3,
+                    "normalized_mae_x": 0.4,
+                    "normalized_mae_y": 0.5,
+                },
+                scales=np.asarray([1.0]),
+                active=np.asarray([True]),
+                rows_used=2,
+            )
+            fields = SimpleNamespace(
+                cylinder_radius=1.0,
+                theta_edges=np.asarray([0.0, 2.0 * np.pi]),
+                theta_centers=np.asarray([np.pi]),
+                x_centers=np.asarray([0.5]),
+                lx=1.0,
+                material_current=vector,
+                partial_t_rho=scalar,
+                S_cross=np.zeros_like(scalar),
+                partial_t_P=vector,
+            )
+            result = FittingResult(
+                transition_steps=np.asarray([[0, 1]]),
+                dt=1.0,
+                cylinder_radius=1.0,
+                lx=1.0,
+                x_edges=np.asarray([0.0, 1.0]),
+                x_centers=np.asarray([0.5]),
+                theta_edges=np.asarray([0.0, 2.0 * np.pi]),
+                theta_centers=np.asarray([np.pi]),
+                fields=fields,
+                mask=np.ones((1, 1, 1), dtype=bool),
+                density_target=scalar,
+                polarization_target=vector,
+                density=density,
+                polarization=polarization,
+                density_contributions=scalar[..., None],
+                polarization_contributions=vector[..., None, :],
+                curl_residual=scalar,
+            )
+            with tempfile.TemporaryDirectory() as tmp:
+                txt_path = write_model_report(result, tmp, case_id="case")
+                md_path = Path(tmp) / "case_model_report.md"
+
+                self.assertTrue(txt_path.exists())
+                self.assertTrue(md_path.exists())
+                txt = txt_path.read_text()
+                md = md_path.read_text()
+                self.assertIn("Three Full Stochastic Density Models", txt)
+                self.assertIn("Model 1: J_fit residual split", txt)
+                self.assertIn("Model 2: J_EOM residual split", txt)
+                self.assertIn("Model 3: J_fit without force_density residual split", txt)
+                self.assertNotIn("Polarization", txt)
+                self.assertIn("## Three Full Stochastic Density Models", md)
+                self.assertNotIn("Polarization", md)
 
 
 if __name__ == "__main__":
