@@ -10,16 +10,17 @@ import numpy as np
 from .config import FittingConfig
 from .fields import HydrodynamicFields, load_or_compute_fields
 from .library import (
-    build_density_library,
+    build_current_library,
     build_polarization_library,
     density_target,
+    current_target,
     polarization_target,
 )
 from . import operators as ops
-from .regression import RegressionResult, fit_scalar_library, fit_vector_library
+from .regression import RegressionResult, fit_vector_library
 
 
-CACHE_VERSION = 19
+CACHE_VERSION = 21
 
 
 @dataclass(frozen=True)
@@ -44,6 +45,7 @@ class FittingResult:
     ridge_alpha: float = 1.0e-6
     stlsq_threshold: float = 1.0e-8
     stlsq_max_iter: int = 20
+    coarse_grain_transitions: int = 20
     pocket_radius: float | None = None
 
     def as_cache_arrays(self) -> dict[str, Any]:
@@ -82,6 +84,7 @@ class FittingResult:
             "ridge_alpha": self.ridge_alpha,
             "stlsq_threshold": self.stlsq_threshold,
             "stlsq_max_iter": self.stlsq_max_iter,
+            "coarse_grain_transitions": self.coarse_grain_transitions,
             "pocket_radius": np.nan if self.pocket_radius is None else self.pocket_radius,
         }
         arrays.update(_flatten_float_dict(self.density.metrics, "density_metrics"))
@@ -109,6 +112,8 @@ class FittingResult:
                 kwargs[key] = float(np.asarray(kwargs[key]))
         if "stlsq_max_iter" in kwargs:
             kwargs["stlsq_max_iter"] = int(np.asarray(kwargs["stlsq_max_iter"]))
+        if "coarse_grain_transitions" in kwargs:
+            kwargs["coarse_grain_transitions"] = int(np.asarray(kwargs["coarse_grain_transitions"]))
         pocket_radius_val = float(np.asarray(kwargs.get("pocket_radius", np.nan)))
         kwargs["pocket_radius"] = None if np.isnan(pocket_radius_val) else pocket_radius_val
         if "mask" in kwargs:
@@ -138,21 +143,31 @@ class FittingResult:
         return (
             f"mask: {masked_bins}/{total_bins} valid samples, "
             f"density_r2={self.density.metrics.get('r2', np.nan):.6g}, "
+            f"density_nmae={100.0 * self.density.metrics.get('normalized_mae', np.nan):.4g}%, "
+            f"current_r2=({self.density.metrics.get('current_r2_x', np.nan):.6g}, "
+            f"{self.density.metrics.get('current_r2_y', np.nan):.6g}), "
             f"polarization_r2=({self.polarization.metrics.get('r2_x', np.nan):.6g}, "
-            f"{self.polarization.metrics.get('r2_y', np.nan):.6g})"
+            f"{self.polarization.metrics.get('r2_y', np.nan):.6g}), "
+            f"polarization_nmae=("
+            f"{100.0 * self.polarization.metrics.get('normalized_mae_x', np.nan):.4g}%, "
+            f"{100.0 * self.polarization.metrics.get('normalized_mae_y', np.nan):.4g}%)"
             f"{curl_stats}"
         )
 
 
 def compute_fitting(config: FittingConfig) -> FittingResult:
-    fields = load_or_compute_fields(config)
-    density_lib = build_density_library(fields)
+    """Fit current and polarization models, then evaluate density conservatively."""
+    raw_fields = load_or_compute_fields(config)
+    fields = _coarse_grain_fields(raw_fields, config.coarse_grain_transitions)
+    current_lib = build_current_library(fields)
     polarization_lib = build_polarization_library(fields)
     y_density = density_target(fields)
+    y_current = current_target(fields)
     y_polarization = polarization_target(fields)
-    density_fit = fit_scalar_library(
-        density_lib,
-        y_density,
+
+    current_fit = fit_vector_library(
+        current_lib,
+        y_current,
         fields.mask,
         ridge_alpha=config.ridge_alpha,
         stlsq_threshold=config.stlsq_threshold,
@@ -167,9 +182,24 @@ def compute_fitting(config: FittingConfig) -> FittingResult:
         stlsq_max_iter=config.stlsq_max_iter,
     )
 
-    # contribution maps
-    density_contributions = (
-        density_lib.values * density_fit.coefficients[None, None, None, :]
+    kx, ky = _field_wavenumbers(fields)
+    density_fit = _current_fit_as_density_result(
+        current_fit=current_fit,
+        density_target_values=y_density,
+        mask=fields.mask,
+        kx=kx,
+        ky=ky,
+    )
+    density_contributions = np.stack(
+        [
+            -ops.fft_divergence(
+                current_lib.values[..., term_idx, :] * current_fit.coefficients[term_idx],
+                kx,
+                ky,
+            )
+            for term_idx in range(current_lib.values.shape[-2])
+        ],
+        axis=-1,
     )
     polarization_contributions = (
         polarization_lib.values * polarization_fit.coefficients[None, None, None, :, None]
@@ -177,10 +207,6 @@ def compute_fitting(config: FittingConfig) -> FittingResult:
 
     # curl of polarization residual
     residual = y_polarization - polarization_fit.prediction
-    nx = fields.x_centers.size
-    ntheta = fields.theta_centers.size
-    ly = fields.cylinder_radius * (fields.theta_edges[-1] - fields.theta_edges[0])
-    kx, ky = ops.build_k_vectors(nx, ntheta, fields.lx, ly)
     curl_residual = ops.fft_curl(residual, kx, ky)
 
     return FittingResult(
@@ -204,8 +230,131 @@ def compute_fitting(config: FittingConfig) -> FittingResult:
         ridge_alpha=config.ridge_alpha,
         stlsq_threshold=config.stlsq_threshold,
         stlsq_max_iter=config.stlsq_max_iter,
+        coarse_grain_transitions=config.coarse_grain_transitions,
         pocket_radius=fields.pocket_radius,
     )
+
+
+def _field_wavenumbers(fields: HydrodynamicFields) -> tuple[np.ndarray, np.ndarray]:
+    """Return spectral wave numbers for the cylinder surface grid."""
+    ly = fields.cylinder_radius * (fields.theta_edges[-1] - fields.theta_edges[0])
+    return ops.build_k_vectors(fields.x_centers.size, fields.theta_centers.size, fields.lx, ly)
+
+
+def _current_fit_as_density_result(
+    *,
+    current_fit: RegressionResult,
+    density_target_values: np.ndarray,
+    mask: np.ndarray,
+    kx: np.ndarray,
+    ky: np.ndarray,
+) -> RegressionResult:
+    """Wrap a vector current fit as the density result via -div J_fit."""
+    density_prediction = -ops.fft_divergence(current_fit.prediction, kx, ky)
+    density_residual = density_target_values - density_prediction
+    density_metrics = _density_metrics(density_target_values, density_prediction, mask)
+    density_metrics.update({f"current_{k}": v for k, v in current_fit.metrics.items()})
+    return RegressionResult(
+        names=current_fit.names,
+        labels=current_fit.labels,
+        coefficients=current_fit.coefficients,
+        prediction=density_prediction,
+        residual=density_residual,
+        metrics=density_metrics,
+        scales=current_fit.scales,
+        active=current_fit.active,
+        rows_used=current_fit.rows_used,
+    )
+
+
+def _coarse_grain_fields(fields: HydrodynamicFields, window: int) -> HydrodynamicFields:
+    """Average adjacent transition fields for slower, lower-noise fitting."""
+    if window <= 1:
+        return fields
+
+    def avg(values: np.ndarray) -> np.ndarray:
+        values = np.asarray(values)
+        usable = (values.shape[0] // window) * window
+        assert usable > 0
+        return values[:usable].reshape(-1, window, *values.shape[1:]).mean(axis=1)
+
+    def all_valid(values: np.ndarray) -> np.ndarray:
+        values = np.asarray(values, dtype=bool)
+        usable = (values.shape[0] // window) * window
+        assert usable > 0
+        return values[:usable].reshape(-1, window, *values.shape[1:]).all(axis=1)
+
+    usable = (fields.transition_steps.shape[0] // window) * window
+    steps = fields.transition_steps[:usable].reshape(-1, window, 2)
+    transition_steps = np.stack((steps[:, 0, 0], steps[:, -1, 1]), axis=1)
+    return HydrodynamicFields(
+        transition_steps=transition_steps,
+        dt=fields.dt * window,
+        cylinder_radius=fields.cylinder_radius,
+        lx=fields.lx,
+        x_edges=fields.x_edges,
+        x_centers=fields.x_centers,
+        theta_edges=fields.theta_edges,
+        theta_centers=fields.theta_centers,
+        rho=fields.rho,
+        P=fields.P,
+        chirality=fields.chirality,
+        D=fields.D,
+        hexatic_order=fields.hexatic_order,
+        S_cross=avg(fields.S_cross),
+        partial_t_rho=avg(fields.partial_t_rho),
+        partial_t_P=avg(fields.partial_t_P),
+        grad_rho=avg(fields.grad_rho),
+        grad_D=avg(fields.grad_D),
+        grad_hexatic_order=avg(fields.grad_hexatic_order),
+        div_P=avg(fields.div_P),
+        div_chiral_P_perp=avg(fields.div_chiral_P_perp),
+        laplacian_rho=avg(fields.laplacian_rho),
+        laplacian_D=avg(fields.laplacian_D),
+        laplacian_hexatic_order=avg(fields.laplacian_hexatic_order),
+        P_dot_grad_P=avg(fields.P_dot_grad_P),
+        P_perp_dot_grad_P=avg(fields.P_perp_dot_grad_P),
+        laplacian_P=avg(fields.laplacian_P),
+        laplacian_P_perp=avg(fields.laplacian_P_perp),
+        material_current=avg(fields.material_current),
+        mid_rho=avg(fields.mid_rho),
+        mid_chirality=avg(fields.mid_chirality),
+        mid_D=avg(fields.mid_D),
+        mid_hexatic_order=avg(fields.mid_hexatic_order),
+        mid_P=avg(fields.mid_P),
+        mid_force_density=avg(fields.mid_force_density),
+        mask=all_valid(fields.mask),
+        pocket_radius=fields.pocket_radius,
+    )
+
+
+def _density_metrics(
+    target: np.ndarray,
+    prediction: np.ndarray,
+    mask: np.ndarray,
+) -> dict[str, float]:
+    valid = mask & np.isfinite(target) & np.isfinite(prediction)
+    y = target[valid]
+    p = prediction[valid]
+    if y.size == 0:
+        return {
+            "correlation": float("nan"),
+            "r2": float("nan"),
+            "normalized_mae": float("nan"),
+        }
+    corr = float("nan")
+    if y.size >= 2 and np.std(y) > 0.0 and np.std(p) > 0.0:
+        corr = float(np.corrcoef(y, p)[0, 1])
+    ss_tot = float(np.sum((y - np.mean(y)) ** 2))
+    r2 = float("nan") if ss_tot == 0.0 else 1.0 - float(np.sum((y - p) ** 2)) / ss_tot
+    scale = float(np.mean(np.abs(y)))
+    if not np.isfinite(scale) or scale == 0.0:
+        scale = 1.0
+    return {
+        "correlation": corr,
+        "r2": r2,
+        "normalized_mae": float(np.mean(np.abs(y - p)) / scale),
+    }
 
 
 def stlsq(

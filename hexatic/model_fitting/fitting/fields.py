@@ -1,9 +1,4 @@
-"""Build hydrodynamic fields from particle data.
-
-Owns field construction: active-matter loading, chirality loading/computation,
-hexatic-order loading, D construction, measured S_cross, smoothed frame fields,
-transition fields, time derivatives, geometry metadata, and shared mask.
-"""
+"""Build hydrodynamic fields from particle data."""
 
 from __future__ import annotations
 
@@ -12,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
-from hexatic.active_matter_cylinder.math_utils import _density_sum
+from hexatic.active_matter_cylinder.math_utils import _density_sum, _minimum_image_delta
 from hexatic.chirality.compute import compute_chirality_fields
 from hexatic.chirality.config import ChiralityConfig
 
@@ -21,7 +16,6 @@ from ..film_continuity.config import (
     FilmContinuityScalars,
     scalars_from_active_fields,
 )
-from ..film_continuity.continuity import FilmContinuityResult, compute_film_continuity
 from ..film_continuity.io_cache import ActiveMatterFields, load_active_matter_fields
 from . import operators as ops
 from .config import FittingConfig
@@ -77,12 +71,14 @@ class HydrodynamicFields:
     P_perp_dot_grad_P: np.ndarray     # (T-1, nx, ntheta, 2)
     laplacian_P: np.ndarray           # (T-1, nx, ntheta, 2)
     laplacian_P_perp: np.ndarray      # (T-1, nx, ntheta, 2)
+    material_current: np.ndarray      # (T-1, nx, ntheta, 2)
 
     mid_rho: np.ndarray
     mid_chirality: np.ndarray
     mid_D: np.ndarray
     mid_hexatic_order: np.ndarray
     mid_P: np.ndarray   # (T-1, nx, ntheta, 2)
+    mid_force_density: np.ndarray     # (T-1, nx, ntheta, 2)
 
     # shared validity mask (T-1, nx, ntheta)
     mask: np.ndarray
@@ -99,9 +95,12 @@ def load_or_compute_fields(config: FittingConfig) -> HydrodynamicFields:
     cache_path = config.hydrodynamic_fields_cache_path
     if cache_path.exists():
         print("[fitting] Loading cached hydrodynamic fields...")
-        result = _load_hydrodynamic_cache(cache_path)
-        print("[fitting] Cache loaded.")
-        return result
+        try:
+            result = _load_hydrodynamic_cache(cache_path)
+            print("[fitting] Cache loaded.")
+            return result
+        except ValueError:
+            print("[fitting] Hydrodynamic cache stale; recomputing...")
 
     print("[fitting] Loading active fields...")
     active = load_active_matter_fields(config.active_matter_path)
@@ -128,13 +127,32 @@ def load_or_compute_fields(config: FittingConfig) -> HydrodynamicFields:
     )
 
     # --- load Gaussian-smoothed scalars and polarization on grid ---
-    rho, hexatic_order, D, P, chirality = _load_smoothed_scalars(
+    rho, hexatic_order, D, P, chirality, force_density = _load_smoothed_scalars(
         config, active, scalars, active_arrays, pocket_radius,
     )
 
-    # --- measured crossing source (transition field) ---
-    print("[fitting] Loading S_cross...")
-    S_cross = _load_s_cross(config)
+    # --- crossing source in the same Gaussian representation as rho ---
+    print("[fitting] Computing Gaussian S_cross...")
+    S_cross = _gaussian_crossing_source(
+        active.coords,
+        active.shell_mask,
+        scalars.x_centers,
+        scalars.theta_centers,
+        scalars.lx,
+        scalars.cylinder_radius,
+        pocket_radius,
+        scalars.dt,
+    )
+    material_current = _gaussian_material_current(
+        active.coords,
+        active.shell_mask,
+        scalars.x_centers,
+        scalars.theta_centers,
+        scalars.lx,
+        scalars.cylinder_radius,
+        pocket_radius,
+        scalars.dt,
+    )
 
     # --- frame fields and mid-frame fields ---
     print("[fitting] Computing derivatives...")
@@ -143,6 +161,7 @@ def load_or_compute_fields(config: FittingConfig) -> HydrodynamicFields:
     mid_chirality = _mid(chirality)
     mid_D = _mid(D)
     mid_hexatic_order = _mid(hexatic_order)
+    mid_force_density = _mid(force_density)
 
     # time derivatives from adjacent smoothed frames
     partial_t_rho = (rho[1:] - rho[:-1]) / scalars.dt
@@ -207,6 +226,8 @@ def load_or_compute_fields(config: FittingConfig) -> HydrodynamicFields:
             P_perp_dot_grad_P,
             laplacian_P,
             laplacian_P_perp,
+            material_current,
+            mid_force_density,
         ),
     )
     masked_count = int(np.count_nonzero(mask))
@@ -244,11 +265,13 @@ def load_or_compute_fields(config: FittingConfig) -> HydrodynamicFields:
         P_perp_dot_grad_P=P_perp_dot_grad_P,
         laplacian_P=laplacian_P,
         laplacian_P_perp=laplacian_P_perp,
+        material_current=material_current,
         mid_rho=mid_rho,
         mid_chirality=mid_chirality,
         mid_D=mid_D,
         mid_hexatic_order=mid_hexatic_order,
         mid_P=mid_P,
+        mid_force_density=mid_force_density,
         mask=mask,
         pocket_radius=pocket_radius,
     )
@@ -257,27 +280,6 @@ def load_or_compute_fields(config: FittingConfig) -> HydrodynamicFields:
     _save_hydrodynamic_cache(cache_path, result)
     print("[fitting] Cache written.")
     return result
-
-
-# ---------------------------------------------------------------------------
-# S_cross loading
-# ---------------------------------------------------------------------------
-
-def _load_s_cross(config: FittingConfig) -> np.ndarray:
-    """Load measured crossing source from film-continuity cache."""
-    fc_cache = config.film_continuity_cache_path
-    if fc_cache.exists():
-        fc = FilmContinuityResult.from_cache_arrays(load_npz_arrays(fc_cache))
-        return np.asarray(fc.S_cross_b, dtype=float)
-
-    print("[fitting] Film-continuity cache missing; computing S_cross...")
-    fc_config = FilmContinuityConfig(
-        case_id=config.case_id,
-        npz_path=config.npz_path,
-        gsd_path=config.gsd_path,
-    )
-    fc = compute_film_continuity(fc_config)
-    return np.asarray(fc.S_cross_b, dtype=float)
 
 
 # ---------------------------------------------------------------------------
@@ -290,8 +292,8 @@ def _load_smoothed_scalars(
     scalars: FilmContinuityScalars,
     active_arrays: dict[str, np.ndarray],
     pocket_radius: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Load or compute rho, hexatic_order, D, P, chirality via Gaussian smoothing."""
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Load or compute rho, hexatic_order, D, P, chirality, force density."""
     gaussian_cache = _load_gaussian_field_cache(
         config.gaussian_fields_cache_path,
         active.steps, scalars.x_edges, scalars.theta_edges,
@@ -311,6 +313,8 @@ def _load_smoothed_scalars(
     Px_numerator = _cached("P_x_numerator")
     Py_numerator = _cached("P_y_numerator")
     chirality_numerator = _cached("chirality_numerator")
+    Fx_numerator = _cached("force_density_x_numerator")
+    Fy_numerator = _cached("force_density_y_numerator")
 
     # particle-level source values
     hexatic_values = _load_hexatic_order_frames(
@@ -322,6 +326,12 @@ def _load_smoothed_scalars(
     D_values = (6.0 - neighbor_counts) ** 2
     Px_values = np.asarray(active_arrays["polar_mean"][..., 0], dtype=float)
     Py_values = np.asarray(active_arrays["polar_cylindrical"][..., 2], dtype=float)
+    Fx_values = np.asarray(
+        active_arrays["force_density_cylindrical"][..., 0], dtype=float,
+    )
+    Fy_values = np.asarray(
+        active_arrays["force_density_cylindrical"][..., 2], dtype=float,
+    )
     if chirality_numerator is None:
         chirality_grid = _load_or_compute_chirality_frames(
             config, scalars.x_centers.size, scalars.theta_centers.size,
@@ -346,6 +356,10 @@ def _load_smoothed_scalars(
         missing["P_y_numerator"] = Py_values
     if chirality_numerator is None:
         missing["chirality_numerator"] = chirality_values
+    if Fx_numerator is None:
+        missing["force_density_x_numerator"] = Fx_values
+    if Fy_numerator is None:
+        missing["force_density_y_numerator"] = Fy_values
 
     if missing:
         print("[fitting] Computing Gaussian fields on grid...")
@@ -355,16 +369,19 @@ def _load_smoothed_scalars(
             scalars.lx, scalars.cylinder_radius, pocket_radius,
         )
         gaussian_cache.update(computed)
-        gaussian_density = _cached("rho_gaussian")
-        hexatic_numerator = _cached("hexatic_order_numerator")
-        D_numerator = _cached("D_numerator")
-        Px_numerator = _cached("P_x_numerator")
-        Py_numerator = _cached("P_y_numerator")
         _save_gaussian_field_cache(
             config.gaussian_fields_cache_path,
             active.steps, scalars.x_edges, scalars.theta_edges,
             gaussian_cache,
         )
+        gaussian_density = _cached("rho_gaussian")
+        hexatic_numerator = _cached("hexatic_order_numerator")
+        D_numerator = _cached("D_numerator")
+        Px_numerator = _cached("P_x_numerator")
+        Py_numerator = _cached("P_y_numerator")
+        chirality_numerator = _cached("chirality_numerator")
+        Fx_numerator = _cached("force_density_x_numerator")
+        Fy_numerator = _cached("force_density_y_numerator")
 
     assert gaussian_density is not None
     assert hexatic_numerator is not None
@@ -372,6 +389,8 @@ def _load_smoothed_scalars(
     assert Px_numerator is not None
     assert Py_numerator is not None
     assert chirality_numerator is not None
+    assert Fx_numerator is not None
+    assert Fy_numerator is not None
 
     rho = gaussian_density
     hexatic_order = _divide_by_density(hexatic_numerator, gaussian_density)
@@ -379,8 +398,11 @@ def _load_smoothed_scalars(
     P_x = _divide_by_density(Px_numerator, gaussian_density)
     P_y = _divide_by_density(Py_numerator, gaussian_density)
     chirality = _divide_by_density(chirality_numerator, gaussian_density)
+    force_x = _divide_by_density(Fx_numerator, gaussian_density)
+    force_y = _divide_by_density(Fy_numerator, gaussian_density)
     P = np.stack((P_x, P_y), axis=-1)
-    return rho, hexatic_order, D, P, chirality
+    force_density = np.stack((force_x, force_y), axis=-1)
+    return rho, hexatic_order, D, P, chirality, force_density
 
 
 # ---------------------------------------------------------------------------
@@ -484,6 +506,101 @@ def _gaussian_scalar_field_frames(
         for field_idx, name in enumerate(names):
             fields[name][frame_idx] = density[..., field_idx]
     return fields
+
+
+def _gaussian_crossing_source(
+    coords: np.ndarray,
+    shell_mask: np.ndarray,
+    x_centers: np.ndarray,
+    theta_centers: np.ndarray,
+    lx: float,
+    cylinder_radius: float,
+    pocket_radius: float,
+    dt: float,
+) -> np.ndarray:
+    """Return S_cross from shell entry/exit in the Gaussian density basis."""
+    coords = np.asarray(coords, dtype=np.float64)
+    shell_mask = np.asarray(shell_mask, dtype=bool)
+    assert coords.ndim == 3 and coords.shape[2] >= 3
+    assert shell_mask.shape == coords.shape[:2]
+    assert dt > 0.0
+
+    grid_points = _surface_grid_points(x_centers, theta_centers, cylinder_radius)
+    source = np.zeros(
+        (coords.shape[0] - 1, x_centers.size, theta_centers.size),
+        dtype=np.float64,
+    )
+    for frame_idx in range(coords.shape[0] - 1):
+        entering = (~shell_mask[frame_idx]) & shell_mask[frame_idx + 1]
+        exiting = shell_mask[frame_idx] & (~shell_mask[frame_idx + 1])
+        density_in = _gaussian_density_for_particles(
+            grid_points, coords[frame_idx + 1, entering], lx, pocket_radius,
+        )
+        density_out = _gaussian_density_for_particles(
+            grid_points, coords[frame_idx, exiting], lx, pocket_radius,
+        )
+        source[frame_idx] = ((density_in - density_out) / dt).reshape(
+            x_centers.size, theta_centers.size,
+        )
+    return source
+
+
+def _gaussian_material_current(
+    coords: np.ndarray,
+    shell_mask: np.ndarray,
+    x_centers: np.ndarray,
+    theta_centers: np.ndarray,
+    lx: float,
+    cylinder_radius: float,
+    pocket_radius: float,
+    dt: float,
+) -> np.ndarray:
+    """Return measured material current J_m from same-particle displacement."""
+    coords = np.asarray(coords, dtype=np.float64)
+    shell_mask = np.asarray(shell_mask, dtype=bool)
+    assert coords.ndim == 3 and coords.shape[2] >= 3
+    assert shell_mask.shape == coords.shape[:2]
+    assert dt > 0.0
+
+    grid_points = _surface_grid_points(x_centers, theta_centers, cylinder_radius)
+    current = np.zeros(
+        (coords.shape[0] - 1, x_centers.size, theta_centers.size, 2),
+        dtype=np.float64,
+    )
+    theta_period = 2.0 * np.pi
+    for frame_idx in range(coords.shape[0] - 1):
+        valid = shell_mask[frame_idx] & shell_mask[frame_idx + 1]
+        if not np.any(valid):
+            continue
+        start = coords[frame_idx, valid]
+        stop = coords[frame_idx + 1, valid]
+        dx = _minimum_image_delta(stop[:, 0] - start[:, 0], lx)
+        dtheta = _minimum_image_delta(stop[:, 1] - start[:, 1], theta_period)
+        mid = start.copy()
+        mid[:, 0] = start[:, 0] + 0.5 * dx
+        mid[:, 1] = np.mod(start[:, 1] + 0.5 * dtheta, theta_period)
+        values = np.column_stack((dx / dt, cylinder_radius * dtheta / dt))
+        current[frame_idx] = _density_sum(
+            grid_points,
+            _cylindrical_coords_to_cartesian(mid),
+            values,
+            lx,
+            pocket_radius,
+        ).reshape(x_centers.size, theta_centers.size, 2)
+    return current
+
+
+def _gaussian_density_for_particles(
+    grid_points: np.ndarray,
+    coords: np.ndarray,
+    lx: float,
+    pocket_radius: float,
+) -> np.ndarray:
+    if coords.size == 0:
+        return np.zeros(grid_points.shape[0], dtype=np.float64)
+    positions = _cylindrical_coords_to_cartesian(coords)
+    values = np.ones(positions.shape[0], dtype=np.float64)
+    return _density_sum(grid_points, positions, values, lx, pocket_radius)
 
 
 def _divide_by_density(numerator: np.ndarray, density: np.ndarray) -> np.ndarray:

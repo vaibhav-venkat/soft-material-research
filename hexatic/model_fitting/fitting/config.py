@@ -15,6 +15,9 @@ DEFAULT_CASE_ID = "radius_15D"
 DEFAULT_RIDGE_ALPHA = 1.0e-6
 DEFAULT_STLSQ_THRESHOLD = 1.0e-8
 DEFAULT_STLSQ_MAX_ITER = 20
+# Block average this many adjacent transition fields before regression. This is
+# separate from the raw hydrodynamic cache, which stays at native transition time.
+DEFAULT_COARSE_GRAIN_TRANSITIONS = 50
 
 
 @dataclass(frozen=True)
@@ -30,6 +33,7 @@ class FittingConfig:
     ridge_alpha: float = DEFAULT_RIDGE_ALPHA
     stlsq_threshold: float = DEFAULT_STLSQ_THRESHOLD
     stlsq_max_iter: int = DEFAULT_STLSQ_MAX_ITER
+    coarse_grain_transitions: int = DEFAULT_COARSE_GRAIN_TRANSITIONS
 
     def __post_init__(self) -> None:
         if self.npz_path is not None:
@@ -59,6 +63,8 @@ class FittingConfig:
             raise ValueError("stlsq_threshold must be non-negative.")
         if self.stlsq_max_iter < 1:
             raise ValueError("stlsq_max_iter must be at least 1.")
+        if self.coarse_grain_transitions < 1:
+            raise ValueError("coarse_grain_transitions must be at least 1.")
 
     @property
     def case(self) -> RadiusCase:

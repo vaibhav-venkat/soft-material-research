@@ -8,7 +8,7 @@ import numpy as np
 
 from .io_cache import load_npz_arrays
 
-HYDRO_CACHE_VERSION = 2
+HYDRO_CACHE_VERSION = 4
 
 
 def _save_hydrodynamic_cache(path: Path, fields) -> None:
@@ -43,11 +43,13 @@ def _save_hydrodynamic_cache(path: Path, fields) -> None:
         "P_perp_dot_grad_P": fields.P_perp_dot_grad_P,
         "laplacian_P": fields.laplacian_P,
         "laplacian_P_perp": fields.laplacian_P_perp,
+        "material_current": fields.material_current,
         "mid_rho": fields.mid_rho,
         "mid_chirality": fields.mid_chirality,
         "mid_D": fields.mid_D,
         "mid_hexatic_order": fields.mid_hexatic_order,
         "mid_P": fields.mid_P,
+        "mid_force_density": fields.mid_force_density,
         "mask": fields.mask,
         "pocket_radius": np.asarray(
             fields.pocket_radius if fields.pocket_radius is not None else np.nan
@@ -96,11 +98,13 @@ def _load_hydrodynamic_cache(path: Path):
         P_perp_dot_grad_P=arrays["P_perp_dot_grad_P"],
         laplacian_P=arrays["laplacian_P"],
         laplacian_P_perp=arrays["laplacian_P_perp"],
+        material_current=arrays["material_current"],
         mid_rho=arrays["mid_rho"],
         mid_chirality=arrays["mid_chirality"],
         mid_D=arrays["mid_D"],
         mid_hexatic_order=arrays["mid_hexatic_order"],
         mid_P=arrays["mid_P"],
+        mid_force_density=arrays["mid_force_density"],
         mask=np.asarray(arrays["mask"], dtype=bool),
         pocket_radius=pocket_radius,
     )

@@ -150,16 +150,11 @@ def _residual_map(
 
 def _density_contribution_plots(result: FittingResult, path: Path) -> Path:
     n_terms = result.density_contributions.shape[-1]
-    # Two rows: absolute contributions + normalized contributions
-    ncols = min(n_terms, 3)
-    fig, axes = plt.subplots(2, ncols, figsize=(5 * ncols, 7.0),
-                             squeeze=False)
+    fig, axes = plt.subplots(n_terms, 2, figsize=(10, 3.2 * n_terms), squeeze=False)
     target = result.density_target
     target_mean = _masked_transition_mean(target, result.mask)
     for i in range(n_terms):
-        row, col = divmod(i, ncols)
-        # Row 0: absolute contributions
-        ax = axes[0][col]
+        ax = axes[i, 0]
         contrib = _masked_transition_mean(result.density_contributions[..., i],
                                           result.mask)
         vmin, vmax = _robust_color_limits(contrib, symmetric=True)
@@ -169,8 +164,7 @@ def _density_contribution_plots(result: FittingResult, path: Path) -> Path:
         ax.set_title(result.density.labels[i])
         ax.set_xlabel("x bin")
         ax.set_ylabel("theta bin")
-        # Row 1: normalized contribution (contrib / target)
-        ax2 = axes[1][col]
+        ax2 = axes[i, 1]
         norm = np.divide(
             contrib, target_mean,
             out=np.full_like(contrib, np.nan),
@@ -183,11 +177,7 @@ def _density_contribution_plots(result: FittingResult, path: Path) -> Path:
         ax2.set_title(f"{result.density.labels[i]} / Y_rho")
         ax2.set_xlabel("x bin")
         ax2.set_ylabel("theta bin")
-    # hide unused subplots
-    for i in range(n_terms, ncols):
-        axes[0, i].set_visible(False)
-        axes[1, i].set_visible(False)
-    fig.suptitle("Density term contributions  (absolute / normalized)", fontsize=12)
+    fig.suptitle("Density current-closure contributions  (absolute / normalized)", fontsize=12)
     fig.tight_layout()
     fig.savefig(path, dpi=150)
     plt.close(fig)
