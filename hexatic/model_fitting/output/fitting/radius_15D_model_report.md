@@ -82,8 +82,6 @@ Final density model with seeded AR(1) `xi`:
 | lag-1 autocorrelation | `-0.26408635` | `-0.42544221` |
 | correlation time | `0` | `0` |
 
-Stochastic note: seeded adaptive Fourier AR(1) rollout of xi using empirical eta modes that retain 85% of eta power; pointwise metrics are reproducible but stochastic and should be read with the distributional statistics
-
 Note: J_res_fit = J_m - J_fit; J_sys_fit = mean_t J_res_fit; ξ_fit = J_res_fit - J_sys_fit
 
 | coefficient | value | term |
@@ -155,8 +153,6 @@ Final density model with seeded AR(1) `xi`:
 | lag-1 autocorrelation | `-0.19693555` | `-0.38616889` |
 | correlation time | `0` | `0` |
 
-Stochastic note: seeded adaptive Fourier AR(1) rollout of xi using empirical eta modes that retain 85% of eta power; pointwise metrics are reproducible but stochastic and should be read with the distributional statistics
-
 Note: J_EOM = J_active + J_pair + J_wall; full residual identity reconstructs J_m
 
 No fitted `a_i`; EOM terms use fixed microscopic coefficients.
@@ -217,8 +213,6 @@ Final density model with seeded AR(1) `xi`:
 | dominant mode `(x,theta)` | `(1, 2)` | `(1, 2)` |
 | lag-1 autocorrelation | `-0.13607439` | `-0.35065818` |
 | correlation time | `0` | `0` |
-
-Stochastic note: seeded adaptive Fourier AR(1) rollout of xi using empirical eta modes that retain 85% of eta power; pointwise metrics are reproducible but stochastic and should be read with the distributional statistics
 
 Note: force_density and D force_density omitted from J_fit before residual split; final model uses seeded adaptive ξ_85 selected from empirical η power
 

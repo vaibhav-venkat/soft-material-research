@@ -85,8 +85,6 @@ def text_report_lines(summary: StochasticMechanismSummary) -> list[str]:
             f"{summary.model_correlation_time:.8g}"
         ),
     ]
-    if summary.note:
-        lines.append(f"      note: {summary.note}")
     return lines
 
 
@@ -140,8 +138,6 @@ def markdown_report_lines(summary: StochasticMechanismSummary) -> list[str]:
         ),
         "",
     ]
-    if summary.note:
-        lines.extend((f"Stochastic note: {summary.note}", ""))
     return lines
 
 

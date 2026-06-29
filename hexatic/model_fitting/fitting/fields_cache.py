@@ -55,7 +55,7 @@ def _save_hydrodynamic_cache(path: Path, fields) -> None:
             fields.pocket_radius if fields.pocket_radius is not None else np.nan
         ),
     }
-    np.savez_compressed(path, **arrays)
+    np.savez_compressed(path, allow_pickle=True, **arrays)
 
 
 def _load_hydrodynamic_cache(path: Path):
@@ -137,6 +137,7 @@ def _save_gaussian_field_cache(
         steps=np.asarray(steps),
         x_edges=np.asarray(x_edges),
         theta_edges=np.asarray(theta_edges),
+        allow_pickle=True,
         **{
             k: v for k, v in arrays.items()
             if k not in {"steps", "x_edges", "theta_edges"}
