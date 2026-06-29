@@ -1,14 +1,4 @@
-"""Hydrodynamic model libraries.
-
-The density fit now uses the vector current library: fit J, then evaluate
-partial_t rho - S_cross through -div J. The older scalar density library remains
-available for comparison/tests, but the main workflow uses ``build_current_library``.
-
-Convention: the upstream active-matter field named ``polar_mean`` is built from
-Gaussian-weighted orientation sums before fitting. The fitting field ``P`` is
-therefore used directly as the polar-density-like current candidate; the current
-library does not multiply it by rho again.
-"""
+"""Hydrodynamic model libraries."""
 
 from __future__ import annotations
 

@@ -18,7 +18,7 @@ from ..film_continuity.config import (
 )
 from ..film_continuity.io_cache import ActiveMatterFields, load_active_matter_fields
 from . import operators as ops
-from .config import FittingConfig
+from .config import DISCLINATIONS_ONLY, FittingConfig
 from .fields_cache import (
     _cached_grid_field,
     _load_gaussian_field_cache,
@@ -84,6 +84,7 @@ class HydrodynamicFields:
 
     # shared validity mask (T-1, nx, ntheta)
     mask: np.ndarray
+    disclination_mask: np.ndarray
 
     pocket_radius: float | None = None
 
@@ -129,7 +130,17 @@ def load_or_compute_fields(config: FittingConfig) -> HydrodynamicFields:
     )
 
     # --- load Gaussian-smoothed scalars and polarization on grid ---
-    rho, hexatic_order, D, h, P_r, P, chirality, force_density = _load_smoothed_scalars(
+    (
+        rho,
+        hexatic_order,
+        D,
+        h,
+        P_r,
+        disclination_particle_mask,
+        P,
+        chirality,
+        force_density,
+    ) = _load_smoothed_scalars(
         config, active, scalars, active_arrays, pocket_radius,
     )
 
@@ -137,7 +148,7 @@ def load_or_compute_fields(config: FittingConfig) -> HydrodynamicFields:
     print("[fitting] Computing Gaussian S_cross...")
     S_cross = _gaussian_crossing_source(
         active.coords,
-        active.shell_mask,
+        disclination_particle_mask if DISCLINATIONS_ONLY else active.shell_mask,
         scalars.x_centers,
         scalars.theta_centers,
         scalars.lx,
@@ -147,7 +158,7 @@ def load_or_compute_fields(config: FittingConfig) -> HydrodynamicFields:
     )
     material_current = _gaussian_material_current(
         active.coords,
-        active.shell_mask,
+        disclination_particle_mask if DISCLINATIONS_ONLY else active.shell_mask,
         scalars.x_centers,
         scalars.theta_centers,
         scalars.lx,
@@ -236,9 +247,20 @@ def load_or_compute_fields(config: FittingConfig) -> HydrodynamicFields:
             mid_force_density,
         ),
     )
+    disclination_mask = mask & _transition_particle_grid_mask(
+        active.coords,
+        disclination_particle_mask,
+        scalars.x_edges,
+        scalars.theta_edges,
+    )
     masked_count = int(np.count_nonzero(mask))
     total_count = mask.size
     print(f"[fitting] Shared mask: {masked_count}/{total_count} valid samples.")
+    disclination_count = int(np.count_nonzero(disclination_mask))
+    print(
+        "[fitting] Disclination mask: "
+        f"{disclination_count}/{total_count} samples."
+    )
 
     transition_steps = np.stack((active.steps[:-1], active.steps[1:]), axis=1)
 
@@ -281,6 +303,7 @@ def load_or_compute_fields(config: FittingConfig) -> HydrodynamicFields:
         mid_P=mid_P,
         mid_force_density=mid_force_density,
         mask=mask,
+        disclination_mask=disclination_mask,
         pocket_radius=pocket_radius,
     )
 
@@ -300,11 +323,22 @@ def _load_smoothed_scalars(
     scalars: FilmContinuityScalars,
     active_arrays: dict[str, np.ndarray],
     pocket_radius: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+]:
     """Load or compute scalar, polarization, chirality, and force fields."""
     gaussian_cache = _load_gaussian_field_cache(
         config.gaussian_fields_cache_path,
         active.steps, scalars.x_edges, scalars.theta_edges,
+        disclinations_only=DISCLINATIONS_ONLY,
     )
 
     def _cached(name: str) -> np.ndarray | None:
@@ -320,6 +354,7 @@ def _load_smoothed_scalars(
     D_numerator = _cached("D_numerator")
     h_numerator = _cached("h_numerator")
     P_r_numerator = _cached("P_r_numerator")
+    disclination_numerator = _cached("disclination_numerator")
     Px_numerator = _cached("P_x_numerator")
     Py_numerator = _cached("P_y_numerator")
     chirality_numerator = _cached("chirality_numerator")
@@ -334,6 +369,9 @@ def _load_smoothed_scalars(
         config.neighbor_count_table_path, active.steps, active.coords.shape[1],
     )
     D_values = (6.0 - neighbor_counts) ** 2
+    disclination_particle_mask = active.shell_mask & np.isclose(D_values, 1.0)
+    particle_mask = disclination_particle_mask if DISCLINATIONS_ONLY else active.shell_mask
+    disclination_values = disclination_particle_mask.astype(float)
     h_values = _normalized_shell_depth(
         active.coords[..., 2],
         scalars.cylinder_radius,
@@ -370,6 +408,8 @@ def _load_smoothed_scalars(
         missing["h_numerator"] = h_values
     if P_r_numerator is None:
         missing["P_r_numerator"] = P_r_values
+    if disclination_numerator is None:
+        missing["disclination_numerator"] = disclination_values
     if Px_numerator is None:
         missing["P_x_numerator"] = Px_values
     if Py_numerator is None:
@@ -384,7 +424,7 @@ def _load_smoothed_scalars(
     if missing:
         print("[fitting] Computing Gaussian fields on grid...")
         computed = _gaussian_scalar_field_frames(
-            active.coords, active.shell_mask, missing,
+            active.coords, particle_mask, missing,
             scalars.x_centers, scalars.theta_centers,
             scalars.lx, scalars.cylinder_radius, pocket_radius,
         )
@@ -393,12 +433,14 @@ def _load_smoothed_scalars(
             config.gaussian_fields_cache_path,
             active.steps, scalars.x_edges, scalars.theta_edges,
             gaussian_cache,
+            disclinations_only=DISCLINATIONS_ONLY,
         )
         gaussian_density = _cached("rho_gaussian")
         hexatic_numerator = _cached("hexatic_order_numerator")
         D_numerator = _cached("D_numerator")
         h_numerator = _cached("h_numerator")
         P_r_numerator = _cached("P_r_numerator")
+        disclination_numerator = _cached("disclination_numerator")
         Px_numerator = _cached("P_x_numerator")
         Py_numerator = _cached("P_y_numerator")
         chirality_numerator = _cached("chirality_numerator")
@@ -410,6 +452,7 @@ def _load_smoothed_scalars(
     assert D_numerator is not None
     assert h_numerator is not None
     assert P_r_numerator is not None
+    assert disclination_numerator is not None
     assert Px_numerator is not None
     assert Py_numerator is not None
     assert chirality_numerator is not None
@@ -428,7 +471,17 @@ def _load_smoothed_scalars(
     force_y = _divide_by_density(Fy_numerator, gaussian_density)
     P = np.stack((P_x, P_y), axis=-1)
     force_density = np.stack((force_x, force_y), axis=-1)
-    return rho, hexatic_order, D, h, P_r, P, chirality, force_density
+    return (
+        rho,
+        hexatic_order,
+        D,
+        h,
+        P_r,
+        disclination_particle_mask,
+        P,
+        chirality,
+        force_density,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -681,6 +734,33 @@ def _periodic_bin_indices(values: np.ndarray, edges: np.ndarray) -> np.ndarray:
     wrapped = edges[0] + np.mod(np.asarray(values, dtype=np.float64) - edges[0], period)
     indices = np.searchsorted(edges, wrapped, side="right") - 1
     return np.mod(indices, edges.size - 1)
+
+
+def _transition_particle_grid_mask(
+    coords: np.ndarray,
+    particle_mask: np.ndarray,
+    x_edges: np.ndarray,
+    theta_edges: np.ndarray,
+) -> np.ndarray:
+    """Return transition grid cells occupied by selected particles at either endpoint."""
+    coords = np.asarray(coords, dtype=np.float64)
+    particle_mask = np.asarray(particle_mask, dtype=bool)
+    assert coords.ndim == 3 and coords.shape[2] >= 2
+    assert particle_mask.shape == coords.shape[:2]
+
+    out = np.zeros(
+        (coords.shape[0] - 1, x_edges.size - 1, theta_edges.size - 1),
+        dtype=bool,
+    )
+    for frame_idx in range(coords.shape[0] - 1):
+        for endpoint in (frame_idx, frame_idx + 1):
+            selected = particle_mask[endpoint]
+            if not np.any(selected):
+                continue
+            ix = _periodic_bin_indices(coords[endpoint, selected, 0], x_edges)
+            itheta = _periodic_bin_indices(coords[endpoint, selected, 1], theta_edges)
+            out[frame_idx, ix, itheta] = True
+    return out
 
 
 def _shared_valid_mask(

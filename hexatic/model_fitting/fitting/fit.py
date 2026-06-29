@@ -7,7 +7,7 @@ from typing import Any
 
 import numpy as np
 
-from .config import FittingConfig
+from .config import DISCLINATIONS_ONLY, FittingConfig
 from .fields import HydrodynamicFields, load_or_compute_fields
 from .library import (
     build_current_library,
@@ -21,7 +21,7 @@ from . import operators as ops
 from .regression import RegressionResult, fit_scalar_library, fit_vector_library
 
 
-CACHE_VERSION = 26
+CACHE_VERSION = 27
 
 
 @dataclass(frozen=True)
@@ -54,6 +54,7 @@ class FittingResult:
     def as_cache_arrays(self) -> dict[str, Any]:
         arrays: dict[str, Any] = {
             "cache_version": CACHE_VERSION,
+            "disclinations_only": np.asarray(DISCLINATIONS_ONLY),
             "transition_steps": self.transition_steps,
             "dt": self.dt,
             "cylinder_radius": self.cylinder_radius,
@@ -113,6 +114,14 @@ class FittingResult:
         if cache_version < CACHE_VERSION:
             raise ValueError(
                 "Cached fitting result is from an older layout; recompute it."
+            )
+        cached_disclinations_only = bool(
+            np.asarray(kwargs.pop("disclinations_only", False))
+        )
+        if cached_disclinations_only != DISCLINATIONS_ONLY:
+            raise ValueError(
+                "Cached fitting result used a different DISCLINATIONS_ONLY setting; "
+                "recompute it."
             )
         kwargs.pop("fields", None)
         source = _regression_from_cache(kwargs, "source")
@@ -181,6 +190,7 @@ def compute_fitting(config: FittingConfig) -> FittingResult:
     """Fit current and polarization models, then evaluate density conservatively."""
     raw_fields = load_or_compute_fields(config)
     fields = _coarse_grain_fields(raw_fields, config.coarse_grain_transitions)
+    fit_mask = _effective_fit_mask(fields)
     source_lib = build_s_cross_library(fields)
     current_lib = build_current_library(fields)
     polarization_lib = build_polarization_library(fields)
@@ -191,7 +201,7 @@ def compute_fitting(config: FittingConfig) -> FittingResult:
     source_fit = fit_scalar_library(
         source_lib,
         fields.S_cross,
-        fields.mask,
+        fit_mask,
         ridge_alpha=config.ridge_alpha,
         stlsq_threshold=config.stlsq_threshold,
         stlsq_max_iter=config.stlsq_max_iter,
@@ -199,7 +209,7 @@ def compute_fitting(config: FittingConfig) -> FittingResult:
     current_fit = fit_vector_library(
         current_lib,
         y_current,
-        fields.mask,
+        fit_mask,
         ridge_alpha=config.ridge_alpha,
         stlsq_threshold=config.stlsq_threshold,
         stlsq_max_iter=config.stlsq_max_iter,
@@ -207,7 +217,7 @@ def compute_fitting(config: FittingConfig) -> FittingResult:
     polarization_fit = fit_vector_library(
         polarization_lib,
         y_polarization,
-        fields.mask,
+        fit_mask,
         ridge_alpha=config.ridge_alpha,
         stlsq_threshold=config.stlsq_threshold,
         stlsq_max_iter=config.stlsq_max_iter,
@@ -217,7 +227,7 @@ def compute_fitting(config: FittingConfig) -> FittingResult:
     density_fit = _current_fit_as_density_result(
         current_fit=current_fit,
         density_target_values=y_density,
-        mask=fields.mask,
+        mask=fit_mask,
         kx=kx,
         ky=ky,
     )
@@ -251,7 +261,7 @@ def compute_fitting(config: FittingConfig) -> FittingResult:
         theta_edges=fields.theta_edges,
         theta_centers=fields.theta_centers,
         fields=fields,
-        mask=fields.mask,
+        mask=fit_mask,
         density_target=y_density,
         polarization_target=y_polarization,
         source=source_fit,
@@ -318,6 +328,12 @@ def _coarse_grain_fields(fields: HydrodynamicFields, window: int) -> Hydrodynami
         assert usable > 0
         return values[:usable].reshape(-1, window, *values.shape[1:]).all(axis=1)
 
+    def any_valid(values: np.ndarray) -> np.ndarray:
+        values = np.asarray(values, dtype=bool)
+        usable = (values.shape[0] // window) * window
+        assert usable > 0
+        return values[:usable].reshape(-1, window, *values.shape[1:]).any(axis=1)
+
     usable = (fields.transition_steps.shape[0] // window) * window
     steps = fields.transition_steps[:usable].reshape(-1, window, 2)
     transition_steps = np.stack((steps[:, 0, 0], steps[:, -1, 1]), axis=1)
@@ -360,8 +376,16 @@ def _coarse_grain_fields(fields: HydrodynamicFields, window: int) -> Hydrodynami
         mid_P=avg(fields.mid_P),
         mid_force_density=avg(fields.mid_force_density),
         mask=all_valid(fields.mask),
+        disclination_mask=any_valid(fields.disclination_mask),
         pocket_radius=fields.pocket_radius,
     )
+
+
+def _effective_fit_mask(fields: HydrodynamicFields) -> np.ndarray:
+    mask = np.asarray(fields.mask, dtype=bool)
+    if not DISCLINATIONS_ONLY:
+        return mask
+    return mask & np.asarray(fields.disclination_mask, dtype=bool)
 
 
 def _density_metrics(

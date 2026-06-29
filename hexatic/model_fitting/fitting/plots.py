@@ -132,9 +132,17 @@ def _scatter_plot(
 def _masked_transition_mean(field: np.ndarray, mask: np.ndarray | None) -> np.ndarray:
     """Mean over transition axis, respecting per-element mask."""
     field = np.asarray(field, dtype=float)
+    valid = np.isfinite(field)
     if mask is not None:
-        field = np.where(mask, field, np.nan)
-    return np.nanmean(field, axis=0)
+        valid &= np.asarray(mask, dtype=bool)
+    count = np.sum(valid, axis=0)
+    total = np.sum(np.where(valid, field, 0.0), axis=0)
+    return np.divide(
+        total,
+        count,
+        out=np.full(field.shape[1:], np.nan, dtype=float),
+        where=count > 0,
+    )
 
 
 def _residual_map(

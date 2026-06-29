@@ -3,8 +3,7 @@
 ## Headline Model 3 Result
 
 ```text
-partial_t rho_pred = -div(J_fit_model3) + S_cross
-J_fit_model3 = J_fit_no_force + J_sys_no_force + xi_AR1
+partial_t rho_pred = -div(J_fit_no_force + J_sys_no_force) + S_cross + eta_AR1
 ```
 
 | metric vs `partial_t rho` | value |
@@ -61,11 +60,11 @@ S_cross_pred = c0 1 + c1 rho + c2 laplacian rho + c3 D + c4 |psi6| + c5 P_r + c6
 
 ## Three Full Stochastic Density Models
 
-| model | R² AR(1)/full | R² with S_cross_pred AR(1) | R² det (no ξ) | rms(-∇·ξ) | fraction J_sys/J_res |
-|---|---:|---:|---:|---:|---:|
-| J_fit residual split | `0.9985239` |  | `0.79972685` | `0.0061999701` | `0.50585587` |
-| J_EOM residual split | `0.9985239` |  | `0.89352542` | `0.0045611717` | `0.65719928` |
-| J_fit without force_density residual split + 85% η-power AR(1) | `0.7959097` | `0.53604607` | `0.73861094` | `0.0070611948` | `0.68643877` |
+| model | R² AR(1)/full | R² det (no ξ) | rms(-∇·ξ) | fraction J_sys/J_res |
+|---|---:|---:|---:|---:|
+| J_fit residual split | `0.9985239` | `0.79972685` | `0.0061999701` | `0.50585587` |
+| J_EOM residual split | `0.9985239` | `0.89352542` | `0.0045611717` | `0.65719928` |
+| J_fit without force_density residual split + 85% η-power AR(1) | `0.7959097` | `0.73861094` | `0.0070611948` | `0.68643877` |
 
 ### Model 1: J_fit residual split
 
@@ -129,7 +128,7 @@ Final density model with seeded AR(1) `xi`:
 | std | `0.0061999701` | `0.0055126857` |
 | retained eta power fraction | `0.85037549` | `0.99711752` |
 | dominant mode `(x,theta)` | `(1, 0)` | `(1, 0)` |
-| lag-1 autocorrelation | `-0.26408635` | `-0.42544221` |
+| lag-1 autocorrelation | `-0.26408635` | `-0.28710549` |
 | correlation time | `0` | `0` |
 
 Note: J_res_fit = J_m - J_fit; J_sys_fit = mean_t J_res_fit; ξ_fit = J_res_fit - J_sys_fit
@@ -200,7 +199,7 @@ Final density model with seeded AR(1) `xi`:
 | std | `0.0045611717` | `0.0043225049` |
 | retained eta power fraction | `0.8511737` | `0.99920756` |
 | dominant mode `(x,theta)` | `(1, 2)` | `(1, -3)` |
-| lag-1 autocorrelation | `-0.19693555` | `-0.38616889` |
+| lag-1 autocorrelation | `-0.19693555` | `-0.19959162` |
 | correlation time | `0` | `0` |
 
 Note: J_EOM = J_active + J_pair + J_wall; full residual identity reconstructs J_m
@@ -242,8 +241,6 @@ Current fit against `J_m`:
 | x component | `0.17218961` |
 | theta component | `-0.18720045` |
 
-Actual `S_cross` baseline:
-
 Adaptive Fourier stochastic mechanism:
 
 | quantity | value |
@@ -271,42 +268,10 @@ Final density model with seeded AR(1) `xi`:
 | std | `0.0070611948` | `0.0061714928` |
 | retained eta power fraction | `0.85046645` | `0.99981847` |
 | dominant mode `(x,theta)` | `(1, 2)` | `(1, 2)` |
-| lag-1 autocorrelation | `-0.13607439` | `-0.35065818` |
+| lag-1 autocorrelation | `-0.13607439` | `-0.1978952` |
 | correlation time | `0` | `0` |
 
-Fitted `S_cross_pred` substituted for actual `S_cross`:
-
-Adaptive Fourier stochastic mechanism:
-
-| quantity | value |
-|---|---:|
-| selected modes | empirical `eta` power ranking, keep 85% |
-| retained Fourier current modes | `394` |
-| mean abs(`alpha_k`) | `0.42365618` |
-| mean `sigma_k` | `10.790699` |
-| mean modal correlation time | `2.3287413` |
-
-Final density model with seeded AR(1) `xi`:
-
-| metric | value |
-|---|---:|
-| R2 vs `partial_t rho` | `0.53604607` |
-| MAE vs `partial_t rho` | `0.0073621421` |
-| normalized MAE | `0.82306249` |
-| correlation | `0.762229` |
-
-`eta = -div xi` statistics, empirical vs AR(1) mechanism:
-
-| statistic | empirical | AR(1) mechanism |
-|---|---:|---:|
-| rms | `0.0070611948` | `0.0061714928` |
-| std | `0.0070611948` | `0.0061714928` |
-| retained eta power fraction | `0.85046645` | `0.99981847` |
-| dominant mode `(x,theta)` | `(1, 2)` | `(1, 2)` |
-| lag-1 autocorrelation | `-0.13607439` | `-0.35065818` |
-| correlation time | `0` | `0` |
-
-Note: force_density and D force_density omitted from J_fit before residual split; S_cross_pred substituted-source metrics are reported separately from the actual-S_cross baseline; final model uses seeded adaptive ξ_85 selected from empirical η power
+Note: force_density and D force_density omitted from J_fit before residual split; final model uses seeded adaptive ξ_85 selected from empirical η power
 
 | coefficient | value | term |
 |---:|---:|---|

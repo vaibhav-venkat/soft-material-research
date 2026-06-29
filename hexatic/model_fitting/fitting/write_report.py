@@ -78,6 +78,17 @@ def write_model_report(
     add(f"Density Stochastic-Flux Report — case: {case_id}")
     add("=" * 72)
     add("")
+    model3 = models[2] if len(models) >= 3 else None
+    if model3 is not None and model3.stochastic is not None:
+        add("Headline Model 3 Result")
+        add("-" * 48)
+        add("  partial_t rho_pred = -div(J_fit_no_force + J_sys_no_force) + S_cross + eta_AR1")
+        add("  Metrics against actual partial_t rho:")
+        add(f"    R²:  {model3.stochastic.r2:.8g}")
+        add(f"    MAE: {model3.stochastic.mae:.8g}")
+        add(f"    normalized MAE: {model3.stochastic.normalized_mae:.8g}")
+        add(f"    correlation:    {model3.stochastic.correlation:.8g}")
+        add("")
     add("Governing density equation")
     add("-" * 48)
     add("  ∂_t ρ = -∇_s·J_m + S_cross")
@@ -127,12 +138,6 @@ def write_model_report(
         add(f"      MAE: {model.mae:.8g}")
         add(f"      normalized MAE: {model.normalized_mae:.8g}")
         add(f"      correlation:    {model.correlation:.8g}")
-        if model.source_stochastic is not None:
-            add("    Full stochastic with fitted S_cross_pred against ∂_tρ:")
-            add(f"      R²:  {model.source_stochastic.r2:.8g}")
-            add(f"      MAE: {model.source_stochastic.mae:.8g}")
-            add(f"      normalized MAE: {model.source_stochastic.normalized_mae:.8g}")
-            add(f"      correlation:    {model.source_stochastic.correlation:.8g}")
         add(f"    Deterministic (without ξ) against ∂_tρ:")
         add(f"      R²:  {model.det_r2:.8g}")
         add(f"      MAE: {model.det_mae:.8g}")
@@ -149,12 +154,7 @@ def write_model_report(
             add(f"      R² x:        {model.current_r2_x:.8g}")
             add(f"      R² theta:    {model.current_r2_y:.8g}")
         if model.stochastic is not None:
-            if model.source_stochastic is not None:
-                add("    With actual S_cross baseline:")
             lines.extend(stochastic_text_report_lines(model.stochastic))
-        if model.source_stochastic is not None:
-            add("    With fitted S_cross_pred substituted for actual S_cross:")
-            lines.extend(stochastic_text_report_lines(model.source_stochastic))
         if model.note:
             add(f"    note: {model.note}")
         if model.coefficients:
@@ -274,21 +274,13 @@ def _three_density_models(
             no_force_current,
             stochastic_as_full=True,
         )
-        no_force_source_diag = _residual_diagnostics(
-            result,
-            no_force_current,
-            source_prediction=result.source.prediction,
-            stochastic_as_full=True,
-        )
-        no_force_diag["source_stochastic"] = no_force_source_diag["stochastic"]
+        no_force_diag["source_stochastic"] = None
         no_force_coefficients = tuple(
             (f"a{i}", float(coef), label)
             for i, (coef, label) in enumerate(zip(no_force_result.coefficients, no_force_result.labels), start=1)
         )
         no_force_note = (
-            "force_density and D force_density omitted from J_fit before residual split; "
-            "S_cross_pred substituted-source metrics are reported separately from the "
-            "actual-S_cross baseline"
+            "force_density and D force_density omitted from J_fit before residual split"
         )
 
     eom_diag = _residual_diagnostics(result, np.zeros_like(result.fields.material_current))
@@ -379,7 +371,7 @@ def _residual_diagnostics(
 ) -> dict[str, float]:
     """Return full/deterministic metrics + residual diagnostic stats for a given base current."""
     j_res = result.fields.material_current - base_current
-    j_sys = np.mean(j_res, axis=0, keepdims=True)
+    j_sys = _masked_time_mean(j_res, result.mask)
     xi = j_res - j_sys
     current_metrics = _metrics_for_current_prediction(result, base_current)
     source = result.fields.S_cross if source_prediction is None else source_prediction
@@ -411,11 +403,10 @@ def _residual_diagnostics(
     C_xi = -_divergence(result, xi)         # (T, nx, ntheta)
     T = C_jres.shape[0]
     v = result.mask & np.isfinite(C_jres) & np.isfinite(C_xi)
-    rms_jres = float(np.sqrt(np.mean(C_jres[v] ** 2)))
-    # J_sys has 1 time sample; use mask valid across all times at each spatial cell
-    v_sys = result.mask.all(axis=0) & np.isfinite(C_jsys[0])
-    rms_jsys = float(np.sqrt(np.mean(C_jsys[0][v_sys] ** 2)))
-    rms_xi = float(np.sqrt(np.mean(C_xi[v] ** 2)))
+    rms_jres = _rms_where(C_jres, v)
+    v_sys = result.mask.any(axis=0) & np.isfinite(C_jsys[0])
+    rms_jsys = _rms_where(C_jsys[0], v_sys)
+    rms_xi = _rms_where(C_xi, v)
     fraction = rms_jsys / rms_jres if rms_jres > 0 else float("nan")
 
     return {
@@ -435,7 +426,26 @@ def _residual_diagnostics(
         "current_r2_x": current_metrics["r2_x"],
         "current_r2_y": current_metrics["r2_y"],
         "stochastic": stochastic,
-    }
+}
+
+
+def _masked_time_mean(values: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    values = np.asarray(values, dtype=float)
+    mask = np.asarray(mask, dtype=bool)
+    assert values.shape[:-1] == mask.shape
+    weights = mask[..., None]
+    count = np.sum(weights, axis=0, keepdims=True)
+    total = np.sum(np.where(weights, values, 0.0), axis=0, keepdims=True)
+    return np.divide(total, count, out=np.zeros_like(total), where=count > 0)
+
+
+def _rms_where(values: np.ndarray, valid: np.ndarray) -> float:
+    values = np.asarray(values, dtype=float)
+    valid = np.asarray(valid, dtype=bool) & np.isfinite(values)
+    if not np.any(valid):
+        return float("nan")
+    selected = values[valid]
+    return float(np.sqrt(np.mean(selected * selected)))
 
 
 def _metrics_for_current_prediction(result: FittingResult, prediction: np.ndarray) -> dict[str, float]:
@@ -532,21 +542,19 @@ def _markdown_report(
     model3 = models[2] if len(models) >= 3 else None
     add(f"# Density Stochastic-Flux Report: `{case_id}`")
     add("")
-    if model3 is not None:
-        headline = model3.source_stochastic or model3.stochastic
+    if model3 is not None and model3.stochastic is not None:
         add("## Headline Model 3 Result")
         add("")
         add("```text")
-        add("partial_t rho_pred = -div(J_fit_model3) + S_cross_pred")
-        add("J_fit_model3 = J_fit_no_force + J_sys_no_force + xi_AR1")
+        add("partial_t rho_pred = -div(J_fit_no_force + J_sys_no_force) + S_cross + eta_AR1")
         add("```")
         add("")
         add("| metric vs `partial_t rho` | value |")
         add("|---|---:|")
-        add(f"| R² | `{headline.r2:.8g}` |")
-        add(f"| MAE | `{headline.mae:.8g}` |")
-        add(f"| normalized MAE | `{headline.normalized_mae:.8g}` |")
-        add(f"| correlation | `{headline.correlation:.8g}` |")
+        add(f"| R² | `{model3.stochastic.r2:.8g}` |")
+        add(f"| MAE | `{model3.stochastic.mae:.8g}` |")
+        add(f"| normalized MAE | `{model3.stochastic.normalized_mae:.8g}` |")
+        add(f"| correlation | `{model3.stochastic.correlation:.8g}` |")
         add("")
     add("## Governing Equation")
     add("")
@@ -586,16 +594,11 @@ def _markdown_report(
     add("")
     add("## Three Full Stochastic Density Models")
     add("")
-    add("| model | R² AR(1)/full | R² with S_cross_pred AR(1) | R² det (no ξ) | rms(-∇·ξ) | fraction J_sys/J_res |")
-    add("|---|---:|---:|---:|---:|---:|")
+    add("| model | R² AR(1)/full | R² det (no ξ) | rms(-∇·ξ) | fraction J_sys/J_res |")
+    add("|---|---:|---:|---:|---:|")
     for model in models:
-        source_r2 = (
-            f"`{model.source_stochastic.r2:.8g}`"
-            if model.source_stochastic is not None
-            else ""
-        )
         add(
-            f"| {model.name} | `{model.r2:.8g}` | {source_r2} | "
+            f"| {model.name} | `{model.r2:.8g}` | "
             f"`{model.det_r2:.8g}` | `{model.rms_div_xi:.8g}` | "
             f"`{model.fraction_jsys_jres:.8g}` |"
         )
@@ -638,14 +641,7 @@ def _markdown_report(
             add(f"| theta component | `{model.current_r2_y:.8g}` |")
             add("")
         if model.stochastic is not None:
-            if model.source_stochastic is not None:
-                add("Actual `S_cross` baseline:")
-                add("")
             lines.extend(stochastic_markdown_report_lines(model.stochastic))
-        if model.source_stochastic is not None:
-            add("Fitted `S_cross_pred` substituted for actual `S_cross`:")
-            add("")
-            lines.extend(stochastic_markdown_report_lines(model.source_stochastic))
         if model.note:
             add(f"Note: {model.note}")
             add("")

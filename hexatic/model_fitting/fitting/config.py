@@ -18,6 +18,8 @@ DEFAULT_STLSQ_MAX_ITER = 20
 # Block average this many adjacent transition fields before regression. This is
 # separate from the raw hydrodynamic cache, which stays at native transition time.
 DEFAULT_COARSE_GRAIN_TRANSITIONS = 20
+DISCLINATIONS_ONLY = False
+DISCLINATION_FRACTION_THRESHOLD = 0.5
 
 
 @dataclass(frozen=True)

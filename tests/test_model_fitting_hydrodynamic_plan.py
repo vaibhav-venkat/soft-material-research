@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from hexatic.model_fitting.fitting import fields as fields_module
+from hexatic.model_fitting.fitting import fit as fit_module
 from hexatic.model_fitting.fitting.library import build_current_library
 from hexatic.model_fitting.fitting.fit import FittingResult
 from hexatic.model_fitting.fitting.regression import RegressionResult
@@ -168,7 +169,7 @@ class HydrodynamicPlanTests(unittest.TestCase):
             fields_module._save_gaussian_field_cache,
         )
         try:
-            fields_module._load_gaussian_field_cache = lambda *args: {}
+            fields_module._load_gaussian_field_cache = lambda *args, **kwargs: {}
             fields_module._load_hexatic_order_frames = lambda *args: np.asarray([[5.0]])
             fields_module._load_neighbor_count_frames = lambda *args: np.asarray([[6.0]])
             fields_module._load_or_compute_chirality_frames = lambda *args: np.asarray([[[7.0]]])
@@ -178,13 +179,14 @@ class HydrodynamicPlanTests(unittest.TestCase):
                 "D_numerator": np.asarray([[[0.0]]]),
                 "h_numerator": np.asarray([[[1.0]]]),
                 "P_r_numerator": np.asarray([[[9.0]]]),
+                "disclination_numerator": np.asarray([[[1.0]]]),
                 "P_x_numerator": np.asarray([[[2.0]]]),
                 "P_y_numerator": np.asarray([[[3.0]]]),
                 "chirality_numerator": np.asarray([[[7.0]]]),
                 "force_density_x_numerator": np.asarray([[[4.0]]]),
                 "force_density_y_numerator": np.asarray([[[5.0]]]),
             }
-            fields_module._save_gaussian_field_cache = lambda *args: None
+            fields_module._save_gaussian_field_cache = lambda *args, **kwargs: None
 
             (
                 rho,
@@ -192,6 +194,7 @@ class HydrodynamicPlanTests(unittest.TestCase):
                 D,
                 h,
                 P_r,
+                disclination_particle_mask,
                 P,
                 chirality,
                 force_density,
@@ -210,8 +213,32 @@ class HydrodynamicPlanTests(unittest.TestCase):
 
         np.testing.assert_allclose(h, np.asarray([[[1.0]]]))
         np.testing.assert_allclose(P_r, np.asarray([[[9.0]]]))
+        np.testing.assert_array_equal(
+            disclination_particle_mask,
+            np.asarray([[False]]),
+        )
         np.testing.assert_allclose(chirality, np.asarray([[[7.0]]]))
         np.testing.assert_allclose(force_density, np.asarray([[[[4.0, 5.0]]]]))
+
+    def test_effective_fit_mask_can_restrict_to_disclinations(self):
+        fields = SimpleNamespace(
+            mask=np.asarray([[[True, True], [False, True]]], dtype=bool),
+            disclination_mask=np.asarray([[[True, False], [True, True]]], dtype=bool),
+        )
+        original = fit_module.DISCLINATIONS_ONLY
+        try:
+            fit_module.DISCLINATIONS_ONLY = False
+            np.testing.assert_array_equal(
+                fit_module._effective_fit_mask(fields),
+                fields.mask,
+            )
+            fit_module.DISCLINATIONS_ONLY = True
+            np.testing.assert_array_equal(
+                fit_module._effective_fit_mask(fields),
+                np.asarray([[[True, False], [False, True]]], dtype=bool),
+            )
+        finally:
+            fit_module.DISCLINATIONS_ONLY = original
 
     def test_gaussian_crossing_source_matches_gaussian_density_change_for_entry(self):
         coords = np.asarray(

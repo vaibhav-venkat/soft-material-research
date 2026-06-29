@@ -149,7 +149,7 @@ def compute_stochastic_mechanism(
     """Fit the 85%-eta-power Fourier AR(1) residual model."""
     try:
         j_res = result.fields.material_current - base_current
-        j_sys = np.mean(j_res, axis=0, keepdims=True)
+        j_sys = _masked_time_mean(j_res, result.mask)
         xi = j_res - j_sys
         eta_empirical = -_divergence(result, xi)
         mode_mask = _adaptive_eta_power_mode_mask(
@@ -316,6 +316,16 @@ def _ar1_rollout(
     return xi_model, retained_modes, mean_abs_alpha, mean_sigma
 
 
+def _masked_time_mean(values: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    values = np.asarray(values, dtype=float)
+    mask = np.asarray(mask, dtype=bool)
+    assert values.shape[:-1] == mask.shape
+    weights = mask[..., None]
+    count = np.sum(weights, axis=0, keepdims=True)
+    total = np.sum(np.where(weights, values, 0.0), axis=0, keepdims=True)
+    return np.divide(total, count, out=np.zeros_like(total), where=count > 0)
+
+
 def _eta_statistics(
     eta: np.ndarray,
     mask: np.ndarray,
@@ -421,18 +431,26 @@ def _adaptive_eta_power_mode_mask(
 
 
 def _temporal_autocorrelation(eta: np.ndarray, valid: np.ndarray) -> np.ndarray:
-    all_valid = np.all(valid, axis=0)
-    if eta.shape[0] < 2 or not np.any(all_valid):
+    valid = np.asarray(valid, dtype=bool) & np.isfinite(eta)
+    if eta.shape[0] < 2 or not np.any(valid):
         return np.asarray([1.0])
-    series = np.asarray(eta[:, all_valid], dtype=float)
-    series = series - np.mean(series, axis=0, keepdims=True)
-    denom = float(np.mean(series * series))
+    centered = np.zeros_like(eta, dtype=float)
+    mean = float(np.mean(eta[valid]))
+    centered[valid] = eta[valid] - mean
+    denom = float(np.mean(centered[valid] * centered[valid]))
     if denom <= 0.0 or not np.isfinite(denom):
         return np.asarray([1.0])
-    autocorr = np.empty(series.shape[0], dtype=float)
+    autocorr = np.empty(eta.shape[0], dtype=float)
     autocorr[0] = 1.0
-    for lag in range(1, series.shape[0]):
-        autocorr[lag] = float(np.mean(series[:-lag] * series[lag:]) / denom)
+    for lag in range(1, eta.shape[0]):
+        pair_valid = valid[:-lag] & valid[lag:]
+        if not np.any(pair_valid):
+            autocorr[lag] = float("nan")
+        else:
+            autocorr[lag] = float(
+                np.mean(centered[:-lag][pair_valid] * centered[lag:][pair_valid])
+                / denom
+            )
     return autocorr
 
 
@@ -440,7 +458,8 @@ def _correlation_time_from_autocorrelation(autocorr: np.ndarray, dt: float) -> f
     if autocorr.size < 2:
         return float("nan")
     positive = autocorr[1:]
-    nonpositive = np.nonzero(positive <= 0.0)[0]
+    stop_mask = (~np.isfinite(positive)) | (positive <= 0.0)
+    nonpositive = np.nonzero(stop_mask)[0]
     stop = int(nonpositive[0]) if nonpositive.size else positive.size
     if stop <= 0:
         return 0.0

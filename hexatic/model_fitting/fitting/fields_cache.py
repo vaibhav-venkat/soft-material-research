@@ -6,15 +6,17 @@ from pathlib import Path
 
 import numpy as np
 
+from .config import DISCLINATIONS_ONLY
 from .io_cache import load_npz_arrays
 
-HYDRO_CACHE_VERSION = 5
+HYDRO_CACHE_VERSION = 8
 
 
 def _save_hydrodynamic_cache(path: Path, fields) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     arrays: dict[str, np.ndarray] = {
         "hydro_cache_version": np.asarray(HYDRO_CACHE_VERSION),
+        "hydro_disclinations_only": np.asarray(DISCLINATIONS_ONLY),
         "transition_steps": fields.transition_steps,
         "dt": np.asarray(fields.dt),
         "cylinder_radius": np.asarray(fields.cylinder_radius),
@@ -53,6 +55,7 @@ def _save_hydrodynamic_cache(path: Path, fields) -> None:
         "mid_P": fields.mid_P,
         "mid_force_density": fields.mid_force_density,
         "mask": fields.mask,
+        "disclination_mask": fields.disclination_mask,
         "pocket_radius": np.asarray(
             fields.pocket_radius if fields.pocket_radius is not None else np.nan
         ),
@@ -68,6 +71,13 @@ def _load_hydrodynamic_cache(path: Path):
     if cache_ver < HYDRO_CACHE_VERSION:
         raise ValueError(
             f"Hydrodynamic cache version {cache_ver} < {HYDRO_CACHE_VERSION}; recompute."
+        )
+    cached_disclinations_only = bool(
+        np.asarray(arrays.get("hydro_disclinations_only", False))
+    )
+    if cached_disclinations_only != DISCLINATIONS_ONLY:
+        raise ValueError(
+            "Hydrodynamic cache used a different DISCLINATIONS_ONLY setting; recompute."
         )
     pocket_radius_val = float(np.asarray(arrays["pocket_radius"]))
     pocket_radius = None if np.isnan(pocket_radius_val) else pocket_radius_val
@@ -110,6 +120,7 @@ def _load_hydrodynamic_cache(path: Path):
         mid_P=arrays["mid_P"],
         mid_force_density=arrays["mid_force_density"],
         mask=np.asarray(arrays["mask"], dtype=bool),
+        disclination_mask=np.asarray(arrays["disclination_mask"], dtype=bool),
         pocket_radius=pocket_radius,
     )
 
@@ -119,11 +130,19 @@ def _load_gaussian_field_cache(
     steps: np.ndarray,
     x_edges: np.ndarray,
     theta_edges: np.ndarray,
+    *,
+    disclinations_only: bool,
 ) -> dict[str, np.ndarray]:
     if not gaussian_cache_path.exists():
         return {}
     arrays = load_npz_arrays(gaussian_cache_path)
-    if not _gaussian_cache_metadata_matches(arrays, steps, x_edges, theta_edges):
+    if not _gaussian_cache_metadata_matches(
+        arrays,
+        steps,
+        x_edges,
+        theta_edges,
+        disclinations_only=disclinations_only,
+    ):
         return {}
     return arrays
 
@@ -134,6 +153,8 @@ def _save_gaussian_field_cache(
     x_edges: np.ndarray,
     theta_edges: np.ndarray,
     arrays: dict[str, np.ndarray],
+    *,
+    disclinations_only: bool,
 ) -> None:
     gaussian_cache_path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
@@ -141,10 +162,11 @@ def _save_gaussian_field_cache(
         steps=np.asarray(steps),
         x_edges=np.asarray(x_edges),
         theta_edges=np.asarray(theta_edges),
+        disclinations_only=np.asarray(disclinations_only),
         allow_pickle=True,
         **{
             k: v for k, v in arrays.items()
-            if k not in {"steps", "x_edges", "theta_edges"}
+            if k not in {"steps", "x_edges", "theta_edges", "disclinations_only"}
         },
     )
 
@@ -154,14 +176,17 @@ def _gaussian_cache_metadata_matches(
     steps: np.ndarray,
     x_edges: np.ndarray,
     theta_edges: np.ndarray,
+    *,
+    disclinations_only: bool,
 ) -> bool:
-    required = ("steps", "x_edges", "theta_edges")
+    required = ("steps", "x_edges", "theta_edges", "disclinations_only")
     if any(k not in arrays for k in required):
         return False
     return (
         np.array_equal(np.asarray(arrays["steps"]), np.asarray(steps))
         and np.array_equal(np.asarray(arrays["x_edges"]), np.asarray(x_edges))
         and np.array_equal(np.asarray(arrays["theta_edges"]), np.asarray(theta_edges))
+        and bool(np.asarray(arrays["disclinations_only"])) == disclinations_only
     )
 
 
