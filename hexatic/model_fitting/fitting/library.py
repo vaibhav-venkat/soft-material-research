@@ -15,6 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+from scipy import fft
 
 from .fields import HydrodynamicFields
 
@@ -87,6 +88,7 @@ CURRENT_TERM_NAMES = (
     "minus_grad_rho",
     "minus_grad_hexatic_order",
     "minus_grad_D",
+    "low_k_fourier_modes",
 )
 CURRENT_TERM_LABELS = (
     "P",
@@ -98,6 +100,7 @@ CURRENT_TERM_LABELS = (
     "-grad rho",
     "-grad hexatic_order",
     "-grad D",
+    "low-k Fourier modes",
 )
 
 
@@ -145,6 +148,7 @@ def build_current_library(fields: HydrodynamicFields) -> VectorLibrary:
     P = fields.mid_P
     P_perp = np.stack((-P[..., 1], P[..., 0]), axis=-1)
     chiral_P_perp = fields.mid_chirality[..., None] * P_perp
+    low_k_modes = _low_k_fourier_modes(getattr(fields, "material_current", None), P)
     values = np.stack(
         (
             P,
@@ -156,10 +160,46 @@ def build_current_library(fields: HydrodynamicFields) -> VectorLibrary:
             -fields.grad_rho,
             -fields.grad_hexatic_order,
             -fields.grad_D,
+            low_k_modes,
         ),
         axis=-2,
     )
     return VectorLibrary(CURRENT_TERM_NAMES, CURRENT_TERM_LABELS, values)
+
+
+def _low_k_fourier_modes(
+    vec_field: np.ndarray | None,
+    template: np.ndarray,
+    *,
+    max_mode: int = 1,
+) -> np.ndarray:
+    """Return the nonzero low-frequency Fourier reconstruction of a vector field."""
+    if vec_field is None:
+        return np.zeros_like(template)
+
+    vec_field = np.asarray(vec_field, dtype=float)
+    if vec_field.shape != template.shape:
+        raise ValueError(
+            "low-k Fourier mode field must match current-library vector shape "
+            f"{template.shape}, got {vec_field.shape}."
+        )
+
+    nx = vec_field.shape[1]
+    ntheta = vec_field.shape[2]
+    x_modes = fft.fftfreq(nx) * nx
+    theta_modes = fft.fftfreq(ntheta) * ntheta
+    low_k = (
+        (np.abs(x_modes[:, None]) <= max_mode)
+        & (np.abs(theta_modes[None, :]) <= max_mode)
+    )
+    low_k &= ~((x_modes[:, None] == 0.0) & (theta_modes[None, :] == 0.0))
+
+    filtered = np.empty_like(vec_field)
+    for component in range(vec_field.shape[-1]):
+        field_hat = fft.fft2(vec_field[..., component], axes=(1, 2))
+        field_hat *= low_k[None, :, :]
+        filtered[..., component] = fft.ifft2(field_hat, axes=(1, 2)).real
+    return filtered
 
 
 def density_target(fields: HydrodynamicFields) -> np.ndarray:
