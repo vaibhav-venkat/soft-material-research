@@ -23,7 +23,7 @@ Because `ξ` is defined from the residual, each full stochastic model reconstruc
 |---|---:|---:|---:|---:|
 | J_fit residual split | `0.9985239` | `0.79972685` | `0.0061999701` | `0.50585587` |
 | J_EOM residual split | `0.9985239` | `0.89352542` | `0.0045611717` | `0.65719928` |
-| J_fit without force_density residual split | `0.9985239` | `0.73861094` | `0.0070611948` | `0.68643877` |
+| J_fit without force_density residual split + 85% η-power AR(1) | `0.9985239` | `0.73861094` | `0.0070611948` | `0.68643877` |
 
 ### Model 1: J_fit residual split
 
@@ -51,6 +51,38 @@ Residual diagnostics:
 | rms(-∇·J_sys) | `0.0036357823` |
 | rms(-∇·ξ) | `0.0061999701` |
 | fraction J_sys / J_res | `0.50585587` |
+
+Adaptive Fourier stochastic mechanism:
+
+| quantity | value |
+|---|---:|
+| selected modes | empirical `eta` power ranking, keep 85% |
+| retained Fourier current modes | `338` |
+| mean abs(`alpha_k`) | `0.47998866` |
+| mean `sigma_k` | `9.8577815` |
+| mean modal correlation time | `2.7248224` |
+
+Final density model with seeded AR(1) `xi`:
+
+| metric | value |
+|---|---:|
+| R2 vs `partial_t rho` | `0.83722772` |
+| MAE vs `partial_t rho` | `0.0042312293` |
+| normalized MAE | `0.47303707` |
+| correlation | `0.92637418` |
+
+`eta = -div xi` statistics, empirical vs AR(1) mechanism:
+
+| statistic | empirical | AR(1) mechanism |
+|---|---:|---:|
+| rms | `0.0061999701` | `0.0055126857` |
+| std | `0.0061999701` | `0.0055126857` |
+| retained eta power fraction | `0.85037549` | `0.99711752` |
+| dominant mode `(x,theta)` | `(1, 0)` | `(1, 0)` |
+| lag-1 autocorrelation | `-0.26408635` | `-0.42544221` |
+| correlation time | `0` | `0` |
+
+Stochastic note: seeded adaptive Fourier AR(1) rollout of xi using empirical eta modes that retain 85% of eta power; pointwise metrics are reproducible but stochastic and should be read with the distributional statistics
 
 Note: J_res_fit = J_m - J_fit; J_sys_fit = mean_t J_res_fit; ξ_fit = J_res_fit - J_sys_fit
 
@@ -93,11 +125,43 @@ Residual diagnostics:
 | rms(-∇·ξ) | `0.0045611717` |
 | fraction J_sys / J_res | `0.65719928` |
 
+Adaptive Fourier stochastic mechanism:
+
+| quantity | value |
+|---|---:|
+| selected modes | empirical `eta` power ranking, keep 85% |
+| retained Fourier current modes | `278` |
+| mean abs(`alpha_k`) | `0.36725562` |
+| mean `sigma_k` | `13.1414` |
+| mean modal correlation time | `1.9966114` |
+
+Final density model with seeded AR(1) `xi`:
+
+| metric | value |
+|---|---:|
+| R2 vs `partial_t rho` | `0.917926` |
+| MAE vs `partial_t rho` | `0.0030311321` |
+| normalized MAE | `0.33887028` |
+| correlation | `0.9605412` |
+
+`eta = -div xi` statistics, empirical vs AR(1) mechanism:
+
+| statistic | empirical | AR(1) mechanism |
+|---|---:|---:|
+| rms | `0.0045611717` | `0.0043225049` |
+| std | `0.0045611717` | `0.0043225049` |
+| retained eta power fraction | `0.8511737` | `0.99920756` |
+| dominant mode `(x,theta)` | `(1, 2)` | `(1, -3)` |
+| lag-1 autocorrelation | `-0.19693555` | `-0.38616889` |
+| correlation time | `0` | `0` |
+
+Stochastic note: seeded adaptive Fourier AR(1) rollout of xi using empirical eta modes that retain 85% of eta power; pointwise metrics are reproducible but stochastic and should be read with the distributional statistics
+
 Note: J_EOM = J_active + J_pair + J_wall; full residual identity reconstructs J_m
 
 No fitted `a_i`; EOM terms use fixed microscopic coefficients.
 
-### Model 3: J_fit without force_density residual split
+### Model 3: J_fit without force_density residual split + 85% η-power AR(1)
 
 Full equation:
 ```text
@@ -124,7 +188,39 @@ Residual diagnostics:
 | rms(-∇·ξ) | `0.0070611948` |
 | fraction J_sys / J_res | `0.68643877` |
 
-Note: force_density and D force_density omitted from J_fit before residual split
+Adaptive Fourier stochastic mechanism:
+
+| quantity | value |
+|---|---:|
+| selected modes | empirical `eta` power ranking, keep 85% |
+| retained Fourier current modes | `394` |
+| mean abs(`alpha_k`) | `0.42365618` |
+| mean `sigma_k` | `10.790699` |
+| mean modal correlation time | `2.3287413` |
+
+Final density model with seeded AR(1) `xi`:
+
+| metric | value |
+|---|---:|
+| R2 vs `partial_t rho` | `0.7959097` |
+| MAE vs `partial_t rho` | `0.0046818884` |
+| normalized MAE | `0.52341923` |
+| correlation | `0.90964319` |
+
+`eta = -div xi` statistics, empirical vs AR(1) mechanism:
+
+| statistic | empirical | AR(1) mechanism |
+|---|---:|---:|
+| rms | `0.0070611948` | `0.0061714928` |
+| std | `0.0070611948` | `0.0061714928` |
+| retained eta power fraction | `0.85046645` | `0.99981847` |
+| dominant mode `(x,theta)` | `(1, 2)` | `(1, 2)` |
+| lag-1 autocorrelation | `-0.13607439` | `-0.35065818` |
+| correlation time | `0` | `0` |
+
+Stochastic note: seeded adaptive Fourier AR(1) rollout of xi using empirical eta modes that retain 85% of eta power; pointwise metrics are reproducible but stochastic and should be read with the distributional statistics
+
+Note: force_density and D force_density omitted from J_fit before residual split; final model uses seeded adaptive ξ_85 selected from empirical η power
 
 | coefficient | value | term |
 |---:|---:|---|

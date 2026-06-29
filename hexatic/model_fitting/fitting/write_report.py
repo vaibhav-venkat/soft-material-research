@@ -12,6 +12,12 @@ from . import operators as ops
 from .fit import FittingResult
 from .library import VectorLibrary, build_current_library, build_no_force_low_k_library
 from .regression import RegressionResult, fit_vector_library
+from .stochastic import (
+    StochasticMechanismSummary,
+    compute_stochastic_mechanism,
+    markdown_report_lines as stochastic_markdown_report_lines,
+    text_report_lines as stochastic_text_report_lines,
+)
 
 
 @dataclass(frozen=True)
@@ -37,6 +43,7 @@ class DensityModelSummary:
     rms_div_jsys: float
     rms_div_jres: float
     fraction_jsys_jres: float
+    stochastic: StochasticMechanismSummary | None
     note: str
 
 
@@ -111,6 +118,8 @@ def write_model_report(
         add(f"      rms(-∇·J_sys): {model.rms_div_jsys:.8g}")
         add(f"      rms(-∇·ξ):     {model.rms_div_xi:.8g}")
         add(f"      fraction J_sys/J_res: {model.fraction_jsys_jres:.8g}")
+        if model.stochastic is not None:
+            lines.extend(stochastic_text_report_lines(model.stochastic))
         if model.note:
             add(f"    note: {model.note}")
         if model.coefficients:
@@ -165,6 +174,7 @@ def _three_density_models(
             rms_div_jsys=float("nan"),
             rms_div_jres=float("nan"),
             fraction_jsys_jres=float("nan"),
+            stochastic=None,
         )
         note = "current-library fields unavailable in minimal result"
         return (
@@ -234,11 +244,14 @@ def _three_density_models(
             **eom_diag,
         ),
         DensityModelSummary(
-            name="J_fit without force_density residual split",
+            name="J_fit without force_density residual split + 85% η-power AR(1)",
             equation="-∇_s·[J_fit_no_f + J_sys_no_f] + S_cross - ∇_s·ξ_no_f",
             det_equation="-∇_s·[J_fit_no_f + J_sys_no_f] + S_cross",
             coefficients=no_force_coefficients,
-            note=no_force_note,
+            note=(
+                no_force_note
+                + "; final model uses seeded adaptive ξ_85 selected from empirical η power"
+            ),
             **no_force_diag,
         ),
     )
@@ -324,6 +337,7 @@ def _residual_diagnostics(result: FittingResult, base_current: np.ndarray) -> di
         "rms_div_jsys": rms_jsys,
         "rms_div_jres": rms_jres,
         "fraction_jsys_jres": fraction,
+        "stochastic": compute_stochastic_mechanism(result, base_current),
     }
 
 
@@ -434,6 +448,8 @@ def _markdown_report(
         add(f"| rms(-∇·ξ) | `{model.rms_div_xi:.8g}` |")
         add(f"| fraction J_sys / J_res | `{model.fraction_jsys_jres:.8g}` |")
         add("")
+        if model.stochastic is not None:
+            lines.extend(stochastic_markdown_report_lines(model.stochastic))
         if model.note:
             add(f"Note: {model.note}")
             add("")

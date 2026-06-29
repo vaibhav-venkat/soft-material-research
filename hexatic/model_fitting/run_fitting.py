@@ -13,7 +13,7 @@ from .fitting.config import (
     FittingConfig,
 )
 from .fitting.fields import load_or_compute_fields
-from .fitting.fit import FittingResult, compute_fitting
+from .fitting.fit import FittingResult, compute_fitting, _coarse_grain_fields
 from .fitting.io_cache import load_cache, write_cache
 from .fitting.library import NO_FORCE_LOW_K_TERM_NAMES
 from .fitting.plots import write_all_plots
@@ -77,7 +77,10 @@ def main(argv: list[str] | None = None) -> int:
     if config.cache_path.exists() and not args.overwrite:
         print("[fitting] Loading cached fit result...")
         try:
-            fields = load_or_compute_fields(config)
+            fields = _coarse_grain_fields(
+                load_or_compute_fields(config),
+                config.coarse_grain_transitions,
+            )
             result = FittingResult.from_cache_arrays(load_cache(config.cache_path), fields)
             print("[fitting] Cache loaded.")
         except ValueError:
