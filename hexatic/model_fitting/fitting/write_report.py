@@ -43,7 +43,11 @@ class DensityModelSummary:
     rms_div_jsys: float
     rms_div_jres: float
     fraction_jsys_jres: float
+    current_r2: float
+    current_r2_x: float
+    current_r2_y: float
     stochastic: StochasticMechanismSummary | None
+    source_stochastic: StochasticMechanismSummary | None
     note: str
 
 
@@ -66,6 +70,7 @@ def write_model_report(
     )
     rho_stats = _field_stats(result.fields.partial_t_rho, result.mask)
     source_stats = _field_stats(result.fields.S_cross, result.mask)
+    source_pred_stats = _field_stats(result.source.prediction, result.mask)
     y_stats = _field_stats(result.density_target, result.mask)
 
     lines: list[str] = []
@@ -94,8 +99,22 @@ def write_model_report(
     add(_format_stats(rho_stats))
     add("  S_cross:")
     add(_format_stats(source_stats))
+    add("  S_cross_pred:")
+    add(_format_stats(source_pred_stats))
     add("  Y_ρ = ∂_t ρ - S_cross:")
     add(_format_stats(y_stats))
+    add("")
+    add("Fitted S_cross source model")
+    add("-" * 48)
+    add(f"  equation: {_source_equation(result)}")
+    add("  Metrics against actual S_cross:")
+    add(f"    R²:  {result.source.metrics.get('r2', np.nan):.8g}")
+    add(f"    MAE: {result.source.metrics.get('mae', np.nan):.8g}")
+    add(f"    normalized MAE: {result.source.metrics.get('normalized_mae', np.nan):.8g}")
+    add(f"    correlation:    {result.source.metrics.get('correlation', np.nan):.8g}")
+    add("  coefficients:")
+    for cname, coef, label in _source_coefficients(result):
+        add(f"    {cname:>3s} = {coef: .8e}    {label}")
     add("")
     add("Three Full Stochastic Density Models")
     add("-" * 48)
@@ -108,6 +127,12 @@ def write_model_report(
         add(f"      MAE: {model.mae:.8g}")
         add(f"      normalized MAE: {model.normalized_mae:.8g}")
         add(f"      correlation:    {model.correlation:.8g}")
+        if model.source_stochastic is not None:
+            add("    Full stochastic with fitted S_cross_pred against ∂_tρ:")
+            add(f"      R²:  {model.source_stochastic.r2:.8g}")
+            add(f"      MAE: {model.source_stochastic.mae:.8g}")
+            add(f"      normalized MAE: {model.source_stochastic.normalized_mae:.8g}")
+            add(f"      correlation:    {model.source_stochastic.correlation:.8g}")
         add(f"    Deterministic (without ξ) against ∂_tρ:")
         add(f"      R²:  {model.det_r2:.8g}")
         add(f"      MAE: {model.det_mae:.8g}")
@@ -118,8 +143,18 @@ def write_model_report(
         add(f"      rms(-∇·J_sys): {model.rms_div_jsys:.8g}")
         add(f"      rms(-∇·ξ):     {model.rms_div_xi:.8g}")
         add(f"      fraction J_sys/J_res: {model.fraction_jsys_jres:.8g}")
+        if np.isfinite(model.current_r2):
+            add("    Current fit diagnostics against J_m:")
+            add(f"      R² combined: {model.current_r2:.8g}")
+            add(f"      R² x:        {model.current_r2_x:.8g}")
+            add(f"      R² theta:    {model.current_r2_y:.8g}")
         if model.stochastic is not None:
+            if model.source_stochastic is not None:
+                add("    With actual S_cross baseline:")
             lines.extend(stochastic_text_report_lines(model.stochastic))
+        if model.source_stochastic is not None:
+            add("    With fitted S_cross_pred substituted for actual S_cross:")
+            lines.extend(stochastic_text_report_lines(model.source_stochastic))
         if model.note:
             add(f"    note: {model.note}")
         if model.coefficients:
@@ -142,7 +177,19 @@ def write_model_report(
     _plot_jsys(result, dest, case_id, models)
 
     txt_path.write_text("\n".join(lines))
-    md_path.write_text(_markdown_report(case_id, models, rho_stats, source_stats, y_stats, txt_path, md_path))
+    md_path.write_text(
+        _markdown_report(
+            case_id,
+            models,
+            result,
+            rho_stats,
+            source_stats,
+            source_pred_stats,
+            y_stats,
+            txt_path,
+            md_path,
+        )
+    )
     print(f"[fitting] Report saved: {txt_path}")
     print(f"[fitting] Markdown report saved: {md_path}")
     print(f"[fitting] J_sys plot saved: {dest / f'{case_id}_jsys.png'}")
@@ -174,7 +221,11 @@ def _three_density_models(
             rms_div_jsys=float("nan"),
             rms_div_jres=float("nan"),
             fraction_jsys_jres=float("nan"),
+            current_r2=float("nan"),
+            current_r2_x=float("nan"),
+            current_r2_y=float("nan"),
             stochastic=None,
+            source_stochastic=None,
         )
         note = "current-library fields unavailable in minimal result"
         return (
@@ -213,18 +264,41 @@ def _three_density_models(
     if no_force_fit is None:
         no_force_coefficients: tuple[tuple[str, float, str], ...] = ()
         no_force_diag = _residual_diagnostics(result, np.zeros_like(result.fields.material_current))
+        no_force_diag["source_stochastic"] = None
         no_force_note = "no-force refit unavailable for this synthetic/minimal result"
     else:
         no_force_result, no_force_lib = no_force_fit
         no_force_current = _current_from_fit(no_force_lib, no_force_result.coefficients)
-        no_force_diag = _residual_diagnostics(result, no_force_current)
+        no_force_diag = _residual_diagnostics(
+            result,
+            no_force_current,
+            stochastic_as_full=True,
+        )
+        no_force_source_diag = _residual_diagnostics(
+            result,
+            no_force_current,
+            source_prediction=result.source.prediction,
+            stochastic_as_full=True,
+        )
+        no_force_diag["source_stochastic"] = no_force_source_diag["stochastic"]
         no_force_coefficients = tuple(
             (f"a{i}", float(coef), label)
             for i, (coef, label) in enumerate(zip(no_force_result.coefficients, no_force_result.labels), start=1)
         )
-        no_force_note = "force_density and D force_density omitted from J_fit before residual split"
+        no_force_note = (
+            "force_density and D force_density omitted from J_fit before residual split; "
+            "S_cross_pred substituted-source metrics are reported separately from the "
+            "actual-S_cross baseline"
+        )
 
     eom_diag = _residual_diagnostics(result, np.zeros_like(result.fields.material_current))
+    eom_diag.update(
+        current_r2=float("nan"),
+        current_r2_x=float("nan"),
+        current_r2_y=float("nan"),
+        source_stochastic=None,
+    )
+    fit_diag["source_stochastic"] = None
 
     return (
         DensityModelSummary(
@@ -245,7 +319,7 @@ def _three_density_models(
         ),
         DensityModelSummary(
             name="J_fit without force_density residual split + 85% η-power AR(1)",
-            equation="-∇_s·[J_fit_no_f + J_sys_no_f] + S_cross - ∇_s·ξ_no_f",
+            equation="-∇_s·[J_fit_no_f + J_sys_no_f] + S_cross + η_AR1",
             det_equation="-∇_s·[J_fit_no_f + J_sys_no_f] + S_cross",
             coefficients=no_force_coefficients,
             note=(
@@ -296,20 +370,40 @@ def _current_from_fit(library: VectorLibrary, coefficients: np.ndarray) -> np.nd
     return np.einsum("...tc,t->...c", library.values, np.asarray(coefficients, dtype=float))
 
 
-def _residual_diagnostics(result: FittingResult, base_current: np.ndarray) -> dict[str, float]:
+def _residual_diagnostics(
+    result: FittingResult,
+    base_current: np.ndarray,
+    *,
+    source_prediction: np.ndarray | None = None,
+    stochastic_as_full: bool = False,
+) -> dict[str, float]:
     """Return full/deterministic metrics + residual diagnostic stats for a given base current."""
     j_res = result.fields.material_current - base_current
     j_sys = np.mean(j_res, axis=0, keepdims=True)
     xi = j_res - j_sys
+    current_metrics = _metrics_for_current_prediction(result, base_current)
+    source = result.fields.S_cross if source_prediction is None else source_prediction
 
     # deterministic prediction (without xi)
-    det_prediction = -_divergence(result, base_current + j_sys) + result.fields.S_cross
+    det_prediction = -_divergence(result, base_current + j_sys) + source
     det = _metrics_for_partial_t_prediction(result, det_prediction)
 
     # full stochastic prediction
     full_current = base_current + j_sys + xi
-    full_prediction = -_divergence(result, full_current) + result.fields.S_cross
+    full_prediction = -_divergence(result, full_current) + source
     full = _metrics_for_partial_t_prediction(result, full_prediction)
+    stochastic = compute_stochastic_mechanism(
+        result,
+        base_current,
+        source_prediction=source_prediction,
+    )
+    if stochastic_as_full and stochastic is not None:
+        full = {
+            "r2": stochastic.r2,
+            "mae": stochastic.mae,
+            "normalized_mae": stochastic.normalized_mae,
+            "correlation": stochastic.correlation,
+        }
 
     # residual diagnostic fields (different time dimensions)
     C_jres = -_divergence(result, j_res)   # (T, nx, ntheta)
@@ -337,7 +431,28 @@ def _residual_diagnostics(result: FittingResult, base_current: np.ndarray) -> di
         "rms_div_jsys": rms_jsys,
         "rms_div_jres": rms_jres,
         "fraction_jsys_jres": fraction,
-        "stochastic": compute_stochastic_mechanism(result, base_current),
+        "current_r2": current_metrics["r2"],
+        "current_r2_x": current_metrics["r2_x"],
+        "current_r2_y": current_metrics["r2_y"],
+        "stochastic": stochastic,
+    }
+
+
+def _metrics_for_current_prediction(result: FittingResult, prediction: np.ndarray) -> dict[str, float]:
+    valid = (
+        result.mask
+        & np.all(np.isfinite(result.fields.material_current), axis=-1)
+        & np.all(np.isfinite(prediction), axis=-1)
+    )
+    target = result.fields.material_current
+    tx = target[..., 0][valid]
+    ty = target[..., 1][valid]
+    px = prediction[..., 0][valid]
+    py = prediction[..., 1][valid]
+    return {
+        "r2": _r2(np.concatenate((tx, ty)), np.concatenate((px, py))),
+        "r2_x": _r2(tx, px),
+        "r2_y": _r2(ty, py),
     }
 
 
@@ -387,19 +502,52 @@ def _format_stats(stats: dict[str, float]) -> str:
     )
 
 
+def _source_coefficients(result: FittingResult) -> tuple[tuple[str, float, str], ...]:
+    return tuple(
+        (f"c{i}", float(coef), label)
+        for i, (coef, label) in enumerate(
+            zip(result.source.coefficients, result.source.labels),
+        )
+    )
+
+
+def _source_equation(result: FittingResult) -> str:
+    terms = [f"c{i} {label}" for i, label in enumerate(result.source.labels)]
+    return "S_cross_pred = " + " + ".join(terms)
+
+
 def _markdown_report(
     case_id: str,
     models: tuple[DensityModelSummary, ...],
+    result: FittingResult,
     rho_stats: dict[str, float],
     source_stats: dict[str, float],
+    source_pred_stats: dict[str, float],
     y_stats: dict[str, float],
     txt_path: Path,
     md_path: Path,
 ) -> str:
     lines: list[str] = []
     add = lines.append
+    model3 = models[2] if len(models) >= 3 else None
     add(f"# Density Stochastic-Flux Report: `{case_id}`")
     add("")
+    if model3 is not None:
+        headline = model3.source_stochastic or model3.stochastic
+        add("## Headline Model 3 Result")
+        add("")
+        add("```text")
+        add("partial_t rho_pred = -div(J_fit_model3) + S_cross_pred")
+        add("J_fit_model3 = J_fit_no_force + J_sys_no_force + xi_AR1")
+        add("```")
+        add("")
+        add("| metric vs `partial_t rho` | value |")
+        add("|---|---:|")
+        add(f"| R² | `{headline.r2:.8g}` |")
+        add(f"| MAE | `{headline.mae:.8g}` |")
+        add(f"| normalized MAE | `{headline.normalized_mae:.8g}` |")
+        add(f"| correlation | `{headline.correlation:.8g}` |")
+        add("")
     add("## Governing Equation")
     add("")
     add("```text")
@@ -411,14 +559,46 @@ def _markdown_report(
     add("")
     add("## Field Summaries")
     add("")
-    add(_markdown_stats_table([("∂_t ρ", rho_stats), ("S_cross", source_stats), ("Y_ρ", y_stats)]))
+    add(_markdown_stats_table([
+        ("∂_t ρ", rho_stats),
+        ("S_cross", source_stats),
+        ("S_cross_pred", source_pred_stats),
+        ("Y_ρ", y_stats),
+    ]))
+    add("")
+    add("## Fitted S_cross Source Model")
+    add("")
+    add("```text")
+    add(_source_equation(result))
+    add("```")
+    add("")
+    add("| metric vs actual `S_cross` | value |")
+    add("|---|---:|")
+    add(f"| R² | `{result.source.metrics.get('r2', np.nan):.8g}` |")
+    add(f"| MAE | `{result.source.metrics.get('mae', np.nan):.8g}` |")
+    add(f"| normalized MAE | `{result.source.metrics.get('normalized_mae', np.nan):.8g}` |")
+    add(f"| correlation | `{result.source.metrics.get('correlation', np.nan):.8g}` |")
+    add("")
+    add("| coefficient | value | term |")
+    add("|---:|---:|---|")
+    for cname, coef, label in _source_coefficients(result):
+        add(f"| `{cname}` | `{coef:.8e}` | {label} |")
     add("")
     add("## Three Full Stochastic Density Models")
     add("")
-    add("| model | R² full | R² det (no ξ) | rms(-∇·ξ) | fraction J_sys/J_res |")
-    add("|---|---:|---:|---:|---:|")
+    add("| model | R² AR(1)/full | R² with S_cross_pred AR(1) | R² det (no ξ) | rms(-∇·ξ) | fraction J_sys/J_res |")
+    add("|---|---:|---:|---:|---:|---:|")
     for model in models:
-        add(f"| {model.name} | `{model.r2:.8g}` | `{model.det_r2:.8g}` | `{model.rms_div_xi:.8g}` | `{model.fraction_jsys_jres:.8g}` |")
+        source_r2 = (
+            f"`{model.source_stochastic.r2:.8g}`"
+            if model.source_stochastic is not None
+            else ""
+        )
+        add(
+            f"| {model.name} | `{model.r2:.8g}` | {source_r2} | "
+            f"`{model.det_r2:.8g}` | `{model.rms_div_xi:.8g}` | "
+            f"`{model.fraction_jsys_jres:.8g}` |"
+        )
     add("")
     for idx, model in enumerate(models, start=1):
         add(f"### Model {idx}: {model.name}")
@@ -448,8 +628,24 @@ def _markdown_report(
         add(f"| rms(-∇·ξ) | `{model.rms_div_xi:.8g}` |")
         add(f"| fraction J_sys / J_res | `{model.fraction_jsys_jres:.8g}` |")
         add("")
+        if np.isfinite(model.current_r2):
+            add("Current fit against `J_m`:")
+            add("")
+            add("| quantity | R² |")
+            add("|---|---:|")
+            add(f"| combined components | `{model.current_r2:.8g}` |")
+            add(f"| x component | `{model.current_r2_x:.8g}` |")
+            add(f"| theta component | `{model.current_r2_y:.8g}` |")
+            add("")
         if model.stochastic is not None:
+            if model.source_stochastic is not None:
+                add("Actual `S_cross` baseline:")
+                add("")
             lines.extend(stochastic_markdown_report_lines(model.stochastic))
+        if model.source_stochastic is not None:
+            add("Fitted `S_cross_pred` substituted for actual `S_cross`:")
+            add("")
+            lines.extend(stochastic_markdown_report_lines(model.source_stochastic))
         if model.note:
             add(f"Note: {model.note}")
             add("")
@@ -477,6 +673,20 @@ def _markdown_stats_table(rows: list[tuple[str, dict[str, float]]]) -> str:
             f"`{stats['min']:.6g}` | `{stats['max']:.6g}` |"
         )
     return "\n".join(lines)
+
+
+def _r2(target: np.ndarray, prediction: np.ndarray) -> float:
+    target = np.asarray(target, dtype=float)
+    prediction = np.asarray(prediction, dtype=float)
+    finite = np.isfinite(target) & np.isfinite(prediction)
+    target = target[finite]
+    prediction = prediction[finite]
+    if target.size == 0:
+        return float("nan")
+    ss_tot = float(np.sum((target - np.mean(target)) ** 2))
+    if ss_tot == 0.0:
+        return float("nan")
+    return 1.0 - float(np.sum((target - prediction) ** 2)) / ss_tot
 
 
 def _plot_jsys(result: FittingResult, dest: Path, case_id: str, models: tuple[DensityModelSummary, ...]) -> Path | None:

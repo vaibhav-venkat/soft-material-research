@@ -101,6 +101,33 @@ CURRENT_TERM_LABELS = (
     "-grad D",
 )
 
+S_CROSS_TERM_NAMES = (
+    "constant",
+    "rho",
+    "laplacian_rho",
+    "D",
+    "hexatic_order",
+    "P_r",
+    "h",
+    "h_rho",
+    "h_P_r",
+    "D_P_r",
+    "D_rho",
+)
+S_CROSS_TERM_LABELS = (
+    "1",
+    "rho",
+    "laplacian rho",
+    "D",
+    "|psi6|",
+    "P_r",
+    "h",
+    "h rho",
+    "h P_r",
+    "D P_r",
+    "D rho",
+)
+
 NO_FORCE_LOW_K_TERM_NAMES = (
     "low_k_P",
     "low_k_force_density",
@@ -176,6 +203,28 @@ def build_current_library(fields: HydrodynamicFields) -> VectorLibrary:
         axis=-2,
     )
     return VectorLibrary(CURRENT_TERM_NAMES, CURRENT_TERM_LABELS, values)
+
+
+def build_s_cross_library(fields: HydrodynamicFields) -> ScalarLibrary:
+    """Build the scalar source library for S_cross."""
+    ones = np.ones_like(fields.S_cross, dtype=float)
+    values = np.stack(
+        (
+            ones,
+            fields.mid_rho,
+            fields.laplacian_rho,
+            fields.mid_D,
+            fields.mid_hexatic_order,
+            fields.mid_P_r,
+            fields.mid_h,
+            fields.mid_h * fields.mid_rho,
+            fields.mid_h * fields.mid_P_r,
+            fields.mid_D * fields.mid_P_r,
+            fields.mid_D * fields.mid_rho,
+        ),
+        axis=-1,
+    )
+    return ScalarLibrary(S_CROSS_TERM_NAMES, S_CROSS_TERM_LABELS, values)
 
 
 def build_no_force_low_k_library(

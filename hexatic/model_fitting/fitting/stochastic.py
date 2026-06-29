@@ -144,6 +144,7 @@ def markdown_report_lines(summary: StochasticMechanismSummary) -> list[str]:
 def compute_stochastic_mechanism(
     result: FittingResult,
     base_current: np.ndarray,
+    source_prediction: np.ndarray | None = None,
 ) -> StochasticMechanismSummary | None:
     """Fit the 85%-eta-power Fourier AR(1) residual model."""
     try:
@@ -198,9 +199,10 @@ def compute_stochastic_mechanism(
         )
 
     eta_model = -_divergence(result, xi_model)
+    source = result.fields.S_cross if source_prediction is None else source_prediction
     stochastic_prediction = (
         -_divergence(result, base_current + j_sys)
-        + result.fields.S_cross
+        + source
         + eta_model
     )
     metrics = _metrics_for_partial_t_prediction(result, stochastic_prediction)

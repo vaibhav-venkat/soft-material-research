@@ -12,15 +12,16 @@ from .fields import HydrodynamicFields, load_or_compute_fields
 from .library import (
     build_current_library,
     build_polarization_library,
+    build_s_cross_library,
     density_target,
     current_target,
     polarization_target,
 )
 from . import operators as ops
-from .regression import RegressionResult, fit_vector_library
+from .regression import RegressionResult, fit_scalar_library, fit_vector_library
 
 
-CACHE_VERSION = 25
+CACHE_VERSION = 26
 
 
 @dataclass(frozen=True)
@@ -37,8 +38,10 @@ class FittingResult:
     mask: np.ndarray
     density_target: np.ndarray
     polarization_target: np.ndarray
+    source: RegressionResult
     density: RegressionResult
     polarization: RegressionResult
+    source_contributions: np.ndarray
     density_contributions: np.ndarray
     polarization_contributions: np.ndarray
     curl_residual: np.ndarray
@@ -62,6 +65,14 @@ class FittingResult:
             "mask": self.mask,
             "density_target": self.density_target,
             "polarization_target": self.polarization_target,
+            "source_names": np.asarray(self.source.names),
+            "source_labels": np.asarray(self.source.labels),
+            "source_coefficients": self.source.coefficients,
+            "source_prediction": self.source.prediction,
+            "source_residual": self.source.residual,
+            "source_scales": self.source.scales,
+            "source_active": self.source.active,
+            "source_rows_used": self.source.rows_used,
             "density_names": np.asarray(self.density.names),
             "density_labels": np.asarray(self.density.labels),
             "density_coefficients": self.density.coefficients,
@@ -78,6 +89,7 @@ class FittingResult:
             "polarization_scales": self.polarization.scales,
             "polarization_active": self.polarization.active,
             "polarization_rows_used": self.polarization.rows_used,
+            "source_contributions": self.source_contributions,
             "density_contributions": self.density_contributions,
             "polarization_contributions": self.polarization_contributions,
             "curl_residual": self.curl_residual,
@@ -87,6 +99,7 @@ class FittingResult:
             "coarse_grain_transitions": self.coarse_grain_transitions,
             "pocket_radius": np.nan if self.pocket_radius is None else self.pocket_radius,
         }
+        arrays.update(_flatten_float_dict(self.source.metrics, "source_metrics"))
         arrays.update(_flatten_float_dict(self.density.metrics, "density_metrics"))
         arrays.update(_flatten_float_dict(self.polarization.metrics, "polarization_metrics"))
         return arrays
@@ -102,6 +115,7 @@ class FittingResult:
                 "Cached fitting result is from an older layout; recompute it."
             )
         kwargs.pop("fields", None)
+        source = _regression_from_cache(kwargs, "source")
         density = _regression_from_cache(kwargs, "density")
         polarization = _regression_from_cache(kwargs, "polarization")
         for key in (
@@ -124,13 +138,19 @@ class FittingResult:
             kwargs["polarization_target"] = np.asarray(
                 kwargs["polarization_target"], dtype=float
             )
-        for prefix in ("density", "polarization"):
+        for prefix in ("source", "density", "polarization"):
             for key in tuple(kwargs):
                 if key.startswith(f"{prefix}_") and key not in (
                     f"{prefix}_target", f"{prefix}_contributions",
                 ):
                     kwargs.pop(key)
-        return cls(fields=fields, density=density, polarization=polarization, **kwargs)
+        return cls(
+            fields=fields,
+            source=source,
+            density=density,
+            polarization=polarization,
+            **kwargs,
+        )
 
     def summary(self) -> str:
         masked_bins = int(np.count_nonzero(self.mask)) if self.mask is not None else 0
@@ -142,6 +162,8 @@ class FittingResult:
                 curl_stats = f", curl_resid: mean={np.nanmean(c):.4g}, rms={np.sqrt(np.nanmean(c**2)):.4g}"
         return (
             f"mask: {masked_bins}/{total_bins} valid samples, "
+            f"source_r2={self.source.metrics.get('r2', np.nan):.6g}, "
+            f"source_nmae={100.0 * self.source.metrics.get('normalized_mae', np.nan):.4g}%, "
             f"density_r2={self.density.metrics.get('r2', np.nan):.6g}, "
             f"density_nmae={100.0 * self.density.metrics.get('normalized_mae', np.nan):.4g}%, "
             f"current_r2=({self.density.metrics.get('current_r2_x', np.nan):.6g}, "
@@ -159,12 +181,21 @@ def compute_fitting(config: FittingConfig) -> FittingResult:
     """Fit current and polarization models, then evaluate density conservatively."""
     raw_fields = load_or_compute_fields(config)
     fields = _coarse_grain_fields(raw_fields, config.coarse_grain_transitions)
+    source_lib = build_s_cross_library(fields)
     current_lib = build_current_library(fields)
     polarization_lib = build_polarization_library(fields)
     y_density = density_target(fields)
     y_current = current_target(fields)
     y_polarization = polarization_target(fields)
 
+    source_fit = fit_scalar_library(
+        source_lib,
+        fields.S_cross,
+        fields.mask,
+        ridge_alpha=config.ridge_alpha,
+        stlsq_threshold=config.stlsq_threshold,
+        stlsq_max_iter=config.stlsq_max_iter,
+    )
     current_fit = fit_vector_library(
         current_lib,
         y_current,
@@ -201,6 +232,7 @@ def compute_fitting(config: FittingConfig) -> FittingResult:
         ],
         axis=-1,
     )
+    source_contributions = source_lib.values * source_fit.coefficients[None, None, None, :]
     polarization_contributions = (
         polarization_lib.values * polarization_fit.coefficients[None, None, None, :, None]
     )
@@ -222,8 +254,10 @@ def compute_fitting(config: FittingConfig) -> FittingResult:
         mask=fields.mask,
         density_target=y_density,
         polarization_target=y_polarization,
+        source=source_fit,
         density=density_fit,
         polarization=polarization_fit,
+        source_contributions=source_contributions,
         density_contributions=density_contributions,
         polarization_contributions=polarization_contributions,
         curl_residual=curl_residual,
@@ -321,6 +355,8 @@ def _coarse_grain_fields(fields: HydrodynamicFields, window: int) -> Hydrodynami
         mid_chirality=avg(fields.mid_chirality),
         mid_D=avg(fields.mid_D),
         mid_hexatic_order=avg(fields.mid_hexatic_order),
+        mid_h=avg(fields.mid_h),
+        mid_P_r=avg(fields.mid_P_r),
         mid_P=avg(fields.mid_P),
         mid_force_density=avg(fields.mid_force_density),
         mask=all_valid(fields.mask),

@@ -77,6 +77,8 @@ class HydrodynamicFields:
     mid_chirality: np.ndarray
     mid_D: np.ndarray
     mid_hexatic_order: np.ndarray
+    mid_h: np.ndarray
+    mid_P_r: np.ndarray
     mid_P: np.ndarray   # (T-1, nx, ntheta, 2)
     mid_force_density: np.ndarray     # (T-1, nx, ntheta, 2)
 
@@ -127,7 +129,7 @@ def load_or_compute_fields(config: FittingConfig) -> HydrodynamicFields:
     )
 
     # --- load Gaussian-smoothed scalars and polarization on grid ---
-    rho, hexatic_order, D, P, chirality, force_density = _load_smoothed_scalars(
+    rho, hexatic_order, D, h, P_r, P, chirality, force_density = _load_smoothed_scalars(
         config, active, scalars, active_arrays, pocket_radius,
     )
 
@@ -161,6 +163,8 @@ def load_or_compute_fields(config: FittingConfig) -> HydrodynamicFields:
     mid_chirality = _mid(chirality)
     mid_D = _mid(D)
     mid_hexatic_order = _mid(hexatic_order)
+    mid_h = _mid(h)
+    mid_P_r = _mid(P_r)
     mid_force_density = _mid(force_density)
 
     # time derivatives from adjacent smoothed frames
@@ -210,6 +214,8 @@ def load_or_compute_fields(config: FittingConfig) -> HydrodynamicFields:
             mid_chirality,
             mid_D,
             mid_hexatic_order,
+            mid_h,
+            mid_P_r,
             div_P,
             div_chiral_P_perp,
             laplacian_rho,
@@ -270,6 +276,8 @@ def load_or_compute_fields(config: FittingConfig) -> HydrodynamicFields:
         mid_chirality=mid_chirality,
         mid_D=mid_D,
         mid_hexatic_order=mid_hexatic_order,
+        mid_h=mid_h,
+        mid_P_r=mid_P_r,
         mid_P=mid_P,
         mid_force_density=mid_force_density,
         mask=mask,
@@ -292,8 +300,8 @@ def _load_smoothed_scalars(
     scalars: FilmContinuityScalars,
     active_arrays: dict[str, np.ndarray],
     pocket_radius: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Load or compute rho, hexatic_order, D, P, chirality, force density."""
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Load or compute scalar, polarization, chirality, and force fields."""
     gaussian_cache = _load_gaussian_field_cache(
         config.gaussian_fields_cache_path,
         active.steps, scalars.x_edges, scalars.theta_edges,
@@ -310,6 +318,8 @@ def _load_smoothed_scalars(
     gaussian_density = _cached("rho_gaussian")
     hexatic_numerator = _cached("hexatic_order_numerator")
     D_numerator = _cached("D_numerator")
+    h_numerator = _cached("h_numerator")
+    P_r_numerator = _cached("P_r_numerator")
     Px_numerator = _cached("P_x_numerator")
     Py_numerator = _cached("P_y_numerator")
     chirality_numerator = _cached("chirality_numerator")
@@ -324,6 +334,12 @@ def _load_smoothed_scalars(
         config.neighbor_count_table_path, active.steps, active.coords.shape[1],
     )
     D_values = (6.0 - neighbor_counts) ** 2
+    h_values = _normalized_shell_depth(
+        active.coords[..., 2],
+        scalars.cylinder_radius,
+        pocket_radius,
+    )
+    P_r_values = np.asarray(active_arrays["polar_cylindrical"][..., 1], dtype=float)
     Px_values = np.asarray(active_arrays["polar_mean"][..., 0], dtype=float)
     Py_values = np.asarray(active_arrays["polar_cylindrical"][..., 2], dtype=float)
     Fx_values = np.asarray(
@@ -350,6 +366,10 @@ def _load_smoothed_scalars(
         missing["hexatic_order_numerator"] = hexatic_values
     if D_numerator is None:
         missing["D_numerator"] = D_values
+    if h_numerator is None:
+        missing["h_numerator"] = h_values
+    if P_r_numerator is None:
+        missing["P_r_numerator"] = P_r_values
     if Px_numerator is None:
         missing["P_x_numerator"] = Px_values
     if Py_numerator is None:
@@ -377,6 +397,8 @@ def _load_smoothed_scalars(
         gaussian_density = _cached("rho_gaussian")
         hexatic_numerator = _cached("hexatic_order_numerator")
         D_numerator = _cached("D_numerator")
+        h_numerator = _cached("h_numerator")
+        P_r_numerator = _cached("P_r_numerator")
         Px_numerator = _cached("P_x_numerator")
         Py_numerator = _cached("P_y_numerator")
         chirality_numerator = _cached("chirality_numerator")
@@ -386,6 +408,8 @@ def _load_smoothed_scalars(
     assert gaussian_density is not None
     assert hexatic_numerator is not None
     assert D_numerator is not None
+    assert h_numerator is not None
+    assert P_r_numerator is not None
     assert Px_numerator is not None
     assert Py_numerator is not None
     assert chirality_numerator is not None
@@ -395,6 +419,8 @@ def _load_smoothed_scalars(
     rho = gaussian_density
     hexatic_order = _divide_by_density(hexatic_numerator, gaussian_density)
     D = _divide_by_density(D_numerator, gaussian_density)
+    h = _divide_by_density(h_numerator, gaussian_density)
+    P_r = P_r_numerator
     P_x = _divide_by_density(Px_numerator, gaussian_density)
     P_y = _divide_by_density(Py_numerator, gaussian_density)
     chirality = _divide_by_density(chirality_numerator, gaussian_density)
@@ -402,7 +428,7 @@ def _load_smoothed_scalars(
     force_y = _divide_by_density(Fy_numerator, gaussian_density)
     P = np.stack((P_x, P_y), axis=-1)
     force_density = np.stack((force_x, force_y), axis=-1)
-    return rho, hexatic_order, D, P, chirality, force_density
+    return rho, hexatic_order, D, h, P_r, P, chirality, force_density
 
 
 # ---------------------------------------------------------------------------
@@ -612,6 +638,16 @@ def _divide_by_density(numerator: np.ndarray, density: np.ndarray) -> np.ndarray
         out=np.zeros_like(numerator),
         where=np.isfinite(density) & (density > 0.0),
     )
+
+
+def _normalized_shell_depth(
+    radii: np.ndarray,
+    cylinder_radius: float,
+    pocket_radius: float,
+) -> np.ndarray:
+    radii = np.asarray(radii, dtype=np.float64)
+    depth = (radii - (float(cylinder_radius) - float(pocket_radius))) / float(pocket_radius)
+    return np.clip(depth, 0.0, 1.0)
 
 
 # ---------------------------------------------------------------------------

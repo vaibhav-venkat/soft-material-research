@@ -8,7 +8,7 @@ import numpy as np
 
 from .io_cache import load_npz_arrays
 
-HYDRO_CACHE_VERSION = 4
+HYDRO_CACHE_VERSION = 5
 
 
 def _save_hydrodynamic_cache(path: Path, fields) -> None:
@@ -48,6 +48,8 @@ def _save_hydrodynamic_cache(path: Path, fields) -> None:
         "mid_chirality": fields.mid_chirality,
         "mid_D": fields.mid_D,
         "mid_hexatic_order": fields.mid_hexatic_order,
+        "mid_h": fields.mid_h,
+        "mid_P_r": fields.mid_P_r,
         "mid_P": fields.mid_P,
         "mid_force_density": fields.mid_force_density,
         "mask": fields.mask,
@@ -103,6 +105,8 @@ def _load_hydrodynamic_cache(path: Path):
         mid_chirality=arrays["mid_chirality"],
         mid_D=arrays["mid_D"],
         mid_hexatic_order=arrays["mid_hexatic_order"],
+        mid_h=arrays["mid_h"],
+        mid_P_r=arrays["mid_P_r"],
         mid_P=arrays["mid_P"],
         mid_force_density=arrays["mid_force_density"],
         mask=np.asarray(arrays["mask"], dtype=bool),

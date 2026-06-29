@@ -27,6 +27,8 @@ def write_all_plots(
 
     # 1. True vs predicted scatter
     for label, target, prediction, fname in [
+        ("S_cross", result.fields.S_cross, result.source.prediction,
+         f"{case_id}_s_cross_true_vs_predicted.png"),
         ("density Y_rho", result.density_target, result.density.prediction,
          f"{case_id}_density_true_vs_predicted.png"),
         ("partial_t P_x", result.polarization_target[..., 0],
@@ -48,6 +50,14 @@ def write_all_plots(
     )
     saved.append(p)
 
+    p = _residual_map(
+        result.source.residual,
+        "S_cross residual",
+        dest / f"{case_id}_s_cross_residual_map.png",
+        mask=result.mask,
+    )
+    saved.append(p)
+
     # 3. Polarization residual map (vector magnitude, transition mean)
     res_mag = np.sqrt(
         result.polarization.residual[..., 0] ** 2
@@ -64,6 +74,11 @@ def write_all_plots(
     # 4. Density term contribution maps
     p = _density_contribution_plots(
         result, dest / f"{case_id}_density_contributions.png",
+    )
+    saved.append(p)
+
+    p = _source_contribution_plots(
+        result, dest / f"{case_id}_s_cross_contributions.png",
     )
     saved.append(p)
 
@@ -178,6 +193,54 @@ def _density_contribution_plots(result: FittingResult, path: Path) -> Path:
         ax2.set_xlabel("x bin")
         ax2.set_ylabel("theta bin")
     fig.suptitle("Density current-closure contributions  (absolute / normalized)", fontsize=12)
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    return path
+
+
+def _source_contribution_plots(result: FittingResult, path: Path) -> Path:
+    n_terms = result.source_contributions.shape[-1]
+    fig, axes = plt.subplots(n_terms, 2, figsize=(10, 3.2 * n_terms), squeeze=False)
+    target_mean = _masked_transition_mean(result.fields.S_cross, result.mask)
+    for i in range(n_terms):
+        ax = axes[i, 0]
+        contrib = _masked_transition_mean(result.source_contributions[..., i], result.mask)
+        vmin, vmax = _robust_color_limits(contrib, symmetric=True)
+        im = ax.imshow(
+            contrib.T,
+            origin="lower",
+            aspect="auto",
+            vmin=vmin,
+            vmax=vmax,
+            cmap="RdBu_r",
+        )
+        plt.colorbar(im, ax=ax)
+        ax.set_title(result.source.labels[i])
+        ax.set_xlabel("x bin")
+        ax.set_ylabel("theta bin")
+
+        ax2 = axes[i, 1]
+        norm = np.divide(
+            contrib,
+            target_mean,
+            out=np.full_like(contrib, np.nan),
+            where=np.isfinite(target_mean) & (np.abs(target_mean) > 1e-12),
+        )
+        vmin2, vmax2 = _robust_color_limits(norm, symmetric=True)
+        im2 = ax2.imshow(
+            norm.T,
+            origin="lower",
+            aspect="auto",
+            vmin=vmin2,
+            vmax=vmax2,
+            cmap="RdBu_r",
+        )
+        plt.colorbar(im2, ax=ax2)
+        ax2.set_title(f"{result.source.labels[i]} / S_cross")
+        ax2.set_xlabel("x bin")
+        ax2.set_ylabel("theta bin")
+    fig.suptitle("S_cross source-model contributions  (absolute / normalized)", fontsize=12)
     fig.tight_layout()
     fig.savefig(path, dpi=150)
     plt.close(fig)

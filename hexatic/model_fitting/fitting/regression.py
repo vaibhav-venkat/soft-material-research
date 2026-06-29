@@ -169,6 +169,7 @@ def _scalar_metrics(target: np.ndarray, prediction: np.ndarray, mask: np.ndarray
     return {
         "correlation": _correlation(target[valid], prediction[valid]),
         "r2": _r2(target[valid], prediction[valid]),
+        "mae": _mae(target[valid], prediction[valid]),
         "normalized_mae": _normalized_mae(target[valid], prediction[valid]),
     }
 
@@ -206,6 +207,12 @@ def _r2(target: np.ndarray, prediction: np.ndarray) -> float:
     if ss_tot == 0.0:
         return float("nan")
     return 1.0 - ss_res / ss_tot
+
+
+def _mae(target: np.ndarray, prediction: np.ndarray) -> float:
+    if target.size == 0:
+        return float("nan")
+    return float(np.mean(np.abs(target - prediction)))
 
 
 def _normalized_mae(target: np.ndarray, prediction: np.ndarray) -> float:

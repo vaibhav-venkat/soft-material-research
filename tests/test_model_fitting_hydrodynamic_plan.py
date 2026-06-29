@@ -28,6 +28,17 @@ class HydrodynamicPlanTests(unittest.TestCase):
             active=np.asarray([True]),
             rows_used=1,
         )
+        source = RegressionResult(
+            names=("constant",),
+            labels=("1",),
+            coefficients=np.asarray([1.0]),
+            prediction=scalar,
+            residual=np.zeros_like(scalar),
+            metrics={"r2": 1.0, "mae": 0.0, "normalized_mae": 0.0},
+            scales=np.asarray([1.0]),
+            active=np.asarray([True]),
+            rows_used=1,
+        )
         polarization = RegressionResult(
             names=("term",),
             labels=("term",),
@@ -57,8 +68,10 @@ class HydrodynamicPlanTests(unittest.TestCase):
             mask=np.ones((1, 1, 1), dtype=bool),
             density_target=scalar,
             polarization_target=vector,
+            source=source,
             density=density,
             polarization=polarization,
+            source_contributions=scalar[..., None],
             density_contributions=scalar[..., None],
             polarization_contributions=vector[..., None, :],
             curl_residual=scalar,
@@ -142,7 +155,7 @@ class HydrodynamicPlanTests(unittest.TestCase):
         )
         active_arrays = {
             "polar_mean": np.asarray([[[2.0, 0.0, 0.0]]]),
-            "polar_cylindrical": np.asarray([[[0.0, 0.0, 3.0]]]),
+            "polar_cylindrical": np.asarray([[[0.0, 9.0, 3.0]]]),
             "force_density_cylindrical": np.asarray([[[4.0, 0.0, 5.0]]]),
         }
 
@@ -163,6 +176,8 @@ class HydrodynamicPlanTests(unittest.TestCase):
                 "rho_gaussian": np.asarray([[[1.0]]]),
                 "hexatic_order_numerator": np.asarray([[[5.0]]]),
                 "D_numerator": np.asarray([[[0.0]]]),
+                "h_numerator": np.asarray([[[1.0]]]),
+                "P_r_numerator": np.asarray([[[9.0]]]),
                 "P_x_numerator": np.asarray([[[2.0]]]),
                 "P_y_numerator": np.asarray([[[3.0]]]),
                 "chirality_numerator": np.asarray([[[7.0]]]),
@@ -171,7 +186,16 @@ class HydrodynamicPlanTests(unittest.TestCase):
             }
             fields_module._save_gaussian_field_cache = lambda *args: None
 
-            rho, hexatic_order, D, P, chirality, force_density = fields_module._load_smoothed_scalars(
+            (
+                rho,
+                hexatic_order,
+                D,
+                h,
+                P_r,
+                P,
+                chirality,
+                force_density,
+            ) = fields_module._load_smoothed_scalars(
                 config, active, scalars, active_arrays, pocket_radius=1.0,
             )
         finally:
@@ -184,6 +208,8 @@ class HydrodynamicPlanTests(unittest.TestCase):
                 fields_module._save_gaussian_field_cache,
             ) = originals
 
+        np.testing.assert_allclose(h, np.asarray([[[1.0]]]))
+        np.testing.assert_allclose(P_r, np.asarray([[[9.0]]]))
         np.testing.assert_allclose(chirality, np.asarray([[[7.0]]]))
         np.testing.assert_allclose(force_density, np.asarray([[[[4.0, 5.0]]]]))
 
@@ -265,6 +291,22 @@ class HydrodynamicPlanTests(unittest.TestCase):
                 active=np.asarray([True]),
                 rows_used=2,
             )
+            source = RegressionResult(
+                names=("constant",),
+                labels=("1",),
+                coefficients=np.asarray([0.0]),
+                prediction=np.zeros_like(scalar),
+                residual=np.zeros_like(scalar),
+                metrics={
+                    "correlation": 1.0,
+                    "r2": 1.0,
+                    "mae": 0.0,
+                    "normalized_mae": 0.0,
+                },
+                scales=np.asarray([1.0]),
+                active=np.asarray([True]),
+                rows_used=2,
+            )
             polarization = RegressionResult(
                 names=("P",),
                 labels=("P",),
@@ -306,8 +348,10 @@ class HydrodynamicPlanTests(unittest.TestCase):
                 mask=np.ones((1, 1, 1), dtype=bool),
                 density_target=scalar,
                 polarization_target=vector,
+                source=source,
                 density=density,
                 polarization=polarization,
+                source_contributions=scalar[..., None],
                 density_contributions=scalar[..., None],
                 polarization_contributions=vector[..., None, :],
                 curl_residual=scalar,
