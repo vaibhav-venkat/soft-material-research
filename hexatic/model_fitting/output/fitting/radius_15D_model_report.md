@@ -21,9 +21,9 @@ Because `ξ` is defined from the residual, each full stochastic model reconstruc
 
 | model | R² full | R² det (no ξ) | rms(-∇·ξ) | fraction J_sys/J_res |
 |---|---:|---:|---:|---:|
-| J_fit residual split | `0.9985239` | `0.85750037` | `0.005255767` | `0.51346418` |
+| J_fit residual split | `0.9985239` | `0.79972685` | `0.0061999701` | `0.50585587` |
 | J_EOM residual split | `0.9985239` | `0.89352542` | `0.0045611717` | `0.65719928` |
-| J_fit without force_density residual split | `0.9985239` | `0.8036315` | `0.0061396664` | `0.67725717` |
+| J_fit without force_density residual split | `0.9985239` | `0.73861094` | `0.0070611948` | `0.68643877` |
 
 ### Model 1: J_fit residual split
 
@@ -38,34 +38,33 @@ Deterministic (no ξ):
 
 | metric | full (with ξ) | deterministic (no ξ) |
 |---|---:|---:|
-| R² vs `∂_tρ` | `0.9985239` | `0.85750037` |
-| MAE vs `∂_tρ` | `0.00020570209` | `0.004005905` |
-| normalized MAE | `0.022996795` | `0.44784658` |
-| correlation | `0.99926647` | `0.93448855` |
+| R² vs `∂_tρ` | `0.9985239` | `0.79972685` |
+| MAE vs `∂_tρ` | `0.00020570209` | `0.0047646304` |
+| normalized MAE | `0.022996795` | `0.53266949` |
+| correlation | `0.99926647` | `0.91182345` |
 
 Residual diagnostics:
 
 | quantity | value |
 |---|---:|
-| rms(-∇·J_res) | `0.00612481` |
-| rms(-∇·J_sys) | `0.0031448705` |
-| rms(-∇·ξ) | `0.005255767` |
-| fraction J_sys / J_res | `0.51346418` |
+| rms(-∇·J_res) | `0.0071873877` |
+| rms(-∇·J_sys) | `0.0036357823` |
+| rms(-∇·ξ) | `0.0061999701` |
+| fraction J_sys / J_res | `0.50585587` |
 
 Note: J_res_fit = J_m - J_fit; J_sys_fit = mean_t J_res_fit; ξ_fit = J_res_fit - J_sys_fit
 
 | coefficient | value | term |
 |---:|---:|---|
-| `a1` | `2.98397626e+01` | P |
-| `a2` | `-1.13545183e-01` | chirality P_perp |
-| `a3` | `2.93302141e-01` | force_density |
-| `a4` | `-4.42475841e+00` | D P |
-| `a5` | `3.50968213e-01` | D chirality P_perp |
-| `a6` | `-4.25664895e-02` | D force_density |
-| `a7` | `-6.13714536e+00` | -grad rho |
-| `a8` | `2.75623590e-01` | -grad hexatic_order |
-| `a9` | `-3.19215140e-02` | -grad D |
-| `a10` | `4.81036101e-01` | low-k Fourier modes |
+| `a1` | `4.08657093e+01` | P |
+| `a2` | `9.55427841e-01` | chirality P_perp |
+| `a3` | `4.01825572e-01` | force_density |
+| `a4` | `-8.15167432e+00` | D P |
+| `a5` | `-1.19239397e+00` | D chirality P_perp |
+| `a6` | `-7.62611037e-02` | D force_density |
+| `a7` | `-6.91987057e+00` | -grad rho |
+| `a8` | `2.57584123e-01` | -grad hexatic_order |
+| `a9` | `-3.76771229e-02` | -grad D |
 
 ### Model 2: J_EOM residual split
 
@@ -111,32 +110,32 @@ Deterministic (no ξ):
 
 | metric | full (with ξ) | deterministic (no ξ) |
 |---|---:|---:|
-| R² vs `∂_tρ` | `0.9985239` | `0.8036315` |
-| MAE vs `∂_tρ` | `0.00020570209` | `0.0047289818` |
-| normalized MAE | `0.022996795` | `0.52868411` |
-| correlation | `0.99926647` | `0.91107144` |
+| R² vs `∂_tρ` | `0.9985239` | `0.73861094` |
+| MAE vs `∂_tρ` | `0.00020570209` | `0.0054857519` |
+| normalized MAE | `0.022996795` | `0.61328843` |
+| correlation | `0.99926647` | `0.88616915` |
 
 Residual diagnostics:
 
 | quantity | value |
 |---|---:|
-| rms(-∇·J_res) | `0.0083448136` |
-| rms(-∇·J_sys) | `0.0056515849` |
-| rms(-∇·ξ) | `0.0061396664` |
-| fraction J_sys / J_res | `0.67725717` |
+| rms(-∇·J_res) | `0.0097102793` |
+| rms(-∇·J_sys) | `0.0066655122` |
+| rms(-∇·ξ) | `0.0070611948` |
+| fraction J_sys / J_res | `0.68643877` |
 
 Note: force_density and D force_density omitted from J_fit before residual split
 
 | coefficient | value | term |
 |---:|---:|---|
-| `a1` | `6.64530411e-01` | P |
-| `a2` | `-1.22478971e+00` | chirality P_perp |
-| `a3` | `9.08373856e-01` | D P |
-| `a4` | `2.38872706e+00` | D chirality P_perp |
-| `a5` | `-2.49037299e+00` | -grad rho |
-| `a6` | `5.47875708e-01` | -grad hexatic_order |
-| `a7` | `-1.12597256e-02` | -grad D |
-| `a8` | `9.49002029e-01` | low-k Fourier modes |
+| `a1` | `1.24444814e+00` | P |
+| `a2` | `8.43386162e-01` | chirality P_perp |
+| `a3` | `4.98806938e-01` | D P |
+| `a4` | `-3.06525183e-01` | D chirality P_perp |
+| `a5` | `-2.08889813e+00` | -grad rho |
+| `a6` | `6.38386250e-01` | -grad hexatic_order |
+| `a7` | `-1.06673006e-02` | -grad D |
+| `a8` | `1.99801704e+00` | low-k(P) |
 
 ## Saved Outputs
 

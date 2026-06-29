@@ -15,8 +15,17 @@ from .fitting.config import (
 from .fitting.fields import load_or_compute_fields
 from .fitting.fit import FittingResult, compute_fitting
 from .fitting.io_cache import load_cache, write_cache
+from .fitting.library import NO_FORCE_LOW_K_TERM_NAMES
 from .fitting.plots import write_all_plots
 from .fitting.write_report import write_model_report
+
+
+DROP_NO_FORCE_LOW_K_TERMS: tuple[str, ...] = (
+    "low_k_force_density",
+    "low_k_grad_rho",
+    "low_k_grad_hexatic_order",
+    "low_k_grad_D",
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -55,6 +64,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    _validate_drop_no_force_low_k_terms()
     config = FittingConfig(
         case_id=args.case,
         ridge_alpha=args.ridge_alpha,
@@ -82,7 +92,12 @@ def main(argv: list[str] | None = None) -> int:
         print("[fitting] Cache written.")
 
     # --- text reports ---
-    write_model_report(result, config.output_dir, case_id=args.case)
+    write_model_report(
+        result,
+        config.output_dir,
+        case_id=args.case,
+        drop_no_force_low_k_terms=DROP_NO_FORCE_LOW_K_TERMS,
+    )
 
     # --- plots ---
     if not args.no_plot:
@@ -91,6 +106,15 @@ def main(argv: list[str] | None = None) -> int:
     # --- terminal summary ---
     print(result.summary())
     return 0
+
+
+def _validate_drop_no_force_low_k_terms() -> None:
+    unknown = set(DROP_NO_FORCE_LOW_K_TERMS).difference(NO_FORCE_LOW_K_TERM_NAMES)
+    if unknown:
+        raise ValueError(
+            "DROP_NO_FORCE_LOW_K_TERMS contains unknown low-k terms: "
+            + ", ".join(sorted(unknown))
+        )
 
 
 if __name__ == "__main__":

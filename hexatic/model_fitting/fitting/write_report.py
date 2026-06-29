@@ -10,7 +10,7 @@ import numpy as np
 
 from . import operators as ops
 from .fit import FittingResult
-from .library import VectorLibrary, build_current_library
+from .library import VectorLibrary, build_current_library, build_no_force_low_k_library
 from .regression import RegressionResult, fit_vector_library
 
 
@@ -45,6 +45,7 @@ def write_model_report(
     output_dir: str | Path,
     *,
     case_id: str = "radius_15D",
+    drop_no_force_low_k_terms: tuple[str, ...] = (),
 ) -> Path:
     """Write density-only text and Markdown reports for the three requested models."""
     dest = Path(output_dir)
@@ -52,7 +53,10 @@ def write_model_report(
     txt_path = dest / f"{case_id}_model_report.txt"
     md_path = dest / f"{case_id}_model_report.md"
 
-    models = _three_density_models(result)
+    models = _three_density_models(
+        result,
+        drop_no_force_low_k_terms=drop_no_force_low_k_terms,
+    )
     rho_stats = _field_stats(result.fields.partial_t_rho, result.mask)
     source_stats = _field_stats(result.fields.S_cross, result.mask)
     y_stats = _field_stats(result.density_target, result.mask)
@@ -136,7 +140,11 @@ def write_model_report(
     return txt_path
 
 
-def _three_density_models(result: FittingResult) -> tuple[DensityModelSummary, ...]:
+def _three_density_models(
+    result: FittingResult,
+    *,
+    drop_no_force_low_k_terms: tuple[str, ...] = (),
+) -> tuple[DensityModelSummary, ...]:
     try:
         current_lib = build_current_library(result.fields)
     except AttributeError:
@@ -187,7 +195,11 @@ def _three_density_models(result: FittingResult) -> tuple[DensityModelSummary, .
         for i, (coef, label) in enumerate(zip(result.density.coefficients, result.density.labels), start=1)
     )
 
-    no_force_fit = _fit_without_force_density(result, current_lib)
+    no_force_fit = _fit_without_force_density(
+        result,
+        current_lib,
+        drop_low_k_terms=drop_no_force_low_k_terms,
+    )
     if no_force_fit is None:
         no_force_coefficients: tuple[tuple[str, float, str], ...] = ()
         no_force_diag = _residual_diagnostics(result, np.zeros_like(result.fields.material_current))
@@ -235,6 +247,8 @@ def _three_density_models(result: FittingResult) -> tuple[DensityModelSummary, .
 def _fit_without_force_density(
     result: FittingResult,
     library: VectorLibrary,
+    *,
+    drop_low_k_terms: tuple[str, ...] = (),
 ) -> tuple[RegressionResult, VectorLibrary] | None:
     keep = tuple(
         i for i, name in enumerate(library.names)
@@ -242,11 +256,18 @@ def _fit_without_force_density(
     )
     if not keep or result.fields.material_current.shape[:-1] != result.mask.shape:
         return None
-    sub_library = VectorLibrary(
-        names=tuple(library.names[i] for i in keep),
-        labels=tuple(library.labels[i] for i in keep),
-        values=library.values[..., keep, :],
+    names = tuple(library.names[i] for i in keep)
+    labels = tuple(library.labels[i] for i in keep)
+    values = library.values[..., keep, :]
+    low_k_library = build_no_force_low_k_library(
+        result.fields,
+        drop_terms=drop_low_k_terms,
     )
+    if low_k_library.values.shape[-2] > 0:
+        names = names + low_k_library.names
+        labels = labels + low_k_library.labels
+        values = np.concatenate((values, low_k_library.values), axis=-2)
+    sub_library = VectorLibrary(names=names, labels=labels, values=values)
     fit = fit_vector_library(
         sub_library,
         result.fields.material_current,

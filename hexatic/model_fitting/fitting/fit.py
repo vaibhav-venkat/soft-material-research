@@ -20,7 +20,7 @@ from . import operators as ops
 from .regression import RegressionResult, fit_vector_library
 
 
-CACHE_VERSION = 24
+CACHE_VERSION = 25
 
 
 @dataclass(frozen=True)

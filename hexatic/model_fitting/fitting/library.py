@@ -88,7 +88,6 @@ CURRENT_TERM_NAMES = (
     "minus_grad_rho",
     "minus_grad_hexatic_order",
     "minus_grad_D",
-    "low_k_fourier_modes",
 )
 CURRENT_TERM_LABELS = (
     "P",
@@ -100,7 +99,21 @@ CURRENT_TERM_LABELS = (
     "-grad rho",
     "-grad hexatic_order",
     "-grad D",
-    "low-k Fourier modes",
+)
+
+NO_FORCE_LOW_K_TERM_NAMES = (
+    "low_k_P",
+    "low_k_force_density",
+    "low_k_grad_rho",
+    "low_k_grad_hexatic_order",
+    "low_k_grad_D",
+)
+NO_FORCE_LOW_K_TERM_LABELS = (
+    "low-k(P)",
+    "low-k(f)",
+    "low-k(grad rho)",
+    "low-k(grad |psi6|)",
+    "low-k(grad D)",
 )
 
 
@@ -148,7 +161,6 @@ def build_current_library(fields: HydrodynamicFields) -> VectorLibrary:
     P = fields.mid_P
     P_perp = np.stack((-P[..., 1], P[..., 0]), axis=-1)
     chiral_P_perp = fields.mid_chirality[..., None] * P_perp
-    low_k_modes = _low_k_fourier_modes(getattr(fields, "material_current", None), P)
     values = np.stack(
         (
             P,
@@ -160,11 +172,52 @@ def build_current_library(fields: HydrodynamicFields) -> VectorLibrary:
             -fields.grad_rho,
             -fields.grad_hexatic_order,
             -fields.grad_D,
-            low_k_modes,
         ),
         axis=-2,
     )
     return VectorLibrary(CURRENT_TERM_NAMES, CURRENT_TERM_LABELS, values)
+
+
+def build_no_force_low_k_library(
+    fields: HydrodynamicFields,
+    *,
+    drop_terms: tuple[str, ...] = (),
+) -> VectorLibrary:
+    """Build low-k fields used only by the no-force residual-split current fit."""
+    drop_set = set(drop_terms)
+    unknown = drop_set.difference(NO_FORCE_LOW_K_TERM_NAMES)
+    if unknown:
+        raise ValueError(
+            "unknown no-force low-k terms to drop: "
+            + ", ".join(sorted(unknown))
+        )
+
+    sources = (
+        fields.mid_P,
+        fields.mid_force_density,
+        fields.grad_rho,
+        fields.grad_hexatic_order,
+        fields.grad_D,
+    )
+    values = []
+    names = []
+    labels = []
+    for name, label, source in zip(
+        NO_FORCE_LOW_K_TERM_NAMES,
+        NO_FORCE_LOW_K_TERM_LABELS,
+        sources,
+        strict=True,
+    ):
+        if name in drop_set:
+            continue
+        names.append(name)
+        labels.append(label)
+        values.append(_low_k_fourier_modes(source, fields.mid_P))
+
+    if not values:
+        empty = np.empty((*fields.mid_P.shape[:-1], 0, fields.mid_P.shape[-1]))
+        return VectorLibrary(tuple(names), tuple(labels), empty)
+    return VectorLibrary(tuple(names), tuple(labels), np.stack(values, axis=-2))
 
 
 def _low_k_fourier_modes(
