@@ -11,8 +11,11 @@ from . import operators as ops
 from .fit import FittingResult
 
 
-STOCHASTIC_ETA_POWER_FRACTION = 0.85
+STOCHASTIC_ETA_POWER_FRACTION = 0.80
 STOCHASTIC_ROLLOUT_SEED = 0
+SOURCE_STOCHASTIC_POWER_FRACTION = 0.80
+SOURCE_STOCHASTIC_ROLLOUT_SEED = 4
+STOCHASTIC_ENSEMBLE_SEEDS = tuple(range(50))
 
 
 @dataclass(frozen=True)
@@ -41,6 +44,33 @@ class StochasticMechanismSummary:
     mean_abs_alpha: float
     mean_mode_correlation_time: float
     mean_sigma: float
+    ensemble_mean_r2: float
+    ensemble_median_r2: float
+    note: str
+
+
+@dataclass(frozen=True)
+class SourceStochasticMechanismSummary:
+    """Seeded Fourier AR(1) correction for the fitted source residual."""
+
+    r2: float
+    mae: float
+    normalized_mae: float
+    correlation: float
+    empirical_rms_source: float
+    model_rms_source: float
+    empirical_retained_power_fraction: float
+    model_retained_power_fraction: float
+    empirical_dominant_mode_x: int
+    empirical_dominant_mode_theta: int
+    model_dominant_mode_x: int
+    model_dominant_mode_theta: int
+    retained_modes: int
+    mean_abs_alpha: float
+    mean_mode_correlation_time: float
+    mean_sigma: float
+    ensemble_mean_r2: float
+    ensemble_median_r2: float
     note: str
 
 
@@ -58,6 +88,8 @@ def text_report_lines(summary: StochasticMechanismSummary) -> list[str]:
         f"      mean modal correlation time: {summary.mean_mode_correlation_time:.8g}",
         "      Final density model with seeded AR(1) xi:",
         f"        R2:  {summary.r2:.8g}",
+        f"        seed ensemble mean R2:   {summary.ensemble_mean_r2:.8g}",
+        f"        seed ensemble median R2: {summary.ensemble_median_r2:.8g}",
         f"        MAE: {summary.mae:.8g}",
         f"        normalized MAE: {summary.normalized_mae:.8g}",
         f"        correlation:    {summary.correlation:.8g}",
@@ -109,6 +141,8 @@ def markdown_report_lines(summary: StochasticMechanismSummary) -> list[str]:
         "| metric | value |",
         "|---|---:|",
         f"| R2 vs `partial_t rho` | `{summary.r2:.8g}` |",
+        f"| seed ensemble mean R2 | `{summary.ensemble_mean_r2:.8g}` |",
+        f"| seed ensemble median R2 | `{summary.ensemble_median_r2:.8g}` |",
         f"| MAE vs `partial_t rho` | `{summary.mae:.8g}` |",
         f"| normalized MAE | `{summary.normalized_mae:.8g}` |",
         f"| correlation | `{summary.correlation:.8g}` |",
@@ -141,10 +175,69 @@ def markdown_report_lines(summary: StochasticMechanismSummary) -> list[str]:
     return lines
 
 
+def text_source_report_lines(summary: SourceStochasticMechanismSummary) -> list[str]:
+    return [
+        "    Adaptive Fourier source-residual stochastic mechanism:",
+        "      zeta_k(t+dt) = alpha_k zeta_k(t) + sigma_k noise_k",
+        (
+            "      selected modes: empirical deltaS power ranking, "
+            f"keep {100.0 * SOURCE_STOCHASTIC_POWER_FRACTION:.0f}%"
+        ),
+        f"      retained Fourier source modes: {summary.retained_modes}",
+        f"      mean abs(alpha_k): {summary.mean_abs_alpha:.8g}",
+        f"      mean sigma_k:   {summary.mean_sigma:.8g}",
+        f"      mean modal correlation time: {summary.mean_mode_correlation_time:.8g}",
+        "      Final density model with seeded AR(1) xi and zeta:",
+        f"        R2:  {summary.r2:.8g}",
+        f"        seed ensemble mean R2:   {summary.ensemble_mean_r2:.8g}",
+        f"        seed ensemble median R2: {summary.ensemble_median_r2:.8g}",
+        f"        MAE: {summary.mae:.8g}",
+        f"        normalized MAE: {summary.normalized_mae:.8g}",
+        f"        correlation:    {summary.correlation:.8g}",
+        (
+            "      deltaS rms empirical/model: "
+            f"{summary.empirical_rms_source:.8g} vs {summary.model_rms_source:.8g}"
+        ),
+    ]
+
+
+def markdown_source_report_lines(summary: SourceStochasticMechanismSummary) -> list[str]:
+    return [
+        "Adaptive Fourier source-residual stochastic mechanism:",
+        "",
+        "| quantity | value |",
+        "|---|---:|",
+        (
+            "| selected modes | empirical `deltaS` power ranking, "
+            f"keep {100.0 * SOURCE_STOCHASTIC_POWER_FRACTION:.0f}% |"
+        ),
+        f"| retained Fourier source modes | `{summary.retained_modes}` |",
+        f"| mean abs(`alpha_k`) | `{summary.mean_abs_alpha:.8g}` |",
+        f"| mean `sigma_k` | `{summary.mean_sigma:.8g}` |",
+        f"| mean modal correlation time | `{summary.mean_mode_correlation_time:.8g}` |",
+        f"| empirical `deltaS` rms | `{summary.empirical_rms_source:.8g}` |",
+        f"| AR(1) `zeta` rms | `{summary.model_rms_source:.8g}` |",
+        "",
+        "Final density model with seeded AR(1) `xi` and `zeta`:",
+        "",
+        "| metric | value |",
+        "|---|---:|",
+        f"| R2 vs `partial_t rho` | `{summary.r2:.8g}` |",
+        f"| seed ensemble mean R2 | `{summary.ensemble_mean_r2:.8g}` |",
+        f"| seed ensemble median R2 | `{summary.ensemble_median_r2:.8g}` |",
+        f"| MAE vs `partial_t rho` | `{summary.mae:.8g}` |",
+        f"| normalized MAE | `{summary.normalized_mae:.8g}` |",
+        f"| correlation | `{summary.correlation:.8g}` |",
+        "",
+    ]
+
+
 def compute_stochastic_mechanism(
     result: FittingResult,
     base_current: np.ndarray,
     source_prediction: np.ndarray | None = None,
+    *,
+    seed: int = STOCHASTIC_ROLLOUT_SEED,
 ) -> StochasticMechanismSummary | None:
     """Fit the 85%-eta-power Fourier AR(1) residual model."""
     try:
@@ -160,7 +253,7 @@ def compute_stochastic_mechanism(
         xi_model, retained_modes, mean_abs_alpha, mean_sigma = _ar1_rollout(
             xi,
             mode_mask=mode_mask,
-            seed=STOCHASTIC_ROLLOUT_SEED,
+            seed=seed,
         )
     except (AttributeError, ValueError):
         return None
@@ -195,6 +288,8 @@ def compute_stochastic_mechanism(
             mean_abs_alpha=float("nan"),
             mean_mode_correlation_time=float("nan"),
             mean_sigma=float("nan"),
+            ensemble_mean_r2=float("nan"),
+            ensemble_median_r2=float("nan"),
             note="not enough time samples or retained Fourier modes for AR(1)",
         )
 
@@ -218,6 +313,24 @@ def compute_stochastic_mechanism(
         result.dt,
         mode_mask=mode_mask,
     )
+    ensemble_r2 = []
+    for ensemble_seed in STOCHASTIC_ENSEMBLE_SEEDS:
+        ensemble_xi, *_ = _ar1_rollout(
+            xi,
+            mode_mask=mode_mask,
+            seed=int(ensemble_seed),
+        )
+        if ensemble_xi is None:
+            continue
+        ensemble_prediction = (
+            -_divergence(result, base_current + j_sys)
+            + source
+            - _divergence(result, ensemble_xi)
+        )
+        ensemble_r2.append(
+            _metrics_for_partial_t_prediction(result, ensemble_prediction)["r2"]
+        )
+    ensemble_mean_r2, ensemble_median_r2 = _mean_median_finite(ensemble_r2)
     mean_mode_tau = (
         -result.dt / np.log(mean_abs_alpha)
         if np.isfinite(mean_abs_alpha) and 0.0 < mean_abs_alpha < 1.0
@@ -246,11 +359,135 @@ def compute_stochastic_mechanism(
         mean_abs_alpha=mean_abs_alpha,
         mean_mode_correlation_time=mean_mode_tau,
         mean_sigma=mean_sigma,
+        ensemble_mean_r2=ensemble_mean_r2,
+        ensemble_median_r2=ensemble_median_r2,
         note=(
             "seeded adaptive Fourier AR(1) rollout of xi using empirical eta modes "
             f"that retain {100.0 * STOCHASTIC_ETA_POWER_FRACTION:.0f}% of eta power; "
             "pointwise metrics are reproducible but stochastic and should be read "
             "with the distributional statistics"
+        ),
+    )
+
+
+def compute_source_stochastic_mechanism(
+    result: FittingResult,
+    base_current: np.ndarray,
+    *,
+    current_seed: int = STOCHASTIC_ROLLOUT_SEED,
+    source_seed: int = SOURCE_STOCHASTIC_ROLLOUT_SEED,
+) -> SourceStochasticMechanismSummary | None:
+    """Fit independent AR(1) models for current noise and S_cross residual."""
+    try:
+        j_res = result.fields.material_current - base_current
+        j_sys = _masked_time_mean(j_res, result.mask)
+        xi = j_res - j_sys
+        eta_empirical = -_divergence(result, xi)
+        eta_mode_mask = _adaptive_eta_power_mode_mask(
+            eta_empirical,
+            result.mask,
+            keep_fraction=STOCHASTIC_ETA_POWER_FRACTION,
+        )
+        xi_model, *_ = _ar1_rollout(
+            xi,
+            mode_mask=eta_mode_mask,
+            seed=current_seed,
+        )
+
+        source_residual = result.fields.S_cross - result.source.prediction
+        source_mode_mask = _adaptive_eta_power_mode_mask(
+            source_residual,
+            result.mask,
+            keep_fraction=SOURCE_STOCHASTIC_POWER_FRACTION,
+        )
+        zeta_model, retained_modes, mean_abs_alpha, mean_sigma = _ar1_rollout_scalar(
+            source_residual,
+            mask=result.mask,
+            mode_mask=source_mode_mask,
+            seed=source_seed,
+        )
+    except (AttributeError, ValueError):
+        return None
+
+    if xi_model is None or zeta_model is None:
+        return None
+
+    eta_model = -_divergence(result, xi_model)
+    prediction = (
+        -_divergence(result, base_current + j_sys)
+        + result.source.prediction
+        + eta_model
+        + zeta_model
+    )
+    metrics = _metrics_for_partial_t_prediction(result, prediction)
+    empirical_stats = _eta_statistics(
+        source_residual,
+        result.mask,
+        result.dt,
+        mode_mask=source_mode_mask,
+    )
+    model_stats = _eta_statistics(
+        zeta_model,
+        result.mask,
+        result.dt,
+        mode_mask=source_mode_mask,
+    )
+    ensemble_r2 = []
+    seed_count = len(STOCHASTIC_ENSEMBLE_SEEDS)
+    for offset, current_ensemble_seed in enumerate(STOCHASTIC_ENSEMBLE_SEEDS):
+        source_ensemble_seed = STOCHASTIC_ENSEMBLE_SEEDS[(offset + 1) % seed_count]
+        eta_xi, *_ = _ar1_rollout(
+            xi,
+            mode_mask=eta_mode_mask,
+            seed=int(current_ensemble_seed),
+        )
+        zeta, *_ = _ar1_rollout_scalar(
+            source_residual,
+            mask=result.mask,
+            mode_mask=source_mode_mask,
+            seed=int(source_ensemble_seed),
+        )
+        if eta_xi is None or zeta is None:
+            continue
+        ensemble_prediction = (
+            -_divergence(result, base_current + j_sys)
+            + result.source.prediction
+            - _divergence(result, eta_xi)
+            + zeta
+        )
+        ensemble_r2.append(
+            _metrics_for_partial_t_prediction(result, ensemble_prediction)["r2"]
+        )
+    ensemble_mean_r2, ensemble_median_r2 = _mean_median_finite(ensemble_r2)
+    mean_mode_tau = (
+        -result.dt / np.log(mean_abs_alpha)
+        if np.isfinite(mean_abs_alpha) and 0.0 < mean_abs_alpha < 1.0
+        else float("nan")
+    )
+    return SourceStochasticMechanismSummary(
+        r2=metrics["r2"],
+        mae=metrics["mae"],
+        normalized_mae=metrics["normalized_mae"],
+        correlation=metrics["correlation"],
+        empirical_rms_source=empirical_stats["rms"],
+        model_rms_source=model_stats["rms"],
+        empirical_retained_power_fraction=empirical_stats["retained_power_fraction"],
+        model_retained_power_fraction=model_stats["retained_power_fraction"],
+        empirical_dominant_mode_x=int(empirical_stats["dominant_mode_x"]),
+        empirical_dominant_mode_theta=int(empirical_stats["dominant_mode_theta"]),
+        model_dominant_mode_x=int(model_stats["dominant_mode_x"]),
+        model_dominant_mode_theta=int(model_stats["dominant_mode_theta"]),
+        retained_modes=retained_modes,
+        mean_abs_alpha=mean_abs_alpha,
+        mean_mode_correlation_time=mean_mode_tau,
+        mean_sigma=mean_sigma,
+        ensemble_mean_r2=ensemble_mean_r2,
+        ensemble_median_r2=ensemble_median_r2,
+        note=(
+            "seeded adaptive Fourier AR(1) rollout of zeta = S_cross - "
+            "S_cross_pred using empirical deltaS modes "
+            f"that retain {100.0 * SOURCE_STOCHASTIC_POWER_FRACTION:.0f}% of "
+            "deltaS power"
         ),
     )
 
@@ -314,6 +551,78 @@ def _ar1_rollout(
     mean_abs_alpha = float(np.mean(np.abs(alpha_values)))
     mean_sigma = float(np.mean(sigma_values)) if sigma_values else float("nan")
     return xi_model, retained_modes, mean_abs_alpha, mean_sigma
+
+
+def _ar1_rollout_scalar(
+    field: np.ndarray,
+    *,
+    mask: np.ndarray,
+    mode_mask: np.ndarray,
+    seed: int,
+) -> tuple[np.ndarray | None, int, float, float]:
+    """Return a seeded AR(1) stochastic rollout for selected scalar Fourier modes."""
+    field = np.asarray(field, dtype=float)
+    if field.ndim != 3 or field.shape[0] < 2:
+        return None, 0, float("nan"), float("nan")
+    _, nx, ntheta = field.shape
+    mode_mask = np.asarray(mode_mask, dtype=bool)
+    if mode_mask.shape != (nx, ntheta):
+        raise ValueError(
+            f"mode_mask must have shape {(nx, ntheta)}, got {mode_mask.shape}."
+        )
+    retained_modes = int(np.count_nonzero(mode_mask))
+    if retained_modes == 0:
+        return None, 0, float("nan"), float("nan")
+
+    filled = _filled_scalar_for_fft(field, mask)
+    rng = np.random.default_rng(seed)
+    coeff = fft.fft2(filled, axes=(1, 2))
+    model_hat = np.zeros((field.shape[0], nx, ntheta), dtype=complex)
+    alpha_values: list[complex] = []
+    sigma_values: list[float] = []
+    for ix, itheta in zip(*np.nonzero(mode_mask), strict=True):
+        series = coeff[:, ix, itheta]
+        previous = series[:-1]
+        following = series[1:]
+        denom = np.vdot(previous, previous).real
+        if denom <= 0.0 or not np.isfinite(denom):
+            continue
+        alpha = np.vdot(previous, following) / denom
+        innovation = following - alpha * previous
+        sigma = float(np.sqrt(np.mean(np.abs(innovation) ** 2)))
+        model_hat[0, ix, itheta] = series[0]
+        for t in range(1, field.shape[0]):
+            noise = sigma * (rng.normal() + 1j * rng.normal()) / np.sqrt(2.0)
+            model_hat[t, ix, itheta] = alpha * model_hat[t - 1, ix, itheta] + noise
+        alpha_values.append(alpha)
+        sigma_values.append(sigma)
+
+    if not alpha_values:
+        return None, 0, float("nan"), float("nan")
+    model = fft.ifft2(model_hat, axes=(1, 2)).real
+    mean_abs_alpha = float(np.mean(np.abs(alpha_values)))
+    mean_sigma = float(np.mean(sigma_values)) if sigma_values else float("nan")
+    return model, retained_modes, mean_abs_alpha, mean_sigma
+
+
+def _filled_scalar_for_fft(field: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    field = np.asarray(field, dtype=float)
+    valid = np.asarray(mask, dtype=bool) & np.isfinite(field)
+    filled = np.zeros_like(field, dtype=float)
+    for t in range(field.shape[0]):
+        time_valid = valid[t]
+        if np.any(time_valid):
+            time_values = field[t, time_valid]
+            filled[t] = np.where(time_valid, field[t], float(np.mean(time_values)))
+    return filled
+
+
+def _mean_median_finite(values: list[float]) -> tuple[float, float]:
+    finite = np.asarray(values, dtype=float)
+    finite = finite[np.isfinite(finite)]
+    if finite.size == 0:
+        return float("nan"), float("nan")
+    return float(np.mean(finite)), float(np.median(finite))
 
 
 def _masked_time_mean(values: np.ndarray, mask: np.ndarray) -> np.ndarray:

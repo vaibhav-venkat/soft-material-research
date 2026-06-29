@@ -13,9 +13,13 @@ from .fit import FittingResult
 from .library import VectorLibrary, build_current_library, build_no_force_low_k_library
 from .regression import RegressionResult, fit_vector_library
 from .stochastic import (
+    SourceStochasticMechanismSummary,
     StochasticMechanismSummary,
+    compute_source_stochastic_mechanism,
     compute_stochastic_mechanism,
+    markdown_source_report_lines,
     markdown_report_lines as stochastic_markdown_report_lines,
+    text_source_report_lines,
     text_report_lines as stochastic_text_report_lines,
 )
 
@@ -47,7 +51,7 @@ class DensityModelSummary:
     current_r2_x: float
     current_r2_y: float
     stochastic: StochasticMechanismSummary | None
-    source_stochastic: StochasticMechanismSummary | None
+    source_stochastic: SourceStochasticMechanismSummary | None
     note: str
 
 
@@ -85,9 +89,18 @@ def write_model_report(
         add("  partial_t rho_pred = -div(J_fit_no_force + J_sys_no_force) + S_cross + eta_AR1")
         add("  Metrics against actual partial_t rho:")
         add(f"    R²:  {model3.stochastic.r2:.8g}")
+        add(f"    seed ensemble mean R²:   {model3.stochastic.ensemble_mean_r2:.8g}")
+        add(f"    seed ensemble median R²: {model3.stochastic.ensemble_median_r2:.8g}")
         add(f"    MAE: {model3.stochastic.mae:.8g}")
         add(f"    normalized MAE: {model3.stochastic.normalized_mae:.8g}")
         add(f"    correlation:    {model3.stochastic.correlation:.8g}")
+        if model3.source_stochastic is not None:
+            add("  With fitted S_cross_pred plus source AR(1):")
+            add("    partial_t rho_pred = -div(J_fit_no_force + J_sys_no_force) + S_cross_pred + eta_AR1 + zeta_AR1")
+            add(f"    R²:  {model3.source_stochastic.r2:.8g}")
+            add(f"    seed ensemble mean R²:   {model3.source_stochastic.ensemble_mean_r2:.8g}")
+            add(f"    seed ensemble median R²: {model3.source_stochastic.ensemble_median_r2:.8g}")
+            add(f"    normalized MAE: {model3.source_stochastic.normalized_mae:.8g}")
         add("")
     add("Governing density equation")
     add("-" * 48)
@@ -155,6 +168,8 @@ def write_model_report(
             add(f"      R² theta:    {model.current_r2_y:.8g}")
         if model.stochastic is not None:
             lines.extend(stochastic_text_report_lines(model.stochastic))
+        if model.source_stochastic is not None:
+            lines.extend(text_source_report_lines(model.source_stochastic))
         if model.note:
             add(f"    note: {model.note}")
         if model.coefficients:
@@ -274,7 +289,11 @@ def _three_density_models(
             no_force_current,
             stochastic_as_full=True,
         )
-        no_force_diag["source_stochastic"] = None
+        no_force_source_stochastic = compute_source_stochastic_mechanism(
+            result,
+            no_force_current,
+        )
+        no_force_diag["source_stochastic"] = no_force_source_stochastic
         no_force_coefficients = tuple(
             (f"a{i}", float(coef), label)
             for i, (coef, label) in enumerate(zip(no_force_result.coefficients, no_force_result.labels), start=1)
@@ -552,10 +571,26 @@ def _markdown_report(
         add("| metric vs `partial_t rho` | value |")
         add("|---|---:|")
         add(f"| R² | `{model3.stochastic.r2:.8g}` |")
+        add(f"| seed ensemble mean R² | `{model3.stochastic.ensemble_mean_r2:.8g}` |")
+        add(f"| seed ensemble median R² | `{model3.stochastic.ensemble_median_r2:.8g}` |")
         add(f"| MAE | `{model3.stochastic.mae:.8g}` |")
         add(f"| normalized MAE | `{model3.stochastic.normalized_mae:.8g}` |")
         add(f"| correlation | `{model3.stochastic.correlation:.8g}` |")
         add("")
+        if model3.source_stochastic is not None:
+            add("With fitted `S_cross_pred` plus source AR(1):")
+            add("")
+            add("```text")
+            add("partial_t rho_pred = -div(J_fit_no_force + J_sys_no_force) + S_cross_pred + eta_AR1 + zeta_AR1")
+            add("```")
+            add("")
+            add("| metric vs `partial_t rho` | value |")
+            add("|---|---:|")
+            add(f"| R² | `{model3.source_stochastic.r2:.8g}` |")
+            add(f"| seed ensemble mean R² | `{model3.source_stochastic.ensemble_mean_r2:.8g}` |")
+            add(f"| seed ensemble median R² | `{model3.source_stochastic.ensemble_median_r2:.8g}` |")
+            add(f"| normalized MAE | `{model3.source_stochastic.normalized_mae:.8g}` |")
+            add("")
     add("## Governing Equation")
     add("")
     add("```text")
@@ -642,6 +677,8 @@ def _markdown_report(
             add("")
         if model.stochastic is not None:
             lines.extend(stochastic_markdown_report_lines(model.stochastic))
+        if model.source_stochastic is not None:
+            lines.extend(markdown_source_report_lines(model.source_stochastic))
         if model.note:
             add(f"Note: {model.note}")
             add("")

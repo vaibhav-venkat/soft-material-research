@@ -8,10 +8,25 @@ partial_t rho_pred = -div(J_fit_no_force + J_sys_no_force) + S_cross + eta_AR1
 
 | metric vs `partial_t rho` | value |
 |---|---:|
-| R² | `0.7959097` |
-| MAE | `0.0046818884` |
-| normalized MAE | `0.52341923` |
-| correlation | `0.90964319` |
+| R² | `0.91881822` |
+| seed ensemble mean R² | `0.91849559` |
+| seed ensemble median R² | `0.91874161` |
+| MAE | `0.0028007294` |
+| normalized MAE | `0.26897127` |
+| correlation | `0.96172108` |
+
+With fitted `S_cross_pred` plus source AR(1):
+
+```text
+partial_t rho_pred = -div(J_fit_no_force + J_sys_no_force) + S_cross_pred + eta_AR1 + zeta_AR1
+```
+
+| metric vs `partial_t rho` | value |
+|---|---:|
+| R² | `0.1525717` |
+| seed ensemble mean R² | `0.15948488` |
+| seed ensemble median R² | `0.16374184` |
+| normalized MAE | `0.86968105` |
 
 ## Governing Equation
 
@@ -26,10 +41,10 @@ Because `ξ` is defined from the residual, each full stochastic model reconstruc
 
 | field | mean | std | rms | min | max |
 |---|---:|---:|---:|---:|---:|
-| ∂_t ρ | `0.00742318` | `0.0136621` | `0.0155485` | `-0.0118795` | `0.0491443` |
-| S_cross | `0.00742292` | `0.014668` | `0.0164393` | `-0.0118802` | `0.0809634` |
-| S_cross_pred | `0.00742292` | `0.0125048` | `0.014542` | `-0.0205416` | `0.0533479` |
-| Y_ρ | `2.64301e-07` | `0.00593726` | `0.00593726` | `-0.0514888` | `0.0214055` |
+| ∂_t ρ | `0.00143118` | `0.0128182` | `0.0128979` | `-0.039283` | `0.0371766` |
+| S_cross | `0.00144285` | `0.0131774` | `0.0132561` | `-0.0419619` | `0.0466283` |
+| S_cross_pred | `0.00144285` | `0.00416552` | `0.00440833` | `-0.0180684` | `0.0149101` |
+| Y_ρ | `-1.16713e-05` | `0.0025509` | `0.00255093` | `-0.0157778` | `0.0136173` |
 
 ## Fitted S_cross Source Model
 
@@ -39,32 +54,32 @@ S_cross_pred = c0 1 + c1 rho + c2 laplacian rho + c3 D + c4 |psi6| + c5 P_r + c6
 
 | metric vs actual `S_cross` | value |
 |---|---:|
-| R² | `0.72679327` |
-| MAE | `0.0059726377` |
-| normalized MAE | `0.63419001` |
-| correlation | `0.85252171` |
+| R² | `0.09992629` |
+| MAE | `0.010073988` |
+| normalized MAE | `0.94745702` |
+| correlation | `0.3161112` |
 
 | coefficient | value | term |
 |---:|---:|---|
-| `c0` | `2.78233935e+02` | 1 |
-| `c1` | `1.74951104e+03` | rho |
-| `c2` | `-5.89207934e+00` | laplacian rho |
-| `c3` | `3.07957076e-01` | D |
-| `c4` | `1.68851926e-01` | |psi6| |
-| `c5` | `-1.17617463e+04` | P_r |
-| `c6` | `-5.55637177e+02` | h |
-| `c7` | `-3.50606284e+03` | h rho |
-| `c8` | `2.35239848e+04` | h P_r |
-| `c9` | `2.07668460e+00` | D P_r |
-| `c10` | `-2.72736597e+00` | D rho |
+| `c0` | `3.33422410e+01` | 1 |
+| `c1` | `1.29553560e+03` | rho |
+| `c2` | `3.01511757e-01` | laplacian rho |
+| `c3` | `3.33422410e+01` | D |
+| `c4` | `-2.86962588e-02` | |psi6| |
+| `c5` | `-6.19737243e+03` | P_r |
+| `c6` | `-1.33279329e+02` | h |
+| `c7` | `-5.18188774e+03` | h rho |
+| `c8` | `2.47921318e+04` | h P_r |
+| `c9` | `-6.19737243e+03` | D P_r |
+| `c10` | `1.29553560e+03` | D rho |
 
 ## Three Full Stochastic Density Models
 
 | model | R² AR(1)/full | R² det (no ξ) | rms(-∇·ξ) | fraction J_sys/J_res |
 |---|---:|---:|---:|---:|
-| J_fit residual split | `0.9985239` | `0.79972685` | `0.0061999701` | `0.50585587` |
-| J_EOM residual split | `0.9985239` | `0.89352542` | `0.0045611717` | `0.65719928` |
-| J_fit without force_density residual split + 85% η-power AR(1) | `0.7959097` | `0.73861094` | `0.0070611948` | `0.68643877` |
+| J_fit residual split | `0.99966059` | `0.73205499` | `0.0066552997` | `2.6214722` |
+| J_EOM residual split | `0.99966059` | `0.64058303` | `0.007702712` | `3.053387` |
+| J_fit without force_density residual split + 85% η-power AR(1) | `0.91881822` | `0.66283464` | `0.0074620521` | `2.6146718` |
 
 ### Model 1: J_fit residual split
 
@@ -79,71 +94,73 @@ Deterministic (no ξ):
 
 | metric | full (with ξ) | deterministic (no ξ) |
 |---|---:|---:|
-| R² vs `∂_tρ` | `0.9985239` | `0.79972685` |
-| MAE vs `∂_tρ` | `0.00020570209` | `0.0047646304` |
-| normalized MAE | `0.022996795` | `0.53266949` |
-| correlation | `0.99926647` | `0.91182345` |
+| R² vs `∂_tρ` | `0.99966059` | `0.73205499` |
+| MAE vs `∂_tρ` | `8.9867475e-05` | `0.0044555008` |
+| normalized MAE | `0.0086305262` | `0.42788914` |
+| correlation | `0.99983093` | `0.88954564` |
 
 Residual diagnostics:
 
 | quantity | value |
 |---|---:|
-| rms(-∇·J_res) | `0.0071873877` |
-| rms(-∇·J_sys) | `0.0036357823` |
-| rms(-∇·ξ) | `0.0061999701` |
-| fraction J_sys / J_res | `0.50585587` |
+| rms(-∇·J_res) | `0.0026968366` |
+| rms(-∇·J_sys) | `0.0070696823` |
+| rms(-∇·ξ) | `0.0066552997` |
+| fraction J_sys / J_res | `2.6214722` |
 
 Current fit against `J_m`:
 
 | quantity | R² |
 |---|---:|
-| combined components | `0.64615782` |
-| x component | `0.66838023` |
-| theta component | `0.46062846` |
+| combined components | `0.53153784` |
+| x component | `0.55750644` |
+| theta component | `0.4039943` |
 
 Adaptive Fourier stochastic mechanism:
 
 | quantity | value |
 |---|---:|
-| selected modes | empirical `eta` power ranking, keep 85% |
-| retained Fourier current modes | `338` |
-| mean abs(`alpha_k`) | `0.47998866` |
-| mean `sigma_k` | `9.8577815` |
-| mean modal correlation time | `2.7248224` |
+| selected modes | empirical `eta` power ranking, keep 80% |
+| retained Fourier current modes | `5464` |
+| mean abs(`alpha_k`) | `0.93623483` |
+| mean `sigma_k` | `0.21126384` |
+| mean modal correlation time | `30.354104` |
 
 Final density model with seeded AR(1) `xi`:
 
 | metric | value |
 |---|---:|
-| R2 vs `partial_t rho` | `0.83722772` |
-| MAE vs `partial_t rho` | `0.0042312293` |
-| normalized MAE | `0.47303707` |
-| correlation | `0.92637418` |
+| R2 vs `partial_t rho` | `0.93127008` |
+| seed ensemble mean R2 | `0.93104114` |
+| seed ensemble median R2 | `0.93124053` |
+| MAE vs `partial_t rho` | `0.0025768712` |
+| normalized MAE | `0.24747278` |
+| correlation | `0.96698654` |
 
 `eta = -div xi` statistics, empirical vs AR(1) mechanism:
 
 | statistic | empirical | AR(1) mechanism |
 |---|---:|---:|
-| rms | `0.0061999701` | `0.0055126857` |
-| std | `0.0061999701` | `0.0055126857` |
-| retained eta power fraction | `0.85037549` | `0.99711752` |
-| dominant mode `(x,theta)` | `(1, 0)` | `(1, 0)` |
-| lag-1 autocorrelation | `-0.26408635` | `-0.28710549` |
-| correlation time | `0` | `0` |
+| rms | `0.0066552997` | `0.0062379844` |
+| std | `0.006655291` | `0.0062379638` |
+| retained eta power fraction | `0.80005834` | `0.90672117` |
+| dominant mode `(x,theta)` | `(49, -27)` | `(49, -27)` |
+| lag-1 autocorrelation | `0.6929453` | `0.74331568` |
+| correlation time | `4.1601327` | `4.7000836` |
 
 Note: J_res_fit = J_m - J_fit; J_sys_fit = mean_t J_res_fit; ξ_fit = J_res_fit - J_sys_fit
 
 | coefficient | value | term |
 |---:|---:|---|
-| `a1` | `4.08657093e+01` | P |
-| `a2` | `9.55427841e-01` | chirality P_perp |
-| `a3` | `4.01825572e-01` | force_density |
-| `a4` | `-8.15167432e+00` | D P |
-| `a5` | `-1.19239397e+00` | D chirality P_perp |
-| `a6` | `-7.62611037e-02` | D force_density |
-| `a7` | `-6.91987057e+00` | -grad rho |
-| `a8` | `2.57584123e-01` | -grad hexatic_order |
-| `a9` | `-3.76771229e-02` | -grad D |
+| `a1` | `2.94470456e+00` | P |
+| `a2` | `3.90656268e-02` | chirality P_perp |
+| `a3` | `2.93627274e-02` | force_density |
+| `a4` | `2.94470456e+00` | D P |
+| `a5` | `3.90656268e-02` | D chirality P_perp |
+| `a6` | `2.93627274e-02` | D force_density |
+| `a7` | `-9.10395593e-02` | -grad rho |
+| `a8` | `-2.84303880e-02` | -grad hexatic_order |
+| `a9` | `-3.67848048e+11` | -grad D |
 
 ### Model 2: J_EOM residual split
 
@@ -158,49 +175,51 @@ Deterministic (no ξ):
 
 | metric | full (with ξ) | deterministic (no ξ) |
 |---|---:|---:|
-| R² vs `∂_tρ` | `0.9985239` | `0.89352542` |
-| MAE vs `∂_tρ` | `0.00020570209` | `0.0032049176` |
-| normalized MAE | `0.022996795` | `0.3582989` |
-| correlation | `0.99926647` | `0.94908979` |
+| R² vs `∂_tρ` | `0.99966059` | `0.64058303` |
+| MAE vs `∂_tρ` | `8.9867475e-05` | `0.0051855135` |
+| normalized MAE | `0.0086305262` | `0.49799675` |
+| correlation | `0.99983093` | `0.85971964` |
 
 Residual diagnostics:
 
 | quantity | value |
 |---|---:|
-| rms(-∇·J_res) | `0.0060515719` |
-| rms(-∇·J_sys) | `0.0039770887` |
-| rms(-∇·ξ) | `0.0045611717` |
-| fraction J_sys / J_res | `0.65719928` |
+| rms(-∇·J_res) | `0.0026243663` |
+| rms(-∇·J_sys) | `0.0080132061` |
+| rms(-∇·ξ) | `0.007702712` |
+| fraction J_sys / J_res | `3.053387` |
 
 Adaptive Fourier stochastic mechanism:
 
 | quantity | value |
 |---|---:|
-| selected modes | empirical `eta` power ranking, keep 85% |
-| retained Fourier current modes | `278` |
-| mean abs(`alpha_k`) | `0.36725562` |
-| mean `sigma_k` | `13.1414` |
-| mean modal correlation time | `1.9966114` |
+| selected modes | empirical `eta` power ranking, keep 80% |
+| retained Fourier current modes | `5148` |
+| mean abs(`alpha_k`) | `0.94220106` |
+| mean `sigma_k` | `0.232215` |
+| mean modal correlation time | `33.592787` |
 
 Final density model with seeded AR(1) `xi`:
 
 | metric | value |
 |---|---:|
-| R2 vs `partial_t rho` | `0.917926` |
-| MAE vs `partial_t rho` | `0.0030311321` |
-| normalized MAE | `0.33887028` |
-| correlation | `0.9605412` |
+| R2 vs `partial_t rho` | `0.92061484` |
+| seed ensemble mean R2 | `0.92071959` |
+| seed ensemble median R2 | `0.920728` |
+| MAE vs `partial_t rho` | `0.002771293` |
+| normalized MAE | `0.2661443` |
+| correlation | `0.96280712` |
 
 `eta = -div xi` statistics, empirical vs AR(1) mechanism:
 
 | statistic | empirical | AR(1) mechanism |
 |---|---:|---:|
-| rms | `0.0045611717` | `0.0043225049` |
-| std | `0.0045611717` | `0.0043225049` |
-| retained eta power fraction | `0.8511737` | `0.99920756` |
-| dominant mode `(x,theta)` | `(1, 2)` | `(1, -3)` |
-| lag-1 autocorrelation | `-0.19693555` | `-0.19959162` |
-| correlation time | `0` | `0` |
+| rms | `0.007702712` | `0.0071821406` |
+| std | `0.0077027059` | `0.0071821316` |
+| retained eta power fraction | `0.80005307` | `0.92186356` |
+| dominant mode `(x,theta)` | `(49, -25)` | `(49, -25)` |
+| lag-1 autocorrelation | `0.80116975` | `0.83657165` |
+| correlation time | `4.8069303` | `5.1900978` |
 
 Note: J_EOM = J_active + J_pair + J_wall; full residual identity reconstructs J_m
 
@@ -219,70 +238,95 @@ Deterministic (no ξ):
 
 | metric | full (with ξ) | deterministic (no ξ) |
 |---|---:|---:|
-| R² vs `∂_tρ` | `0.7959097` | `0.73861094` |
-| MAE vs `∂_tρ` | `0.0046818884` | `0.0054857519` |
-| normalized MAE | `0.52341923` | `0.61328843` |
-| correlation | `0.90964319` | `0.88616915` |
+| R² vs `∂_tρ` | `0.91881822` | `0.66283464` |
+| MAE vs `∂_tρ` | `0.0028007294` | `0.0051115513` |
+| normalized MAE | `0.26897127` | `0.4908937` |
+| correlation | `0.96172108` | `0.86763971` |
 
 Residual diagnostics:
 
 | quantity | value |
 |---|---:|
-| rms(-∇·J_res) | `0.0097102793` |
-| rms(-∇·J_sys) | `0.0066655122` |
-| rms(-∇·ξ) | `0.0070611948` |
-| fraction J_sys / J_res | `0.68643877` |
+| rms(-∇·J_res) | `0.0029250177` |
+| rms(-∇·J_sys) | `0.0076479612` |
+| rms(-∇·ξ) | `0.0074620521` |
+| fraction J_sys / J_res | `2.6146718` |
 
 Current fit against `J_m`:
 
 | quantity | R² |
 |---|---:|
-| combined components | `0.13457788` |
-| x component | `0.17218961` |
-| theta component | `-0.18720045` |
+| combined components | `0.10772019` |
+| x component | `0.14777263` |
+| theta component | `-0.089155403` |
 
 Adaptive Fourier stochastic mechanism:
 
 | quantity | value |
 |---|---:|
-| selected modes | empirical `eta` power ranking, keep 85% |
-| retained Fourier current modes | `394` |
-| mean abs(`alpha_k`) | `0.42365618` |
-| mean `sigma_k` | `10.790699` |
-| mean modal correlation time | `2.3287413` |
+| selected modes | empirical `eta` power ranking, keep 80% |
+| retained Fourier current modes | `5048` |
+| mean abs(`alpha_k`) | `0.93555486` |
+| mean `sigma_k` | `0.25131419` |
+| mean modal correlation time | `30.023047` |
 
 Final density model with seeded AR(1) `xi`:
 
 | metric | value |
 |---|---:|
-| R2 vs `partial_t rho` | `0.7959097` |
-| MAE vs `partial_t rho` | `0.0046818884` |
-| normalized MAE | `0.52341923` |
-| correlation | `0.90964319` |
+| R2 vs `partial_t rho` | `0.91881822` |
+| seed ensemble mean R2 | `0.91849559` |
+| seed ensemble median R2 | `0.91874161` |
+| MAE vs `partial_t rho` | `0.0028007294` |
+| normalized MAE | `0.26897127` |
+| correlation | `0.96172108` |
 
 `eta = -div xi` statistics, empirical vs AR(1) mechanism:
 
 | statistic | empirical | AR(1) mechanism |
 |---|---:|---:|
-| rms | `0.0070611948` | `0.0061714928` |
-| std | `0.0070611948` | `0.0061714928` |
-| retained eta power fraction | `0.85046645` | `0.99981847` |
-| dominant mode `(x,theta)` | `(1, 2)` | `(1, 2)` |
-| lag-1 autocorrelation | `-0.13607439` | `-0.1978952` |
-| correlation time | `0` | `0` |
+| rms | `0.0074620521` | `0.0069130801` |
+| std | `0.0074620481` | `0.0069130335` |
+| retained eta power fraction | `0.80002386` | `0.92605747` |
+| dominant mode `(x,theta)` | `(49, -26)` | `(49, -26)` |
+| lag-1 autocorrelation | `0.80337312` | `0.83649879` |
+| correlation time | `4.7193573` | `5.1327042` |
+
+Adaptive Fourier source-residual stochastic mechanism:
+
+| quantity | value |
+|---|---:|
+| selected modes | empirical `deltaS` power ranking, keep 80% |
+| retained Fourier source modes | `117` |
+| mean abs(`alpha_k`) | `0.6619935` |
+| mean `sigma_k` | `4.649516` |
+| mean modal correlation time | `4.8484902` |
+| empirical `deltaS` rms | `0.012501682` |
+| AR(1) `zeta` rms | `0.0088575791` |
+
+Final density model with seeded AR(1) `xi` and `zeta`:
+
+| metric | value |
+|---|---:|
+| R2 vs `partial_t rho` | `0.1525717` |
+| seed ensemble mean R2 | `0.15948488` |
+| seed ensemble median R2 | `0.16374184` |
+| MAE vs `partial_t rho` | `0.0090557677` |
+| normalized MAE | `0.86968105` |
+| correlation | `0.49996724` |
 
 Note: force_density and D force_density omitted from J_fit before residual split; final model uses seeded adaptive ξ_85 selected from empirical η power
 
 | coefficient | value | term |
 |---:|---:|---|
-| `a1` | `1.24444814e+00` | P |
-| `a2` | `8.43386162e-01` | chirality P_perp |
-| `a3` | `4.98806938e-01` | D P |
-| `a4` | `-3.06525183e-01` | D chirality P_perp |
-| `a5` | `-2.08889813e+00` | -grad rho |
-| `a6` | `6.38386250e-01` | -grad hexatic_order |
-| `a7` | `-1.06673006e-02` | -grad D |
-| `a8` | `1.99801704e+00` | low-k(P) |
+| `a1` | `1.53731209e-01` | P |
+| `a2` | `5.16140155e-02` | chirality P_perp |
+| `a3` | `1.53731209e-01` | D P |
+| `a4` | `5.16140155e-02` | D chirality P_perp |
+| `a5` | `-3.91966422e-01` | -grad rho |
+| `a6` | `3.70802118e-02` | -grad hexatic_order |
+| `a7` | `-3.20138399e+11` | -grad D |
+| `a8` | `3.33855038e-01` | low-k(P) |
 
 ## Saved Outputs
 

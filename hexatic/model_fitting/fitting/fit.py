@@ -21,7 +21,7 @@ from . import operators as ops
 from .regression import RegressionResult, fit_scalar_library, fit_vector_library
 
 
-CACHE_VERSION = 27
+CACHE_VERSION = 29
 
 
 @dataclass(frozen=True)
