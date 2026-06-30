@@ -18,6 +18,12 @@ pub fn build_density_library(
     let mut lap_cache: HashMap<usize, Array3<f64>> = HashMap::new();
 
     for (column, name) in term_names.iter().enumerate() {
+        println!(
+            "[rho_fitting] density-library term {}/{}: {}",
+            column + 1,
+            term_names.len(),
+            name
+        );
         if let Some(power) = rho_power(name) {
             for row in 0..samples {
                 let (t, ix, iy) = index_triplet(sample_indices, row)?;
@@ -27,14 +33,10 @@ pub fn build_density_library(
         }
 
         if let Some(order) = lap_order(name) {
-            let field = if order == 0 {
-                rho.to_owned()
-            } else {
-                lap_cache
-                    .entry(order)
-                    .or_insert(fft_ops::repeated_laplacian_scalar(rho, lx, ly, order)?)
-                    .to_owned()
-            };
+            let field = lap_cache
+                .entry(order)
+                .or_insert(fft_ops::repeated_laplacian_scalar(rho, lx, ly, order)?)
+                .to_owned();
             for row in 0..samples {
                 let (t, ix, iy) = index_triplet(sample_indices, row)?;
                 out[[row, column]] = field[[t, ix, iy]];
@@ -105,15 +107,22 @@ fn rho_power(name: &str) -> Option<usize> {
     if name == "rho" {
         return Some(1);
     }
-    name.strip_prefix("rho")?.parse::<usize>().ok()
+    let suffix = name.strip_prefix("rho")?;
+    parse_positive_suffix(suffix, 2)
 }
 
 fn lap_order(name: &str) -> Option<usize> {
     if name == "lap_rho" {
         return Some(1);
     }
-    name.strip_prefix("lap")?
-        .strip_suffix("_rho")?
-        .parse::<usize>()
-        .ok()
+    let suffix = name.strip_prefix("lap")?.strip_suffix("_rho")?;
+    parse_positive_suffix(suffix, 2)
+}
+
+fn parse_positive_suffix(suffix: &str, minimum: usize) -> Option<usize> {
+    if suffix.is_empty() || (suffix.len() > 1 && suffix.starts_with('0')) {
+        return None;
+    }
+    let value = suffix.parse::<usize>().ok()?;
+    (value >= minimum).then_some(value)
 }

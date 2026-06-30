@@ -27,6 +27,7 @@ def density_report_lines(
     n_rho_power: int,
     n_rho_lap_power: int,
     fit: StabilityResult,
+    warnings: tuple[str, ...] = (),
 ) -> list[str]:
     lines = [
         f"# Rho fitting report: {case_id}",
@@ -45,10 +46,18 @@ def density_report_lines(
         f"- r2: {fit.r2:.8g}",
         f"- tau_index: {fit.tau_index if fit.tau_index is not None else 'none'}",
         "",
-        "## Coefficients",
-        "| term | active | coefficient | importance |",
-        "|---|---:|---:|---:|",
     ]
+    if warnings:
+        lines.append("## Warnings")
+        lines.extend(f"- {warning}" for warning in warnings)
+        lines.append("")
+    lines.extend(
+        [
+            "## Coefficients",
+            "| term | active | coefficient | importance |",
+            "|---|---:|---:|---:|",
+        ]
+    )
     for label, active, coefficient, importance in zip(
         fit.labels,
         fit.active,

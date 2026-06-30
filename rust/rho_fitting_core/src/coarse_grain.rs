@@ -31,8 +31,11 @@ pub fn coarse_grain_fields(
     let ny = y_centers.len();
     let mut rho = Array3::<f64>::zeros((frames, nx, ny));
     let mut p_density = Array4::<f64>::zeros((frames, nx, ny, 2));
+    let cutoff = 4.0 * sigma;
+    let cutoff2 = cutoff * cutoff;
 
     for t in 0..frames {
+        println!("[rho_fitting] coarse-grain frame {}/{}", t + 1, frames);
         for i in 0..particles {
             if !shell_mask[[t, i]] {
                 continue;
@@ -51,8 +54,14 @@ pub fn coarse_grain_fields(
 
             for ix in 0..nx {
                 let dx = minimum_image(x_centers[ix] - particle_x, lx);
+                if dx.abs() > cutoff {
+                    continue;
+                }
                 for iy in 0..ny {
                     let dy = minimum_image(y_centers[iy] - particle_y, ly);
+                    if dy.abs() > cutoff || dx * dx + dy * dy > cutoff2 {
+                        continue;
+                    }
                     let weight = gaussian_2d(dx, dy, sigma);
                     rho[[t, ix, iy]] += weight;
                     p_density[[t, ix, iy, 0]] += weight * px;

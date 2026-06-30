@@ -61,8 +61,11 @@ def stability_selection(
     importance_path = np.zeros((tau_values.size, X.shape[1]), dtype=np.float64)
     n_sub = max(1, X.shape[0] // 2)
     for tau_i, tau in enumerate(tau_values):
+        _progress(f"stability tau {tau_i + 1}/{tau_values.size}: tau={tau:.6g}")
         kept = np.zeros(X.shape[1], dtype=np.float64)
-        for _ in range(subsamples):
+        for sub_i in range(subsamples):
+            if _should_report_subsample(sub_i, subsamples):
+                _progress(f"  subsample {sub_i + 1}/{subsamples}")
             rows = rng.choice(X.shape[0], size=n_sub, replace=False)
             active_terms = _pysindy_active_terms(
                 Xn[rows],
@@ -74,12 +77,8 @@ def stability_selection(
             kept += active_terms
         importance_path[tau_i] = kept / float(subsamples)
 
-    tau_index = _choose_tau_index(importance_path, importance_threshold)
-    importance = (
-        np.max(importance_path, axis=0)
-        if tau_index is None
-        else importance_path[tau_index]
-    )
+    tau_index = None
+    importance = np.max(importance_path, axis=0)
     active = importance >= importance_threshold
     coefficients = final_refit(X, y, active, alpha)
     y_pred = X @ coefficients
@@ -195,3 +194,14 @@ def _result(
         rmse=rmse,
         r2=r2,
     )
+
+
+def _should_report_subsample(index: int, total: int) -> bool:
+    if total <= 4:
+        return True
+    interval = max(1, total // 4)
+    return index == 0 or index + 1 == total or (index + 1) % interval == 0
+
+
+def _progress(message: str) -> None:
+    print(f"[rho_fitting] {message}", flush=True)
