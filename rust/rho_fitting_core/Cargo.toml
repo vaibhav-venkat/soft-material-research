@@ -9,7 +9,7 @@ name = "_rho_fitting_core"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-ndarray = "0.17"
+ndarray = "0.16"
 num-complex = "0.4"
 numpy = "0.29"
 pyo3 = { version = "0.29", features = ["extension-module"] }

@@ -15,6 +15,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--no-plot", action="store_true")
+    parser.add_argument("--max-frames", type=int)
     return parser
 
 
@@ -26,6 +27,7 @@ def main(argv: list[str] | None = None) -> int:
         seed=args.seed,
         overwrite=args.overwrite,
         make_plots=not args.no_plot,
+        max_frames=args.max_frames,
     )
     result = run(config)
     print(result.summary())

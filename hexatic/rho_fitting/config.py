@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 
 
 PACKAGE_DIR = Path(__file__).resolve().parent
@@ -31,6 +32,11 @@ class CasePaths:
         )
 
 
+def radius_from_case_id(case_id: str) -> float | None:
+    match = re.search(r"radius_([0-9]+(?:\.[0-9]+)?)D", case_id)
+    return float(match.group(1)) if match else None
+
+
 @dataclass(frozen=True)
 class NumericalSettings:
     sigma: float = 1.0
@@ -53,12 +59,16 @@ class RhoFittingConfig:
     seed: int = 0
     overwrite: bool = False
     make_plots: bool = True
+    coarse_grain: bool = True
+    max_frames: int | None = None
     output_dir: Path = DEFAULT_OUTPUT_DIR
     settings: NumericalSettings | None = None
 
     def __post_init__(self) -> None:
         if self.nd <= 0:
             raise ValueError("nd must be positive")
+        if self.max_frames is not None and self.max_frames <= 0:
+            raise ValueError("max_frames must be positive")
         settings = self.settings or NumericalSettings(nd=self.nd, seed=self.seed)
         object.__setattr__(self, "settings", settings)
 
