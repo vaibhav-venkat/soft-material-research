@@ -189,7 +189,8 @@ def write_model_report(
     add(f"  gaussian data:     {_result_path(dest, case_id, 'gaussian_fields.npz')}")
     add("")
 
-    _plot_jsys(result, dest, case_id, models)
+    jsys_path = _plot_jsys(result, dest, case_id, models)
+    model3_jsys_divergence_path = _plot_model3_jsys_divergence(result, dest, case_id)
 
     txt_path.write_text("\n".join(lines))
     md_path.write_text(
@@ -207,7 +208,10 @@ def write_model_report(
     )
     print(f"[fitting] Report saved: {txt_path}")
     print(f"[fitting] Markdown report saved: {md_path}")
-    print(f"[fitting] J_sys plot saved: {dest / f'{case_id}_jsys.png'}")
+    if jsys_path is not None:
+        print(f"[fitting] J_sys plot saved: {jsys_path}")
+    if model3_jsys_divergence_path is not None:
+        print(f"[fitting] Model 3 div(J_sys) plot saved: {model3_jsys_divergence_path}")
     return txt_path
 
 
@@ -329,13 +333,13 @@ def _three_density_models(
             **eom_diag,
         ),
         DensityModelSummary(
-            name="J_fit without force_density residual split + 85% η-power AR(1)",
+            name="J_fit without force_density residual split + 80% η-power AR(1)",
             equation="-∇_s·[J_fit_no_f + J_sys_no_f] + S_cross + η_AR1",
             det_equation="-∇_s·[J_fit_no_f + J_sys_no_f] + S_cross",
             coefficients=no_force_coefficients,
             note=(
                 no_force_note
-                + "; final model uses seeded adaptive ξ_85 selected from empirical η power"
+                + "; final model uses seeded adaptive ξ_80 selected from empirical η power"
             ),
             **no_force_diag,
         ),
@@ -786,6 +790,55 @@ def _plot_jsys(result: FittingResult, dest: Path, case_id: str, models: tuple[De
     fig.suptitle(f"Persistent residual current J_sys — case {case_id}", fontsize=12)
     fig.tight_layout()
     path = dest / f"{case_id}_jsys.png"
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    return path
+
+
+def _plot_model3_jsys_divergence(result: FittingResult, dest: Path, case_id: str) -> Path | None:
+    """Save a heatmap of -div(J_sys_no_force) for Model 3."""
+    try:
+        current_lib = build_current_library(result.fields)
+        no_force_fit = _fit_without_force_density(result, current_lib)
+    except (AttributeError, Exception):
+        return None
+    if no_force_fit is None:
+        return None
+
+    import matplotlib
+    matplotlib.use("Agg")
+
+    no_force_result, no_force_lib = no_force_fit
+    no_force_current = _current_from_fit(no_force_lib, no_force_result.coefficients)
+    j_res = result.fields.material_current - no_force_current
+    j_sys = _masked_time_mean(j_res, result.mask)
+    div_jsys = -_divergence(result, j_sys)[0]
+
+    finite = div_jsys[np.isfinite(div_jsys)]
+    if finite.size == 0:
+        vmax = 1.0
+    else:
+        vmax = float(np.percentile(np.abs(finite), 98.0))
+        if not np.isfinite(vmax) or vmax <= 0.0:
+            vmax = float(np.max(np.abs(finite))) if finite.size else 1.0
+        if not np.isfinite(vmax) or vmax <= 0.0:
+            vmax = 1.0
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+    im = ax.imshow(
+        div_jsys.T,
+        origin="lower",
+        aspect="auto",
+        cmap="RdBu_r",
+        vmin=-vmax,
+        vmax=vmax,
+    )
+    plt.colorbar(im, ax=ax, label="-div(J_sys_no_force)")
+    ax.set_xlabel("x bin")
+    ax.set_ylabel("theta bin")
+    ax.set_title("Model 3 persistent source: -div(J_sys_no_force)")
+    fig.tight_layout()
+    path = dest / f"{case_id}_model3_jsys_divergence.png"
     fig.savefig(path, dpi=150)
     plt.close(fig)
     return path

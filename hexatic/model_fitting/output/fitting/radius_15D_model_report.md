@@ -79,7 +79,7 @@ S_cross_pred = c0 1 + c1 rho + c2 laplacian rho + c3 D + c4 |psi6| + c5 P_r + c6
 |---|---:|---:|---:|---:|
 | J_fit residual split | `0.9985239` | `0.79972685` | `0.0061999701` | `0.50585587` |
 | J_EOM residual split | `0.9985239` | `0.89352542` | `0.0045611717` | `0.65719928` |
-| J_fit without force_density residual split + 85% η-power AR(1) | `0.7914742` | `0.73861094` | `0.0070611948` | `0.68643877` |
+| J_fit without force_density residual split + 80% η-power AR(1) | `0.7914742` | `0.73861094` | `0.0070611948` | `0.68643877` |
 
 ### Model 1: J_fit residual split
 
@@ -225,7 +225,7 @@ Note: J_EOM = J_active + J_pair + J_wall; full residual identity reconstructs J_
 
 No fitted `a_i`; EOM terms use fixed microscopic coefficients.
 
-### Model 3: J_fit without force_density residual split + 85% η-power AR(1)
+### Model 3: J_fit without force_density residual split + 80% η-power AR(1)
 
 Full equation:
 ```text
@@ -315,7 +315,7 @@ Final density model with seeded AR(1) `xi` and `zeta`:
 | normalized MAE | `0.79936431` |
 | correlation | `0.77725763` |
 
-Note: force_density and D force_density omitted from J_fit before residual split; final model uses seeded adaptive ξ_85 selected from empirical η power
+Note: force_density and D force_density omitted from J_fit before residual split; final model uses seeded adaptive ξ_80 selected from empirical η power
 
 | coefficient | value | term |
 |---:|---:|---|

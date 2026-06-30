@@ -239,7 +239,7 @@ def compute_stochastic_mechanism(
     *,
     seed: int = STOCHASTIC_ROLLOUT_SEED,
 ) -> StochasticMechanismSummary | None:
-    """Fit the 85%-eta-power Fourier AR(1) residual model."""
+    """Fit the 80%-eta-power Fourier AR(1) residual model."""
     try:
         j_res = result.fields.material_current - base_current
         j_sys = _masked_time_mean(j_res, result.mask)

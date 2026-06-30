@@ -120,6 +120,8 @@ S_CROSS_TERM_LABELS = (
 
 NO_FORCE_LOW_K_TERM_NAMES = (
     "low_k_P",
+    "low_k_D_P",
+    "low_k_P_r_P",
     "low_k_force_density",
     "low_k_grad_rho",
     "low_k_grad_hexatic_order",
@@ -127,6 +129,8 @@ NO_FORCE_LOW_K_TERM_NAMES = (
 )
 NO_FORCE_LOW_K_TERM_LABELS = (
     "low-k(P)",
+    "low-k(D P)",
+    "low-k(P_r P)",
     "low-k(f)",
     "low-k(grad rho)",
     "low-k(grad |psi6|)",
@@ -233,6 +237,8 @@ def build_no_force_low_k_library(
 
     sources = (
         fields.mid_P,
+        fields.mid_D[..., None] * fields.mid_P,
+        fields.mid_P_r[..., None] * fields.mid_P,
         fields.mid_force_density,
         fields.grad_rho,
         fields.grad_hexatic_order,
