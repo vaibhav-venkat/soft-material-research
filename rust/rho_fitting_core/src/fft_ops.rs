@@ -27,11 +27,23 @@ pub fn gradient_scalar(field: ArrayView3<'_, f64>, lx: f64, ly: f64) -> CoreResu
 }
 
 pub fn laplacian_scalar(field: ArrayView3<'_, f64>, lx: f64, ly: f64) -> CoreResult<Array3<f64>> {
-    scalar_k_power(field, lx, ly, 1)
+    repeated_laplacian_scalar(field, lx, ly, 1)
 }
 
 pub fn bilaplacian_scalar(field: ArrayView3<'_, f64>, lx: f64, ly: f64) -> CoreResult<Array3<f64>> {
-    scalar_k_power(field, lx, ly, 2)
+    repeated_laplacian_scalar(field, lx, ly, 2)
+}
+
+pub fn repeated_laplacian_scalar(
+    field: ArrayView3<'_, f64>,
+    lx: f64,
+    ly: f64,
+    order: usize,
+) -> CoreResult<Array3<f64>> {
+    if order == 0 {
+        return Ok(field.to_owned());
+    }
+    scalar_k_power(field, lx, ly, order)
 }
 
 pub fn divergence_vector(field: ArrayView4<'_, f64>, lx: f64, ly: f64) -> CoreResult<Array3<f64>> {
@@ -77,7 +89,7 @@ fn scalar_k_power(
     field: ArrayView3<'_, f64>,
     lx: f64,
     ly: f64,
-    power: u32,
+    order: usize,
 ) -> CoreResult<Array3<f64>> {
     let (frames, nx, ny) = validate_scalar(field, lx, ly)?;
     let kx = wavenumbers(nx, lx);
@@ -87,11 +99,7 @@ fn scalar_k_power(
         let spectrum = fft2_real(field, t, nx, ny);
         let values = inverse_with_multiplier(&spectrum, nx, ny, |ix, iy| {
             let k2 = kx[ix] * kx[ix] + ky[iy] * ky[iy];
-            if power == 1 {
-                Complex64::new(-k2, 0.0)
-            } else {
-                Complex64::new(k2 * k2, 0.0)
-            }
+            Complex64::new((-k2).powi(order as i32), 0.0)
         });
         for ix in 0..nx {
             for iy in 0..ny {

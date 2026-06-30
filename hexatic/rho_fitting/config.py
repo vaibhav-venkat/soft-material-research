@@ -1,13 +1,13 @@
 """Configuration for rho fitting."""
 
 from __future__ import annotations
-from hexatic.constants.cylinder import PARTICLE_DIAMETER
 
 from dataclasses import dataclass
 from pathlib import Path
 import re
 
 from hexatic.constants import cylinder
+from hexatic.constants.cylinder import PARTICLE_DIAMETER
 
 
 PACKAGE_DIR = Path(__file__).resolve().parent
@@ -45,6 +45,8 @@ class NumericalSettings:
     sigma: float = 5.0 * PARTICLE_DIAMETER
     cheb_cutoff: int = 20
     timestep: float = cylinder.SIMULATION.timestep
+    n_rho_power: int = 5
+    n_rho_lap_power: int = 4
     nd: int = 500_000
     seed: int = 0
     replace: bool = False
@@ -80,6 +82,10 @@ class RhoFittingConfig:
             raise ValueError("cheb_cutoff must be positive")
         if settings.timestep <= 0.0:
             raise ValueError("timestep must be positive")
+        if settings.n_rho_power < 0:
+            raise ValueError("n_rho_power must be nonnegative")
+        if settings.n_rho_lap_power < 0:
+            raise ValueError("n_rho_lap_power must be nonnegative")
         object.__setattr__(self, "settings", settings)
 
     @property

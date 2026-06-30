@@ -17,6 +17,7 @@ DS_Store
 *.so
 *.dylib
 rust/**/target/
+hexatic/rho_fitting/output/
 
 CORE.md
 *.pkl

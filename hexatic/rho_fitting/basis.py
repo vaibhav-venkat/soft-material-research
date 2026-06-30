@@ -18,12 +18,14 @@ class ChebyshevTimeResult:
     cutoff: int
 
 
-def temporal_power_spectrum(rho_hat: np.ndarray, px_hat: np.ndarray, py_hat: np.ndarray) -> np.ndarray:
-    return (
-        np.sum(np.abs(rho_hat) ** 2, axis=(1, 2))
-        + np.sum(np.abs(px_hat) ** 2, axis=(1, 2))
-        + np.sum(np.abs(py_hat) ** 2, axis=(1, 2))
-    )
+def temporal_power_spectrum(*coefficients: np.ndarray) -> np.ndarray:
+    if not coefficients:
+        raise ValueError("at least one coefficient array is required")
+    power = np.zeros(coefficients[0].shape[0], dtype=np.float64)
+    for coeff in coefficients:
+        axes = tuple(range(1, coeff.ndim))
+        power += np.sum(np.abs(coeff) ** 2, axis=axes)
+    return power
 
 
 def validate_cheb_cutoff(cutoff: int, frame_count: int) -> int:

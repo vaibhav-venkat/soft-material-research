@@ -1,10 +1,12 @@
-use numpy::{IntoPyArray, PyReadonlyArray1, PyReadonlyArray2, PyReadonlyArray3, PyReadonlyArray4};
+use numpy::{IntoPyArray, PyReadonlyArray1, PyReadonlyArray2, PyReadonlyArray3};
 use pyo3::exceptions::{PyNotImplementedError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use crate::coarse_grain;
 use crate::fft_ops;
+use crate::library;
+use crate::sampling;
 use crate::CoreError;
 
 fn not_ready(name: &str) -> PyErr {
@@ -53,11 +55,10 @@ fn coarse_grain_fields(
 }
 
 #[pyfunction]
-#[pyo3(signature = (rho, p_density, lx, ly, requested))]
+#[pyo3(signature = (rho, lx, ly, requested))]
 fn spatial_derivatives(
     py: Python<'_>,
     rho: PyReadonlyArray3<'_, f64>,
-    p_density: PyReadonlyArray4<'_, f64>,
     lx: f64,
     ly: f64,
     requested: Vec<String>,
@@ -78,24 +79,14 @@ fn spatial_derivatives(
                     fft_ops::bilaplacian_scalar(rho.as_array(), lx, ly).map_err(to_py_err)?;
                 out.set_item(name, value.into_pyarray(py))?;
             }
-            "div_p" => {
-                let value =
-                    fft_ops::divergence_vector(p_density.as_array(), lx, ly).map_err(to_py_err)?;
-                out.set_item(name, value.into_pyarray(py))?;
-            }
-            "lap_p" => {
-                let value =
-                    fft_ops::laplacian_vector(p_density.as_array(), lx, ly).map_err(to_py_err)?;
-                out.set_item(name, value.into_pyarray(py))?;
-            }
-            "bilap_p" => {
-                let value =
-                    fft_ops::bilaplacian_vector(p_density.as_array(), lx, ly).map_err(to_py_err)?;
-                out.set_item(name, value.into_pyarray(py))?;
-            }
-            "grad_div_p" => {
-                let value =
-                    fft_ops::grad_div_vector(p_density.as_array(), lx, ly).map_err(to_py_err)?;
+            _ if lap_order(&name).is_some() => {
+                let value = fft_ops::repeated_laplacian_scalar(
+                    rho.as_array(),
+                    lx,
+                    ly,
+                    lap_order(&name).unwrap(),
+                )
+                .map_err(to_py_err)?;
                 out.set_item(name, value.into_pyarray(py))?;
             }
             _ => return Err(PyValueError::new_err(format!("unknown derivative: {name}"))),
@@ -105,18 +96,45 @@ fn spatial_derivatives(
 }
 
 #[pyfunction]
-fn sample_rows() -> PyResult<()> {
-    Err(not_ready("sample_rows"))
+#[pyo3(signature = (valid_mask, nd, seed, replace))]
+fn sample_rows(
+    py: Python<'_>,
+    valid_mask: PyReadonlyArray3<'_, bool>,
+    nd: usize,
+    seed: u64,
+    replace: bool,
+) -> PyResult<Py<PyAny>> {
+    let rows =
+        sampling::sample_rows(valid_mask.as_array(), nd, seed, replace).map_err(to_py_err)?;
+    Ok(rows.into_pyarray(py).into_any().unbind())
 }
 
 #[pyfunction]
-fn build_density_library() -> PyResult<()> {
-    Err(not_ready("build_density_library"))
-}
-
-#[pyfunction]
-fn build_polarization_library() -> PyResult<()> {
-    Err(not_ready("build_polarization_library"))
+#[pyo3(signature = (rho, sample_indices, term_names, lx, ly))]
+fn build_density_library(
+    py: Python<'_>,
+    rho: PyReadonlyArray3<'_, f64>,
+    sample_indices: PyReadonlyArray2<'_, i64>,
+    term_names: Vec<String>,
+    lx: f64,
+    ly: f64,
+) -> PyResult<Py<PyAny>> {
+    for name in &term_names {
+        if !library::known_density_term(name) {
+            return Err(PyValueError::new_err(format!(
+                "unknown density term: {name}"
+            )));
+        }
+    }
+    let values = library::build_density_library(
+        rho.as_array(),
+        sample_indices.as_array(),
+        &term_names,
+        lx,
+        ly,
+    )
+    .map_err(to_py_err)?;
+    Ok(values.into_pyarray(py).into_any().unbind())
 }
 
 #[pyfunction]
@@ -131,7 +149,16 @@ fn _rho_fitting_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(spatial_derivatives, m)?)?;
     m.add_function(wrap_pyfunction!(sample_rows, m)?)?;
     m.add_function(wrap_pyfunction!(build_density_library, m)?)?;
-    m.add_function(wrap_pyfunction!(build_polarization_library, m)?)?;
     m.add_function(wrap_pyfunction!(stlsq, m)?)?;
     Ok(())
+}
+
+fn lap_order(name: &str) -> Option<usize> {
+    if name == "lap_rho" {
+        return Some(1);
+    }
+    name.strip_prefix("lap")?
+        .strip_suffix("_rho")?
+        .parse::<usize>()
+        .ok()
 }
