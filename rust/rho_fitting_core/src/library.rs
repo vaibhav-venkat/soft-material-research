@@ -1,21 +1,22 @@
 use std::collections::HashMap;
 
-use ndarray::{Array2, Array3, ArrayView2, ArrayView3};
+use ndarray::{Array2, Array3, Array4, ArrayView2, ArrayView3, ArrayView4};
 
 use crate::fft_ops;
 use crate::{CoreError, CoreResult};
 
 pub fn build_density_library(
     rho: ArrayView3<'_, f64>,
+    p_density: ArrayView4<'_, f64>,
     sample_indices: ArrayView2<'_, i64>,
     term_names: &[String],
     lx: f64,
     ly: f64,
 ) -> CoreResult<Array2<f64>> {
-    validate_inputs(rho, sample_indices, term_names)?;
+    validate_inputs(rho, p_density, sample_indices, term_names)?;
     let samples = sample_indices.dim().0;
     let mut out = Array2::<f64>::zeros((samples, term_names.len()));
-    let mut lap_cache: HashMap<usize, Array3<f64>> = HashMap::new();
+    let mut field_cache: HashMap<String, Array3<f64>> = HashMap::new();
 
     for (column, name) in term_names.iter().enumerate() {
         println!(
@@ -24,40 +25,43 @@ pub fn build_density_library(
             term_names.len(),
             name
         );
-        if let Some(power) = rho_power(name) {
-            for row in 0..samples {
-                let (t, ix, iy) = index_triplet(sample_indices, row)?;
-                out[[row, column]] = rho[[t, ix, iy]].powi(power as i32);
+        let field = match field_cache.get(name) {
+            Some(field) => field,
+            None => {
+                let field = build_term_field(rho, p_density, name, lx, ly)?;
+                field_cache.insert(name.clone(), field);
+                field_cache.get(name).expect("inserted field must exist")
             }
-            continue;
+        };
+        for row in 0..samples {
+            let (t, ix, iy) = index_triplet(sample_indices, row)?;
+            out[[row, column]] = field[[t, ix, iy]];
         }
-
-        if let Some(order) = lap_order(name) {
-            let field = lap_cache
-                .entry(order)
-                .or_insert(fft_ops::repeated_laplacian_scalar(rho, lx, ly, order)?)
-                .to_owned();
-            for row in 0..samples {
-                let (t, ix, iy) = index_triplet(sample_indices, row)?;
-                out[[row, column]] = field[[t, ix, iy]];
-            }
-            continue;
-        }
-
-        return Err(CoreError::InvalidInput(format!(
-            "unknown density term {name}"
-        )));
     }
 
     Ok(out)
 }
 
 pub fn known_density_term(name: &str) -> bool {
-    rho_power(name).is_some() || lap_order(name).is_some()
+    matches!(
+        name,
+        "div_p"
+            | "lap_rho"
+            | "lap_rho2"
+            | "lap_rho3"
+            | "div_rho_p"
+            | "div_rho2_p"
+            | "div_p_norm2_p"
+            | "div_p_perp"
+            | "div_rho_p_perp"
+            | "div_rho2_p_perp"
+            | "div_p_norm2_p_perp"
+    )
 }
 
 fn validate_inputs(
     rho: ArrayView3<'_, f64>,
+    p_density: ArrayView4<'_, f64>,
     sample_indices: ArrayView2<'_, i64>,
     term_names: &[String],
 ) -> CoreResult<()> {
@@ -65,6 +69,11 @@ fn validate_inputs(
     if frames == 0 || nx == 0 || ny == 0 {
         return Err(CoreError::InvalidInput(
             "rho axes must be non-empty".to_string(),
+        ));
+    }
+    if p_density.dim() != (frames, nx, ny, 2) {
+        return Err(CoreError::Shape(
+            "P_density must have shape (T, Nx, Ny, 2)".to_string(),
         ));
     }
     if sample_indices.dim().1 != 3 {
@@ -88,6 +97,102 @@ fn validate_inputs(
     Ok(())
 }
 
+fn build_term_field(
+    rho: ArrayView3<'_, f64>,
+    p_density: ArrayView4<'_, f64>,
+    name: &str,
+    lx: f64,
+    ly: f64,
+) -> CoreResult<Array3<f64>> {
+    match name {
+        "div_p" => fft_ops::divergence_vector(p_density, lx, ly),
+        "lap_rho" => fft_ops::laplacian_scalar(rho, lx, ly),
+        "lap_rho2" => {
+            let field = scalar_power(rho, 2);
+            fft_ops::laplacian_scalar(field.view(), lx, ly)
+        }
+        "lap_rho3" => {
+            let field = scalar_power(rho, 3);
+            fft_ops::laplacian_scalar(field.view(), lx, ly)
+        }
+        "div_rho_p" => {
+            let field = scale_vector_by_rho_power(rho, p_density, 1, false, false);
+            fft_ops::divergence_vector(field.view(), lx, ly)
+        }
+        "div_rho2_p" => {
+            let field = scale_vector_by_rho_power(rho, p_density, 2, false, false);
+            fft_ops::divergence_vector(field.view(), lx, ly)
+        }
+        "div_p_norm2_p" => {
+            let field = scale_vector_by_rho_power(rho, p_density, 0, false, true);
+            fft_ops::divergence_vector(field.view(), lx, ly)
+        }
+        "div_p_perp" => {
+            let field = scale_vector_by_rho_power(rho, p_density, 0, true, false);
+            fft_ops::divergence_vector(field.view(), lx, ly)
+        }
+        "div_rho_p_perp" => {
+            let field = scale_vector_by_rho_power(rho, p_density, 1, true, false);
+            fft_ops::divergence_vector(field.view(), lx, ly)
+        }
+        "div_rho2_p_perp" => {
+            let field = scale_vector_by_rho_power(rho, p_density, 2, true, false);
+            fft_ops::divergence_vector(field.view(), lx, ly)
+        }
+        "div_p_norm2_p_perp" => {
+            let field = scale_vector_by_rho_power(rho, p_density, 0, true, true);
+            fft_ops::divergence_vector(field.view(), lx, ly)
+        }
+        _ => Err(CoreError::InvalidInput(format!(
+            "unknown density term {name}"
+        ))),
+    }
+}
+
+fn scalar_power(rho: ArrayView3<'_, f64>, power: i32) -> Array3<f64> {
+    let (frames, nx, ny) = rho.dim();
+    let mut out = Array3::<f64>::zeros((frames, nx, ny));
+    for t in 0..frames {
+        for ix in 0..nx {
+            for iy in 0..ny {
+                out[[t, ix, iy]] = rho[[t, ix, iy]].powi(power);
+            }
+        }
+    }
+    out
+}
+
+fn scale_vector_by_rho_power(
+    rho: ArrayView3<'_, f64>,
+    p_density: ArrayView4<'_, f64>,
+    rho_power: i32,
+    perpendicular: bool,
+    p_norm2_scale: bool,
+) -> Array4<f64> {
+    let (frames, nx, ny) = rho.dim();
+    let mut out = Array4::<f64>::zeros((frames, nx, ny, 2));
+    for t in 0..frames {
+        for ix in 0..nx {
+            for iy in 0..ny {
+                let px = p_density[[t, ix, iy, 0]];
+                let py = p_density[[t, ix, iy, 1]];
+                let (vx, vy) = if perpendicular { (-py, px) } else { (px, py) };
+                let mut scale = if rho_power == 0 {
+                    1.0
+                } else {
+                    rho[[t, ix, iy]].powi(rho_power)
+                };
+                if p_norm2_scale {
+                    scale *= px * px + py * py;
+                }
+                out[[t, ix, iy, 0]] = scale * vx;
+                out[[t, ix, iy, 1]] = scale * vy;
+            }
+        }
+    }
+    out
+}
+
 fn index_triplet(
     sample_indices: ArrayView2<'_, i64>,
     row: usize,
@@ -101,28 +206,4 @@ fn index_triplet(
         )));
     }
     Ok((t as usize, ix as usize, iy as usize))
-}
-
-fn rho_power(name: &str) -> Option<usize> {
-    if name == "rho" {
-        return Some(1);
-    }
-    let suffix = name.strip_prefix("rho")?;
-    parse_positive_suffix(suffix, 2)
-}
-
-fn lap_order(name: &str) -> Option<usize> {
-    if name == "lap_rho" {
-        return Some(1);
-    }
-    let suffix = name.strip_prefix("lap")?.strip_suffix("_rho")?;
-    parse_positive_suffix(suffix, 2)
-}
-
-fn parse_positive_suffix(suffix: &str, minimum: usize) -> Option<usize> {
-    if suffix.is_empty() || (suffix.len() > 1 && suffix.starts_with('0')) {
-        return None;
-    }
-    let value = suffix.parse::<usize>().ok()?;
-    (value >= minimum).then_some(value)
 }

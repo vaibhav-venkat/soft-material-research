@@ -17,9 +17,7 @@ class Term:
 def density_terms(n_rho_power: int, n_rho_lap_power: int) -> tuple[Term, ...]:
     if n_rho_power < 0 or n_rho_lap_power < 0:
         raise ValueError("term counts must be nonnegative")
-    terms = [_rho_power_term(power) for power in range(1, n_rho_power + 1)]
-    terms.extend(_rho_lap_term(order) for order in range(1, n_rho_lap_power + 1))
-    return tuple(terms)
+    return DENSITY_TERMS
 
 
 def term_names(terms: tuple[Term, ...]) -> tuple[str, ...]:
@@ -37,15 +35,20 @@ def validate_terms(names: tuple[str, ...], registry: tuple[Term, ...]) -> None:
         raise ValueError(f"unknown terms: {', '.join(unknown)}")
 
 
-def _rho_power_term(power: int) -> Term:
-    name = "rho" if power == 1 else f"rho{power}"
-    label = "rho" if power == 1 else f"rho^{power}"
-    return Term(name=name, label=label, rust_name=name, family="rho_power", order=power)
+def _term(name: str, label: str, family: str, order: int = 0) -> Term:
+    return Term(name=name, label=label, rust_name=name, family=family, order=order)
 
 
-def _rho_lap_term(order: int) -> Term:
-    name = "lap_rho" if order == 1 else f"lap{order}_rho"
-    label = "rho"
-    for _ in range(order):
-        label = f"lap({label})"
-    return Term(name=name, label=label, rust_name=name, family="rho_lap", order=order)
+DENSITY_TERMS: tuple[Term, ...] = (
+    _term("div_p", "div(P)", "div_p"),
+    _term("lap_rho", "lap(rho)", "lap_rho", 1),
+    _term("lap_rho2", "lap(rho^2)", "lap_rho_power", 2),
+    _term("lap_rho3", "lap(rho^3)", "lap_rho_power", 3),
+    _term("div_rho_p", "div(rho P)", "div_rho_p", 1),
+    _term("div_rho2_p", "div(rho^2 P)", "div_rho_p", 2),
+    _term("div_p_norm2_p", "div(|P|^2 P)", "div_p_norm2_p"),
+    _term("div_p_perp", "div(P_perp)", "div_p_perp"),
+    _term("div_rho_p_perp", "div(rho P_perp)", "div_rho_p_perp", 1),
+    _term("div_rho2_p_perp", "div(rho^2 P_perp)", "div_rho_p_perp", 2),
+    _term("div_p_norm2_p_perp", "div(|P|^2 P_perp)", "div_p_norm2_p_perp"),
+)

@@ -12,7 +12,7 @@ from . import _rho_fitting_core
 from .basis import chebyshev_filter_and_derivative, temporal_power_spectrum
 from .cache import write_npz_atomic
 from .config import RhoFittingConfig, radius_from_case_id
-from .geometry import surface_lengths, theta_to_y
+from .geometry import surface_lengths, tangential_particle_vectors, theta_to_y
 from .io import ActiveMatterArrays, load_active_matter_npz
 from .library import density_terms, term_labels, term_names
 from .plots import write_density_plots, write_temporal_power_plot
@@ -73,7 +73,7 @@ def run(config: RhoFittingConfig) -> RhoFittingResult:
         _progress("coarse-grain density")
         coarse = coarse_grain_active_fields(active, config)
         coarse_shape = tuple(coarse["rho"].shape)
-        _progress(f"coarse-grain complete rho={coarse_shape}")
+        _progress(f"coarse-grain complete rho={coarse_shape} P={coarse['P_density'].shape}")
         _progress("chebyshev filter and partial_t rho")
         spectral = spectral_active_fields(active, coarse, config)
         temporal_shape = tuple(spectral["partial_t_rho"].shape)
@@ -121,7 +121,11 @@ def coarse_grain_active_fields(
 
     lx, ly = surface_lengths(active.x_edges, active.theta_edges, active.radius)
     y_centers = theta_to_y(active.theta_centers, active.radius)
-    p_particles = np.zeros((*active.coords.shape[:2], 2), dtype=np.float64)
+    p_particles = tangential_particle_vectors(
+        active.coords,
+        direction_cylindrical=active.direction_cylindrical,
+        active_direction=active.active_direction,
+    )
     result = _rho_fitting_core.coarse_grain_fields(
         np.ascontiguousarray(active.coords, dtype=np.float64),
         p_particles,
@@ -133,7 +137,10 @@ def coarse_grain_active_fields(
         active.radius,
         float(config.settings.sigma),
     )
-    return {"rho": np.asarray(result["rho"])}
+    return {
+        "rho": np.asarray(result["rho"]),
+        "P_density": np.asarray(result["P_density"]),
+    }
 
 
 def spectral_active_fields(
@@ -144,19 +151,31 @@ def spectral_active_fields(
     if _rho_fitting_core is None:
         raise RuntimeError("rho_fitting extension is not built")
 
-    _progress("chebyshev rho 1/1")
+    _progress("chebyshev rho 1/2")
     rho_time = chebyshev_filter_and_derivative(
         coarse["rho"],
         active.steps,
         config.settings.timestep,
         config.settings.cheb_cutoff,
     )
-    power = temporal_power_spectrum(rho_time.coefficients)
+    _progress("chebyshev P_density 2/2")
+    p_time = chebyshev_filter_and_derivative(
+        coarse["P_density"],
+        active.steps,
+        config.settings.timestep,
+        config.settings.cheb_cutoff,
+    )
+    power = temporal_power_spectrum(
+        rho_time.coefficients,
+        p_time.coefficients[..., 0],
+        p_time.coefficients[..., 1],
+    )
     min_rho = float(np.min(rho_time.filtered))
     if min_rho < -1.0e-8:
         _progress(f"warning: filtered rho has negative values; min={min_rho:.6g}")
     return {
         "rho": rho_time.filtered,
+        "P_density": p_time.filtered,
         "partial_t_rho": rho_time.derivative,
         "temporal_power": power,
         "cheb_times": rho_time.times,
@@ -177,7 +196,11 @@ def fit_density(
     labels = term_labels(terms)
     _progress(f"density terms={len(names)} ({', '.join(names)})")
     _progress("build valid mask")
-    valid_mask = np.isfinite(spectral["rho"]) & np.isfinite(spectral["partial_t_rho"])
+    valid_mask = (
+        np.isfinite(spectral["rho"])
+        & np.isfinite(spectral["partial_t_rho"])
+        & np.all(np.isfinite(spectral["P_density"]), axis=-1)
+    )
     _progress(f"sample rows target={config.settings.nd}")
     sample_indices = np.asarray(
         _rho_fitting_core.sample_rows(
@@ -200,6 +223,7 @@ def fit_density(
     X = np.asarray(
         _rho_fitting_core.build_density_library(
             np.ascontiguousarray(spectral["rho"], dtype=np.float64),
+            np.ascontiguousarray(spectral["P_density"], dtype=np.float64),
             np.ascontiguousarray(sample_indices, dtype=np.int64),
             list(names),
             lx,
@@ -260,7 +284,9 @@ def write_density_outputs(
         overwrite=config.overwrite,
         metadata=metadata,
         raw_rho=coarse["rho"],
+        raw_P_density=coarse["P_density"],
         rho=spectral["rho"],
+        P_density=spectral["P_density"],
         partial_t_rho=spectral["partial_t_rho"],
         temporal_power=spectral["temporal_power"],
         cheb_times=spectral["cheb_times"],

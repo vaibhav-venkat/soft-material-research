@@ -1,4 +1,4 @@
-use numpy::{IntoPyArray, PyReadonlyArray1, PyReadonlyArray2, PyReadonlyArray3};
+use numpy::{IntoPyArray, PyReadonlyArray1, PyReadonlyArray2, PyReadonlyArray3, PyReadonlyArray4};
 use pyo3::exceptions::{PyNotImplementedError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -168,10 +168,11 @@ fn sample_rows(
 }
 
 #[pyfunction]
-#[pyo3(signature = (rho, sample_indices, term_names, lx, ly))]
+#[pyo3(signature = (rho, p_density, sample_indices, term_names, lx, ly))]
 fn build_density_library(
     py: Python<'_>,
     rho: PyReadonlyArray3<'_, f64>,
+    p_density: PyReadonlyArray4<'_, f64>,
     sample_indices: PyReadonlyArray2<'_, i64>,
     term_names: Vec<String>,
     lx: f64,
@@ -186,6 +187,7 @@ fn build_density_library(
     }
     let values = library::build_density_library(
         rho.as_array(),
+        p_density.as_array(),
         sample_indices.as_array(),
         &term_names,
         lx,
