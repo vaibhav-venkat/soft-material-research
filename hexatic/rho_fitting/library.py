@@ -40,15 +40,7 @@ def _term(name: str, label: str, family: str, order: int = 0) -> Term:
 
 
 DENSITY_TERMS: tuple[Term, ...] = (
-    _term("div_p", "div(P)", "div_p"),
+    _term("source_cross", "S_cross", "source_cross"),
+    _term("neg_div_j", "-div(J)", "neg_div_j"),
     _term("lap_rho", "lap(rho)", "lap_rho", 1),
-    _term("lap_rho2", "lap(rho^2)", "lap_rho_power", 2),
-    _term("lap_rho3", "lap(rho^3)", "lap_rho_power", 3),
-    _term("div_rho_p", "div(rho P)", "div_rho_p", 1),
-    _term("div_rho2_p", "div(rho^2 P)", "div_rho_p", 2),
-    _term("div_p_norm2_p", "div(|P|^2 P)", "div_p_norm2_p"),
-    _term("div_p_perp", "div(P_perp)", "div_p_perp"),
-    _term("div_rho_p_perp", "div(rho P_perp)", "div_rho_p_perp", 1),
-    _term("div_rho2_p_perp", "div(rho^2 P_perp)", "div_rho_p_perp", 2),
-    _term("div_p_norm2_p_perp", "div(|P|^2 P_perp)", "div_p_norm2_p_perp"),
 )

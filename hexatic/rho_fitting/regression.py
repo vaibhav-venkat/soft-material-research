@@ -49,6 +49,9 @@ def stability_selection(
         raise ValueError("regression matrix must be non-empty")
 
     raw_correlations = raw_feature_correlations(X, y)
+    _progress("raw correlations with partial_t_rho")
+    for label, correlation in zip(labels, raw_correlations, strict=True):
+        _progress(f"  {label}: {_format_correlation(correlation)}")
     Xn, yn = _normalize_for_path(X, y)
     coef0 = _pysindy_coefficients(Xn, yn, threshold=0.0, alpha=alpha, max_iter=max_iter)
     tau_max = float(np.max(np.abs(coef0)) * 1.01) if coef0.size else 0.0
@@ -255,3 +258,9 @@ def _should_report_subsample(index: int, total: int) -> bool:
 
 def _progress(message: str) -> None:
     print(f"[rho_fitting] {message}", flush=True)
+
+
+def _format_correlation(value: float) -> str:
+    if not np.isfinite(value):
+        return "nan"
+    return f"{value:.6g}"

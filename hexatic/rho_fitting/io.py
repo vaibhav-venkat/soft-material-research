@@ -19,6 +19,7 @@ class ActiveMatterArrays:
     theta_centers: np.ndarray
     active_direction: np.ndarray | None
     direction_cylindrical: np.ndarray | None
+    flux_cylindrical: np.ndarray | None
     radius: float
 
 
@@ -46,6 +47,11 @@ def load_active_matter_npz(path: Path, fallback_radius: float | None = None) -> 
             if "direction_cylindrical" in data.files
             else None
         )
+        flux_cylindrical = (
+            np.asarray(data["flux_cylindrical"], dtype=float)
+            if "flux_cylindrical" in data.files
+            else None
+        )
         arrays = ActiveMatterArrays(
             steps=np.asarray(data["steps"]),
             coords=coords,
@@ -56,6 +62,7 @@ def load_active_matter_npz(path: Path, fallback_radius: float | None = None) -> 
             theta_centers=_read_centers(data, "theta"),
             active_direction=active_direction,
             direction_cylindrical=direction_cylindrical,
+            flux_cylindrical=flux_cylindrical,
             radius=radius,
         )
     validate_active_matter_arrays(arrays)
@@ -100,10 +107,21 @@ def validate_active_matter_arrays(arrays: ActiveMatterArrays) -> None:
         raise ValueError("steps must match coords frame axis")
     if arrays.shell_mask.shape != arrays.coords.shape[:2]:
         raise ValueError("shell_mask must match coords frame/particle axes")
-    if arrays.active_direction is not None and arrays.active_direction.shape[:2] != arrays.coords.shape[:2]:
+    if arrays.active_direction is not None and (
+        arrays.active_direction.shape[:2] != arrays.coords.shape[:2]
+        or arrays.active_direction.shape[-1] != 3
+    ):
         raise ValueError("active_direction must match coords frame/particle axes")
-    if arrays.direction_cylindrical is not None and arrays.direction_cylindrical.shape[:2] != arrays.coords.shape[:2]:
+    if arrays.direction_cylindrical is not None and (
+        arrays.direction_cylindrical.shape[:2] != arrays.coords.shape[:2]
+        or arrays.direction_cylindrical.shape[-1] != 3
+    ):
         raise ValueError("direction_cylindrical must match coords frame/particle axes")
+    if arrays.flux_cylindrical is not None and (
+        arrays.flux_cylindrical.shape[:2] != arrays.coords.shape[:2]
+        or arrays.flux_cylindrical.shape[-1] != 3
+    ):
+        raise ValueError("flux_cylindrical must match coords frame/particle axes")
     if arrays.x_edges.ndim != 1 or arrays.theta_edges.ndim != 1:
         raise ValueError("grid edges must be one-dimensional")
     if arrays.x_centers.shape != (arrays.x_edges.size - 1,):

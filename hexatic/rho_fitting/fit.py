@@ -9,10 +9,10 @@ from pathlib import Path
 import numpy as np
 
 from . import _rho_fitting_core
-from .basis import chebyshev_filter_and_derivative, temporal_power_spectrum
+from .basis import ChebyshevTimeResult, chebyshev_filter_and_derivative, temporal_power_spectrum
 from .cache import write_npz_atomic
 from .config import RhoFittingConfig, radius_from_case_id
-from .geometry import surface_lengths, tangential_particle_vectors, theta_to_y
+from .geometry import minimum_image, surface_lengths, tangential_particle_vectors, theta_to_y
 from .io import ActiveMatterArrays, load_active_matter_npz
 from .library import density_terms, term_labels, term_names
 from .plots import write_density_plots, write_temporal_power_plot
@@ -73,7 +73,11 @@ def run(config: RhoFittingConfig) -> RhoFittingResult:
         _progress("coarse-grain density")
         coarse = coarse_grain_active_fields(active, config)
         coarse_shape = tuple(coarse["rho"].shape)
-        _progress(f"coarse-grain complete rho={coarse_shape} P={coarse['P_density'].shape}")
+        _progress(
+            f"coarse-grain complete rho={coarse_shape} "
+            f"P={coarse['P_density'].shape} J={coarse['J_density'].shape} "
+            f"S={coarse['S_cross'].shape}"
+        )
         _progress("chebyshev filter and partial_t rho")
         spectral = spectral_active_fields(active, coarse, config)
         temporal_shape = tuple(spectral["partial_t_rho"].shape)
@@ -126,6 +130,9 @@ def coarse_grain_active_fields(
         direction_cylindrical=active.direction_cylindrical,
         active_direction=active.active_direction,
     )
+    j_particles = particle_surface_velocities(active, config)
+    source_particles = particle_shell_source(active, config)
+    all_particles = np.ones_like(active.shell_mask, dtype=bool)
     result = _rho_fitting_core.coarse_grain_fields(
         np.ascontiguousarray(active.coords, dtype=np.float64),
         p_particles,
@@ -137,10 +144,98 @@ def coarse_grain_active_fields(
         active.radius,
         float(config.settings.sigma),
     )
+    j_result = _rho_fitting_core.coarse_grain_fields(
+        np.ascontiguousarray(active.coords, dtype=np.float64),
+        j_particles,
+        np.ascontiguousarray(active.shell_mask),
+        np.ascontiguousarray(active.x_centers, dtype=np.float64),
+        np.ascontiguousarray(y_centers, dtype=np.float64),
+        lx,
+        ly,
+        active.radius,
+        float(config.settings.sigma),
+    )
+    source_result = _rho_fitting_core.coarse_grain_fields(
+        np.ascontiguousarray(active.coords, dtype=np.float64),
+        source_particles,
+        np.ascontiguousarray(all_particles),
+        np.ascontiguousarray(active.x_centers, dtype=np.float64),
+        np.ascontiguousarray(y_centers, dtype=np.float64),
+        lx,
+        ly,
+        active.radius,
+        float(config.settings.sigma),
+    )
     return {
         "rho": np.asarray(result["rho"]),
         "P_density": np.asarray(result["P_density"]),
+        "J_density": np.asarray(j_result["P_density"]),
+        "S_cross": np.asarray(source_result["P_density"])[..., 0],
     }
+
+
+def particle_surface_velocities(
+    active: ActiveMatterArrays,
+    config: RhoFittingConfig,
+) -> np.ndarray:
+    coords = np.asarray(active.coords, dtype=np.float64)
+    if coords.shape[0] < 2:
+        return np.zeros((*coords.shape[:2], 2), dtype=np.float64)
+
+    lx, _ = surface_lengths(active.x_edges, active.theta_edges, active.radius)
+    times = (np.asarray(active.steps, dtype=np.float64) - float(active.steps[0])) * float(
+        config.settings.timestep
+    )
+    velocities = np.zeros((*coords.shape[:2], 2), dtype=np.float64)
+    for frame in range(coords.shape[0]):
+        if frame == 0:
+            left = 0
+            right = 1
+        elif frame == coords.shape[0] - 1:
+            left = coords.shape[0] - 2
+            right = coords.shape[0] - 1
+        else:
+            left = frame - 1
+            right = frame + 1
+
+        dt = times[right] - times[left]
+        if dt <= 0.0:
+            raise ValueError("steps must increase over time")
+        dx = minimum_image(coords[right, :, 0] - coords[left, :, 0], lx)
+        dtheta = minimum_image(coords[right, :, 1] - coords[left, :, 1], 2.0 * np.pi)
+        velocities[frame, :, 0] = dx / dt
+        velocities[frame, :, 1] = active.radius * dtheta / dt
+    return np.ascontiguousarray(velocities)
+
+
+def particle_shell_source(
+    active: ActiveMatterArrays,
+    config: RhoFittingConfig,
+) -> np.ndarray:
+    mask = np.asarray(active.shell_mask, dtype=np.float64)
+    if mask.shape[0] < 2:
+        return np.zeros((*mask.shape, 2), dtype=np.float64)
+
+    times = (np.asarray(active.steps, dtype=np.float64) - float(active.steps[0])) * float(
+        config.settings.timestep
+    )
+    source = np.zeros((*mask.shape, 2), dtype=np.float64)
+    for frame in range(mask.shape[0]):
+        if frame == 0:
+            left = 0
+            right = 1
+        elif frame == mask.shape[0] - 1:
+            left = mask.shape[0] - 2
+            right = mask.shape[0] - 1
+        else:
+            left = frame - 1
+            right = frame + 1
+
+        dt = times[right] - times[left]
+        if dt <= 0.0:
+            raise ValueError("steps must increase over time")
+        source[frame, :, 0] = (mask[right] - mask[left]) / dt
+    return np.ascontiguousarray(source)
 
 
 def spectral_active_fields(
@@ -151,24 +246,42 @@ def spectral_active_fields(
     if _rho_fitting_core is None:
         raise RuntimeError("rho_fitting extension is not built")
 
-    _progress("chebyshev rho 1/2")
+    _progress("chebyshev rho 1/4")
     rho_time = chebyshev_filter_and_derivative(
         coarse["rho"],
         active.steps,
         config.settings.timestep,
         config.settings.cheb_cutoff,
     )
-    _progress("chebyshev P_density 2/2")
+    _progress("chebyshev P_density 2/4")
     p_time = chebyshev_filter_and_derivative(
         coarse["P_density"],
         active.steps,
         config.settings.timestep,
         config.settings.cheb_cutoff,
     )
+    _progress("chebyshev J_density 3/4")
+    j_time = chebyshev_filter_and_derivative(
+        coarse["J_density"],
+        active.steps,
+        config.settings.timestep,
+        config.settings.cheb_cutoff,
+    )
+    _progress("chebyshev S_cross 4/4")
+    source_time = chebyshev_filter_and_derivative(
+        coarse["S_cross"],
+        active.steps,
+        config.settings.timestep,
+        config.settings.cheb_cutoff,
+    )
+    _validate_temporal_alignment(rho_time, p_time, j_time, source_time)
     power = temporal_power_spectrum(
         rho_time.coefficients,
         p_time.coefficients[..., 0],
         p_time.coefficients[..., 1],
+        j_time.coefficients[..., 0],
+        j_time.coefficients[..., 1],
+        source_time.coefficients,
     )
     min_rho = float(np.min(rho_time.filtered))
     if min_rho < -1.0e-8:
@@ -176,11 +289,41 @@ def spectral_active_fields(
     return {
         "rho": rho_time.filtered,
         "P_density": p_time.filtered,
+        "J_density": j_time.filtered,
+        "S_cross": source_time.filtered,
         "partial_t_rho": rho_time.derivative,
         "temporal_power": power,
         "cheb_times": rho_time.times,
         "cheb_scaled_times": rho_time.scaled_times,
     }
+
+
+def _validate_temporal_alignment(
+    rho_time: ChebyshevTimeResult,
+    p_time: ChebyshevTimeResult,
+    j_time: ChebyshevTimeResult,
+    source_time: ChebyshevTimeResult,
+) -> None:
+    if rho_time.filtered.shape != rho_time.derivative.shape:
+        raise ValueError("rho and partial_t_rho must share the same time-space shape")
+    if p_time.filtered.shape[:3] != rho_time.filtered.shape:
+        raise ValueError("rho, P_density, and partial_t_rho must share frame/grid axes")
+    if j_time.filtered.shape[:3] != rho_time.filtered.shape:
+        raise ValueError("rho, J_density, and partial_t_rho must share frame/grid axes")
+    if source_time.filtered.shape != rho_time.filtered.shape:
+        raise ValueError("rho, S_cross, and partial_t_rho must share frame/grid axes")
+    if not np.array_equal(rho_time.times, p_time.times):
+        raise ValueError("rho and P_density Chebyshev times are not aligned")
+    if not np.array_equal(rho_time.times, j_time.times):
+        raise ValueError("rho and J_density Chebyshev times are not aligned")
+    if not np.array_equal(rho_time.times, source_time.times):
+        raise ValueError("rho and S_cross Chebyshev times are not aligned")
+    if not np.array_equal(rho_time.scaled_times, p_time.scaled_times):
+        raise ValueError("rho and P_density scaled Chebyshev times are not aligned")
+    if not np.array_equal(rho_time.scaled_times, j_time.scaled_times):
+        raise ValueError("rho and J_density scaled Chebyshev times are not aligned")
+    if not np.array_equal(rho_time.scaled_times, source_time.scaled_times):
+        raise ValueError("rho and S_cross scaled Chebyshev times are not aligned")
 
 
 def fit_density(
@@ -200,6 +343,8 @@ def fit_density(
         np.isfinite(spectral["rho"])
         & np.isfinite(spectral["partial_t_rho"])
         & np.all(np.isfinite(spectral["P_density"]), axis=-1)
+        & np.all(np.isfinite(spectral["J_density"]), axis=-1)
+        & np.isfinite(spectral["S_cross"])
     )
     _progress(f"sample rows target={config.settings.nd}")
     sample_indices = np.asarray(
@@ -224,6 +369,8 @@ def fit_density(
         _rho_fitting_core.build_density_library(
             np.ascontiguousarray(spectral["rho"], dtype=np.float64),
             np.ascontiguousarray(spectral["P_density"], dtype=np.float64),
+            np.ascontiguousarray(spectral["J_density"], dtype=np.float64),
+            np.ascontiguousarray(spectral["S_cross"], dtype=np.float64),
             np.ascontiguousarray(sample_indices, dtype=np.int64),
             list(names),
             lx,
@@ -285,8 +432,12 @@ def write_density_outputs(
         metadata=metadata,
         raw_rho=coarse["rho"],
         raw_P_density=coarse["P_density"],
+        raw_J_density=coarse["J_density"],
+        raw_S_cross=coarse["S_cross"],
         rho=spectral["rho"],
         P_density=spectral["P_density"],
+        J_density=spectral["J_density"],
+        S_cross=spectral["S_cross"],
         partial_t_rho=spectral["partial_t_rho"],
         temporal_power=spectral["temporal_power"],
         cheb_times=spectral["cheb_times"],
@@ -331,6 +482,9 @@ def write_density_outputs(
             fit,
             fit_payload["y_density"],
             spectral["rho"],
+            spectral["P_density"],
+            spectral["J_density"],
+            spectral["S_cross"],
             spectral["partial_t_rho"],
             spectral["temporal_power"],
             config.settings.cheb_cutoff,
@@ -411,6 +565,9 @@ def _limit_frames(
         direction_cylindrical=None
         if active.direction_cylindrical is None
         else active.direction_cylindrical[:n],
+        flux_cylindrical=None
+        if active.flux_cylindrical is None
+        else active.flux_cylindrical[:n],
         radius=active.radius,
     )
 

@@ -20,7 +20,10 @@ def grid_centers(edges: np.ndarray) -> np.ndarray:
 
 def surface_lengths(x_edges: np.ndarray, theta_edges: np.ndarray, radius: float) -> tuple[float, float]:
     lx = float(x_edges[-1] - x_edges[0])
-    ly = float(radius * (theta_edges[-1] - theta_edges[0]))
+    theta_span = float(theta_edges[-1] - theta_edges[0])
+    if not np.isclose(theta_span, 2.0 * np.pi, rtol=1.0e-6, atol=1.0e-8):
+        raise ValueError("theta_edges must span 2*pi for full-cylinder derivatives")
+    ly = float(2.0 * np.pi * radius)
     if lx <= 0.0 or ly <= 0.0:
         raise ValueError("surface lengths must be positive")
     return lx, ly

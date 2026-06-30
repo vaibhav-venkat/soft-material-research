@@ -22,7 +22,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-plot", action="store_true")
     parser.add_argument("--max-frames", type=int)
     parser.add_argument("--sigma", type=float)
-    parser.add_argument("--cheb-cutoff", type=int, default=8)
+    parser.add_argument("--cheb-cutoff", type=int, default=10)
     parser.add_argument("--timestep", type=float)
     parser.add_argument("--n-rho-power", type=int, default=5)
     parser.add_argument("--n-rho-lap-power", type=int, default=4)

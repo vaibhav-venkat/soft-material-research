@@ -168,11 +168,13 @@ fn sample_rows(
 }
 
 #[pyfunction]
-#[pyo3(signature = (rho, p_density, sample_indices, term_names, lx, ly))]
+#[pyo3(signature = (rho, p_density, j_density, source_cross, sample_indices, term_names, lx, ly))]
 fn build_density_library(
     py: Python<'_>,
     rho: PyReadonlyArray3<'_, f64>,
     p_density: PyReadonlyArray4<'_, f64>,
+    j_density: PyReadonlyArray4<'_, f64>,
+    source_cross: PyReadonlyArray3<'_, f64>,
     sample_indices: PyReadonlyArray2<'_, i64>,
     term_names: Vec<String>,
     lx: f64,
@@ -188,6 +190,8 @@ fn build_density_library(
     let values = library::build_density_library(
         rho.as_array(),
         p_density.as_array(),
+        j_density.as_array(),
+        source_cross.as_array(),
         sample_indices.as_array(),
         &term_names,
         lx,

@@ -16,6 +16,9 @@ def write_density_plots(
     fit: StabilityResult,
     y_true: np.ndarray,
     rho: np.ndarray,
+    p_density: np.ndarray,
+    j_density: np.ndarray,
+    source_cross: np.ndarray,
     partial_t_rho: np.ndarray,
     temporal_power: np.ndarray,
     cheb_cutoff: int,
@@ -29,11 +32,25 @@ def write_density_plots(
     _predicted_true_plot(output_dir / f"{case_id}_density_predicted_vs_true.png", fit, y_true, plt)
     write_temporal_power_plot(output_dir, case_id, temporal_power, cheb_cutoff)
     write_temporal_power_plot(output_dir, f"{case_id}_temporal_map", temporal_power, cheb_cutoff)
-    predicted = density_prediction_fields(rho, fit.names, fit.coefficients, lx, ly)
+    predicted = density_prediction_fields(
+        rho,
+        p_density,
+        j_density,
+        source_cross,
+        fit.names,
+        fit.coefficients,
+        lx,
+        ly,
+    )
     residual = partial_t_rho - predicted
     _kymograph(output_dir / f"{case_id}_rho_kymograph.png", rho, "rho", plt)
     _kymograph(output_dir / f"{case_id}_partial_t_rho_kymograph.png", partial_t_rho, "partial_t rho", plt)
-    _kymograph(output_dir / f"{case_id}_predicted_partial_t_rho_kymograph.png", predicted, "predicted partial_t rho", plt)
+    _kymograph(
+        output_dir / f"{case_id}_predicted_partial_t_rho_kymograph.png",
+        predicted,
+        "predicted partial_t rho",
+        plt,
+    )
     _kymograph(output_dir / f"{case_id}_density_residual_kymograph.png", residual, "density residual", plt)
     _heatmap(output_dir / f"{case_id}_density_residual_heatmap.png", np.mean(residual, axis=0), "mean residual", plt)
     _heatmap(
@@ -151,34 +168,65 @@ def _temporal_power_plot(path: Path, temporal_power: np.ndarray, cheb_cutoff: in
 
 def density_prediction_fields(
     rho: np.ndarray,
+    p_density: np.ndarray,
+    j_density: np.ndarray,
+    source_cross: np.ndarray,
     term_names: tuple[str, ...],
     coefficients: np.ndarray,
     lx: float,
     ly: float,
 ) -> np.ndarray:
     predicted = np.zeros_like(rho, dtype=np.float64)
-    lap_cache: dict[int, np.ndarray] = {}
+    field_cache: dict[str, np.ndarray] = {}
     for name, coefficient in zip(term_names, coefficients, strict=True):
         if coefficient == 0.0:
             continue
-        if name == "rho":
-            field = rho
-        elif name.startswith("rho"):
-            field = rho ** int(name.removeprefix("rho"))
-        else:
-            order = 1 if name == "lap_rho" else int(name.removeprefix("lap").removesuffix("_rho"))
-            field = lap_cache.setdefault(order, _repeated_laplacian(rho, lx, ly, order))
+        field = field_cache.get(name)
+        if field is None:
+            field = _density_term_field(rho, p_density, j_density, source_cross, name, lx, ly)
+            field_cache[name] = field
         predicted += coefficient * field
     return predicted
 
 
-def _repeated_laplacian(field: np.ndarray, lx: float, ly: float, order: int) -> np.ndarray:
+def _density_term_field(
+    rho: np.ndarray,
+    p_density: np.ndarray,
+    j_density: np.ndarray,
+    source_cross: np.ndarray,
+    name: str,
+    lx: float,
+    ly: float,
+) -> np.ndarray:
+    if name == "source_cross":
+        return source_cross
+    if name == "neg_div_j":
+        return -_divergence(j_density, lx, ly)
+    if name == "lap_rho":
+        return _laplacian(rho, lx, ly)
+    raise ValueError(f"unknown density term for plotting: {name}")
+
+
+def _laplacian(field: np.ndarray, lx: float, ly: float) -> np.ndarray:
     _, nx, ny = field.shape
     kx = 2.0 * np.pi * np.fft.fftfreq(nx, d=lx / nx)
     ky = 2.0 * np.pi * np.fft.fftfreq(ny, d=ly / ny)
     k2 = kx[:, np.newaxis] ** 2 + ky[np.newaxis, :] ** 2
     spectrum = np.fft.fft2(field, axes=(1, 2))
-    return np.fft.ifft2(((-k2) ** order)[np.newaxis, :, :] * spectrum, axes=(1, 2)).real
+    return np.fft.ifft2((-k2)[np.newaxis, :, :] * spectrum, axes=(1, 2)).real
+
+
+def _divergence(field: np.ndarray, lx: float, ly: float) -> np.ndarray:
+    _, nx, ny, _ = field.shape
+    kx = 2.0 * np.pi * np.fft.fftfreq(nx, d=lx / nx)
+    ky = 2.0 * np.pi * np.fft.fftfreq(ny, d=ly / ny)
+    spectrum_x = np.fft.fft2(field[..., 0], axes=(1, 2))
+    spectrum_y = np.fft.fft2(field[..., 1], axes=(1, 2))
+    spectrum = (
+        (1j * kx)[np.newaxis, :, np.newaxis] * spectrum_x
+        + (1j * ky)[np.newaxis, np.newaxis, :] * spectrum_y
+    )
+    return np.fft.ifft2(spectrum, axes=(1, 2)).real
 
 
 def _kymograph(path: Path, field: np.ndarray, title: str, plt) -> None:
