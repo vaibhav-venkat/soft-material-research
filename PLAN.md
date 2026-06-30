@@ -654,6 +654,7 @@ No testing
 6. Sampling and regression:
    - Implement deterministic row sampling.
    - Implement STLSQ stability path and full unnormalized refit.
+   - Do this for both Rust and Python, only use Python implementation for now.
 7. Validation outputs:
    - Add reports and plots.
    - Add cache metadata and invalidation.

@@ -6,6 +6,8 @@ platforms = ["osx-arm64"]
 version = "0.1.0"
 
 [tasks]
+rho-fitting-build = "maturin develop --manifest-path rust/rho_fitting_core/Cargo.toml"
+rho-fitting-smoke = "python -m hexatic.rho_fitting --case radius_15D --nd 1000 --no-plot"
 
 [dependencies]
 python = "3.14.*"
@@ -21,6 +23,9 @@ plotly = ">=6.8.0,<7"
 scikit-learn = ">=1.9.0,<2"
 numba = ">=0.65.1,<0.66"
 pysr = ">=1.5.10,<2"
+rust = "*"
+maturin = "*"
+rust-analyzer = "*"
 
 [pypi-dependencies]
 pysindy = { version = ">=2.1.0, <3", extras = ["miosr", "sbr", "cvxpy"] }

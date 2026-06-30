@@ -14,6 +14,9 @@ DS_Store
 *.html
 *.log
 *.json
+*.so
+*.dylib
+rust/**/target/
 
 CORE.md
 *.pkl
