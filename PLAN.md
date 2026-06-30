@@ -629,3 +629,34 @@ No testing
 - Time-grid convention: choose transition midpoints once and keep all arrays aligned to it.
 - Whether to include only density fitting in the first runnable milestone or density plus polarization together. The final workflow should include both. **include both**
 - Whether to add rank/SVD pruning before STLSQ or only report rank warnings at first. Only report rank warnings at first.
+
+13. Steps
+
+1. Package and build setup:
+   - Create `hexatic/rho_fitting`.
+   - Create `rust/rho_fitting_core`.
+   - Add pixi dependencies/tasks for Rust and maturin.
+   - Confirm `pixi run maturin develop --manifest-path rust/rho_fitting_core/Cargo.toml`.
+2. Python IO and geometry:
+   - Load local radius case data.
+   - Validate shapes and step alignment.
+   - Build particle tangential `p_i`.
+3. Rust coarse graining:
+   - Implement Gaussian `rho` and `P_density`.
+   - Check if dimensions are correct.
+4. Chebyshev and Fourier derivative layer:
+   - Implement Python Chebyshev time derivative.
+   - Implement Rust FFT derivatives.
+   - Cross-check Rust derivatives against simple sinusoidal fields.
+5. Library registry and Rust candidate builder:
+   - Implement paper default density and polarization terms.
+   - Validate term names before gridding.
+6. Sampling and regression:
+   - Implement deterministic row sampling.
+   - Implement STLSQ stability path and full unnormalized refit.
+7. Validation outputs:
+   - Add reports and plots.
+   - Add cache metadata and invalidation.
+8. Smoke and full-run checks:
+   - Run small `--nd` smoke test first.
+   - Run full `N_d=5e5` only after smoke diagnostics look sane.

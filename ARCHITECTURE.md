@@ -1,5 +1,6 @@
 # Architecture Overview
 
+**DO NOT BE VERBOSE** **BE CONCISE** **LIMIT COMMENTS** **BE CLEAN AND SIMPLE**
 
 ## 2. High-Level System Diagram
  
