@@ -17,10 +17,13 @@ rand = "0.8"
 rand_chacha = "0.3"
 rustfft = "6"
 thiserror = "2"
+cubecl = { version = "0.10", optional = true }
+cubecl-wgpu = { version = "0.10", optional = true }
 rayon = { version = "1", optional = true }
 
 [features]
 default = []
+gpu-metal = ["cubecl", "cubecl-wgpu"]
 parallel = ["rayon"]
 
 [package.metadata.maturin]

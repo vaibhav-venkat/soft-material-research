@@ -1,5 +1,7 @@
 pub mod arrays;
 pub mod coarse_grain;
+#[cfg(feature = "gpu-metal")]
+pub mod coarse_grain_cubecl;
 pub mod errors;
 pub mod fft_ops;
 pub mod geometry;

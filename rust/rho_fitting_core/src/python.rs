@@ -4,6 +4,8 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use crate::coarse_grain;
+#[cfg(feature = "gpu-metal")]
+use crate::coarse_grain_cubecl;
 use crate::fft_ops;
 use crate::library;
 use crate::sampling;
@@ -36,7 +38,58 @@ fn coarse_grain_fields(
     radius: f64,
     sigma: f64,
 ) -> PyResult<Py<PyDict>> {
-    let (rho, p_density) = coarse_grain::coarse_grain_fields(
+    #[cfg(feature = "gpu-metal")]
+    let gpu_requested = std::env::var("RHO_FITTING_GPU").is_ok_and(|value| value == "1");
+    #[cfg(not(feature = "gpu-metal"))]
+    let gpu_requested = false;
+
+    #[cfg(feature = "gpu-metal")]
+    let result = if gpu_requested {
+        coarse_grain_cubecl::coarse_grain_fields(
+            coords.as_array(),
+            p_particles.as_array(),
+            shell_mask.as_array(),
+            x_centers.as_array(),
+            y_centers.as_array(),
+            lx,
+            ly,
+            radius,
+            sigma,
+        )
+        .or_else(|error| {
+            eprintln!("[rho_fitting] GPU coarse-grain failed, falling back to CPU: {error}");
+            coarse_grain::coarse_grain_fields(
+                coords.as_array(),
+                p_particles.as_array(),
+                shell_mask.as_array(),
+                x_centers.as_array(),
+                y_centers.as_array(),
+                lx,
+                ly,
+                radius,
+                sigma,
+            )
+        })
+    } else {
+        coarse_grain::coarse_grain_fields(
+            coords.as_array(),
+            p_particles.as_array(),
+            shell_mask.as_array(),
+            x_centers.as_array(),
+            y_centers.as_array(),
+            lx,
+            ly,
+            radius,
+            sigma,
+        )
+    };
+
+    #[cfg(not(feature = "gpu-metal"))]
+    if gpu_requested {
+        eprintln!("[rho_fitting] RHO_FITTING_GPU=1 ignored; extension was built without gpu-metal");
+    }
+    #[cfg(not(feature = "gpu-metal"))]
+    let result = coarse_grain::coarse_grain_fields(
         coords.as_array(),
         p_particles.as_array(),
         shell_mask.as_array(),
@@ -46,8 +99,9 @@ fn coarse_grain_fields(
         ly,
         radius,
         sigma,
-    )
-    .map_err(to_py_err)?;
+    );
+
+    let (rho, p_density) = result.map_err(to_py_err)?;
     let out = PyDict::new(py);
     out.set_item("rho", rho.into_pyarray(py))?;
     out.set_item("P_density", p_density.into_pyarray(py))?;
