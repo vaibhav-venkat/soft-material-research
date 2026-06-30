@@ -1,6 +1,7 @@
 """Configuration for rho fitting."""
 
 from __future__ import annotations
+from hexatic.constants.cylinder import PARTICLE_DIAMETER
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,7 +42,7 @@ def radius_from_case_id(case_id: str) -> float | None:
 
 @dataclass(frozen=True)
 class NumericalSettings:
-    sigma: float = 1.0
+    sigma: float = 5.0 * PARTICLE_DIAMETER
     cheb_cutoff: int = 20
     timestep: float = cylinder.SIMULATION.timestep
     nd: int = 500_000
