@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 
 import numpy as np
@@ -15,7 +16,7 @@ from .geometry import surface_lengths, theta_to_y
 from .io import ActiveMatterArrays, load_active_matter_npz
 from .library import density_terms, term_labels, term_names
 from .plots import write_density_plots, write_temporal_power_plot
-from .regression import StabilityResult, stability_selection
+from .regression import StabilityResult, raw_feature_correlations, stability_selection
 from .report import density_report_lines, write_report
 
 
@@ -25,7 +26,7 @@ class RhoFittingResult:
     status: str
     nd: int
     frames: int
-    particles: int
+    particles: int | None
     grid_shape: tuple[int, int]
     coarse_shape: tuple[int, int, int] | None = None
     temporal_shape: tuple[int, int, int] | None = None
@@ -35,9 +36,10 @@ class RhoFittingResult:
     report_path: Path | None = None
 
     def summary(self) -> str:
+        particle_text = "" if self.particles is None else f" particles={self.particles}"
         summary = (
             f"[rho_fitting] case={self.case_id} status={self.status} nd={self.nd} "
-            f"frames={self.frames} particles={self.particles} grid={self.grid_shape}"
+            f"frames={self.frames}{particle_text} grid={self.grid_shape}"
         )
         if self.coarse_shape is not None:
             summary += f" rho={self.coarse_shape}"
@@ -272,7 +274,9 @@ def write_density_outputs(
         importance=fit.importance,
         importance_path=fit.importance_path,
         tau_values=fit.tau_values,
+        tau_index=np.asarray(-1 if fit.tau_index is None else fit.tau_index),
         active=fit.active,
+        raw_correlations=fit.raw_correlations,
         warnings=fit_payload["warnings"],
         rmse=np.asarray(fit.rmse),
         r2=np.asarray(fit.r2),
@@ -294,16 +298,65 @@ def write_density_outputs(
     _progress(f"report written {report_path}")
     if config.make_plots:
         _progress("write plots")
+        lx, ly = surface_lengths(active.x_edges, active.theta_edges, active.radius)
         write_density_plots(
             config.output_dir,
             config.case_id,
             fit,
             fit_payload["y_density"],
+            spectral["rho"],
+            spectral["partial_t_rho"],
             spectral["temporal_power"],
             config.settings.cheb_cutoff,
+            lx,
+            ly,
         )
         _progress("plots written")
     return cache_path, report_path
+
+
+def write_density_report_from_cache(config: RhoFittingConfig) -> RhoFittingResult:
+    cache_path = config.output_dir / f"{config.case_id}_fit_result.npz"
+    report_path = config.output_dir / f"{config.case_id}_rho_fitting_report.md"
+    if not cache_path.exists():
+        raise FileNotFoundError(cache_path)
+
+    with np.load(cache_path, allow_pickle=False) as data:
+        metadata = _metadata_from_cache(data)
+        fit = _fit_from_cache(data)
+        warnings = _strings_from_array(data["warnings"]) if "warnings" in data.files else ()
+        sample_count = int(np.asarray(data["sample_indices"]).shape[0])
+        rho_shape = tuple(int(value) for value in np.asarray(data["rho"]).shape)
+
+    grid_shape = _metadata_grid_shape(metadata, rho_shape)
+    frames = int(rho_shape[0]) if rho_shape else int(metadata.get("frames", 0))
+    lines = density_report_lines(
+        case_id=str(metadata.get("case_id", config.case_id)),
+        nd=sample_count,
+        frames=frames,
+        grid_shape=grid_shape,
+        sigma=float(metadata.get("sigma", config.settings.sigma)),
+        cheb_cutoff=int(metadata.get("cheb_cutoff", config.settings.cheb_cutoff)),
+        n_rho_power=int(metadata.get("n_rho_power", config.settings.n_rho_power)),
+        n_rho_lap_power=int(metadata.get("n_rho_lap_power", config.settings.n_rho_lap_power)),
+        fit=fit,
+        warnings=warnings,
+    )
+    write_report(report_path, lines, overwrite=config.overwrite)
+    _progress(f"report written {report_path}")
+    active_terms = tuple(name for name, active_flag in zip(fit.names, fit.active, strict=True) if active_flag)
+    return RhoFittingResult(
+        case_id=config.case_id,
+        status="report-only",
+        nd=sample_count,
+        frames=frames,
+        particles=None,
+        grid_shape=grid_shape,
+        sample_count=sample_count,
+        active_terms=active_terms,
+        cache_path=cache_path,
+        report_path=report_path,
+    )
 
 
 def _load_case(config: RhoFittingConfig) -> ActiveMatterArrays:
@@ -372,6 +425,82 @@ def _sampling_warnings(requested: int, actual: int, replace: bool) -> tuple[str,
             f"requested {requested} rows without replacement, but only {actual} valid rows were available",
         )
     return ()
+
+
+def _fit_from_cache(data: np.lib.npyio.NpzFile) -> StabilityResult:
+    names = _strings_from_array(data["term_names"])
+    labels = _strings_from_array(data["term_labels"])
+    importance = np.asarray(data["importance"], dtype=np.float64)
+    importance_path = np.asarray(data["importance_path"], dtype=np.float64)
+    tau_values = np.asarray(data["tau_values"], dtype=np.float64)
+    coefficients = np.asarray(data["coefficients"], dtype=np.float64)
+    active = np.asarray(data["active"], dtype=bool)
+    y_pred = np.asarray(data["y_pred"], dtype=np.float64)
+    y = np.asarray(data["y_density"], dtype=np.float64)
+    raw_correlations = _raw_correlations_from_cache(data)
+    tau_index = _tau_index_from_cache(data, importance_path, importance)
+    rmse = float(np.asarray(data["rmse"]).reshape(-1)[0])
+    r2 = float(np.asarray(data["r2"]).reshape(-1)[0])
+    return StabilityResult(
+        names=names,
+        labels=labels,
+        coefficients=coefficients,
+        importance=importance,
+        raw_correlations=raw_correlations,
+        importance_path=importance_path,
+        tau_values=tau_values,
+        active=active,
+        tau_index=tau_index,
+        y_pred=y_pred,
+        rmse=rmse,
+        r2=r2,
+    )
+
+
+def _raw_correlations_from_cache(data: np.lib.npyio.NpzFile) -> np.ndarray:
+    if "raw_correlations" in data.files:
+        return np.asarray(data["raw_correlations"], dtype=np.float64)
+    if "X_density" not in data.files or "y_density" not in data.files:
+        raise ValueError("cache is missing X_density/y_density needed for raw correlations")
+    return raw_feature_correlations(
+        np.asarray(data["X_density"], dtype=np.float64),
+        np.asarray(data["y_density"], dtype=np.float64),
+    )
+
+
+def _tau_index_from_cache(
+    data: np.lib.npyio.NpzFile,
+    importance_path: np.ndarray,
+    importance: np.ndarray,
+) -> int | None:
+    if "tau_index" in data.files:
+        value = int(np.asarray(data["tau_index"]).reshape(-1)[0])
+        return None if value < 0 else value
+    for index, row in enumerate(importance_path):
+        if row.shape == importance.shape and np.allclose(row, importance, equal_nan=True):
+            return int(index)
+    return None
+
+
+def _metadata_from_cache(data: np.lib.npyio.NpzFile) -> dict[str, object]:
+    if "metadata_json" not in data.files:
+        return {}
+    return json.loads(str(np.asarray(data["metadata_json"]).item()))
+
+
+def _metadata_grid_shape(
+    metadata: dict[str, object],
+    rho_shape: tuple[int, ...],
+) -> tuple[int, int]:
+    if "Nx" in metadata and "Ny" in metadata:
+        return int(metadata["Nx"]), int(metadata["Ny"])
+    if len(rho_shape) >= 3:
+        return int(rho_shape[1]), int(rho_shape[2])
+    return 0, 0
+
+
+def _strings_from_array(values: np.ndarray) -> tuple[str, ...]:
+    return tuple(str(value) for value in np.asarray(values).reshape(-1))
 
 
 def _progress(message: str) -> None:

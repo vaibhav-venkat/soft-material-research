@@ -54,20 +54,28 @@ def density_report_lines(
     lines.extend(
         [
             "## Coefficients",
-            "| term | active | coefficient | importance |",
-            "|---|---:|---:|---:|",
+            "| term | active | coefficient | importance | corr(partial_t rho) |",
+            "|---|---:|---:|---:|---:|",
         ]
     )
-    for label, active, coefficient, importance in zip(
+    for label, active, coefficient, importance, raw_correlation in zip(
         fit.labels,
         fit.active,
         fit.coefficients,
         fit.importance,
+        fit.raw_correlations,
         strict=True,
     ):
         lines.append(
-            f"| {label} | {int(active)} | {coefficient:.10g} | {importance:.4f} |"
+            f"| {label} | {int(active)} | {coefficient:.10g} | "
+            f"{importance:.4f} | {_format_float(raw_correlation)} |"
         )
     if not np.any(fit.active):
         lines.extend(["", "No terms passed the configured importance threshold."])
     return lines
+
+
+def _format_float(value: float) -> str:
+    if not np.isfinite(value):
+        return "nan"
+    return f"{value:.4f}"

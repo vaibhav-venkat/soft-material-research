@@ -15,6 +15,7 @@ class StabilityResult:
     labels: tuple[str, ...]
     coefficients: np.ndarray
     importance: np.ndarray
+    raw_correlations: np.ndarray
     importance_path: np.ndarray
     tau_values: np.ndarray
     active: np.ndarray
@@ -47,6 +48,7 @@ def stability_selection(
     if X.shape[0] == 0 or X.shape[1] == 0:
         raise ValueError("regression matrix must be non-empty")
 
+    raw_correlations = raw_feature_correlations(X, y)
     Xn, yn = _normalize_for_path(X, y)
     coef0 = _pysindy_coefficients(Xn, yn, threshold=0.0, alpha=alpha, max_iter=max_iter)
     tau_max = float(np.max(np.abs(coef0)) * 1.01) if coef0.size else 0.0
@@ -62,6 +64,7 @@ def stability_selection(
             labels,
             coefficients,
             importance,
+            raw_correlations,
             active,
             importance_path,
             tau_values,
@@ -100,6 +103,7 @@ def stability_selection(
         labels,
         coefficients,
         importance,
+        raw_correlations,
         active,
         importance_path,
         tau_values,
@@ -130,6 +134,22 @@ def tau_path(tau_max: float, count: int = 40, eps: float = 1e-2) -> np.ndarray:
     if tau_max == 0.0:
         return np.zeros(count, dtype=np.float64)
     return tau_max * np.logspace(0.0, np.log10(eps), count)
+
+
+def raw_feature_correlations(X: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """Signed Pearson correlations between raw candidate columns and target."""
+    X = np.asarray(X, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    if X.ndim != 2 or y.ndim != 1 or X.shape[0] != y.size:
+        raise ValueError("X must be (N, terms) and y must be (N,)")
+
+    X_centered = X - np.mean(X, axis=0)
+    y_centered = y - np.mean(y)
+    numerator = X_centered.T @ y_centered
+    denominator = np.linalg.norm(X_centered, axis=0) * np.linalg.norm(y_centered)
+    correlations = np.full(X.shape[1], np.nan, dtype=np.float64)
+    np.divide(numerator, denominator, out=correlations, where=denominator > 0.0)
+    return correlations
 
 
 def _normalize_for_path(X: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -198,6 +218,7 @@ def _result(
     labels: tuple[str, ...],
     coefficients: np.ndarray,
     importance: np.ndarray,
+    raw_correlations: np.ndarray,
     active: np.ndarray,
     importance_path: np.ndarray,
     tau_values: np.ndarray,
@@ -214,6 +235,7 @@ def _result(
         labels=labels,
         coefficients=coefficients,
         importance=importance,
+        raw_correlations=raw_correlations,
         importance_path=importance_path,
         tau_values=tau_values,
         active=active,
