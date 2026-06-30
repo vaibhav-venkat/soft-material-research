@@ -43,7 +43,7 @@ def radius_from_case_id(case_id: str) -> float | None:
 @dataclass(frozen=True)
 class NumericalSettings:
     sigma: float = 5.0 * PARTICLE_DIAMETER
-    cheb_cutoff: int = 20
+    cheb_cutoff: int = 8
     timestep: float = cylinder.SIMULATION.timestep
     n_rho_power: int = 5
     n_rho_lap_power: int = 4

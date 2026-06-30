@@ -45,6 +45,7 @@ fn coarse_grain_fields(
 
     #[cfg(feature = "gpu-metal")]
     let result = if gpu_requested {
+        println!("[rho_fitting] GPU requested: RHO_FITTING_GPU=1, gpu-metal feature enabled");
         coarse_grain_cubecl::coarse_grain_fields(
             coords.as_array(),
             p_particles.as_array(),
@@ -71,6 +72,7 @@ fn coarse_grain_fields(
             )
         })
     } else {
+        println!("[rho_fitting] GPU not requested; using CPU coarse-grain");
         coarse_grain::coarse_grain_fields(
             coords.as_array(),
             p_particles.as_array(),
@@ -87,6 +89,8 @@ fn coarse_grain_fields(
     #[cfg(not(feature = "gpu-metal"))]
     if gpu_requested {
         eprintln!("[rho_fitting] RHO_FITTING_GPU=1 ignored; extension was built without gpu-metal");
+    } else {
+        println!("[rho_fitting] GPU not requested; using CPU coarse-grain");
     }
     #[cfg(not(feature = "gpu-metal"))]
     let result = coarse_grain::coarse_grain_fields(

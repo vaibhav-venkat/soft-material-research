@@ -14,7 +14,7 @@ from .config import RhoFittingConfig, radius_from_case_id
 from .geometry import surface_lengths, theta_to_y
 from .io import ActiveMatterArrays, load_active_matter_npz
 from .library import density_terms, term_labels, term_names
-from .plots import write_density_plots
+from .plots import write_density_plots, write_temporal_power_plot
 from .regression import StabilityResult, stability_selection
 from .report import density_report_lines, write_report
 
@@ -69,13 +69,21 @@ def run(config: RhoFittingConfig) -> RhoFittingResult:
     report_path = None
     if config.coarse_grain:
         _progress("coarse-grain density")
-        coarse = coarse_grain_active_fields(active, config.settings.sigma)
+        coarse = coarse_grain_active_fields(active, config)
         coarse_shape = tuple(coarse["rho"].shape)
         _progress(f"coarse-grain complete rho={coarse_shape}")
         _progress("chebyshev filter and partial_t rho")
         spectral = spectral_active_fields(active, coarse, config)
         temporal_shape = tuple(spectral["partial_t_rho"].shape)
         _progress(f"chebyshev complete partial_t_rho={temporal_shape}")
+        if config.make_plots:
+            path = write_temporal_power_plot(
+                config.output_dir,
+                config.case_id,
+                spectral["temporal_power"],
+                config.settings.cheb_cutoff,
+            )
+            _progress(f"temporal power plot written {path}")
         _progress("sample rows and fit density model")
         fit_payload = fit_density(active, spectral, config)
         sample_count = fit_payload["sample_indices"].shape[0]
@@ -83,7 +91,7 @@ def run(config: RhoFittingConfig) -> RhoFittingResult:
         active_terms = tuple(name for name, active_flag in zip(fit.names, fit.active, strict=True) if active_flag)
         _progress(f"fit complete samples={sample_count} active_terms={len(active_terms)}")
         _progress("write cache/report/plots")
-        cache_path, report_path = write_density_outputs(active, spectral, fit_payload, config)
+        cache_path, report_path = write_density_outputs(active, coarse, spectral, fit_payload, config)
         _progress("outputs complete")
 
     return RhoFittingResult(
@@ -104,7 +112,7 @@ def run(config: RhoFittingConfig) -> RhoFittingResult:
 
 def coarse_grain_active_fields(
     active: ActiveMatterArrays,
-    sigma: float,
+    config: RhoFittingConfig,
 ) -> dict[str, np.ndarray]:
     if _rho_fitting_core is None:
         raise RuntimeError("rho_fitting extension is not built")
@@ -121,7 +129,7 @@ def coarse_grain_active_fields(
         lx,
         ly,
         active.radius,
-        float(sigma),
+        float(config.settings.sigma),
     )
     return {"rho": np.asarray(result["rho"])}
 
@@ -142,6 +150,9 @@ def spectral_active_fields(
         config.settings.cheb_cutoff,
     )
     power = temporal_power_spectrum(rho_time.coefficients)
+    min_rho = float(np.min(rho_time.filtered))
+    if min_rho < -1.0e-8:
+        _progress(f"warning: filtered rho has negative values; min={min_rho:.6g}")
     return {
         "rho": rho_time.filtered,
         "partial_t_rho": rho_time.derivative,
@@ -231,6 +242,7 @@ def fit_density(
 
 def write_density_outputs(
     active: ActiveMatterArrays,
+    coarse: dict[str, np.ndarray],
     spectral: dict[str, np.ndarray],
     fit_payload: dict[str, np.ndarray | StabilityResult],
     config: RhoFittingConfig,
@@ -245,6 +257,7 @@ def write_density_outputs(
         cache_path,
         overwrite=config.overwrite,
         metadata=metadata,
+        raw_rho=coarse["rho"],
         rho=spectral["rho"],
         partial_t_rho=spectral["partial_t_rho"],
         temporal_power=spectral["temporal_power"],
@@ -281,7 +294,14 @@ def write_density_outputs(
     _progress(f"report written {report_path}")
     if config.make_plots:
         _progress("write plots")
-        write_density_plots(config.output_dir, config.case_id, fit, fit_payload["y_density"])
+        write_density_plots(
+            config.output_dir,
+            config.case_id,
+            fit,
+            fit_payload["y_density"],
+            spectral["temporal_power"],
+            config.settings.cheb_cutoff,
+        )
         _progress("plots written")
     return cache_path, report_path
 

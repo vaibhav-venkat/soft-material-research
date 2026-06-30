@@ -55,7 +55,20 @@ def stability_selection(
         active = np.zeros(X.shape[1], dtype=bool)
         coefficients = np.zeros(X.shape[1], dtype=np.float64)
         y_pred = np.zeros_like(y)
-        return _result(names, labels, coefficients, active, np.zeros((tau_count, X.shape[1])), tau_values, None, y, y_pred)
+        importance_path = np.zeros((tau_count, X.shape[1]))
+        importance = np.zeros(X.shape[1], dtype=np.float64)
+        return _result(
+            names,
+            labels,
+            coefficients,
+            importance,
+            active,
+            importance_path,
+            tau_values,
+            None,
+            y,
+            y_pred,
+        )
 
     rng = np.random.default_rng(seed)
     importance_path = np.zeros((tau_values.size, X.shape[1]), dtype=np.float64)
@@ -77,12 +90,23 @@ def stability_selection(
             kept += active_terms
         importance_path[tau_i] = kept / float(subsamples)
 
-    tau_index = None
-    importance = np.max(importance_path, axis=0)
+    tau_index = tau_values.size - 1
+    importance = importance_path[tau_index]
     active = importance >= importance_threshold
     coefficients = final_refit(X, y, active, alpha)
     y_pred = X @ coefficients
-    return _result(names, labels, coefficients, active, importance_path, tau_values, tau_index, y, y_pred)
+    return _result(
+        names,
+        labels,
+        coefficients,
+        importance,
+        active,
+        importance_path,
+        tau_values,
+        tau_index,
+        y,
+        y_pred,
+    )
 
 
 def final_refit(X: np.ndarray, y: np.ndarray, active: np.ndarray, alpha: float) -> np.ndarray:
@@ -110,9 +134,13 @@ def tau_path(tau_max: float, count: int = 40, eps: float = 1e-2) -> np.ndarray:
 
 def _normalize_for_path(X: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     X_centered = X - np.mean(X, axis=0)
-    scale = np.linalg.norm(X_centered, axis=0)
+    scale = np.std(X_centered, axis=0)
     scale[scale == 0.0] = 1.0
-    return X_centered / scale, y - np.mean(y)
+    y_centered = y - np.mean(y)
+    y_scale = float(np.std(y_centered))
+    if y_scale == 0.0:
+        y_scale = 1.0
+    return X_centered / scale, y_centered / y_scale
 
 
 def _pysindy_active_terms(
@@ -169,6 +197,7 @@ def _result(
     names: tuple[str, ...],
     labels: tuple[str, ...],
     coefficients: np.ndarray,
+    importance: np.ndarray,
     active: np.ndarray,
     importance_path: np.ndarray,
     tau_values: np.ndarray,
@@ -180,7 +209,6 @@ def _result(
     rmse = float(np.sqrt(np.mean(residual**2)))
     denom = float(np.sum((y - np.mean(y)) ** 2))
     r2 = 1.0 - float(np.sum(residual**2)) / denom if denom > 0.0 else np.nan
-    importance = np.max(importance_path, axis=0) if tau_index is None else importance_path[tau_index]
     return StabilityResult(
         names=names,
         labels=labels,

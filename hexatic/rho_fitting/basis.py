@@ -57,11 +57,10 @@ def chebyshev_filter_and_derivative(
         raise ValueError("steps length must match values time axis")
 
     scaled, half_span = _scaled_times(times)
-    coeffs = _fit_coefficients(values, scaled)
-    filtered_coeffs = np.zeros_like(coeffs)
-    filtered_coeffs[:cutoff] = coeffs[:cutoff]
+    fit_coeffs = _fit_coefficients(values, scaled, cutoff - 1)
+    diagnostic_coeffs = _project_coefficients(values, scaled, frame_count - 1)
 
-    flat_coeffs = filtered_coeffs.reshape((frame_count, -1))
+    flat_coeffs = fit_coeffs.reshape((cutoff, -1))
     filtered = cheb.chebval(scaled, flat_coeffs).T.reshape(values.shape)
     if frame_count == 1:
         derivative = np.zeros_like(filtered)
@@ -72,7 +71,7 @@ def chebyshev_filter_and_derivative(
     return ChebyshevTimeResult(
         filtered=np.ascontiguousarray(filtered),
         derivative=np.ascontiguousarray(derivative),
-        coefficients=coeffs,
+        coefficients=diagnostic_coeffs,
         times=times,
         scaled_times=scaled,
         cutoff=cutoff,
@@ -90,9 +89,19 @@ def _scaled_times(times: np.ndarray) -> tuple[np.ndarray, float]:
     return (times - center) / half_span, half_span
 
 
-def _fit_coefficients(values: np.ndarray, scaled_times: np.ndarray) -> np.ndarray:
+def _fit_coefficients(values: np.ndarray, scaled_times: np.ndarray, degree: int) -> np.ndarray:
     frame_count = values.shape[0]
     flat = values.reshape((frame_count, -1))
-    vandermonde = cheb.chebvander(scaled_times, frame_count - 1)
+    vandermonde = cheb.chebvander(scaled_times, degree)
     coeffs, *_ = np.linalg.lstsq(vandermonde, flat, rcond=None)
-    return coeffs.reshape((frame_count, *values.shape[1:]))
+    return coeffs.reshape((degree + 1, *values.shape[1:]))
+
+
+def _project_coefficients(values: np.ndarray, scaled_times: np.ndarray, degree: int) -> np.ndarray:
+    frame_count = values.shape[0]
+    flat = values.reshape((frame_count, -1))
+    vandermonde = cheb.chebvander(scaled_times, degree)
+    denom = np.sum(vandermonde * vandermonde, axis=0)
+    denom[denom == 0.0] = 1.0
+    coeffs = (vandermonde.T @ flat) / denom[:, np.newaxis]
+    return coeffs.reshape((degree + 1, *values.shape[1:]))
