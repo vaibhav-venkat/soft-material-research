@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from . import _rho_fitting_core
+from .basis import chebyshev_filter_and_derivative, temporal_power_spectrum
 from .config import RhoFittingConfig, radius_from_case_id
 from .geometry import surface_lengths, tangential_particle_vectors, theta_to_y
 from .io import (
@@ -26,6 +27,8 @@ class RhoFittingResult:
     particles: int
     grid_shape: tuple[int, int]
     coarse_shape: tuple[int, int, int] | None = None
+    temporal_shape: tuple[int, int, int] | None = None
+    derivative_keys: tuple[str, ...] = ()
 
     def summary(self) -> str:
         summary = (
@@ -34,6 +37,10 @@ class RhoFittingResult:
         )
         if self.coarse_shape is not None:
             summary += f" rho={self.coarse_shape}"
+        if self.temporal_shape is not None:
+            summary += f" partial_t_rho={self.temporal_shape}"
+        if self.derivative_keys:
+            summary += f" derivatives={','.join(self.derivative_keys)}"
         return summary
 
 
@@ -44,9 +51,14 @@ def run(config: RhoFittingConfig) -> RhoFittingResult:
     active, p_particles = _limit_frames(config, active, p_particles)
 
     coarse_shape = None
+    temporal_shape = None
+    derivative_keys: tuple[str, ...] = ()
     if config.coarse_grain:
         coarse = coarse_grain_active_fields(active, p_particles, config.settings.sigma)
         coarse_shape = tuple(coarse["rho"].shape)
+        spectral = spectral_active_fields(active, coarse, config)
+        temporal_shape = tuple(spectral["partial_t_rho"].shape)
+        derivative_keys = tuple(spectral["derivatives"])
 
     return RhoFittingResult(
         case_id=config.case_id,
@@ -56,6 +68,8 @@ def run(config: RhoFittingConfig) -> RhoFittingResult:
         particles=active.coords.shape[1],
         grid_shape=(active.x_centers.size, active.theta_centers.size),
         coarse_shape=coarse_shape,
+        temporal_shape=temporal_shape,
+        derivative_keys=derivative_keys,
     )
 
 
@@ -84,6 +98,66 @@ def coarse_grain_active_fields(
         "rho": np.asarray(result["rho"]),
         "P_density": np.asarray(result["P_density"]),
     }
+
+
+def spectral_active_fields(
+    active: ActiveMatterArrays,
+    coarse: dict[str, np.ndarray],
+    config: RhoFittingConfig,
+) -> dict[str, np.ndarray | tuple[str, ...]]:
+    if _rho_fitting_core is None:
+        raise RuntimeError("rho_fitting extension is not built")
+
+    rho_time = chebyshev_filter_and_derivative(
+        coarse["rho"],
+        active.steps,
+        config.settings.timestep,
+        config.settings.cheb_cutoff,
+    )
+    p_time = chebyshev_filter_and_derivative(
+        coarse["P_density"],
+        active.steps,
+        config.settings.timestep,
+        config.settings.cheb_cutoff,
+    )
+    lx, ly = surface_lengths(active.x_edges, active.theta_edges, active.radius)
+    requested = ("grad_rho", "lap_rho", "div_p", "lap_p", "grad_div_p")
+    derivatives = spatial_derivatives(rho_time.filtered, p_time.filtered, lx, ly, requested)
+    power = temporal_power_spectrum(
+        rho_time.coefficients,
+        p_time.coefficients[..., 0],
+        p_time.coefficients[..., 1],
+    )
+    return {
+        "rho": rho_time.filtered,
+        "P_density": p_time.filtered,
+        "partial_t_rho": rho_time.derivative,
+        "partial_t_P_density": p_time.derivative,
+        "temporal_power": power,
+        "cheb_times": rho_time.times,
+        "cheb_scaled_times": rho_time.scaled_times,
+        "derivatives": tuple(derivatives),
+        **derivatives,
+    }
+
+
+def spatial_derivatives(
+    rho: np.ndarray,
+    p_density: np.ndarray,
+    lx: float,
+    ly: float,
+    requested: tuple[str, ...],
+) -> dict[str, np.ndarray]:
+    if _rho_fitting_core is None:
+        raise RuntimeError("rho_fitting extension is not built")
+    result = _rho_fitting_core.spatial_derivatives(
+        np.ascontiguousarray(rho, dtype=np.float64),
+        np.ascontiguousarray(p_density, dtype=np.float64),
+        float(lx),
+        float(ly),
+        list(requested),
+    )
+    return {name: np.asarray(result[name]) for name in requested}
 
 
 def _load_case(config: RhoFittingConfig) -> ActiveMatterArrays:

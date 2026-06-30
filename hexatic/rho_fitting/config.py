@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 
+from hexatic.constants import cylinder
+
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 DEFAULT_OUTPUT_DIR = PACKAGE_DIR / "output"
@@ -41,6 +43,7 @@ def radius_from_case_id(case_id: str) -> float | None:
 class NumericalSettings:
     sigma: float = 1.0
     cheb_cutoff: int = 20
+    timestep: float = cylinder.SIMULATION.timestep
     nd: int = 500_000
     seed: int = 0
     replace: bool = False
@@ -70,6 +73,12 @@ class RhoFittingConfig:
         if self.max_frames is not None and self.max_frames <= 0:
             raise ValueError("max_frames must be positive")
         settings = self.settings or NumericalSettings(nd=self.nd, seed=self.seed)
+        if settings.sigma <= 0.0:
+            raise ValueError("sigma must be positive")
+        if settings.cheb_cutoff <= 0:
+            raise ValueError("cheb_cutoff must be positive")
+        if settings.timestep <= 0.0:
+            raise ValueError("timestep must be positive")
         object.__setattr__(self, "settings", settings)
 
     @property

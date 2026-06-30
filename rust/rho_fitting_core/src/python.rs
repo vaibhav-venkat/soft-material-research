@@ -1,9 +1,10 @@
-use numpy::{IntoPyArray, PyReadonlyArray1, PyReadonlyArray2, PyReadonlyArray3};
+use numpy::{IntoPyArray, PyReadonlyArray1, PyReadonlyArray2, PyReadonlyArray3, PyReadonlyArray4};
 use pyo3::exceptions::{PyNotImplementedError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use crate::coarse_grain;
+use crate::fft_ops;
 use crate::CoreError;
 
 fn not_ready(name: &str) -> PyErr {
@@ -52,9 +53,55 @@ fn coarse_grain_fields(
 }
 
 #[pyfunction]
-fn spatial_derivatives(py: Python<'_>) -> PyResult<Py<PyDict>> {
-    let _ = py;
-    Err(not_ready("spatial_derivatives"))
+#[pyo3(signature = (rho, p_density, lx, ly, requested))]
+fn spatial_derivatives(
+    py: Python<'_>,
+    rho: PyReadonlyArray3<'_, f64>,
+    p_density: PyReadonlyArray4<'_, f64>,
+    lx: f64,
+    ly: f64,
+    requested: Vec<String>,
+) -> PyResult<Py<PyDict>> {
+    let out = PyDict::new(py);
+    for name in requested {
+        match name.as_str() {
+            "grad_rho" => {
+                let value = fft_ops::gradient_scalar(rho.as_array(), lx, ly).map_err(to_py_err)?;
+                out.set_item(name, value.into_pyarray(py))?;
+            }
+            "lap_rho" => {
+                let value = fft_ops::laplacian_scalar(rho.as_array(), lx, ly).map_err(to_py_err)?;
+                out.set_item(name, value.into_pyarray(py))?;
+            }
+            "bilap_rho" => {
+                let value =
+                    fft_ops::bilaplacian_scalar(rho.as_array(), lx, ly).map_err(to_py_err)?;
+                out.set_item(name, value.into_pyarray(py))?;
+            }
+            "div_p" => {
+                let value =
+                    fft_ops::divergence_vector(p_density.as_array(), lx, ly).map_err(to_py_err)?;
+                out.set_item(name, value.into_pyarray(py))?;
+            }
+            "lap_p" => {
+                let value =
+                    fft_ops::laplacian_vector(p_density.as_array(), lx, ly).map_err(to_py_err)?;
+                out.set_item(name, value.into_pyarray(py))?;
+            }
+            "bilap_p" => {
+                let value =
+                    fft_ops::bilaplacian_vector(p_density.as_array(), lx, ly).map_err(to_py_err)?;
+                out.set_item(name, value.into_pyarray(py))?;
+            }
+            "grad_div_p" => {
+                let value =
+                    fft_ops::grad_div_vector(p_density.as_array(), lx, ly).map_err(to_py_err)?;
+                out.set_item(name, value.into_pyarray(py))?;
+            }
+            _ => return Err(PyValueError::new_err(format!("unknown derivative: {name}"))),
+        }
+    }
+    Ok(out.unbind())
 }
 
 #[pyfunction]
