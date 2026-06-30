@@ -31,12 +31,12 @@ def write_all_plots(
          f"{case_id}_s_cross_true_vs_predicted.png"),
         ("density Y_rho", result.density_target, result.density.prediction,
          f"{case_id}_density_true_vs_predicted.png"),
-        ("partial_t P_x", result.polarization_target[..., 0],
+        ("partial_t P_density_x", result.polarization_target[..., 0],
          result.polarization.prediction[..., 0],
-         f"{case_id}_polarization_Px_true_vs_predicted.png"),
-        ("partial_t P_y", result.polarization_target[..., 1],
+         f"{case_id}_polarization_P_density_x_true_vs_predicted.png"),
+        ("partial_t P_density_y", result.polarization_target[..., 1],
          result.polarization.prediction[..., 1],
-         f"{case_id}_polarization_Py_true_vs_predicted.png"),
+         f"{case_id}_polarization_P_density_y_true_vs_predicted.png"),
     ]:
         p = _scatter_plot(result, target, prediction, label, dest / fname)
         saved.append(p)

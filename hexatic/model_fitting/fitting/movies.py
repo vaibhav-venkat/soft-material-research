@@ -49,6 +49,8 @@ def write_model3_xtheta_movies(
     *,
     case_id: str = "radius_15D",
     drop_no_force_low_k_terms: tuple[str, ...] = (),
+    included_bonus_terms: tuple[str, ...] = (),
+    rho_N_power: int = 0,
     fps: int = MODEL_FITTING_MOVIE_FPS,
     seconds_per_frame: float = MODEL_FITTING_MOVIE_SECONDS_PER_FRAME,
 ) -> list[Path]:
@@ -62,6 +64,8 @@ def write_model3_xtheta_movies(
     fields = _model3_movie_fields(
         result,
         drop_no_force_low_k_terms=drop_no_force_low_k_terms,
+        included_bonus_terms=included_bonus_terms,
+        rho_N_power=rho_N_power,
     )
 
     specs = (
@@ -117,8 +121,14 @@ def _model3_movie_fields(
     result: FittingResult,
     *,
     drop_no_force_low_k_terms: tuple[str, ...],
+    included_bonus_terms: tuple[str, ...] = (),
+    rho_N_power: int = 0,
 ) -> Model3MovieFields:
-    current_lib = build_current_library(result.fields)
+    current_lib = build_current_library(
+        result.fields,
+        included_bonus_terms=included_bonus_terms,
+        rho_N_power=rho_N_power,
+    )
     no_force_fit = _fit_without_force_density(
         result,
         current_lib,

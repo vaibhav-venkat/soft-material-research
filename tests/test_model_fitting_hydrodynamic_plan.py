@@ -119,14 +119,14 @@ class HydrodynamicPlanTests(unittest.TestCase):
         partial_t_rho[0, 0, 0] = np.nan
         s_cross = scalar.copy()
         s_cross[0, 0, 1] = np.inf
-        partial_t_P = vector.copy()
-        partial_t_P[0, 1, 0, 1] = np.nan
+        partial_t_P_density = vector.copy()
+        partial_t_P_density[0, 1, 0, 1] = np.nan
 
         mask = fields_module._shared_valid_mask(
             density_threshold=0.0,
             mid_rho=scalar,
             scalar_fields=(partial_t_rho, s_cross),
-            vector_fields=(partial_t_P,),
+            vector_fields=(partial_t_P_density,),
         )
 
         expected = np.asarray(
@@ -195,7 +195,7 @@ class HydrodynamicPlanTests(unittest.TestCase):
                 h,
                 P_r,
                 disclination_particle_mask,
-                P,
+                P_density,
                 chirality,
                 force_density,
             ) = fields_module._load_smoothed_scalars(
@@ -276,13 +276,13 @@ class HydrodynamicPlanTests(unittest.TestCase):
 
         np.testing.assert_allclose(source, (rho[1:] - rho[:-1]) / dt)
 
-    def test_current_library_uses_p_not_rho_times_p_for_polar_terms(self):
+    def test_current_library_uses_p_density_for_polar_terms(self):
         scalar = np.asarray([[[2.0]]], dtype=float)
         vector = np.asarray([[[[3.0, 5.0]]]], dtype=float)
         force = np.asarray([[[[7.0, 11.0]]]], dtype=float)
         fields = SimpleNamespace(
             mid_rho=scalar,
-            mid_P=vector,
+            mid_P_density=vector,
             mid_chirality=np.asarray([[[13.0]]], dtype=float),
             mid_D=np.asarray([[[17.0]]], dtype=float),
             mid_force_density=force,
@@ -293,10 +293,10 @@ class HydrodynamicPlanTests(unittest.TestCase):
 
         library = build_current_library(fields)
 
-        self.assertEqual(library.names[0], "P")
-        self.assertEqual(library.names[1], "chiral_P_perp")
-        self.assertEqual(library.names[3], "D_P")
-        self.assertEqual(library.names[4], "D_chiral_P_perp")
+        self.assertEqual(library.names[0], "P_density")
+        self.assertEqual(library.names[1], "chiral_P_density_perp")
+        self.assertEqual(library.names[3], "D_P_density")
+        self.assertEqual(library.names[4], "D_chiral_P_density_perp")
         np.testing.assert_allclose(library.values[..., 0, :], vector)
         np.testing.assert_allclose(library.values[..., 1, :], [[[[ -65.0, 39.0 ]]]])
         np.testing.assert_allclose(library.values[..., 3, :], 17.0 * vector)
@@ -308,8 +308,8 @@ class HydrodynamicPlanTests(unittest.TestCase):
             scalar = np.ones((1, 1, 1), dtype=float)
             vector = np.ones((1, 1, 1, 2), dtype=float)
             density = RegressionResult(
-                names=("P",),
-                labels=("P",),
+                names=("P_density",),
+                labels=("P_density",),
                 coefficients=np.asarray([1.0]),
                 prediction=scalar,
                 residual=scalar,
@@ -335,8 +335,8 @@ class HydrodynamicPlanTests(unittest.TestCase):
                 rows_used=2,
             )
             polarization = RegressionResult(
-                names=("P",),
-                labels=("P",),
+                names=("P_density",),
+                labels=("P_density",),
                 coefficients=np.asarray([2.0]),
                 prediction=vector,
                 residual=vector,
@@ -360,7 +360,7 @@ class HydrodynamicPlanTests(unittest.TestCase):
                 material_current=vector,
                 partial_t_rho=scalar,
                 S_cross=np.zeros_like(scalar),
-                partial_t_P=vector,
+                partial_t_P_density=vector,
             )
             result = FittingResult(
                 transition_steps=np.asarray([[0, 1]]),

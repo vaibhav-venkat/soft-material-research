@@ -144,18 +144,18 @@ def _pysindy_coefficients(
     stlsq_threshold: float,
     stlsq_max_iter: int,
 ) -> np.ndarray:
-    optimizer = ps.STLSQ(
-        threshold=stlsq_threshold,
-        alpha=ridge_alpha,
-        max_iter=stlsq_max_iter,
-        normalize_columns=False,
-    )
-    # optimizer = ps.SR3(
-    #     reg_weight_lam=stlsq_threshold,
-    #     regularizer="L0",
+    # optimizer = ps.STLSQ(
+    #     threshold=stlsq_threshold,
+    #     alpha=ridge_alpha,
     #     max_iter=stlsq_max_iter,
     #     normalize_columns=False,
     # )
+    optimizer = ps.SR3(
+        reg_weight_lam=stlsq_threshold / 5,
+        regularizer="L1",
+        max_iter=stlsq_max_iter,
+        normalize_columns=False,
+    )
     optimizer.fit(X, y)
     coefficients = np.ravel(np.asarray(optimizer.coef_, dtype=float))
     if coefficients.size != X.shape[1]:

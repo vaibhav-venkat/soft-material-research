@@ -61,6 +61,8 @@ def write_model_report(
     *,
     case_id: str = "radius_15D",
     drop_no_force_low_k_terms: tuple[str, ...] = (),
+    included_bonus_terms: tuple[str, ...] = (),
+    rho_N_power: int = 0,
 ) -> Path:
     """Write density-only text and Markdown reports for the three requested models."""
     dest = Path(output_dir)
@@ -71,6 +73,8 @@ def write_model_report(
     models = _three_density_models(
         result,
         drop_no_force_low_k_terms=drop_no_force_low_k_terms,
+        included_bonus_terms=included_bonus_terms,
+        rho_N_power=rho_N_power,
     )
     rho_stats = _field_stats(result.fields.partial_t_rho, result.mask)
     source_stats = _field_stats(result.fields.S_cross, result.mask)
@@ -189,8 +193,21 @@ def write_model_report(
     add(f"  gaussian data:     {_result_path(dest, case_id, 'gaussian_fields.npz')}")
     add("")
 
-    jsys_path = _plot_jsys(result, dest, case_id, models)
-    model3_jsys_divergence_path = _plot_model3_jsys_divergence(result, dest, case_id)
+    jsys_path = _plot_jsys(
+        result,
+        dest,
+        case_id,
+        models,
+        included_bonus_terms=included_bonus_terms,
+        rho_N_power=rho_N_power,
+    )
+    model3_jsys_divergence_path = _plot_model3_jsys_divergence(
+        result,
+        dest,
+        case_id,
+        included_bonus_terms=included_bonus_terms,
+        rho_N_power=rho_N_power,
+    )
 
     txt_path.write_text("\n".join(lines))
     md_path.write_text(
@@ -219,9 +236,15 @@ def _three_density_models(
     result: FittingResult,
     *,
     drop_no_force_low_k_terms: tuple[str, ...] = (),
+    included_bonus_terms: tuple[str, ...] = (),
+    rho_N_power: int = 0,
 ) -> tuple[DensityModelSummary, ...]:
     try:
-        current_lib = build_current_library(result.fields)
+        current_lib = build_current_library(
+            result.fields,
+            included_bonus_terms=included_bonus_terms,
+            rho_N_power=rho_N_power,
+        )
     except AttributeError:
         measured = _metrics_for_partial_t_prediction(
             result,
@@ -726,11 +749,23 @@ def _r2(target: np.ndarray, prediction: np.ndarray) -> float:
     return 1.0 - float(np.sum((target - prediction) ** 2)) / ss_tot
 
 
-def _plot_jsys(result: FittingResult, dest: Path, case_id: str, models: tuple[DensityModelSummary, ...]) -> Path | None:
+def _plot_jsys(
+    result: FittingResult,
+    dest: Path,
+    case_id: str,
+    models: tuple[DensityModelSummary, ...],
+    *,
+    included_bonus_terms: tuple[str, ...] = (),
+    rho_N_power: int = 0,
+) -> Path | None:
     """Save a quiver plot of J_sys for each stochastic model."""
     # try/except for matplotlib backend issues in headless environments
     try:
-        current_lib = build_current_library(result.fields)
+        current_lib = build_current_library(
+            result.fields,
+            included_bonus_terms=included_bonus_terms,
+            rho_N_power=rho_N_power,
+        )
     except (AttributeError, Exception):
         return None
     import matplotlib
@@ -795,10 +830,21 @@ def _plot_jsys(result: FittingResult, dest: Path, case_id: str, models: tuple[De
     return path
 
 
-def _plot_model3_jsys_divergence(result: FittingResult, dest: Path, case_id: str) -> Path | None:
+def _plot_model3_jsys_divergence(
+    result: FittingResult,
+    dest: Path,
+    case_id: str,
+    *,
+    included_bonus_terms: tuple[str, ...] = (),
+    rho_N_power: int = 0,
+) -> Path | None:
     """Save a heatmap of -div(J_sys_no_force) for Model 3."""
     try:
-        current_lib = build_current_library(result.fields)
+        current_lib = build_current_library(
+            result.fields,
+            included_bonus_terms=included_bonus_terms,
+            rho_N_power=rho_N_power,
+        )
         no_force_fit = _fit_without_force_density(result, current_lib)
     except (AttributeError, Exception):
         return None

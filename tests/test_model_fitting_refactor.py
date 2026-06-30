@@ -32,7 +32,7 @@ class ModelFittingRefactorTests(unittest.TestCase):
                 "rho": scalar.copy(),
                 "D": scalar.copy(),
                 "hexatic_order": scalar.copy(),
-                "P": vector.copy(),
+                "P_density": vector.copy(),
             },
             counts=np.zeros((1, 2, 2), dtype=int),
         )
@@ -40,7 +40,7 @@ class ModelFittingRefactorTests(unittest.TestCase):
         try:
             fit_module.load_or_compute_fields = lambda config: fields
             result = fit_module.compute_fitting(
-                FittingConfig(candidate_names=("P",), smoothing_bins=1.0)
+                FittingConfig(candidate_names=("P_density",), smoothing_bins=1.0)
             )
         finally:
             fit_module.load_or_compute_fields = original_loader
@@ -88,7 +88,7 @@ class ModelFittingRefactorTests(unittest.TestCase):
             "rho": np.ones((1, 1, 1), dtype=float),
             "D": np.ones((1, 1, 1), dtype=float),
             "hexatic_order": np.ones((1, 1, 1), dtype=float),
-            "P": np.ones((1, 1, 1, 2), dtype=float),
+            "P_density": np.ones((1, 1, 1, 2), dtype=float),
         }
         mask = np.ones((1, 1, 1), dtype=bool)
         num, modifiers = compute_scalar_modifiers(mid_fields, mask)
@@ -99,14 +99,14 @@ class ModelFittingRefactorTests(unittest.TestCase):
             mid_fields,
             measured,
             mask,
-            ("P",),
+            ("P_density",),
             g_modifier_indices=kept,
             G_modifiers=modifiers,
             threshold=0.0,
             max_iter=1,
         )
 
-        self.assertEqual(set(coef_map), {f"P_m{idx}" for idx in kept})
+        self.assertEqual(set(coef_map), {f"P_density_m{idx}" for idx in kept})
         for coefficients in coef_map.values():
             self.assertEqual(coefficients.shape, (2,))
 
@@ -139,7 +139,7 @@ class ModelFittingRefactorTests(unittest.TestCase):
             "rho": np.ones((1, 1, 1), dtype=float),
             "D": np.ones((1, 1, 1), dtype=float),
             "hexatic_order": np.ones((1, 1, 1), dtype=float),
-            "P": np.ones((1, 1, 1, 2), dtype=float),
+            "P_density": np.ones((1, 1, 1, 2), dtype=float),
         }
         mask = np.ones((1, 1, 1), dtype=bool)
         num, modifiers = compute_scalar_modifiers(mid_fields, mask)
@@ -148,14 +148,14 @@ class ModelFittingRefactorTests(unittest.TestCase):
             mid_fields,
             measured,
             mask,
-            ("P",),
+            ("P_density",),
             g_modifier_indices=(0, 1, 2, 3, 4),
             G_modifiers=modifiers,
             threshold=0.0,
             max_iter=1,
         )
 
-        self.assertEqual(set(coef_map), {f"P_m{idx}" for idx in range(5)})
+        self.assertEqual(set(coef_map), {f"P_density_m{idx}" for idx in range(5)})
         for coefficients in coef_map.values():
             self.assertEqual(coefficients.shape, (2,))
 

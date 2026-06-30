@@ -48,7 +48,7 @@ class HydrodynamicFields:
     theta_centers: np.ndarray
 
     rho: np.ndarray
-    P: np.ndarray           # (T, nx, ntheta, 2) = (P_x, P_y)
+    P_density: np.ndarray           # (T, nx, ntheta, 2) polarization density
     chirality: np.ndarray
     D: np.ndarray
     hexatic_order: np.ndarray
@@ -56,21 +56,21 @@ class HydrodynamicFields:
     S_cross: np.ndarray
 
     partial_t_rho: np.ndarray
-    partial_t_P: np.ndarray   # (T-1, nx, ntheta, 2)
+    partial_t_P_density: np.ndarray   # (T-1, nx, ntheta, 2)
 
     # spatial derivatives evaluated at transition midpoints
     grad_rho: np.ndarray              # (T-1, nx, ntheta, 2)
     grad_D: np.ndarray                # (T-1, nx, ntheta, 2)
     grad_hexatic_order: np.ndarray    # (T-1, nx, ntheta, 2)
-    div_P: np.ndarray                 # (T-1, nx, ntheta)
-    div_chiral_P_perp: np.ndarray     # (T-1, nx, ntheta)
+    div_P_density: np.ndarray                 # (T-1, nx, ntheta)
+    div_chiral_P_density_perp: np.ndarray     # (T-1, nx, ntheta)
     laplacian_rho: np.ndarray         # (T-1, nx, ntheta)
     laplacian_D: np.ndarray           # (T-1, nx, ntheta)
     laplacian_hexatic_order: np.ndarray  # (T-1, nx, ntheta)
-    P_dot_grad_P: np.ndarray          # (T-1, nx, ntheta, 2)
-    P_perp_dot_grad_P: np.ndarray     # (T-1, nx, ntheta, 2)
-    laplacian_P: np.ndarray           # (T-1, nx, ntheta, 2)
-    laplacian_P_perp: np.ndarray      # (T-1, nx, ntheta, 2)
+    P_density_dot_grad_P_density: np.ndarray          # (T-1, nx, ntheta, 2)
+    P_density_perp_dot_grad_P_density: np.ndarray     # (T-1, nx, ntheta, 2)
+    laplacian_P_density: np.ndarray           # (T-1, nx, ntheta, 2)
+    laplacian_P_density_perp: np.ndarray      # (T-1, nx, ntheta, 2)
     material_current: np.ndarray      # (T-1, nx, ntheta, 2)
 
     mid_rho: np.ndarray
@@ -79,7 +79,7 @@ class HydrodynamicFields:
     mid_hexatic_order: np.ndarray
     mid_h: np.ndarray
     mid_P_r: np.ndarray
-    mid_P: np.ndarray   # (T-1, nx, ntheta, 2)
+    mid_P_density: np.ndarray   # (T-1, nx, ntheta, 2) polarization density
     mid_force_density: np.ndarray     # (T-1, nx, ntheta, 2)
 
     # shared validity mask (T-1, nx, ntheta)
@@ -137,7 +137,7 @@ def load_or_compute_fields(config: FittingConfig) -> HydrodynamicFields:
         h,
         P_r,
         disclination_particle_mask,
-        P,
+        P_density,
         chirality,
         force_density,
     ) = _load_smoothed_scalars(
@@ -170,7 +170,7 @@ def load_or_compute_fields(config: FittingConfig) -> HydrodynamicFields:
     # --- frame fields and mid-frame fields ---
     print("[fitting] Computing derivatives...")
     mid_rho = _mid(rho)
-    mid_P = _mid(P)
+    mid_P_density = _mid(P_density)
     mid_chirality = _mid(chirality)
     mid_D = _mid(D)
     mid_hexatic_order = _mid(hexatic_order)
@@ -180,7 +180,7 @@ def load_or_compute_fields(config: FittingConfig) -> HydrodynamicFields:
 
     # time derivatives from adjacent smoothed frames
     partial_t_rho = (rho[1:] - rho[:-1]) / scalars.dt
-    partial_t_P = (P[1:] - P[:-1]) / scalars.dt
+    partial_t_P_density = (P_density[1:] - P_density[:-1]) / scalars.dt
 
     # spatial derivatives on midpoint fields
     grad_rho_x, grad_rho_y = ops.fft_gradient(mid_rho, kx, ky)
@@ -192,28 +192,38 @@ def load_or_compute_fields(config: FittingConfig) -> HydrodynamicFields:
     grad_hex_x, grad_hex_y = ops.fft_gradient(mid_hexatic_order, kx, ky)
     grad_hexatic_order = np.stack((grad_hex_x, grad_hex_y), axis=-1)
 
-    div_P = ops.fft_divergence(mid_P, kx, ky)
+    div_P_density = ops.fft_divergence(mid_P_density, kx, ky)
 
-    # chiral_P_perp = chirality * P_perp = (-chirality*P_y, chirality*P_x)
-    chiral_P_perp = np.stack(
-        (mid_chirality * (-mid_P[..., 1]), mid_chirality * mid_P[..., 0]),
+    # chiral_P_density_perp = chirality * P_density_perp
+    chiral_P_density_perp = np.stack(
+        (
+            mid_chirality * (-mid_P_density[..., 1]),
+            mid_chirality * mid_P_density[..., 0],
+        ),
         axis=-1,
     )
-    div_chiral_P_perp = ops.fft_divergence(chiral_P_perp, kx, ky)
+    div_chiral_P_density_perp = ops.fft_divergence(chiral_P_density_perp, kx, ky)
 
     laplacian_rho = ops.fft_laplacian(mid_rho, kx, ky)
     laplacian_D = ops.fft_laplacian(mid_D, kx, ky)
     laplacian_hexatic_order = ops.fft_laplacian(mid_hexatic_order, kx, ky)
 
-    P_dot_grad_P = ops.fft_directional_derivative(mid_P, kx, ky)
+    P_density_dot_grad_P_density = ops.fft_directional_derivative(mid_P_density, kx, ky)
 
-    # (P_perp · grad)P computed manually
-    P_perp_dot_grad_P = _p_perp_dot_grad_P(mid_P, kx, ky)
+    # (P_density_perp · grad)P_density computed manually
+    P_density_perp_dot_grad_P_density = _p_density_perp_dot_grad_p_density(
+        mid_P_density,
+        kx,
+        ky,
+    )
 
-    laplacian_P = ops.fft_vector_laplacian(mid_P, kx, ky)
+    laplacian_P_density = ops.fft_vector_laplacian(mid_P_density, kx, ky)
 
-    mid_P_perp = np.stack((-mid_P[..., 1], mid_P[..., 0]), axis=-1)
-    laplacian_P_perp = ops.fft_vector_laplacian(mid_P_perp, kx, ky)
+    mid_P_density_perp = np.stack(
+        (-mid_P_density[..., 1], mid_P_density[..., 0]),
+        axis=-1,
+    )
+    laplacian_P_density_perp = ops.fft_vector_laplacian(mid_P_density_perp, kx, ky)
 
     # --- shared mask: valid density and polarization rows use identical samples ---
     mask = _shared_valid_mask(
@@ -227,22 +237,22 @@ def load_or_compute_fields(config: FittingConfig) -> HydrodynamicFields:
             mid_hexatic_order,
             mid_h,
             mid_P_r,
-            div_P,
-            div_chiral_P_perp,
+            div_P_density,
+            div_chiral_P_density_perp,
             laplacian_rho,
             laplacian_D,
             laplacian_hexatic_order,
         ),
         vector_fields=(
-            mid_P,
-            partial_t_P,
+            mid_P_density,
+            partial_t_P_density,
             grad_rho,
             grad_D,
             grad_hexatic_order,
-            P_dot_grad_P,
-            P_perp_dot_grad_P,
-            laplacian_P,
-            laplacian_P_perp,
+            P_density_dot_grad_P_density,
+            P_density_perp_dot_grad_P_density,
+            laplacian_P_density,
+            laplacian_P_density_perp,
             material_current,
             mid_force_density,
         ),
@@ -274,25 +284,25 @@ def load_or_compute_fields(config: FittingConfig) -> HydrodynamicFields:
         theta_edges=scalars.theta_edges,
         theta_centers=scalars.theta_centers,
         rho=rho,
-        P=P,
+        P_density=P_density,
         chirality=chirality,
         D=D,
         hexatic_order=hexatic_order,
         S_cross=S_cross,
         partial_t_rho=partial_t_rho,
-        partial_t_P=partial_t_P,
+        partial_t_P_density=partial_t_P_density,
         grad_rho=grad_rho,
         grad_D=grad_D,
         grad_hexatic_order=grad_hexatic_order,
-        div_P=div_P,
-        div_chiral_P_perp=div_chiral_P_perp,
+        div_P_density=div_P_density,
+        div_chiral_P_density_perp=div_chiral_P_density_perp,
         laplacian_rho=laplacian_rho,
         laplacian_D=laplacian_D,
         laplacian_hexatic_order=laplacian_hexatic_order,
-        P_dot_grad_P=P_dot_grad_P,
-        P_perp_dot_grad_P=P_perp_dot_grad_P,
-        laplacian_P=laplacian_P,
-        laplacian_P_perp=laplacian_P_perp,
+        P_density_dot_grad_P_density=P_density_dot_grad_P_density,
+        P_density_perp_dot_grad_P_density=P_density_perp_dot_grad_P_density,
+        laplacian_P_density=laplacian_P_density,
+        laplacian_P_density_perp=laplacian_P_density_perp,
         material_current=material_current,
         mid_rho=mid_rho,
         mid_chirality=mid_chirality,
@@ -300,7 +310,7 @@ def load_or_compute_fields(config: FittingConfig) -> HydrodynamicFields:
         mid_hexatic_order=mid_hexatic_order,
         mid_h=mid_h,
         mid_P_r=mid_P_r,
-        mid_P=mid_P,
+        mid_P_density=mid_P_density,
         mid_force_density=mid_force_density,
         mask=mask,
         disclination_mask=disclination_mask,
@@ -464,12 +474,12 @@ def _load_smoothed_scalars(
     D = _divide_by_density(D_numerator, gaussian_density)
     h = _divide_by_density(h_numerator, gaussian_density)
     P_r = P_r_numerator
-    P_x = _divide_by_density(Px_numerator, gaussian_density)
-    P_y = _divide_by_density(Py_numerator, gaussian_density)
+    P_x = Px_numerator
+    P_y = Py_numerator
     chirality = _divide_by_density(chirality_numerator, gaussian_density)
     force_x = _divide_by_density(Fx_numerator, gaussian_density)
     force_y = _divide_by_density(Fy_numerator, gaussian_density)
-    P = np.stack((P_x, P_y), axis=-1)
+    P_density = np.stack((P_x, P_y), axis=-1)
     force_density = np.stack((force_x, force_y), axis=-1)
     return (
         rho,
@@ -478,7 +488,7 @@ def _load_smoothed_scalars(
         h,
         P_r,
         disclination_particle_mask,
-        P,
+        P_density,
         chirality,
         force_density,
     )
@@ -830,22 +840,19 @@ def _chirality_from_arrays(
 
 
 # ---------------------------------------------------------------------------
-# (P_perp · grad)P  -- directional derivative with perpendicular velocity
+# (P_density_perp · grad)P_density  -- directional derivative with perpendicular velocity
 # ---------------------------------------------------------------------------
 
-def _p_perp_dot_grad_P(
-    P: np.ndarray, kx: np.ndarray, ky: np.ndarray,
+def _p_density_perp_dot_grad_p_density(
+    P_density: np.ndarray, kx: np.ndarray, ky: np.ndarray,
 ) -> np.ndarray:
-    """Compute (P_perp · grad)P where P_perp = (-P_y, P_x).
-
-    Input P shape (T, nx, ntheta, 2), output same shape.
-    """
-    assert P.ndim == 4 and P.shape[3] == 2
-    dvx_dx, dvx_dy = ops.fft_gradient(P[..., 0], kx, ky)
-    dvy_dx, dvy_dy = ops.fft_gradient(P[..., 1], kx, ky)
-    # P_perp = (-P_y, P_x)
-    result_x = (-P[..., 1]) * dvx_dx + P[..., 0] * dvx_dy
-    result_y = (-P[..., 1]) * dvy_dx + P[..., 0] * dvy_dy
+    """Compute (P_density_perp · grad)P_density."""
+    assert P_density.ndim == 4 and P_density.shape[3] == 2
+    dvx_dx, dvx_dy = ops.fft_gradient(P_density[..., 0], kx, ky)
+    dvy_dx, dvy_dy = ops.fft_gradient(P_density[..., 1], kx, ky)
+    # P_density_perp = (-P_y, P_x)
+    result_x = (-P_density[..., 1]) * dvx_dx + P_density[..., 0] * dvx_dy
+    result_y = (-P_density[..., 1]) * dvy_dx + P_density[..., 0] * dvy_dy
     return np.stack((result_x, result_y), axis=-1)
 
 

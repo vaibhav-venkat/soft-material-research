@@ -13,6 +13,7 @@ from .library import (
     build_current_library,
     build_polarization_library,
     build_s_cross_library,
+    current_library_term_names,
     density_target,
     current_target,
     polarization_target,
@@ -21,7 +22,7 @@ from . import operators as ops
 from .regression import RegressionResult, fit_scalar_library, fit_vector_library
 
 
-CACHE_VERSION = 29
+CACHE_VERSION = 32
 
 
 @dataclass(frozen=True)
@@ -186,13 +187,22 @@ class FittingResult:
         )
 
 
-def compute_fitting(config: FittingConfig) -> FittingResult:
+def compute_fitting(
+    config: FittingConfig,
+    *,
+    included_bonus_terms: tuple[str, ...] = (),
+    rho_N_power: int = 0,
+) -> FittingResult:
     """Fit current and polarization models, then evaluate density conservatively."""
     raw_fields = load_or_compute_fields(config)
     fields = _coarse_grain_fields(raw_fields, config.coarse_grain_transitions)
     fit_mask = _effective_fit_mask(fields)
     source_lib = build_s_cross_library(fields)
-    current_lib = build_current_library(fields)
+    current_lib = build_current_library(
+        fields,
+        included_bonus_terms=included_bonus_terms,
+        rho_N_power=rho_N_power,
+    )
     polarization_lib = build_polarization_library(fields)
     y_density = density_target(fields)
     y_current = current_target(fields)
@@ -279,6 +289,22 @@ def compute_fitting(config: FittingConfig) -> FittingResult:
     )
 
 
+def validate_current_library_terms(
+    result: FittingResult,
+    included_bonus_terms: tuple[str, ...],
+    rho_N_power: int = 0,
+) -> None:
+    expected = current_library_term_names(
+        included_bonus_terms,
+        rho_N_power=rho_N_power,
+    )
+    if tuple(result.density.names) != expected:
+        raise ValueError(
+            "Cached fitting result used a different included_bonus_terms setting; "
+            "recompute it."
+        )
+
+
 def _field_wavenumbers(fields: HydrodynamicFields) -> tuple[np.ndarray, np.ndarray]:
     """Return spectral wave numbers for the cylinder surface grid."""
     ly = fields.cylinder_radius * (fields.theta_edges[-1] - fields.theta_edges[0])
@@ -347,25 +373,25 @@ def _coarse_grain_fields(fields: HydrodynamicFields, window: int) -> Hydrodynami
         theta_edges=fields.theta_edges,
         theta_centers=fields.theta_centers,
         rho=fields.rho,
-        P=fields.P,
+        P_density=fields.P_density,
         chirality=fields.chirality,
         D=fields.D,
         hexatic_order=fields.hexatic_order,
         S_cross=avg(fields.S_cross),
         partial_t_rho=avg(fields.partial_t_rho),
-        partial_t_P=avg(fields.partial_t_P),
+        partial_t_P_density=avg(fields.partial_t_P_density),
         grad_rho=avg(fields.grad_rho),
         grad_D=avg(fields.grad_D),
         grad_hexatic_order=avg(fields.grad_hexatic_order),
-        div_P=avg(fields.div_P),
-        div_chiral_P_perp=avg(fields.div_chiral_P_perp),
+        div_P_density=avg(fields.div_P_density),
+        div_chiral_P_density_perp=avg(fields.div_chiral_P_density_perp),
         laplacian_rho=avg(fields.laplacian_rho),
         laplacian_D=avg(fields.laplacian_D),
         laplacian_hexatic_order=avg(fields.laplacian_hexatic_order),
-        P_dot_grad_P=avg(fields.P_dot_grad_P),
-        P_perp_dot_grad_P=avg(fields.P_perp_dot_grad_P),
-        laplacian_P=avg(fields.laplacian_P),
-        laplacian_P_perp=avg(fields.laplacian_P_perp),
+        P_density_dot_grad_P_density=avg(fields.P_density_dot_grad_P_density),
+        P_density_perp_dot_grad_P_density=avg(fields.P_density_perp_dot_grad_P_density),
+        laplacian_P_density=avg(fields.laplacian_P_density),
+        laplacian_P_density_perp=avg(fields.laplacian_P_density_perp),
         material_current=avg(fields.material_current),
         mid_rho=avg(fields.mid_rho),
         mid_chirality=avg(fields.mid_chirality),
@@ -373,7 +399,7 @@ def _coarse_grain_fields(fields: HydrodynamicFields, window: int) -> Hydrodynami
         mid_hexatic_order=avg(fields.mid_hexatic_order),
         mid_h=avg(fields.mid_h),
         mid_P_r=avg(fields.mid_P_r),
-        mid_P=avg(fields.mid_P),
+        mid_P_density=avg(fields.mid_P_density),
         mid_force_density=avg(fields.mid_force_density),
         mask=all_valid(fields.mask),
         disclination_mask=any_valid(fields.disclination_mask),

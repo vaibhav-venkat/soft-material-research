@@ -13,9 +13,14 @@ from .fitting.config import (
     FittingConfig,
 )
 from .fitting.fields import load_or_compute_fields
-from .fitting.fit import FittingResult, compute_fitting, _coarse_grain_fields
+from .fitting.fit import (
+    FittingResult,
+    compute_fitting,
+    validate_current_library_terms,
+    _coarse_grain_fields,
+)
 from .fitting.io_cache import load_cache, write_cache
-from .fitting.library import NO_FORCE_LOW_K_TERM_NAMES
+from .fitting.library import NO_FORCE_LOW_K_TERM_NAMES, current_library_term_names
 from .fitting.movies import (
     MODEL_FITTING_MOVIE_FPS,
     MODEL_FITTING_MOVIE_SECONDS_PER_FRAME,
@@ -30,9 +35,24 @@ DROP_NO_FORCE_LOW_K_TERMS: tuple[str, ...] = (
     "low_k_grad_rho",
     "low_k_grad_hexatic_order",
     "low_k_grad_D",
-    "low_k_D_P",
-    "low_k_P_r_P",
+    "low_k_D_P_density",
+    "low_k_P_r_P_density",
 )
+
+included_bonus_terms: tuple[str, ...] = (
+    # "Q_dot_P_density",
+    # "Q_dot_P_density_perp",
+    # "Q_dot_grad_rho",
+    # "div_Q",
+    # "minus_grad_hexatic_order",
+    # "minus_grad_hexatic_order2",
+    # "minus_grad_D",
+    # "minus_grad_D2",
+    # "minus_grad_laplacian_rho",
+    # "minus_grad_laplacian_hexatic_order",
+    # "minus_grad_laplacian_D",
+)
+rho_N_power = 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -89,6 +109,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     _validate_drop_no_force_low_k_terms()
+    _validate_included_bonus_terms()
     config = FittingConfig(
         case_id=args.case,
         ridge_alpha=args.ridge_alpha,
@@ -106,15 +127,28 @@ def main(argv: list[str] | None = None) -> int:
                 config.coarse_grain_transitions,
             )
             result = FittingResult.from_cache_arrays(load_cache(config.cache_path), fields)
+            validate_current_library_terms(
+                result,
+                included_bonus_terms,
+                rho_N_power=rho_N_power,
+            )
             print("[fitting] Cache loaded.")
         except ValueError:
             print("[fitting] Cache stale; recomputing...")
-            result = compute_fitting(config)
+            result = compute_fitting(
+                config,
+                included_bonus_terms=included_bonus_terms,
+                rho_N_power=rho_N_power,
+            )
             write_cache(config.cache_path, overwrite=True, **result.as_cache_arrays())
             print("[fitting] Cache written.")
     else:
         print("[fitting] Computing fit result...")
-        result = compute_fitting(config)
+        result = compute_fitting(
+            config,
+            included_bonus_terms=included_bonus_terms,
+            rho_N_power=rho_N_power,
+        )
         write_cache(config.cache_path, overwrite=args.overwrite, **result.as_cache_arrays())
         print("[fitting] Cache written.")
 
@@ -124,6 +158,8 @@ def main(argv: list[str] | None = None) -> int:
         config.output_dir,
         case_id=args.case,
         drop_no_force_low_k_terms=DROP_NO_FORCE_LOW_K_TERMS,
+        included_bonus_terms=included_bonus_terms,
+        rho_N_power=rho_N_power,
     )
 
     # --- plots ---
@@ -135,6 +171,8 @@ def main(argv: list[str] | None = None) -> int:
                 config.output_dir,
                 case_id=args.case,
                 drop_no_force_low_k_terms=DROP_NO_FORCE_LOW_K_TERMS,
+                included_bonus_terms=included_bonus_terms,
+                rho_N_power=rho_N_power,
                 fps=args.movie_fps,
                 seconds_per_frame=args.movie_seconds_per_frame,
             )
@@ -151,6 +189,13 @@ def _validate_drop_no_force_low_k_terms() -> None:
             "DROP_NO_FORCE_LOW_K_TERMS contains unknown low-k terms: "
             + ", ".join(sorted(unknown))
         )
+
+
+def _validate_included_bonus_terms() -> None:
+    current_library_term_names(
+        included_bonus_terms,
+        rho_N_power=rho_N_power,
+    )
 
 
 if __name__ == "__main__":
