@@ -16,9 +16,6 @@ def write_density_plots(
     fit: StabilityResult,
     y_true: np.ndarray,
     rho: np.ndarray,
-    p_density: np.ndarray,
-    j_density: np.ndarray,
-    source_cross: np.ndarray,
     partial_t_rho: np.ndarray,
     temporal_power: np.ndarray,
     cheb_cutoff: int,
@@ -30,18 +27,9 @@ def write_density_plots(
     _importance_plot(output_dir / f"{case_id}_density_importance_scores.png", fit, plt)
     _predicted_true_plot(output_dir / f"{case_id}_density_true_vs_predicted.png", fit, y_true, plt)
     _predicted_true_plot(output_dir / f"{case_id}_density_predicted_vs_true.png", fit, y_true, plt)
-    write_temporal_power_plot(output_dir, case_id, temporal_power, cheb_cutoff)
-    write_temporal_power_plot(output_dir, f"{case_id}_temporal_map", temporal_power, cheb_cutoff)
-    predicted = density_prediction_fields(
-        rho,
-        p_density,
-        j_density,
-        source_cross,
-        fit.names,
-        fit.coefficients,
-        lx,
-        ly,
-    )
+    write_temporal_power_plots(output_dir, case_id, temporal_power, cheb_cutoff)
+
+    predicted = density_prediction_fields(rho, fit.names, fit.coefficients, lx, ly)
     residual = partial_t_rho - predicted
     _kymograph(output_dir / f"{case_id}_rho_kymograph.png", rho, "rho", plt)
     _kymograph(output_dir / f"{case_id}_partial_t_rho_kymograph.png", partial_t_rho, "partial_t rho", plt)
@@ -59,32 +47,48 @@ def write_density_plots(
         "mean abs residual",
         plt,
     )
-    _heatmap(output_dir / f"{case_id}_rho_snapshot.png", rho[rho.shape[0] // 2], "rho snapshot", plt)
-    _heatmap(
-        output_dir / f"{case_id}_partial_t_rho_snapshot.png",
-        partial_t_rho[partial_t_rho.shape[0] // 2],
-        "partial_t rho snapshot",
-        plt,
-    )
+    mid = rho.shape[0] // 2
+    _heatmap(output_dir / f"{case_id}_rho_snapshot.png", rho[mid], "rho snapshot", plt)
+    _heatmap(output_dir / f"{case_id}_partial_t_rho_snapshot.png", partial_t_rho[mid], "partial_t rho snapshot", plt)
     _heatmap(
         output_dir / f"{case_id}_predicted_partial_t_rho_snapshot.png",
-        predicted[predicted.shape[0] // 2],
+        predicted[mid],
         "predicted partial_t rho snapshot",
         plt,
     )
 
 
-def write_temporal_power_plot(
+def write_temporal_power_plots(
     output_dir: Path,
     case_id: str,
     temporal_power: np.ndarray,
     cheb_cutoff: int,
-) -> Path:
+) -> tuple[Path, Path, Path]:
     plt = _plotter(output_dir)
-    suffix = "" if case_id.endswith("_temporal_map") else "_temporal_power"
-    path = output_dir / f"{case_id}{suffix}_chebyshev.png"
-    _temporal_power_plot(path, temporal_power, cheb_cutoff, plt)
-    return path
+    base = output_dir / f"{case_id}_temporal_power_chebyshev"
+    paths = (
+        base.with_suffix(".png"),
+        output_dir / f"{base.name}_semilog.png",
+        output_dir / f"{base.name}_loglog.png",
+    )
+    _temporal_power_plot(paths[0], temporal_power, cheb_cutoff, plt, scale="linear")
+    _temporal_power_plot(paths[1], temporal_power, cheb_cutoff, plt, scale="semilog")
+    _temporal_power_plot(paths[2], temporal_power, cheb_cutoff, plt, scale="loglog")
+    return paths
+
+
+def density_prediction_fields(
+    rho: np.ndarray,
+    term_names: tuple[str, ...],
+    coefficients: np.ndarray,
+    lx: float,
+    ly: float,
+) -> np.ndarray:
+    predicted = np.zeros_like(rho, dtype=np.float64)
+    for name, coefficient in zip(term_names, coefficients, strict=True):
+        if coefficient != 0.0:
+            predicted += coefficient * _density_term_field(rho, name, lx, ly)
+    return predicted
 
 
 def _plotter(output_dir: Path):
@@ -103,7 +107,7 @@ def _coefficient_plot(path: Path, fit: StabilityResult, plt) -> None:
     fig, axis = plt.subplots(figsize=(max(6.0, 0.7 * len(fit.labels)), 4.0))
     axis.bar(x, fit.coefficients, color=np.where(fit.active, "#2b6cb0", "#a0aec0"))
     axis.set_xticks(x)
-    axis.set_xticklabels(fit.labels, rotation=35, ha="right")
+    axis.set_xticklabels(fit.labels, rotation=25, ha="right")
     axis.set_ylabel("coefficient")
     twin = axis.twinx()
     twin.plot(x, fit.importance, color="#c53030", marker="o", linewidth=1.5)
@@ -132,14 +136,9 @@ def _importance_plot(path: Path, fit: StabilityResult, plt) -> None:
 
 
 def _predicted_true_plot(path: Path, fit: StabilityResult, y_true: np.ndarray, plt) -> None:
-    max_points = min(20_000, y_true.size)
-    if y_true.size > max_points:
-        rows = np.linspace(0, y_true.size - 1, max_points, dtype=int)
-        y_plot = y_true[rows]
-        pred_plot = fit.y_pred[rows]
-    else:
-        y_plot = y_true
-        pred_plot = fit.y_pred
+    rows = np.linspace(0, y_true.size - 1, min(20_000, y_true.size), dtype=int)
+    y_plot = y_true[rows]
+    pred_plot = fit.y_pred[rows]
     fig, axis = plt.subplots(figsize=(4.5, 4.5))
     axis.scatter(y_plot, pred_plot, s=3, alpha=0.35, linewidths=0)
     lo = float(min(np.min(y_plot), np.min(pred_plot)))
@@ -153,58 +152,59 @@ def _predicted_true_plot(path: Path, fit: StabilityResult, y_true: np.ndarray, p
     plt.close(fig)
 
 
-def _temporal_power_plot(path: Path, temporal_power: np.ndarray, cheb_cutoff: int, plt) -> None:
+def _temporal_power_plot(path: Path, temporal_power: np.ndarray, cheb_cutoff: int, plt, *, scale: str) -> None:
     modes = np.arange(temporal_power.size)
+    positive_power = np.maximum(temporal_power, np.finfo(float).tiny)
     fig, axis = plt.subplots(figsize=(6.0, 4.0))
-    axis.semilogy(modes, temporal_power, marker="o", markersize=3, linewidth=1.2)
+    if scale == "loglog":
+        axis.loglog(modes[1:], positive_power[1:], marker="o", markersize=3, linewidth=1.2)
+    elif scale == "semilog":
+        axis.semilogy(modes, positive_power, marker="o", markersize=3, linewidth=1.2)
+    else:
+        axis.plot(modes, temporal_power, marker="o", markersize=3, linewidth=1.2)
     axis.axvline(cheb_cutoff - 1, color="#c53030", linewidth=1.0, linestyle="--")
     axis.set_xlabel("Chebyshev mode n")
     axis.set_ylabel("temporal spectral power")
-    axis.set_title("rho temporal spectrum")
+    axis.set_title(f"rho temporal spectrum ({scale})")
     fig.tight_layout()
     fig.savefig(path, dpi=160)
     plt.close(fig)
 
 
-def density_prediction_fields(
-    rho: np.ndarray,
-    p_density: np.ndarray,
-    j_density: np.ndarray,
-    source_cross: np.ndarray,
-    term_names: tuple[str, ...],
-    coefficients: np.ndarray,
-    lx: float,
-    ly: float,
-) -> np.ndarray:
-    predicted = np.zeros_like(rho, dtype=np.float64)
-    field_cache: dict[str, np.ndarray] = {}
-    for name, coefficient in zip(term_names, coefficients, strict=True):
-        if coefficient == 0.0:
-            continue
-        field = field_cache.get(name)
-        if field is None:
-            field = _density_term_field(rho, p_density, j_density, source_cross, name, lx, ly)
-            field_cache[name] = field
-        predicted += coefficient * field
-    return predicted
+def _density_term_field(rho: np.ndarray, name: str, lx: float, ly: float) -> np.ndarray:
+    if name == "neg_div_grad_rho":
+        return -_laplacian(rho, lx, ly)
+    if name == "neg_div_grad_lap_rho":
+        return -_laplacian(_laplacian(rho, lx, ly), lx, ly)
+    if name == "neg_div_lap_rho_grad_rho":
+        return -_divergence(_laplacian(rho, lx, ly)[..., np.newaxis] * _gradient(rho, lx, ly), lx, ly)
+    if name == "neg_div_grad_rho_cubed":
+        grad_rho = _gradient(rho, lx, ly)
+        return -_divergence(np.sum(grad_rho * grad_rho, axis=3, keepdims=True) * grad_rho, lx, ly)
+    assert False, f"unknown density term for plotting: {name}"
 
 
-def _density_term_field(
-    rho: np.ndarray,
-    p_density: np.ndarray,
-    j_density: np.ndarray,
-    source_cross: np.ndarray,
-    name: str,
-    lx: float,
-    ly: float,
-) -> np.ndarray:
-    if name == "source_cross":
-        return source_cross
-    if name == "neg_div_j":
-        return -_divergence(j_density, lx, ly)
-    if name == "lap_rho":
-        return _laplacian(rho, lx, ly)
-    raise ValueError(f"unknown density term for plotting: {name}")
+def _gradient(field: np.ndarray, lx: float, ly: float) -> np.ndarray:
+    _, nx, ny = field.shape
+    kx = 2.0 * np.pi * np.fft.fftfreq(nx, d=lx / nx)
+    ky = 2.0 * np.pi * np.fft.fftfreq(ny, d=ly / ny)
+    spectrum = np.fft.fft2(field, axes=(1, 2))
+    dx = np.fft.ifft2(1j * kx[np.newaxis, :, np.newaxis] * spectrum, axes=(1, 2)).real
+    dy = np.fft.ifft2(1j * ky[np.newaxis, np.newaxis, :] * spectrum, axes=(1, 2)).real
+    return np.stack((dx, dy), axis=3)
+
+
+def _divergence(field: np.ndarray, lx: float, ly: float) -> np.ndarray:
+    _, nx, ny, _ = field.shape
+    kx = 2.0 * np.pi * np.fft.fftfreq(nx, d=lx / nx)
+    ky = 2.0 * np.pi * np.fft.fftfreq(ny, d=ly / ny)
+    spectrum_x = np.fft.fft2(field[..., 0], axes=(1, 2))
+    spectrum_y = np.fft.fft2(field[..., 1], axes=(1, 2))
+    div_spectrum = (
+        1j * kx[np.newaxis, :, np.newaxis] * spectrum_x
+        + 1j * ky[np.newaxis, np.newaxis, :] * spectrum_y
+    )
+    return np.fft.ifft2(div_spectrum, axes=(1, 2)).real
 
 
 def _laplacian(field: np.ndarray, lx: float, ly: float) -> np.ndarray:
@@ -214,19 +214,6 @@ def _laplacian(field: np.ndarray, lx: float, ly: float) -> np.ndarray:
     k2 = kx[:, np.newaxis] ** 2 + ky[np.newaxis, :] ** 2
     spectrum = np.fft.fft2(field, axes=(1, 2))
     return np.fft.ifft2((-k2)[np.newaxis, :, :] * spectrum, axes=(1, 2)).real
-
-
-def _divergence(field: np.ndarray, lx: float, ly: float) -> np.ndarray:
-    _, nx, ny, _ = field.shape
-    kx = 2.0 * np.pi * np.fft.fftfreq(nx, d=lx / nx)
-    ky = 2.0 * np.pi * np.fft.fftfreq(ny, d=ly / ny)
-    spectrum_x = np.fft.fft2(field[..., 0], axes=(1, 2))
-    spectrum_y = np.fft.fft2(field[..., 1], axes=(1, 2))
-    spectrum = (
-        (1j * kx)[np.newaxis, :, np.newaxis] * spectrum_x
-        + (1j * ky)[np.newaxis, np.newaxis, :] * spectrum_y
-    )
-    return np.fft.ifft2(spectrum, axes=(1, 2)).real
 
 
 def _kymograph(path: Path, field: np.ndarray, title: str, plt) -> None:

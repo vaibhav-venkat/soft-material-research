@@ -41,12 +41,9 @@ def stability_selection(
 ) -> StabilityResult:
     X = np.asarray(X, dtype=np.float64)
     y = np.asarray(y, dtype=np.float64)
-    if X.ndim != 2 or y.ndim != 1 or X.shape[0] != y.size:
-        raise ValueError("X must be (N, terms) and y must be (N,)")
-    if X.shape[1] != len(names) or len(names) != len(labels):
-        raise ValueError("term metadata must match X columns")
-    if X.shape[0] == 0 or X.shape[1] == 0:
-        raise ValueError("regression matrix must be non-empty")
+    assert X.ndim == 2 and y.ndim == 1 and X.shape[0] == y.size, "X must be (N, terms) and y must be (N,)"
+    assert X.shape[1] == len(names) == len(labels), "term metadata must match X columns"
+    assert X.shape[0] > 0 and X.shape[1] > 0, "regression matrix must be non-empty"
 
     raw_correlations = raw_feature_correlations(X, y)
     _progress("raw correlations with partial_t_rho")
@@ -130,10 +127,8 @@ def final_refit(X: np.ndarray, y: np.ndarray, active: np.ndarray, alpha: float) 
 
 
 def tau_path(tau_max: float, count: int = 40, eps: float = 1e-2) -> np.ndarray:
-    if tau_max < 0.0:
-        raise ValueError("tau_max must be nonnegative")
-    if count < 1 or eps <= 0.0:
-        raise ValueError("invalid tau path settings")
+    assert tau_max >= 0.0, "tau_max must be nonnegative"
+    assert count >= 1 and eps > 0.0, "invalid tau path settings"
     if tau_max == 0.0:
         return np.zeros(count, dtype=np.float64)
     return tau_max * np.logspace(0.0, np.log10(eps), count)
@@ -143,8 +138,7 @@ def raw_feature_correlations(X: np.ndarray, y: np.ndarray) -> np.ndarray:
     """Signed Pearson correlations between raw candidate columns and target."""
     X = np.asarray(X, dtype=np.float64)
     y = np.asarray(y, dtype=np.float64)
-    if X.ndim != 2 or y.ndim != 1 or X.shape[0] != y.size:
-        raise ValueError("X must be (N, terms) and y must be (N,)")
+    assert X.ndim == 2 and y.ndim == 1 and X.shape[0] == y.size, "X must be (N, terms) and y must be (N,)"
 
     X_centered = X - np.mean(X, axis=0)
     y_centered = y - np.mean(y)
@@ -209,11 +203,6 @@ def _pysindy_coefficients(
         )
         optimizer.fit(X, y)
     return np.asarray(optimizer.coef_, dtype=np.float64).reshape(-1)
-
-
-def _choose_tau_index(importance_path: np.ndarray, threshold: float) -> int | None:
-    hits = np.where(np.any(importance_path >= threshold, axis=1))[0]
-    return int(hits[0]) if hits.size else None
 
 
 def _result(

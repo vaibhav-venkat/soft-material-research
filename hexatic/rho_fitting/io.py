@@ -80,13 +80,11 @@ def load_gsd_orientations(path: Path) -> GsdOrientationArrays:
     with gsd.hoomd.open(name=str(path), mode="r") as source:
         for frame in source:
             orientation = frame.particles.orientation
-            if orientation is None:
-                raise ValueError(f"missing particle orientation in {path}")
+            assert orientation is not None, f"missing particle orientation in {path}"
             steps.append(int(frame.configuration.step))
             orientations.append(np.asarray(orientation, dtype=float))
 
-    if not orientations:
-        raise ValueError(f"empty GSD trajectory: {path}")
+    assert orientations, f"empty GSD trajectory: {path}"
     return GsdOrientationArrays(
         steps=np.asarray(steps, dtype=np.int64),
         orientation=np.asarray(orientations, dtype=float),
@@ -96,40 +94,28 @@ def load_gsd_orientations(path: Path) -> GsdOrientationArrays:
 def validate_step_alignment(active: ActiveMatterArrays, gsd: GsdOrientationArrays | None) -> None:
     if gsd is None:
         return
-    if active.steps.shape != gsd.steps.shape or not np.array_equal(active.steps, gsd.steps):
-        raise ValueError("GSD and NPZ steps do not align")
+    assert active.steps.shape == gsd.steps.shape and np.array_equal(active.steps, gsd.steps), (
+        "GSD and NPZ steps do not align"
+    )
 
 
 def validate_active_matter_arrays(arrays: ActiveMatterArrays) -> None:
-    if arrays.coords.ndim != 3 or arrays.coords.shape[-1] != 3:
-        raise ValueError("coords must have shape (frames, particles, 3)")
-    if arrays.steps.shape != (arrays.coords.shape[0],):
-        raise ValueError("steps must match coords frame axis")
-    if arrays.shell_mask.shape != arrays.coords.shape[:2]:
-        raise ValueError("shell_mask must match coords frame/particle axes")
-    if arrays.active_direction is not None and (
-        arrays.active_direction.shape[:2] != arrays.coords.shape[:2]
-        or arrays.active_direction.shape[-1] != 3
-    ):
-        raise ValueError("active_direction must match coords frame/particle axes")
-    if arrays.direction_cylindrical is not None and (
-        arrays.direction_cylindrical.shape[:2] != arrays.coords.shape[:2]
-        or arrays.direction_cylindrical.shape[-1] != 3
-    ):
-        raise ValueError("direction_cylindrical must match coords frame/particle axes")
-    if arrays.flux_cylindrical is not None and (
-        arrays.flux_cylindrical.shape[:2] != arrays.coords.shape[:2]
-        or arrays.flux_cylindrical.shape[-1] != 3
-    ):
-        raise ValueError("flux_cylindrical must match coords frame/particle axes")
-    if arrays.x_edges.ndim != 1 or arrays.theta_edges.ndim != 1:
-        raise ValueError("grid edges must be one-dimensional")
-    if arrays.x_centers.shape != (arrays.x_edges.size - 1,):
-        raise ValueError("x_centers must match x_edges")
-    if arrays.theta_centers.shape != (arrays.theta_edges.size - 1,):
-        raise ValueError("theta_centers must match theta_edges")
-    if arrays.radius <= 0.0:
-        raise ValueError("radius must be positive")
+    assert arrays.coords.ndim == 3 and arrays.coords.shape[-1] == 3, "coords must have shape (frames, particles, 3)"
+    assert arrays.steps.shape == (arrays.coords.shape[0],), "steps must match coords frame axis"
+    assert arrays.shell_mask.shape == arrays.coords.shape[:2], "shell_mask must match coords frame/particle axes"
+    assert _optional_vector_matches(arrays.active_direction, arrays.coords), (
+        "active_direction must match coords frame/particle axes"
+    )
+    assert _optional_vector_matches(arrays.direction_cylindrical, arrays.coords), (
+        "direction_cylindrical must match coords frame/particle axes"
+    )
+    assert _optional_vector_matches(arrays.flux_cylindrical, arrays.coords), (
+        "flux_cylindrical must match coords frame/particle axes"
+    )
+    assert arrays.x_edges.ndim == 1 and arrays.theta_edges.ndim == 1, "grid edges must be one-dimensional"
+    assert arrays.x_centers.shape == (arrays.x_edges.size - 1,), "x_centers must match x_edges"
+    assert arrays.theta_centers.shape == (arrays.theta_edges.size - 1,), "theta_centers must match theta_edges"
+    assert arrays.radius > 0.0, "radius must be positive"
 
 
 def _read_radius(data: np.lib.npyio.NpzFile, fallback_radius: float | None) -> float:
@@ -138,7 +124,7 @@ def _read_radius(data: np.lib.npyio.NpzFile, fallback_radius: float | None) -> f
             return float(np.asarray(data[name]).reshape(-1)[0])
     if fallback_radius is not None:
         return float(fallback_radius)
-    raise ValueError("missing cylinder radius metadata")
+    assert False, "missing cylinder radius metadata"
 
 
 def _read_centers(data: np.lib.npyio.NpzFile, axis: str) -> np.ndarray:
@@ -148,3 +134,7 @@ def _read_centers(data: np.lib.npyio.NpzFile, axis: str) -> np.ndarray:
         return np.asarray(data[center_name], dtype=float)
     edges = np.asarray(data[edge_name], dtype=float)
     return 0.5 * (edges[:-1] + edges[1:])
+
+
+def _optional_vector_matches(values: np.ndarray | None, coords: np.ndarray) -> bool:
+    return values is None or (values.shape[:2] == coords.shape[:2] and values.shape[-1] == 3)

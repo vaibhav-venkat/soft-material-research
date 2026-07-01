@@ -1,31 +1,52 @@
-use std::collections::HashMap;
-
-use ndarray::{Array2, Array3, ArrayView2, ArrayView3, ArrayView4};
+use ndarray::{Array2, Array3, Array4, ArrayView2, ArrayView3, ArrayView4};
 
 use crate::fft_ops;
 use crate::{CoreError, CoreResult};
 
+pub const DENSITY_TERM_NAMES: [&str; 4] = [
+    "neg_div_grad_rho",
+    "neg_div_grad_lap_rho",
+    "neg_div_lap_rho_grad_rho",
+    "neg_div_grad_rho_cubed",
+];
+
+pub struct DensityFluxes {
+    pub grad_rho: Array4<f64>,
+    pub grad_lap_rho: Array4<f64>,
+    pub lap_rho_grad_rho: Array4<f64>,
+    pub grad_rho_cubed: Array4<f64>,
+}
+
+pub fn build_density_fluxes(
+    rho: ArrayView3<'_, f64>,
+    lx: f64,
+    ly: f64,
+) -> CoreResult<DensityFluxes> {
+    let grad_rho = fft_ops::gradient_scalar(rho, lx, ly)?;
+    let lap_rho = fft_ops::laplacian_scalar(rho, lx, ly)?;
+    let grad_lap_rho = fft_ops::gradient_scalar(lap_rho.view(), lx, ly)?;
+    let lap_rho_grad_rho = scalar_times_vector(lap_rho.view(), grad_rho.view());
+    let grad_rho_cubed = cubic_gradient_flux(grad_rho.view());
+    Ok(DensityFluxes {
+        grad_rho,
+        grad_lap_rho,
+        lap_rho_grad_rho,
+        grad_rho_cubed,
+    })
+}
+
 pub fn build_density_library(
     rho: ArrayView3<'_, f64>,
-    p_density: ArrayView4<'_, f64>,
-    j_density: ArrayView4<'_, f64>,
-    source_cross: ArrayView3<'_, f64>,
     sample_indices: ArrayView2<'_, i64>,
     term_names: &[String],
     lx: f64,
     ly: f64,
 ) -> CoreResult<Array2<f64>> {
-    validate_inputs(
-        rho,
-        p_density,
-        j_density,
-        source_cross,
-        sample_indices,
-        term_names,
-    )?;
+    validate_inputs(rho, sample_indices, term_names, lx, ly)?;
+
     let samples = sample_indices.dim().0;
     let mut out = Array2::<f64>::zeros((samples, term_names.len()));
-    let mut field_cache: HashMap<String, Array3<f64>> = HashMap::new();
+    let fluxes = build_density_fluxes(rho, lx, ly)?;
 
     for (column, name) in term_names.iter().enumerate() {
         println!(
@@ -34,14 +55,7 @@ pub fn build_density_library(
             term_names.len(),
             name
         );
-        let field = match field_cache.get(name) {
-            Some(field) => field,
-            None => {
-                let field = build_term_field(rho, j_density, source_cross, name, lx, ly)?;
-                field_cache.insert(name.clone(), field);
-                field_cache.get(name).expect("inserted field must exist")
-            }
-        };
+        let field = candidate_field(name, &fluxes, lx, ly)?;
         for row in 0..samples {
             let (t, ix, iy) = index_triplet(sample_indices, row)?;
             out[[row, column]] = field[[t, ix, iy]];
@@ -52,16 +66,72 @@ pub fn build_density_library(
 }
 
 pub fn known_density_term(name: &str) -> bool {
-    matches!(name, "source_cross" | "neg_div_j" | "lap_rho")
+    DENSITY_TERM_NAMES.contains(&name)
+}
+
+fn candidate_field(
+    name: &str,
+    fluxes: &DensityFluxes,
+    lx: f64,
+    ly: f64,
+) -> CoreResult<Array3<f64>> {
+    let mut field = match name {
+        "neg_div_grad_rho" => fft_ops::divergence_vector(fluxes.grad_rho.view(), lx, ly)?,
+        "neg_div_grad_lap_rho" => fft_ops::divergence_vector(fluxes.grad_lap_rho.view(), lx, ly)?,
+        "neg_div_lap_rho_grad_rho" => {
+            fft_ops::divergence_vector(fluxes.lap_rho_grad_rho.view(), lx, ly)?
+        }
+        "neg_div_grad_rho_cubed" => {
+            fft_ops::divergence_vector(fluxes.grad_rho_cubed.view(), lx, ly)?
+        }
+        _ => {
+            return Err(CoreError::InvalidInput(format!(
+                "unknown density term {name}"
+            )))
+        }
+    };
+    field.mapv_inplace(|value| -value);
+    Ok(field)
+}
+
+fn scalar_times_vector(scalar: ArrayView3<'_, f64>, vector: ArrayView4<'_, f64>) -> Array4<f64> {
+    let (frames, nx, ny) = scalar.dim();
+    let mut out = Array4::<f64>::zeros((frames, nx, ny, 2));
+    for t in 0..frames {
+        for ix in 0..nx {
+            for iy in 0..ny {
+                let scale = scalar[[t, ix, iy]];
+                out[[t, ix, iy, 0]] = scale * vector[[t, ix, iy, 0]];
+                out[[t, ix, iy, 1]] = scale * vector[[t, ix, iy, 1]];
+            }
+        }
+    }
+    out
+}
+
+fn cubic_gradient_flux(grad_rho: ArrayView4<'_, f64>) -> Array4<f64> {
+    let (frames, nx, ny, _) = grad_rho.dim();
+    let mut out = Array4::<f64>::zeros((frames, nx, ny, 2));
+    for t in 0..frames {
+        for ix in 0..nx {
+            for iy in 0..ny {
+                let dx = grad_rho[[t, ix, iy, 0]];
+                let dy = grad_rho[[t, ix, iy, 1]];
+                let norm2 = dx * dx + dy * dy;
+                out[[t, ix, iy, 0]] = norm2 * dx;
+                out[[t, ix, iy, 1]] = norm2 * dy;
+            }
+        }
+    }
+    out
 }
 
 fn validate_inputs(
     rho: ArrayView3<'_, f64>,
-    p_density: ArrayView4<'_, f64>,
-    j_density: ArrayView4<'_, f64>,
-    source_cross: ArrayView3<'_, f64>,
     sample_indices: ArrayView2<'_, i64>,
     term_names: &[String],
+    lx: f64,
+    ly: f64,
 ) -> CoreResult<()> {
     let (frames, nx, ny) = rho.dim();
     if frames == 0 || nx == 0 || ny == 0 {
@@ -69,19 +139,9 @@ fn validate_inputs(
             "rho axes must be non-empty".to_string(),
         ));
     }
-    if p_density.dim() != (frames, nx, ny, 2) {
-        return Err(CoreError::Shape(
-            "P_density must have shape (T, Nx, Ny, 2)".to_string(),
-        ));
-    }
-    if j_density.dim() != (frames, nx, ny, 2) {
-        return Err(CoreError::Shape(
-            "J_density must have shape (T, Nx, Ny, 2)".to_string(),
-        ));
-    }
-    if source_cross.dim() != (frames, nx, ny) {
-        return Err(CoreError::Shape(
-            "S_cross must have shape (T, Nx, Ny)".to_string(),
+    if !(lx.is_finite() && lx > 0.0 && ly.is_finite() && ly > 0.0) {
+        return Err(CoreError::InvalidInput(
+            "domain lengths must be positive".to_string(),
         ));
     }
     if sample_indices.dim().1 != 3 {
@@ -103,28 +163,6 @@ fn validate_inputs(
         }
     }
     Ok(())
-}
-
-fn build_term_field(
-    rho: ArrayView3<'_, f64>,
-    j_density: ArrayView4<'_, f64>,
-    source_cross: ArrayView3<'_, f64>,
-    name: &str,
-    lx: f64,
-    ly: f64,
-) -> CoreResult<Array3<f64>> {
-    match name {
-        "source_cross" => Ok(source_cross.to_owned()),
-        "neg_div_j" => {
-            let mut field = fft_ops::divergence_vector(j_density, lx, ly)?;
-            field.mapv_inplace(|value| -value);
-            Ok(field)
-        }
-        "lap_rho" => fft_ops::laplacian_scalar(rho, lx, ly),
-        _ => Err(CoreError::InvalidInput(format!(
-            "unknown density term {name}"
-        ))),
-    }
 }
 
 fn index_triplet(

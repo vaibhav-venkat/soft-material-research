@@ -1,4 +1,4 @@
-use numpy::{IntoPyArray, PyReadonlyArray1, PyReadonlyArray2, PyReadonlyArray3, PyReadonlyArray4};
+use numpy::{IntoPyArray, PyReadonlyArray1, PyReadonlyArray2, PyReadonlyArray3};
 use pyo3::exceptions::{PyNotImplementedError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -168,13 +168,27 @@ fn sample_rows(
 }
 
 #[pyfunction]
-#[pyo3(signature = (rho, p_density, j_density, source_cross, sample_indices, term_names, lx, ly))]
+#[pyo3(signature = (rho, lx, ly))]
+fn build_density_fluxes(
+    py: Python<'_>,
+    rho: PyReadonlyArray3<'_, f64>,
+    lx: f64,
+    ly: f64,
+) -> PyResult<Py<PyDict>> {
+    let fluxes = library::build_density_fluxes(rho.as_array(), lx, ly).map_err(to_py_err)?;
+    let out = PyDict::new(py);
+    out.set_item("grad_rho", fluxes.grad_rho.into_pyarray(py))?;
+    out.set_item("grad_lap_rho", fluxes.grad_lap_rho.into_pyarray(py))?;
+    out.set_item("lap_rho_grad_rho", fluxes.lap_rho_grad_rho.into_pyarray(py))?;
+    out.set_item("grad_rho_cubed", fluxes.grad_rho_cubed.into_pyarray(py))?;
+    Ok(out.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (rho, sample_indices, term_names, lx, ly))]
 fn build_density_library(
     py: Python<'_>,
     rho: PyReadonlyArray3<'_, f64>,
-    p_density: PyReadonlyArray4<'_, f64>,
-    j_density: PyReadonlyArray4<'_, f64>,
-    source_cross: PyReadonlyArray3<'_, f64>,
     sample_indices: PyReadonlyArray2<'_, i64>,
     term_names: Vec<String>,
     lx: f64,
@@ -189,9 +203,6 @@ fn build_density_library(
     }
     let values = library::build_density_library(
         rho.as_array(),
-        p_density.as_array(),
-        j_density.as_array(),
-        source_cross.as_array(),
         sample_indices.as_array(),
         &term_names,
         lx,
@@ -212,6 +223,7 @@ fn _rho_fitting_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(coarse_grain_fields, m)?)?;
     m.add_function(wrap_pyfunction!(spatial_derivatives, m)?)?;
     m.add_function(wrap_pyfunction!(sample_rows, m)?)?;
+    m.add_function(wrap_pyfunction!(build_density_fluxes, m)?)?;
     m.add_function(wrap_pyfunction!(build_density_library, m)?)?;
     m.add_function(wrap_pyfunction!(stlsq, m)?)?;
     Ok(())

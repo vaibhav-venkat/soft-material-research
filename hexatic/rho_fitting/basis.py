@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from numpy.polynomial import chebyshev as cheb
+from scipy.interpolate import CubicSpline
 
 
 @dataclass(frozen=True)
@@ -19,8 +20,7 @@ class ChebyshevTimeResult:
 
 
 def temporal_power_spectrum(*coefficients: np.ndarray) -> np.ndarray:
-    if not coefficients:
-        raise ValueError("at least one coefficient array is required")
+    assert coefficients, "at least one coefficient array is required"
     power = np.zeros(coefficients[0].shape[0], dtype=np.float64)
     for coeff in coefficients:
         axes = tuple(range(1, coeff.ndim))
@@ -29,17 +29,14 @@ def temporal_power_spectrum(*coefficients: np.ndarray) -> np.ndarray:
 
 
 def validate_cheb_cutoff(cutoff: int, frame_count: int) -> int:
-    if cutoff < 1:
-        raise ValueError("cheb_cutoff must be positive")
+    assert cutoff >= 1, "cheb_cutoff must be positive"
     return min(cutoff, frame_count)
 
 
 def physical_times(steps: np.ndarray, timestep: float) -> np.ndarray:
     steps = np.asarray(steps, dtype=np.float64)
-    if steps.ndim != 1 or steps.size == 0:
-        raise ValueError("steps must be a non-empty 1D array")
-    if timestep <= 0.0:
-        raise ValueError("timestep must be positive")
+    assert steps.ndim == 1 and steps.size > 0, "steps must be a non-empty 1D array"
+    assert timestep > 0.0, "timestep must be positive"
     return (steps - steps[0]) * timestep
 
 
@@ -53,12 +50,11 @@ def chebyshev_filter_and_derivative(
     frame_count = values.shape[0]
     cutoff = validate_cheb_cutoff(cutoff, frame_count)
     times = physical_times(steps, timestep)
-    if times.size != frame_count:
-        raise ValueError("steps length must match values time axis")
+    assert times.size == frame_count, "steps length must match values time axis"
 
     scaled, half_span = _scaled_times(times)
     fit_coeffs = _fit_coefficients(values, scaled, cutoff - 1)
-    diagnostic_coeffs = _project_coefficients(values, scaled, frame_count - 1)
+    diagnostic_coeffs = _diagnostic_coefficients(values, scaled)
 
     flat_coeffs = fit_coeffs.reshape((cutoff, -1))
     filtered = cheb.chebval(scaled, flat_coeffs).T.reshape(values.shape)
@@ -82,8 +78,7 @@ def _scaled_times(times: np.ndarray) -> tuple[np.ndarray, float]:
     if times.size == 1:
         return np.zeros_like(times), 1.0
     span = times[-1] - times[0]
-    if span <= 0.0:
-        raise ValueError("steps must increase over time")
+    assert span > 0.0, "steps must increase over time"
     center = 0.5 * (times[0] + times[-1])
     half_span = 0.5 * span
     return (times - center) / half_span, half_span
@@ -97,11 +92,19 @@ def _fit_coefficients(values: np.ndarray, scaled_times: np.ndarray, degree: int)
     return coeffs.reshape((degree + 1, *values.shape[1:]))
 
 
-def _project_coefficients(values: np.ndarray, scaled_times: np.ndarray, degree: int) -> np.ndarray:
+def _diagnostic_coefficients(values: np.ndarray, scaled_times: np.ndarray) -> np.ndarray:
+    if values.shape[0] == 1:
+        return values.copy()
+    nodes, node_values = _values_at_chebyshev_lobatto_nodes(values, scaled_times)
+    return _fit_coefficients(node_values, nodes, node_values.shape[0] - 1)
+
+
+def _values_at_chebyshev_lobatto_nodes(
+    values: np.ndarray,
+    scaled_times: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
     frame_count = values.shape[0]
+    nodes = np.cos(np.pi * np.arange(frame_count) / (frame_count - 1))[::-1]
     flat = values.reshape((frame_count, -1))
-    vandermonde = cheb.chebvander(scaled_times, degree)
-    denom = np.sum(vandermonde * vandermonde, axis=0)
-    denom[denom == 0.0] = 1.0
-    coeffs = (vandermonde.T @ flat) / denom[:, np.newaxis]
-    return coeffs.reshape((degree + 1, *values.shape[1:]))
+    sampled = CubicSpline(scaled_times, flat, axis=0)(nodes)
+    return nodes, sampled.reshape(values.shape)

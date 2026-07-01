@@ -45,8 +45,6 @@ class NumericalSettings:
     sigma: float = 5.0 * PARTICLE_DIAMETER
     cheb_cutoff: int = 10
     timestep: float = cylinder.SIMULATION.timestep
-    n_rho_power: int = 5
-    n_rho_lap_power: int = 4
     nd: int = 500_000
     seed: int = 0
     replace: bool = False
@@ -61,31 +59,17 @@ class NumericalSettings:
 @dataclass(frozen=True)
 class RhoFittingConfig:
     case_id: str = "radius_15D"
-    nd: int = 500_000
-    seed: int = 0
     overwrite: bool = False
     make_plots: bool = True
-    coarse_grain: bool = True
-    max_frames: int | None = None
     output_dir: Path = DEFAULT_OUTPUT_DIR
     settings: NumericalSettings | None = None
 
     def __post_init__(self) -> None:
-        if self.nd <= 0:
-            raise ValueError("nd must be positive")
-        if self.max_frames is not None and self.max_frames <= 0:
-            raise ValueError("max_frames must be positive")
-        settings = self.settings or NumericalSettings(nd=self.nd, seed=self.seed)
-        if settings.sigma <= 0.0:
-            raise ValueError("sigma must be positive")
-        if settings.cheb_cutoff <= 0:
-            raise ValueError("cheb_cutoff must be positive")
-        if settings.timestep <= 0.0:
-            raise ValueError("timestep must be positive")
-        if settings.n_rho_power < 0:
-            raise ValueError("n_rho_power must be nonnegative")
-        if settings.n_rho_lap_power < 0:
-            raise ValueError("n_rho_lap_power must be nonnegative")
+        settings = self.settings or NumericalSettings()
+        assert settings.nd > 0, "nd must be positive"
+        assert settings.sigma > 0.0, "sigma must be positive"
+        assert settings.cheb_cutoff > 0, "cheb_cutoff must be positive"
+        assert settings.timestep > 0.0, "timestep must be positive"
         object.__setattr__(self, "settings", settings)
 
     @property

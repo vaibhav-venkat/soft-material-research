@@ -21,22 +21,22 @@ def grid_centers(edges: np.ndarray) -> np.ndarray:
 def surface_lengths(x_edges: np.ndarray, theta_edges: np.ndarray, radius: float) -> tuple[float, float]:
     lx = float(x_edges[-1] - x_edges[0])
     theta_span = float(theta_edges[-1] - theta_edges[0])
-    if not np.isclose(theta_span, 2.0 * np.pi, rtol=1.0e-6, atol=1.0e-8):
-        raise ValueError("theta_edges must span 2*pi for full-cylinder derivatives")
+    assert np.isclose(theta_span, 2.0 * np.pi, rtol=1.0e-6, atol=1.0e-8), (
+        "theta_edges must span 2*pi for full-cylinder derivatives"
+    )
     ly = float(2.0 * np.pi * radius)
-    if lx <= 0.0 or ly <= 0.0:
-        raise ValueError("surface lengths must be positive")
+    assert lx > 0.0 and ly > 0.0, "surface lengths must be positive"
     return lx, ly
 
 
 def active_direction_from_quaternion(orientation: np.ndarray) -> np.ndarray:
     orientation = np.asarray(orientation, dtype=float)
-    if orientation.ndim != 3 or orientation.shape[-1] != 4:
-        raise ValueError("orientation must have shape (frames, particles, 4)")
+    assert orientation.ndim == 3 and orientation.shape[-1] == 4, (
+        "orientation must have shape (frames, particles, 4)"
+    )
 
     norms = np.linalg.norm(orientation, axis=-1)
-    if np.any(norms <= 0.0):
-        raise ValueError("orientation contains zero-norm quaternions")
+    assert np.all(norms > 0.0), "orientation contains zero-norm quaternions"
     quat = orientation / norms[..., np.newaxis]
     w = quat[..., 0]
     x = quat[..., 1]
@@ -55,8 +55,9 @@ def active_direction_from_quaternion(orientation: np.ndarray) -> np.ndarray:
 def cartesian_to_cylindrical_components(vectors: np.ndarray, theta: np.ndarray) -> np.ndarray:
     vectors = np.asarray(vectors, dtype=float)
     theta = np.asarray(theta, dtype=float)
-    if vectors.shape[-1] != 3 or vectors.shape[:-1] != theta.shape:
-        raise ValueError("vectors must have shape theta.shape + (3,)")
+    assert vectors.shape[-1] == 3 and vectors.shape[:-1] == theta.shape, (
+        "vectors must have shape theta.shape + (3,)"
+    )
 
     sin_theta = np.sin(theta)
     cos_theta = np.cos(theta)
@@ -73,18 +74,18 @@ def tangential_particle_vectors(
     orientation: np.ndarray | None = None,
 ) -> np.ndarray:
     coords = np.asarray(coords, dtype=float)
-    if coords.ndim != 3 or coords.shape[-1] < 2:
-        raise ValueError("coords must have shape (frames, particles, >=2)")
+    assert coords.ndim == 3 and coords.shape[-1] >= 2, "coords must have shape (frames, particles, >=2)"
 
     if direction_cylindrical is not None:
         cylindrical = np.asarray(direction_cylindrical, dtype=float)
     else:
         if active_direction is None:
             if orientation is None:
-                raise ValueError("missing particle orientation source")
+                assert False, "missing particle orientation source"
             active_direction = active_direction_from_quaternion(orientation)
         cylindrical = cartesian_to_cylindrical_components(active_direction, coords[..., 1])
 
-    if cylindrical.shape[:2] != coords.shape[:2] or cylindrical.shape[-1] != 3:
-        raise ValueError("particle directions must match coords frame/particle axes")
+    assert cylindrical.shape[:2] == coords.shape[:2] and cylindrical.shape[-1] == 3, (
+        "particle directions must match coords frame/particle axes"
+    )
     return np.ascontiguousarray(np.stack((cylindrical[..., 0], cylindrical[..., 2]), axis=-1))
