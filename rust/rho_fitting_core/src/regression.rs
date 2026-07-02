@@ -36,7 +36,7 @@ pub fn stability_selection(
     validate_inputs(x, y, tau_eps, subsamples, importance_threshold, alpha)?;
     let raw_correlations = raw_feature_correlations(x, y);
     let (xn, yn) = normalize_for_path(x, y);
-    let coef0 = stlsq(&xn.view(), &yn.view(), 0.0, alpha, max_iter)?;
+    let coef0 = stlsq(&xn.view(), &yn.view(), 0.0, alpha, max_iter, false)?;
     let tau_max = coef0.iter().fold(0.0_f64, |acc, value| acc.max(value.abs())) * 1.01;
     let tau = selected_tau(tau_max, tau_eps);
     let tau_values = Array1::from_vec(vec![tau]);
@@ -70,7 +70,7 @@ pub fn stability_selection(
         let sample = &rows[..n_sub];
         let x_sub = select_rows(&xn.view(), sample);
         let y_sub = select_values(&yn.view(), sample);
-        let coefficients = stlsq(&x_sub.view(), &y_sub.view(), tau, alpha, max_iter)?;
+        let coefficients = stlsq(&x_sub.view(), &y_sub.view(), tau, alpha, max_iter, false)?;
         for feature in 0..coefficients.len() {
             if coefficients[feature].abs() > 0.0 {
                 kept[feature] += 1.0;
@@ -202,6 +202,7 @@ fn stlsq(
     threshold: f64,
     alpha: f64,
     max_iter: usize,
+    unbias: bool,
 ) -> CoreResult<Array1<f64>> {
     let mut coefficients = solve_least_squares(x, y, alpha)?;
     let mut support = vec![true; x.dim().1];
@@ -224,7 +225,7 @@ fn stlsq(
         }
         coefficients = refit_support(x, y, &support, alpha)?;
     }
-    if support.iter().any(|keep| *keep) {
+    if unbias && support.iter().any(|keep| *keep) {
         refit_support(x, y, &support, 0.0)
     } else {
         Ok(coefficients)
@@ -389,7 +390,7 @@ mod tests {
     fn stlsq_final_coefficients_are_unbiased() {
         let x = array![[1.0], [2.0], [3.0], [4.0], [5.0]];
         let y = array![2.0, 4.0, 6.0, 8.0, 10.0];
-        let coefficients = stlsq(&x.view(), &y.view(), 0.1, 10.0, 20)
+        let coefficients = stlsq(&x.view(), &y.view(), 0.1, 10.0, 20, true)
             .expect("regression should succeed");
         assert!((coefficients[0] - 2.0).abs() < 1.0e-10);
     }
@@ -398,7 +399,7 @@ mod tests {
     fn stlsq_can_threshold_everything_out() {
         let x = array![[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]];
         let y = array![1.0, 1.0, 2.0];
-        let coefficients = stlsq(&x.view(), &y.view(), 10.0, 0.0, 20)
+        let coefficients = stlsq(&x.view(), &y.view(), 10.0, 0.0, 20, true)
             .expect("regression should succeed");
         assert_eq!(coefficients.to_vec(), vec![0.0, 0.0]);
     }

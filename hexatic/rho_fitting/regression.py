@@ -45,6 +45,7 @@ def stability_selection(
     assert X.shape[0] > 0 and X.shape[1] > 0, "regression matrix must be non-empty"
 
     assert _rho_fitting_core is not None, "rho_fitting extension is not built"
+    _progress(f"running Rust STLSQ stability selection rows={X.shape[0]} terms={X.shape[1]} subsamples={subsamples}")
     result = _rho_fitting_core.stability_selection(
         np.ascontiguousarray(X, dtype=np.float64),
         np.ascontiguousarray(y, dtype=np.float64),
