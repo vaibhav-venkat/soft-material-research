@@ -131,7 +131,6 @@ class RhoFittingMechanicsTests(unittest.TestCase):
             sigma=1.0,
             cheb_cutoff=1,
             fits={"Y_rho": fit},
-            warnings=(),
         )
 
         self.assertTrue(any("| term | 1 | 1 | 1.0000 | nan |" in line for line in lines))
