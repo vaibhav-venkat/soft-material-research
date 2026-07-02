@@ -9,17 +9,27 @@ from .fit import run
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Fit density dynamics.")
+    parser = argparse.ArgumentParser(description="Fit rho mechanical dynamics.")
+    parser.add_argument("--case", default="radius_15D")
+    parser.add_argument("--nd", type=int, default=None)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--no-plots", action="store_true")
+    parser.add_argument("--no-plot", action="store_true", help=argparse.SUPPRESS)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    settings = None
+    if args.nd is not None:
+        from .config import NumericalSettings
+
+        settings = NumericalSettings(nd=args.nd)
     config = RhoFittingConfig(
+        case_id=args.case,
         overwrite=args.overwrite,
-        make_plots=not args.no_plots,
+        make_plots=not (args.no_plots or args.no_plot),
+        settings=settings,
     )
     result = run(config)
     print(result.summary())

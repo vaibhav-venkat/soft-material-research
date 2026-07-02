@@ -46,7 +46,7 @@ def stability_selection(
     assert X.shape[0] > 0 and X.shape[1] > 0, "regression matrix must be non-empty"
 
     raw_correlations = raw_feature_correlations(X, y)
-    _progress("raw correlations with partial_t_rho")
+    _progress("raw feature correlations with target")
     for label, correlation in zip(labels, raw_correlations, strict=True):
         _progress(f"  {label}: {_format_correlation(correlation)}")
     Xn, yn = _normalize_for_path(X, y)

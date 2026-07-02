@@ -54,6 +54,8 @@ class NumericalSettings:
     importance_threshold: float = 0.6
     alpha: float = 1e-6
     stlsq_max_iter: int = 20
+    gamma: float = float(cylinder.SIMULATION.gamma)
+    u0: float = float(cylinder.SIMULATION.u0)
 
 
 @dataclass(frozen=True)
@@ -70,6 +72,7 @@ class RhoFittingConfig:
         assert settings.sigma > 0.0, "sigma must be positive"
         assert settings.cheb_cutoff > 0, "cheb_cutoff must be positive"
         assert settings.timestep > 0.0, "timestep must be positive"
+        assert settings.u0 != 0.0, "u0 must be nonzero"
         object.__setattr__(self, "settings", settings)
 
     @property

@@ -1,13 +1,16 @@
-use numpy::{IntoPyArray, PyReadonlyArray1, PyReadonlyArray2, PyReadonlyArray3};
+use numpy::{
+    IntoPyArray, PyReadonlyArray1, PyReadonlyArray2, PyReadonlyArray3, PyReadonlyArrayDyn,
+};
 use pyo3::exceptions::{PyNotImplementedError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use crate::coarse_grain;
 #[cfg(feature = "gpu-metal")]
-use crate::coarse_grain_cubecl;
+use crate::coarse_grain_burn;
 use crate::fft_ops;
 use crate::library;
+use crate::mechanics;
 use crate::sampling;
 use crate::CoreError;
 
@@ -45,8 +48,8 @@ fn coarse_grain_fields(
 
     #[cfg(feature = "gpu-metal")]
     let result = if gpu_requested {
-        println!("[rho_fitting] GPU requested: RHO_FITTING_GPU=1, gpu-metal feature enabled");
-        coarse_grain_cubecl::coarse_grain_fields(
+        println!("[rho_fitting] Burn GPU requested: RHO_FITTING_GPU=1, gpu-metal feature enabled");
+        coarse_grain_burn::coarse_grain_fields(
             coords.as_array(),
             p_particles.as_array(),
             shell_mask.as_array(),
@@ -58,7 +61,7 @@ fn coarse_grain_fields(
             sigma,
         )
         .or_else(|error| {
-            eprintln!("[rho_fitting] GPU coarse-grain failed, falling back to CPU: {error}");
+            eprintln!("[rho_fitting] Burn GPU coarse-grain failed, falling back to CPU: {error}");
             coarse_grain::coarse_grain_fields(
                 coords.as_array(),
                 p_particles.as_array(),
@@ -72,7 +75,7 @@ fn coarse_grain_fields(
             )
         })
     } else {
-        println!("[rho_fitting] GPU not requested; using CPU coarse-grain");
+        println!("[rho_fitting] Burn GPU not requested; using CPU coarse-grain");
         coarse_grain::coarse_grain_fields(
             coords.as_array(),
             p_particles.as_array(),
@@ -213,6 +216,190 @@ fn build_density_library(
 }
 
 #[pyfunction]
+#[pyo3(signature = (coords, directions, velocities, mask, x_centers, y_centers, lx, ly, radius, sigma, gamma, u0))]
+fn build_mechanical_fields(
+    py: Python<'_>,
+    coords: PyReadonlyArray3<'_, f64>,
+    directions: PyReadonlyArray3<'_, f64>,
+    velocities: PyReadonlyArray3<'_, f64>,
+    mask: PyReadonlyArray2<'_, bool>,
+    x_centers: PyReadonlyArray1<'_, f64>,
+    y_centers: PyReadonlyArray1<'_, f64>,
+    lx: f64,
+    ly: f64,
+    radius: f64,
+    sigma: f64,
+    gamma: f64,
+    u0: f64,
+) -> PyResult<Py<PyDict>> {
+    #[cfg(feature = "gpu-metal")]
+    let gpu_requested = std::env::var("RHO_FITTING_GPU").is_ok_and(|value| value == "1");
+    #[cfg(not(feature = "gpu-metal"))]
+    let gpu_requested = false;
+
+    #[cfg(feature = "gpu-metal")]
+    let result = if gpu_requested {
+        println!("[rho_fitting] Burn GPU requested for mechanical fields");
+        coarse_grain_burn::build_mechanical_fields(
+            coords.as_array(),
+            directions.as_array(),
+            velocities.as_array(),
+            mask.as_array(),
+            x_centers.as_array(),
+            y_centers.as_array(),
+            lx,
+            ly,
+            radius,
+            sigma,
+            gamma,
+            u0,
+        )
+        .or_else(|error| {
+            eprintln!(
+                "[rho_fitting] Burn mechanical coarse-grain failed, falling back to CPU: {error}"
+            );
+            mechanics::build_mechanical_fields(
+                coords.as_array(),
+                directions.as_array(),
+                velocities.as_array(),
+                mask.as_array(),
+                x_centers.as_array(),
+                y_centers.as_array(),
+                lx,
+                ly,
+                radius,
+                sigma,
+                gamma,
+                u0,
+            )
+        })
+    } else {
+        mechanics::build_mechanical_fields(
+            coords.as_array(),
+            directions.as_array(),
+            velocities.as_array(),
+            mask.as_array(),
+            x_centers.as_array(),
+            y_centers.as_array(),
+            lx,
+            ly,
+            radius,
+            sigma,
+            gamma,
+            u0,
+        )
+    };
+
+    #[cfg(not(feature = "gpu-metal"))]
+    if gpu_requested {
+        eprintln!("[rho_fitting] RHO_FITTING_GPU=1 ignored; extension was built without gpu-metal");
+    }
+    #[cfg(not(feature = "gpu-metal"))]
+    let result = mechanics::build_mechanical_fields(
+        coords.as_array(),
+        directions.as_array(),
+        velocities.as_array(),
+        mask.as_array(),
+        x_centers.as_array(),
+        y_centers.as_array(),
+        lx,
+        ly,
+        radius,
+        sigma,
+        gamma,
+        u0,
+    );
+
+    let fields = result.map_err(to_py_err)?;
+    let out = PyDict::new(py);
+    out.set_item("rho", fields.rho.into_pyarray(py))?;
+    out.set_item("P", fields.p.into_pyarray(py))?;
+    out.set_item("Q", fields.q.into_pyarray(py))?;
+    out.set_item("A", fields.a.into_pyarray(py))?;
+    out.set_item("J_rho", fields.j_rho.into_pyarray(py))?;
+    out.set_item("J_P", fields.j_p.into_pyarray(py))?;
+    out.set_item("J_Q", fields.j_q.into_pyarray(py))?;
+    Ok(out.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (p, j_rho, j_p, j_q, gamma, u0))]
+fn build_mechanical_targets(
+    py: Python<'_>,
+    p: PyReadonlyArrayDyn<'_, f64>,
+    j_rho: PyReadonlyArrayDyn<'_, f64>,
+    j_p: PyReadonlyArrayDyn<'_, f64>,
+    j_q: PyReadonlyArrayDyn<'_, f64>,
+    gamma: f64,
+    u0: f64,
+) -> PyResult<Py<PyDict>> {
+    let (y_rho, y_p, y_q) = mechanics::build_targets(
+        p.as_array(),
+        j_rho.as_array(),
+        j_p.as_array(),
+        j_q.as_array(),
+        gamma,
+        u0,
+    )
+    .map_err(to_py_err)?;
+    let out = PyDict::new(py);
+    out.set_item("Y_rho", y_rho.into_pyarray(py))?;
+    out.set_item("Y_P", y_p.into_pyarray(py))?;
+    out.set_item("Y_Q", y_q.into_pyarray(py))?;
+    Ok(out.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (rho, p, a, f_rho, lx, ly))]
+fn build_mechanical_libraries(
+    py: Python<'_>,
+    rho: PyReadonlyArray3<'_, f64>,
+    p: PyReadonlyArrayDyn<'_, f64>,
+    a: PyReadonlyArrayDyn<'_, f64>,
+    f_rho: PyReadonlyArrayDyn<'_, f64>,
+    lx: f64,
+    ly: f64,
+) -> PyResult<Py<PyDict>> {
+    let libs = mechanics::build_mechanical_libraries(
+        rho.as_array(),
+        p.as_array(),
+        a.as_array(),
+        f_rho.as_array(),
+        lx,
+        ly,
+    )
+    .map_err(to_py_err)?;
+    let out = PyDict::new(py);
+    out.set_item("Y_rho_names", libs.y_rho_names)?;
+    out.set_item("Y_P_names", libs.y_p_names)?;
+    out.set_item("Y_Q_names", libs.y_q_names)?;
+    out.set_item("Y_rho", libs.y_rho.into_pyarray(py))?;
+    out.set_item("Y_P", libs.y_p.into_pyarray(py))?;
+    out.set_item("Y_Q", libs.y_q.into_pyarray(py))?;
+    Ok(out.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (target, library, sample_indices))]
+fn sample_component_rows(
+    py: Python<'_>,
+    target: PyReadonlyArrayDyn<'_, f64>,
+    library: PyReadonlyArrayDyn<'_, f64>,
+    sample_indices: PyReadonlyArray2<'_, i64>,
+) -> PyResult<Py<PyDict>> {
+    let (rows, row_index) = mechanics::sample_component_rows(
+        target.as_array(),
+        library.as_array(),
+        sample_indices.as_array(),
+    )
+    .map_err(to_py_err)?;
+    let out = PyDict::new(py);
+    out.set_item("rows", rows.into_pyarray(py))?;
+    out.set_item("row_index", row_index.into_pyarray(py))?;
+    Ok(out.unbind())
+}
+
+#[pyfunction]
 fn stlsq() -> PyResult<()> {
     Err(not_ready("stlsq"))
 }
@@ -225,6 +412,10 @@ fn _rho_fitting_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(sample_rows, m)?)?;
     m.add_function(wrap_pyfunction!(build_density_fluxes, m)?)?;
     m.add_function(wrap_pyfunction!(build_density_library, m)?)?;
+    m.add_function(wrap_pyfunction!(build_mechanical_fields, m)?)?;
+    m.add_function(wrap_pyfunction!(build_mechanical_targets, m)?)?;
+    m.add_function(wrap_pyfunction!(build_mechanical_libraries, m)?)?;
+    m.add_function(wrap_pyfunction!(sample_component_rows, m)?)?;
     m.add_function(wrap_pyfunction!(stlsq, m)?)?;
     Ok(())
 }

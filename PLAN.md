@@ -296,7 +296,7 @@ Do not overwrite generated outputs unless `overwrite=True`.
 
 ## Tests
 
-No tests for now
+No formal tests, but frequent smaller parity tests with the data.
 
 ## Open Questions
 
@@ -360,19 +360,17 @@ Outputs:
 - Reports should include assumptions and any disabled/uncertain terms.
 - Plot labels should not imply shell-local physics; this workflow is all-particle/global.
 
-## Implementation Order
+## Small Guide
 
-1. Add Burn dependencies and backend feature flags to `rho_fitting_core`.
-2. Add/Edit Rust modules for backend selection, particles, Gaussian weights, moments, fluxes, tensors, libraries.
-3. Use Burn as specified.
-4. Expose modules through `python.rs`.
-5. Add Python dataclasses in `hexatic/rho_fitting/fields.py`.
+1. Add all depencies required like `burn` for Rust.
+2. Add/Edit Rust modules for GPU and CPU support, particles, Gaussian weights, moments, fluxes, tensors, and libraries.
+3. Use Burn as specified within the code for the tensors.
+5. Add Python dataclasses and stricter types, that aren't verbose, however.
 6. Add target metadata in `hexatic/rho_fitting/library.py`; numerical field construction happens in Rust.
 7. Rework `hexatic/rho_fitting/fit.py` to fit `Y_rho`, then `Y_P`, then `Y_Q`.
-  8. Keep the old regression functionality within the Python through `PySINDY`, not Rust. Maybe Rust later, but don't worry about that now.
+  8. Keep the old regression functionality within the Python through `PySINDY`, not Rust. Rust will do the row computation only, not the regresion.
 8. Add cache/report/plot support for the three targets.
 9. Add `partial_t rho + div J_rho` diagnostic.
-10. Run Rust and Python focused tests.
-11. Add the same plots and report, which should report `R^2` and other statistics directly for `fit vs target`.
+10. Add the same plots and report, which should report `R^2` and other statistics directly for `fit vs target`.
 
-**Big idea**: Most of the functionality is already built-in, but you should still verify everything. If i'm missing something, you probably can pick it up.
+**Big idea**: Most of the functionality is already built-in, but you should still verify everything. If i'm missing something, you probably can pick it up. This plan is not exhaustive so don't strictly follow the guide, you should be able to pick up on the gaps (i.e i forgot to include something in the guide) or see existing functionality to understand what is necessary.

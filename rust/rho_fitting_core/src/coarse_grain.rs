@@ -74,7 +74,7 @@ pub fn coarse_grain_fields(
     Ok((rho, p_density))
 }
 
-fn validate_inputs(
+pub fn validate_inputs(
     coords: ArrayView3<'_, f64>,
     p_particles: ArrayView3<'_, f64>,
     shell_mask: ArrayView2<'_, bool>,
