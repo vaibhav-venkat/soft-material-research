@@ -397,13 +397,12 @@ fn sample_component_rows(
 }
 
 #[pyfunction]
-#[pyo3(signature = (x, y, seed, tau_count, tau_eps, subsamples, importance_threshold, alpha, max_iter))]
+#[pyo3(signature = (x, y, seed, tau_eps, subsamples, importance_threshold, alpha, max_iter))]
 fn stability_selection(
     py: Python<'_>,
     x: PyReadonlyArray2<'_, f64>,
     y: PyReadonlyArray1<'_, f64>,
     seed: u64,
-    tau_count: usize,
     tau_eps: f64,
     subsamples: usize,
     importance_threshold: f64,
@@ -414,7 +413,6 @@ fn stability_selection(
         x.as_array(),
         y.as_array(),
         seed,
-        tau_count,
         tau_eps,
         subsamples,
         importance_threshold,

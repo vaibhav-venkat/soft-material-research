@@ -48,7 +48,6 @@ class NumericalSettings:
     nd: int = 500_000
     seed: int = 0
     replace: bool = False
-    tau_count: int = 40
     tau_eps: float = 1e-2
     subsamples: int = 200
     importance_threshold: float = 0.6

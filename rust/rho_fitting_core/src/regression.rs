@@ -7,6 +7,8 @@ use rand_chacha::ChaCha8Rng;
 
 use crate::{CoreError, CoreResult};
 
+const LEGACY_SELECTED_TAU_FRACTION: f64 = 30.0 / 39.0;
+
 pub struct StabilitySelection {
     pub coefficients: Array1<f64>,
     pub importance: Array1<f64>,
@@ -25,19 +27,19 @@ pub fn stability_selection(
     x: ArrayView2<'_, f64>,
     y: ArrayView1<'_, f64>,
     seed: u64,
-    tau_count: usize,
     tau_eps: f64,
     subsamples: usize,
     importance_threshold: f64,
     alpha: f64,
     max_iter: usize,
 ) -> CoreResult<StabilitySelection> {
-    validate_inputs(x, y, tau_count, tau_eps, subsamples, importance_threshold, alpha)?;
+    validate_inputs(x, y, tau_eps, subsamples, importance_threshold, alpha)?;
     let raw_correlations = raw_feature_correlations(x, y);
     let (xn, yn) = normalize_for_path(x, y);
     let coef0 = stlsq(&xn.view(), &yn.view(), 0.0, alpha, max_iter)?;
     let tau_max = coef0.iter().fold(0.0_f64, |acc, value| acc.max(value.abs())) * 1.01;
-    let tau_values = tau_path(tau_max, tau_count, tau_eps);
+    let tau = selected_tau(tau_max, tau_eps);
+    let tau_values = Array1::from_vec(vec![tau]);
 
     if tau_max == 0.0 {
         let active = Array1::<bool>::from_elem(x.dim().1, false);
@@ -47,7 +49,7 @@ pub fn stability_selection(
             coefficients,
             Array1::<f64>::zeros(x.dim().1),
             raw_correlations,
-            Array2::<f64>::zeros((tau_count, x.dim().1)),
+            Array2::<f64>::zeros((1, x.dim().1)),
             tau_values,
             active,
             -1,
@@ -56,9 +58,8 @@ pub fn stability_selection(
         );
     }
 
-    let tau_index = tau_values.len().saturating_sub(10);
-    let tau = tau_values[tau_index];
-    let mut importance_path = Array2::<f64>::zeros((tau_values.len(), x.dim().1));
+    let tau_index = 0;
+    let mut importance_path = Array2::<f64>::zeros((1, x.dim().1));
     let mut kept = Array1::<f64>::zeros(x.dim().1);
     let n_sub = usize::max(1, x.dim().0 / 2);
     let mut rows: Vec<usize> = (0..x.dim().0).collect();
@@ -100,7 +101,6 @@ pub fn stability_selection(
 fn validate_inputs(
     x: ArrayView2<'_, f64>,
     y: ArrayView1<'_, f64>,
-    tau_count: usize,
     tau_eps: f64,
     subsamples: usize,
     importance_threshold: f64,
@@ -111,9 +111,9 @@ fn validate_inputs(
             "X must be (N, terms), y must be (N,), and both must be non-empty".to_string(),
         ));
     }
-    if tau_count == 0 || !(tau_eps.is_finite() && tau_eps > 0.0) || subsamples == 0 {
+    if !(tau_eps.is_finite() && tau_eps > 0.0) || subsamples == 0 {
         return Err(CoreError::InvalidInput(
-            "tau_count, tau_eps, and subsamples must be positive".to_string(),
+            "tau_eps and subsamples must be positive".to_string(),
         ));
     }
     if !(importance_threshold.is_finite()
@@ -189,19 +189,11 @@ fn normalize_for_path(x: ArrayView2<'_, f64>, y: ArrayView1<'_, f64>) -> (Array2
     (xn, yn)
 }
 
-fn tau_path(tau_max: f64, count: usize, eps: f64) -> Array1<f64> {
+fn selected_tau(tau_max: f64, eps: f64) -> f64 {
     if tau_max == 0.0 {
-        return Array1::<f64>::zeros(count);
+        return 0.0;
     }
-    let log_eps = eps.log10();
-    Array1::from_iter((0..count).map(|index| {
-        let fraction = if count == 1 {
-            0.0
-        } else {
-            index as f64 / (count - 1) as f64
-        };
-        tau_max * 10.0_f64.powf(log_eps * fraction)
-    }))
+    tau_max * 10.0_f64.powf(eps.log10() * LEGACY_SELECTED_TAU_FRACTION)
 }
 
 fn stlsq(
@@ -384,11 +376,13 @@ mod tests {
     fn stlsq_recovers_sparse_coefficients() {
         let x = array![[1.0, 0.0], [2.0, 1.0], [3.0, 0.0], [4.0, 1.0], [5.0, 0.0]];
         let y = array![2.0, 4.0, 6.0, 8.0, 10.0];
-        let result = stability_selection(x.view(), y.view(), 7, 12, 1.0e-2, 8, 0.5, 1.0e-9, 20)
+        let result = stability_selection(x.view(), y.view(), 7, 1.0e-2, 8, 0.5, 1.0e-9, 20)
             .expect("regression should succeed");
         assert!((result.coefficients[0] - 2.0).abs() < 1.0e-8);
         assert!(result.coefficients[1].abs() < 1.0e-8);
-        assert_eq!(result.tau_index, 2);
+        assert_eq!(result.tau_index, 0);
+        assert_eq!(result.tau_values.len(), 1);
+        assert_eq!(result.importance_path.dim(), (1, 2));
     }
 
     #[test]

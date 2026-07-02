@@ -94,7 +94,6 @@ class RhoFittingMechanicsTests(unittest.TestCase):
             ("x",),
             ("x",),
             seed=7,
-            tau_count=12,
             tau_eps=1e-2,
             subsamples=8,
             importance_threshold=0.0,
@@ -103,7 +102,9 @@ class RhoFittingMechanicsTests(unittest.TestCase):
         )
 
         self.assertEqual(fit.coefficients.shape, (1,))
-        self.assertEqual(fit.tau_index, 2)
+        self.assertEqual(fit.tau_index, 0)
+        self.assertEqual(fit.tau_values.shape, (1,))
+        self.assertEqual(fit.importance_path.shape, (1, 1))
         self.assertAlmostEqual(fit.coefficients[0], 2.0, places=8)
 
     def test_mechanical_report_formats_coefficients(self) -> None:
