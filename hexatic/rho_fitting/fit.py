@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, TypeAlias, TypedDict, cast
 
 import numpy as np
+from numpy.typing import NDArray
 
 from . import _rho_fitting_core
 from .basis import ChebyshevTimeResult, chebyshev_filter_and_derivative, temporal_power_spectrum
-from .config import RhoFittingConfig, radius_from_case_id
+from .config import NumericalSettings, RhoFittingConfig, radius_from_case_id
 from .geometry import surface_lengths, theta_to_y
 from .io import ActiveMatterArrays, load_active_matter_npz
 from .library import flux_names, mechanical_labels, term_labels, term_names
@@ -17,6 +20,47 @@ from .outputs import mechanical_report_lines, write_density_outputs, write_mecha
 from .particles import particle_surface_velocities, particle_tangent_directions
 from .plots import write_temporal_power_plots
 from .regression import StabilityResult, stability_selection
+
+Array: TypeAlias = NDArray[Any]
+
+
+class MechanicalLibraries(TypedDict):
+    Y_rho: Array
+    Y_P: Array
+    Y_Q: Array
+    Y_rho_names: tuple[str, ...]
+    Y_P_names: tuple[str, ...]
+    Y_Q_names: tuple[str, ...]
+
+
+class MechanicalFitPayload(TypedDict):
+    sample_indices: Array
+    Y_rho_fit: StabilityResult
+    Y_P_fit: StabilityResult
+    Y_Q_fit: StabilityResult
+    Y_rho_rows: Array
+    Y_P_rows: Array
+    Y_Q_rows: Array
+    Y_rho_row_index: Array
+    Y_P_row_index: Array
+    Y_Q_row_index: Array
+    Y_rho_library: Array
+    Y_P_library: Array
+    Y_Q_library: Array
+    Y_rho_names: Array
+    Y_P_names: Array
+    Y_Q_names: Array
+    F_rho_prediction: Array
+
+
+class DensityFitPayload(TypedDict):
+    X_density: Array
+    y_density: Array
+    sample_indices: Array
+    term_names: Array
+    term_labels: Array
+    term_fluxes: Array
+    fit: StabilityResult
 
 
 @dataclass(frozen=True)
@@ -42,6 +86,7 @@ class RhoFittingResult:
 
 
 def run(config: RhoFittingConfig) -> RhoFittingResult:
+    settings = _settings(config)
     config.output_dir.mkdir(parents=True, exist_ok=True)
     active = load_active_matter_npz(config.paths.active_fields_path, radius_from_case_id(config.case_id))
     _log(
@@ -57,26 +102,27 @@ def run(config: RhoFittingConfig) -> RhoFittingResult:
             config.output_dir,
             config.case_id,
             spectral["temporal_power"],
-            config.settings.cheb_cutoff,
+            settings.cheb_cutoff,
         ):
             _log(f"temporal power plot written {path}")
 
     fit_payload = fit_mechanical(active, spectral, config)
-    cache_path, report_path = write_mechanical_outputs(active, coarse, spectral, fit_payload, config)
+    output_payload = cast(Mapping[str, np.ndarray | StabilityResult], fit_payload)
+    cache_path, report_path = write_mechanical_outputs(active, coarse, spectral, output_payload, config)
     active_terms = tuple(
         f"{target}:{name}"
-        for target in ("Y_rho", "Y_P", "Y_Q")
-        for name, keep in zip(
-            fit_payload[f"{target}_fit"].names,
-            fit_payload[f"{target}_fit"].active,
-            strict=True,
+        for target, fit in (
+            ("Y_rho", fit_payload["Y_rho_fit"]),
+            ("Y_P", fit_payload["Y_P_fit"]),
+            ("Y_Q", fit_payload["Y_Q_fit"]),
         )
+        for name, keep in zip(fit.names, fit.active, strict=True)
         if keep
     )
     return RhoFittingResult(
         case_id=config.case_id,
         status="mechanical-fit",
-        nd=config.settings.nd,
+        nd=settings.nd,
         frames=active.coords.shape[0],
         particles=active.coords.shape[1],
         grid_shape=(active.x_centers.size, active.theta_centers.size),
@@ -87,18 +133,29 @@ def run(config: RhoFittingConfig) -> RhoFittingResult:
     )
 
 
+def _settings(config: RhoFittingConfig) -> NumericalSettings:
+    assert config.settings is not None, "rho fitting settings were not initialized"
+    return config.settings
+
+
+def _core() -> Any:
+    assert _rho_fitting_core is not None, "rho_fitting extension is not built"
+    return _rho_fitting_core
+
+
 def coarse_grain_active_fields(
     active: ActiveMatterArrays,
     config: RhoFittingConfig,
-) -> dict[str, np.ndarray]:
-    assert _rho_fitting_core is not None, "rho_fitting extension is not built"
+) -> dict[str, Array]:
+    core = _core()
+    settings = _settings(config)
     lx, ly = surface_lengths(active.x_edges, active.theta_edges, active.radius)
     coords = np.ascontiguousarray(active.coords, dtype=np.float64)
     y_centers = np.ascontiguousarray(theta_to_y(active.theta_centers, active.radius), dtype=np.float64)
     all_particles = np.ones_like(active.shell_mask, dtype=bool)
     directions = particle_tangent_directions(active, config)
     velocities = particle_surface_velocities(active, config)
-    fields = _rho_fitting_core.build_mechanical_fields(
+    fields = core.build_mechanical_fields(
         coords,
         np.ascontiguousarray(directions, dtype=np.float64),
         np.ascontiguousarray(velocities, dtype=np.float64),
@@ -108,9 +165,9 @@ def coarse_grain_active_fields(
         lx,
         ly,
         active.radius,
-        float(config.settings.sigma),
-        float(config.settings.gamma),
-        float(config.settings.u0),
+        float(settings.sigma),
+        float(settings.gamma),
+        float(settings.u0),
     )
     out = {name: np.asarray(value) for name, value in fields.items()}
     out["J_density"] = out["J_rho"]
@@ -118,15 +175,16 @@ def coarse_grain_active_fields(
 
 def spectral_active_fields(
     active: ActiveMatterArrays,
-    coarse: dict[str, np.ndarray],
+    coarse: dict[str, Array],
     config: RhoFittingConfig,
-) -> dict[str, np.ndarray]:
-    assert _rho_fitting_core is not None, "rho_fitting extension is not built"
+) -> dict[str, Array]:
+    core = _core()
+    settings = _settings(config)
     rho_time = chebyshev_filter_and_derivative(
         coarse["rho"],
         active.steps,
-        config.settings.timestep,
-        config.settings.cheb_cutoff,
+        settings.timestep,
+        settings.cheb_cutoff,
     )
     filtered = {"rho": rho_time.filtered}
     coefficients = [rho_time.coefficients]
@@ -134,25 +192,25 @@ def spectral_active_fields(
         result = chebyshev_filter_and_derivative(
             coarse[name],
             active.steps,
-            config.settings.timestep,
-            config.settings.cheb_cutoff,
+            settings.timestep,
+            settings.cheb_cutoff,
         )
         _validate_temporal_alignment(rho_time, result)
         filtered[name] = result.filtered
         coefficients.append(result.coefficients)
     lx, ly = surface_lengths(active.x_edges, active.theta_edges, active.radius)
-    fluxes = _rho_fitting_core.build_density_fluxes(
+    fluxes = core.build_density_fluxes(
         np.ascontiguousarray(rho_time.filtered, dtype=np.float64),
         lx,
         ly,
     )
-    targets = _rho_fitting_core.build_mechanical_targets(
+    targets = core.build_mechanical_targets(
         np.ascontiguousarray(filtered["P"], dtype=np.float64),
         np.ascontiguousarray(filtered["J_rho"], dtype=np.float64),
         np.ascontiguousarray(filtered["J_P"], dtype=np.float64),
         np.ascontiguousarray(filtered["J_Q"], dtype=np.float64),
-        float(config.settings.gamma),
-        float(config.settings.u0),
+        float(settings.gamma),
+        float(settings.u0),
     )
     min_rho = float(np.min(rho_time.filtered))
     if min_rho < -1.0e-8:
@@ -182,19 +240,21 @@ def spectral_active_fields(
 
 def fit_mechanical(
     active: ActiveMatterArrays,
-    spectral: dict[str, np.ndarray],
+    spectral: dict[str, Array],
     config: RhoFittingConfig,
-) -> dict[str, np.ndarray | StabilityResult]:
+) -> MechanicalFitPayload:
+    core = _core()
+    settings = _settings(config)
     valid_mask = _mechanical_valid_mask(spectral)
     sample_indices = np.asarray(
-        _rho_fitting_core.sample_rows(
+        core.sample_rows(
             np.ascontiguousarray(valid_mask),
-            config.settings.nd,
-            config.settings.seed,
-            config.settings.replace,
+            settings.nd,
+            settings.seed,
+            settings.replace,
         )
     )
-    _validate_sample_count(config.settings.nd, sample_indices.shape[0], config.settings.replace)
+    _validate_sample_count(settings.nd, sample_indices.shape[0], settings.replace)
     lx, ly = surface_lengths(active.x_edges, active.theta_edges, active.radius)
     libraries = _mechanical_libraries(spectral, spectral["Y_rho"], lx, ly)
     y_rho_fit, y_rho_rows, y_rho_index = _fit_component_target("Y_rho", spectral["Y_rho"], libraries["Y_rho"], libraries["Y_rho_names"], sample_indices, config)
@@ -224,12 +284,13 @@ def fit_mechanical(
 
 
 def _mechanical_libraries(
-    spectral: dict[str, np.ndarray],
-    f_rho: np.ndarray,
+    spectral: dict[str, Array],
+    f_rho: Array,
     lx: float,
     ly: float,
-) -> dict[str, np.ndarray | tuple[str, ...]]:
-    libs = _rho_fitting_core.build_mechanical_libraries(
+) -> MechanicalLibraries:
+    core = _core()
+    libs = core.build_mechanical_libraries(
         np.ascontiguousarray(spectral["rho"], dtype=np.float64),
         np.ascontiguousarray(spectral["P"], dtype=np.float64),
         np.ascontiguousarray(spectral["A"], dtype=np.float64),
@@ -249,13 +310,15 @@ def _mechanical_libraries(
 
 def _fit_component_target(
     target_name: str,
-    target: np.ndarray,
-    library: np.ndarray,
+    target: Array,
+    library: Array,
     names: tuple[str, ...],
-    sample_indices: np.ndarray,
+    sample_indices: Array,
     config: RhoFittingConfig,
-) -> tuple[StabilityResult, np.ndarray, np.ndarray]:
-    row_payload = _rho_fitting_core.sample_component_rows(
+) -> tuple[StabilityResult, Array, Array]:
+    core = _core()
+    settings = _settings(config)
+    row_payload = core.sample_component_rows(
         np.ascontiguousarray(target, dtype=np.float64),
         np.ascontiguousarray(library, dtype=np.float64),
         np.ascontiguousarray(sample_indices, dtype=np.int64),
@@ -276,17 +339,17 @@ def _fit_component_target(
         y,
         names,
         labels,
-        seed=config.settings.seed,
-        tau_eps=config.settings.tau_eps,
-        subsamples=config.settings.subsamples,
-        importance_threshold=config.settings.importance_threshold,
-        alpha=config.settings.alpha,
-        max_iter=config.settings.stlsq_max_iter,
+        seed=settings.seed,
+        tau_eps=settings.tau_eps,
+        subsamples=settings.subsamples,
+        importance_threshold=settings.importance_threshold,
+        alpha=settings.alpha,
+        max_iter=settings.stlsq_max_iter,
     )
     return fit, rows, row_index
 
 
-def _mechanical_valid_mask(spectral: dict[str, np.ndarray]) -> np.ndarray:
+def _mechanical_valid_mask(spectral: dict[str, Array]) -> Array:
     valid = np.isfinite(spectral["rho"])
     for name in ("P", "A", "J_rho", "J_P", "J_Q", "Y_rho", "Y_P", "Y_Q"):
         axes = tuple(range(3, spectral[name].ndim))
@@ -296,25 +359,26 @@ def _mechanical_valid_mask(spectral: dict[str, np.ndarray]) -> np.ndarray:
 
 def fit_density(
     active: ActiveMatterArrays,
-    spectral: dict[str, np.ndarray],
+    spectral: dict[str, Array],
     config: RhoFittingConfig,
-) -> dict[str, np.ndarray | StabilityResult]:
-    assert _rho_fitting_core is not None, "rho_fitting extension is not built"
+) -> DensityFitPayload:
+    core = _core()
+    settings = _settings(config)
     names = term_names()
     labels = term_labels()
     valid_mask = np.isfinite(spectral["rho"]) & np.isfinite(spectral["partial_t_rho"])
     sample_indices = np.asarray(
-        _rho_fitting_core.sample_rows(
+        core.sample_rows(
             np.ascontiguousarray(valid_mask),
-            config.settings.nd,
-            config.settings.seed,
-            config.settings.replace,
+            settings.nd,
+            settings.seed,
+            settings.replace,
         )
     )
-    _validate_sample_count(config.settings.nd, sample_indices.shape[0], config.settings.replace)
+    _validate_sample_count(settings.nd, sample_indices.shape[0], settings.replace)
     lx, ly = surface_lengths(active.x_edges, active.theta_edges, active.radius)
     X = np.asarray(
-        _rho_fitting_core.build_density_library(
+        core.build_density_library(
             np.ascontiguousarray(spectral["rho"], dtype=np.float64),
             np.ascontiguousarray(sample_indices, dtype=np.int64),
             list(names),
@@ -333,12 +397,12 @@ def fit_density(
         y,
         names,
         labels,
-        seed=config.settings.seed,
-        tau_eps=config.settings.tau_eps,
-        subsamples=config.settings.subsamples,
-        importance_threshold=config.settings.importance_threshold,
-        alpha=config.settings.alpha,
-        max_iter=config.settings.stlsq_max_iter,
+        seed=settings.seed,
+        tau_eps=settings.tau_eps,
+        subsamples=settings.subsamples,
+        importance_threshold=settings.importance_threshold,
+        alpha=settings.alpha,
+        max_iter=settings.stlsq_max_iter,
     )
     return {
         "X_density": X,
@@ -352,17 +416,18 @@ def fit_density(
 
 
 def _coarse_grain(
-    coords: np.ndarray,
-    vectors: np.ndarray,
-    mask: np.ndarray,
+    coords: Array,
+    vectors: Array,
+    mask: Array,
     active: ActiveMatterArrays,
-    y_centers: np.ndarray,
+    y_centers: Array,
     lx: float,
     ly: float,
     config: RhoFittingConfig,
-):
-    assert _rho_fitting_core is not None, "rho_fitting extension is not built"
-    return _rho_fitting_core.coarse_grain_fields(
+) -> Array:
+    core = _core()
+    settings = _settings(config)
+    return core.coarse_grain_fields(
         coords,
         np.ascontiguousarray(vectors, dtype=np.float64),
         np.ascontiguousarray(mask),
@@ -371,7 +436,7 @@ def _coarse_grain(
         lx,
         ly,
         active.radius,
-        float(config.settings.sigma),
+        float(settings.sigma),
     )
 
 
@@ -385,7 +450,7 @@ def _validate_temporal_alignment(
     assert np.array_equal(rho_time.scaled_times, j_time.scaled_times)
 
 
-def _sample_scalar(field: np.ndarray, sample_indices: np.ndarray) -> np.ndarray:
+def _sample_scalar(field: Array, sample_indices: Array) -> Array:
     return field[sample_indices[:, 0], sample_indices[:, 1], sample_indices[:, 2]]
 
 

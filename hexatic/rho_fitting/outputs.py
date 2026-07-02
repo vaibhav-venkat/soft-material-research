@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 
 import numpy as np
@@ -19,7 +20,7 @@ def write_mechanical_outputs(
     active: ActiveMatterArrays,
     coarse: dict[str, np.ndarray],
     spectral: dict[str, np.ndarray],
-    fit_payload: dict[str, np.ndarray | StabilityResult],
+    fit_payload: Mapping[str, np.ndarray | StabilityResult],
     config: RhoFittingConfig,
 ) -> tuple[Path, Path]:
     cache_path = config.output_dir / f"{config.case_id}_fit_result.npz"
@@ -156,7 +157,7 @@ def write_density_outputs(
     active: ActiveMatterArrays,
     coarse: dict[str, np.ndarray],
     spectral: dict[str, np.ndarray],
-    fit_payload: dict[str, np.ndarray | StabilityResult],
+    fit_payload: Mapping[str, np.ndarray | StabilityResult],
     config: RhoFittingConfig,
 ) -> tuple[Path, Path]:
     fit = fit_payload["fit"]
