@@ -88,4 +88,6 @@ def tangential_particle_vectors(
     assert cylindrical.shape[:2] == coords.shape[:2] and cylindrical.shape[-1] == 3, (
         "particle directions must match coords frame/particle axes"
     )
-    return np.ascontiguousarray(np.stack((cylindrical[..., 0], cylindrical[..., 2]), axis=-1))
+    return np.ascontiguousarray(
+        np.stack((cylindrical[..., 0], cylindrical[..., 2], cylindrical[..., 1]), axis=-1)
+    )

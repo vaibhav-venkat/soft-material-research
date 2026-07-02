@@ -89,9 +89,6 @@ class HydrodynamicFields:
     pocket_radius: float | None = None
 
 
-# ---------------------------------------------------------------------------
-# Main entry point
-# ---------------------------------------------------------------------------
 
 def load_or_compute_fields(config: FittingConfig) -> HydrodynamicFields:
     """Load or compute all hydrodynamic fields for the given case."""

@@ -49,11 +49,11 @@ pub fn build_mechanical_fields(
     let nx = x_centers.len();
     let ny = y_centers.len();
     let mut rho = Array3::<f64>::zeros((frames, nx, ny));
-    let mut p = Array4::<f64>::zeros((frames, nx, ny, 2));
-    let mut q = Array5::<f64>::zeros((frames, nx, ny, 2, 2));
+    let mut p = Array4::<f64>::zeros((frames, nx, ny, 3));
+    let mut q = Array5::<f64>::zeros((frames, nx, ny, 3, 3));
     let mut j_rho = Array4::<f64>::zeros((frames, nx, ny, 2));
-    let mut j_p = Array5::<f64>::zeros((frames, nx, ny, 2, 2));
-    let mut j_q = Array6::<f64>::zeros((frames, nx, ny, 2, 2, 2));
+    let mut j_p = Array5::<f64>::zeros((frames, nx, ny, 2, 3));
+    let mut j_q = Array6::<f64>::zeros((frames, nx, ny, 2, 3, 3));
     let cutoff = 4.0 * sigma;
     let cutoff2 = cutoff * cutoff;
 
@@ -71,20 +71,27 @@ pub fn build_mechanical_fields(
             let particle_y = radius * coords[[t, particle, 1]];
             let px = directions[[t, particle, 0]];
             let py = directions[[t, particle, 1]];
+            let pz = directions[[t, particle, 2]];
             let vx = velocities[[t, particle, 0]];
             let vy = velocities[[t, particle, 1]];
             if !(particle_x.is_finite()
                 && particle_y.is_finite()
                 && px.is_finite()
                 && py.is_finite()
+                && pz.is_finite()
                 && vx.is_finite()
                 && vy.is_finite())
             {
                 continue;
             }
-            let dir = [px, py];
+            let dir = [px, py, pz];
             let vel = [vx, vy];
-            let q_particle = [[px * px - 0.5, px * py], [py * px, py * py - 0.5]];
+            let mut q_particle = [[0.0; 3]; 3];
+            for i in 0..3 {
+                for j in 0..3 {
+                    q_particle[i][j] = dir[i] * dir[j] - delta(i, j) / 3.0;
+                }
+            }
             for ix in 0..nx {
                 let dx = minimum_image(x_centers[ix] - particle_x, lx);
                 if dx.abs() > cutoff {
@@ -97,17 +104,19 @@ pub fn build_mechanical_fields(
                     }
                     let weight = gaussian_2d(dx, dy, sigma);
                     rho[[t, ix, iy]] += weight;
-                    for component in 0..2 {
+                    for component in 0..3 {
                         p[[t, ix, iy, component]] += weight * dir[component];
+                    }
+                    for component in 0..2 {
                         j_rho[[t, ix, iy, component]] += weight * vel[component];
                     }
                     for k in 0..2 {
-                        for i in 0..2 {
+                        for i in 0..3 {
                             j_p[[t, ix, iy, k, i]] += weight * vel[k] * dir[i];
                         }
                     }
-                    for i in 0..2 {
-                        for j in 0..2 {
+                    for i in 0..3 {
+                        for j in 0..3 {
                             let q_value = q_particle[i][j];
                             q[[t, ix, iy, i, j]] += weight * q_value;
                             for k in 0..2 {
@@ -124,8 +133,8 @@ pub fn build_mechanical_fields(
     for t in 0..frames {
         for ix in 0..nx {
             for iy in 0..ny {
-                for component in 0..2 {
-                    a[[t, ix, iy, component, component]] += 0.5 * rho[[t, ix, iy]];
+                for component in 0..3 {
+                    a[[t, ix, iy, component, component]] += rho[[t, ix, iy]] / 3.0;
                 }
             }
         }
@@ -150,26 +159,27 @@ pub fn build_targets(
     gamma: f64,
     u0: f64,
 ) -> CoreResult<(ArrayD<f64>, ArrayD<f64>, ArrayD<f64>)> {
-    if p.shape() != j_rho.shape() {
+    if p.ndim() != 4 || p.shape()[3] != 3 {
         return Err(CoreError::Shape(
-            "P and J_rho shapes must match".to_string(),
+            "P must have shape (T,Nx,Ny,3)".to_string(),
         ));
     }
-    if p.ndim() != 4 || p.shape()[3] != 2 {
+    let expected_j_rho = [p.shape()[0], p.shape()[1], p.shape()[2], 2];
+    if j_rho.shape() != expected_j_rho {
         return Err(CoreError::Shape(
-            "P and J_rho must have shape (T,Nx,Ny,2)".to_string(),
+            "J_rho must have shape (T,Nx,Ny,2)".to_string(),
         ));
     }
-    let expected_j_p = [p.shape()[0], p.shape()[1], p.shape()[2], 2, 2];
-    let expected_j_q = [p.shape()[0], p.shape()[1], p.shape()[2], 2, 2, 2];
+    let expected_j_p = [p.shape()[0], p.shape()[1], p.shape()[2], 2, 3];
+    let expected_j_q = [p.shape()[0], p.shape()[1], p.shape()[2], 2, 3, 3];
     if j_p.shape() != expected_j_p {
         return Err(CoreError::Shape(
-            "J_P must have shape (T,Nx,Ny,2,2)".to_string(),
+            "J_P must have shape (T,Nx,Ny,2,3)".to_string(),
         ));
     }
     if j_q.shape() != expected_j_q {
         return Err(CoreError::Shape(
-            "J_Q must have shape (T,Nx,Ny,2,2,2)".to_string(),
+            "J_Q must have shape (T,Nx,Ny,2,3,3)".to_string(),
         ));
     }
     if !(gamma.is_finite() && u0.is_finite() && u0 != 0.0) {
@@ -177,7 +187,17 @@ pub fn build_targets(
             "gamma must be finite and u0 must be nonzero".to_string(),
         ));
     }
-    let y_rho = (&j_rho - &(p.to_owned() * u0)) * gamma;
+    let mut p_surface = ArrayD::<f64>::zeros(IxDyn(&expected_j_rho));
+    for t in 0..p.shape()[0] {
+        for ix in 0..p.shape()[1] {
+            for iy in 0..p.shape()[2] {
+                for k in 0..2 {
+                    p_surface[IxDyn(&[t, ix, iy, k])] = p[IxDyn(&[t, ix, iy, k])];
+                }
+            }
+        }
+    }
+    let y_rho = (&j_rho - &(p_surface * u0)) * gamma;
     let y_p = j_p.to_owned() / u0;
     let y_q = j_q.to_owned();
     Ok((y_rho, y_p, y_q))
@@ -194,16 +214,16 @@ pub fn build_mechanical_libraries(
     validate_grid(rho, lx, ly)?;
     let p4 = p
         .into_dimensionality::<ndarray::Ix4>()
-        .map_err(|_| CoreError::Shape("P must be (T,Nx,Ny,2)".to_string()))?;
+        .map_err(|_| CoreError::Shape("P must be (T,Nx,Ny,3)".to_string()))?;
     let a5 = a
         .into_dimensionality::<ndarray::Ix5>()
-        .map_err(|_| CoreError::Shape("A must be (T,Nx,Ny,2,2)".to_string()))?;
+        .map_err(|_| CoreError::Shape("A must be (T,Nx,Ny,3,3)".to_string()))?;
     let f4 = f_rho
         .into_dimensionality::<ndarray::Ix4>()
         .map_err(|_| CoreError::Shape("F_rho must be (T,Nx,Ny,2)".to_string()))?;
-    if p4.dim() != (rho.dim().0, rho.dim().1, rho.dim().2, 2)
-        || f4.dim() != p4.dim()
-        || a5.dim() != (rho.dim().0, rho.dim().1, rho.dim().2, 2, 2)
+    if p4.dim() != (rho.dim().0, rho.dim().1, rho.dim().2, 3)
+        || f4.dim() != (rho.dim().0, rho.dim().1, rho.dim().2, 2)
+        || a5.dim() != (rho.dim().0, rho.dim().1, rho.dim().2, 3, 3)
     {
         return Err(CoreError::Shape(
             "mechanical library field shapes do not align".to_string(),
@@ -326,11 +346,12 @@ fn build_y_rho_terms(rho: ArrayView3<'_, f64>, lx: f64, ly: f64) -> CoreResult<V
 }
 
 fn build_y_p_terms(rho: ArrayView3<'_, f64>, a: ndarray::ArrayView5<'_, f64>) -> Vec<Array5<f64>> {
+    let a_surface = surface_rows_rank2(a);
     vec![
-        a.to_owned(),
-        rho_times_rank2(rho, a, 1),
-        rho_times_rank2(rho, a, 2),
-        rho_times_rank2(rho, a, 3),
+        a_surface.clone(),
+        rho_times_rank2(rho, a_surface.view(), 1),
+        rho_times_rank2(rho, a_surface.view(), 2),
+        rho_times_rank2(rho, a_surface.view(), 3),
     ]
 }
 
@@ -380,8 +401,8 @@ fn stack_rank2_terms(terms: &[Array5<f64>]) -> ArrayD<f64> {
         for t in 0..shape.0 {
             for ix in 0..shape.1 {
                 for iy in 0..shape.2 {
-                    for i in 0..2 {
-                        for j in 0..2 {
+                    for i in 0..shape.3 {
+                        for j in 0..shape.4 {
                             out[IxDyn(&[term, t, ix, iy, i, j])] = values[[t, ix, iy, i, j]];
                         }
                     }
@@ -407,9 +428,9 @@ fn stack_rank3_terms(terms: &[Array6<f64>]) -> ArrayD<f64> {
         for t in 0..shape.0 {
             for ix in 0..shape.1 {
                 for iy in 0..shape.2 {
-                    for k in 0..2 {
-                        for i in 0..2 {
-                            for j in 0..2 {
+                    for k in 0..shape.3 {
+                        for i in 0..shape.4 {
+                            for j in 0..shape.5 {
                                 out[IxDyn(&[term, t, ix, iy, k, i, j])] =
                                     values[[t, ix, iy, k, i, j]];
                             }
@@ -434,6 +455,23 @@ fn scalar_times_vector(
                 for component in 0..2 {
                     out[[t, ix, iy, component]] =
                         scalar[[t, ix, iy]] * vector[[t, ix, iy, component]];
+                }
+            }
+        }
+    }
+    out
+}
+
+fn surface_rows_rank2(values: ndarray::ArrayView5<'_, f64>) -> Array5<f64> {
+    let (frames, nx, ny, _, orientation_components) = values.dim();
+    let mut out = Array5::<f64>::zeros((frames, nx, ny, 2, orientation_components));
+    for t in 0..frames {
+        for ix in 0..nx {
+            for iy in 0..ny {
+                for k in 0..2 {
+                    for component in 0..orientation_components {
+                        out[[t, ix, iy, k, component]] = values[[t, ix, iy, k, component]];
+                    }
                 }
             }
         }
@@ -467,13 +505,14 @@ fn rho_times_rank2(
     power: i32,
 ) -> Array5<f64> {
     let (frames, nx, ny) = rho.dim();
-    let mut out = Array5::<f64>::zeros((frames, nx, ny, 2, 2));
+    let shape = values.dim();
+    let mut out = Array5::<f64>::zeros(shape);
     for t in 0..frames {
         for ix in 0..nx {
             for iy in 0..ny {
                 let scale = rho[[t, ix, iy]].powi(power);
-                for i in 0..2 {
-                    for j in 0..2 {
+                for i in 0..shape.3 {
+                    for j in 0..shape.4 {
                         out[[t, ix, iy, i, j]] = scale * values[[t, ix, iy, i, j]];
                     }
                 }
@@ -489,14 +528,15 @@ fn rho_times_rank3(
     power: i32,
 ) -> Array6<f64> {
     let (frames, nx, ny) = rho.dim();
-    let mut out = Array6::<f64>::zeros((frames, nx, ny, 2, 2, 2));
+    let shape = values.dim();
+    let mut out = Array6::<f64>::zeros(shape);
     for t in 0..frames {
         for ix in 0..nx {
             for iy in 0..ny {
                 let scale = rho[[t, ix, iy]].powi(power);
-                for k in 0..2 {
-                    for i in 0..2 {
-                        for j in 0..2 {
+                for k in 0..shape.3 {
+                    for i in 0..shape.4 {
+                        for j in 0..shape.5 {
                             out[[t, ix, iy, k, i, j]] = scale * values[[t, ix, iy, k, i, j]];
                         }
                     }
@@ -537,13 +577,13 @@ fn gradient_norm2(grad: ndarray::ArrayView4<'_, f64>) -> Array3<f64> {
 
 fn p_dot_alpha(p: ndarray::ArrayView4<'_, f64>) -> Array6<f64> {
     let (frames, nx, ny, _) = p.dim();
-    let mut out = Array6::<f64>::zeros((frames, nx, ny, 2, 2, 2));
+    let mut out = Array6::<f64>::zeros((frames, nx, ny, 2, 3, 3));
     for t in 0..frames {
         for ix in 0..nx {
             for iy in 0..ny {
                 for k in 0..2 {
-                    for i in 0..2 {
-                        for j in 0..2 {
+                    for i in 0..3 {
+                        for j in 0..3 {
                             out[[t, ix, iy, k, i, j]] = p[[t, ix, iy, k]] * delta(i, j)
                                 + p[[t, ix, iy, i]] * delta(k, j)
                                 + p[[t, ix, iy, j]] * delta(k, i);
@@ -558,12 +598,12 @@ fn p_dot_alpha(p: ndarray::ArrayView4<'_, f64>) -> Array6<f64> {
 
 fn p_dot_ii(p: ndarray::ArrayView4<'_, f64>) -> Array6<f64> {
     let (frames, nx, ny, _) = p.dim();
-    let mut out = Array6::<f64>::zeros((frames, nx, ny, 2, 2, 2));
+    let mut out = Array6::<f64>::zeros((frames, nx, ny, 2, 3, 3));
     for t in 0..frames {
         for ix in 0..nx {
             for iy in 0..ny {
                 for k in 0..2 {
-                    for i in 0..2 {
+                    for i in 0..3 {
                         out[[t, ix, iy, k, i, i]] = p[[t, ix, iy, k]];
                     }
                 }
@@ -575,12 +615,12 @@ fn p_dot_ii(p: ndarray::ArrayView4<'_, f64>) -> Array6<f64> {
 
 fn vector_identity(vector: ndarray::ArrayView4<'_, f64>) -> Array6<f64> {
     let (frames, nx, ny, _) = vector.dim();
-    let mut out = Array6::<f64>::zeros((frames, nx, ny, 2, 2, 2));
+    let mut out = Array6::<f64>::zeros((frames, nx, ny, 2, 3, 3));
     for t in 0..frames {
         for ix in 0..nx {
             for iy in 0..ny {
                 for k in 0..2 {
-                    for i in 0..2 {
+                    for i in 0..3 {
                         out[[t, ix, iy, k, i, i]] = vector[[t, ix, iy, k]];
                     }
                 }
@@ -652,9 +692,10 @@ fn validate_particle_fields(
             "coords must have shape (T,N,3)".to_string(),
         ));
     }
-    if directions.dim() != (frames, particles, 2) || velocities.dim() != (frames, particles, 2) {
+    if directions.dim() != (frames, particles, 3) || velocities.dim() != (frames, particles, 2) {
         return Err(CoreError::Shape(
-            "directions and velocities must have shape (T,N,2)".to_string(),
+            "directions must have shape (T,N,3) and velocities must have shape (T,N,2)"
+                .to_string(),
         ));
     }
     if mask.dim() != (frames, particles) {

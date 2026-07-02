@@ -1,7 +1,7 @@
 use numpy::{
     IntoPyArray, PyReadonlyArray1, PyReadonlyArray2, PyReadonlyArray3, PyReadonlyArrayDyn,
 };
-use pyo3::exceptions::{PyNotImplementedError, PyValueError};
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
@@ -11,12 +11,9 @@ use crate::coarse_grain_burn;
 use crate::fft_ops;
 use crate::library;
 use crate::mechanics;
+use crate::regression;
 use crate::sampling;
 use crate::CoreError;
-
-fn not_ready(name: &str) -> PyErr {
-    PyNotImplementedError::new_err(format!("{name} is planned for a later rho_fitting step"))
-}
 
 fn to_py_err(error: CoreError) -> PyErr {
     PyValueError::new_err(error.to_string())
@@ -400,8 +397,43 @@ fn sample_component_rows(
 }
 
 #[pyfunction]
-fn stlsq() -> PyResult<()> {
-    Err(not_ready("stlsq"))
+#[pyo3(signature = (x, y, seed, tau_count, tau_eps, subsamples, importance_threshold, alpha, max_iter))]
+fn stability_selection(
+    py: Python<'_>,
+    x: PyReadonlyArray2<'_, f64>,
+    y: PyReadonlyArray1<'_, f64>,
+    seed: u64,
+    tau_count: usize,
+    tau_eps: f64,
+    subsamples: usize,
+    importance_threshold: f64,
+    alpha: f64,
+    max_iter: usize,
+) -> PyResult<Py<PyDict>> {
+    let result = regression::stability_selection(
+        x.as_array(),
+        y.as_array(),
+        seed,
+        tau_count,
+        tau_eps,
+        subsamples,
+        importance_threshold,
+        alpha,
+        max_iter,
+    )
+    .map_err(to_py_err)?;
+    let out = PyDict::new(py);
+    out.set_item("coefficients", result.coefficients.into_pyarray(py))?;
+    out.set_item("importance", result.importance.into_pyarray(py))?;
+    out.set_item("raw_correlations", result.raw_correlations.into_pyarray(py))?;
+    out.set_item("importance_path", result.importance_path.into_pyarray(py))?;
+    out.set_item("tau_values", result.tau_values.into_pyarray(py))?;
+    out.set_item("active", result.active.into_pyarray(py))?;
+    out.set_item("tau_index", result.tau_index)?;
+    out.set_item("y_pred", result.y_pred.into_pyarray(py))?;
+    out.set_item("rmse", result.rmse)?;
+    out.set_item("r2", result.r2)?;
+    Ok(out.unbind())
 }
 
 #[pymodule]
@@ -416,7 +448,7 @@ fn _rho_fitting_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(build_mechanical_targets, m)?)?;
     m.add_function(wrap_pyfunction!(build_mechanical_libraries, m)?)?;
     m.add_function(wrap_pyfunction!(sample_component_rows, m)?)?;
-    m.add_function(wrap_pyfunction!(stlsq, m)?)?;
+    m.add_function(wrap_pyfunction!(stability_selection, m)?)?;
     Ok(())
 }
 

@@ -1,75 +1,168 @@
-The new goal is to fit across a series of targets with each target having a different candidate library. 
+# Additional instructions after converting to 3d
 
-I will explain how to calculate the new targets.
+Move the actual STLSQ and subsequent looping algorithms for the regression to Rust. 
 
-First calculate `J_rho`, `J_P`, and `J_Q` where `Q` is the nematic tensor defined earlier, I believe in `model_fitting/fitting/library.py`. However, this definition is not good because it depends on `P` which isn't accurate.
+You will use `burn` for storing all the tensors, but install `faer` in Rust for the actual solver. The core loop of STLSQ is:
+[
+\Xi^{(0)} = \arg\min_{\Xi} |\Theta \Xi - Y|_2
+]
+Where `\Xi` is the coefficient matrix. An AI-recommended implementation of this is 
 
-So define it as:
+```rust
+use burn::tensor::{backend::Backend, Tensor, TensorData};
+use faer::prelude::*;
+use faer::Mat;
+
+#[derive(Debug, Clone)]
+pub struct StlsqConfig {
+    pub lambda: f64,
+    pub max_iter: usize,
+}
+
+pub fn stlsq_sindy<B>(
+    y: Tensor<B, 2>,
+    f: Tensor<B, 2>,
+    config: StlsqConfig,
+    device: &B::Device,
+) -> Tensor<B, 2>
+where
+    B: Backend,
+{
+    let [n_samples, n_features] = y.dims();
+    let [f_rows, n_targets] = f.dims();
+
+    assert_eq!(
+        n_samples, f_rows,
+        "Y and F must have the same number of rows"
+    );
+
+    let y_vec: Vec<f64> = y
+        .to_data()
+        .convert::<f64>()
+        .into_vec::<f64>()
+        .expect("failed to convert Y tensor to Vec<f64>");
+
+    let f_vec: Vec<f64> = f
+        .to_data()
+        .convert::<f64>()
+        .into_vec::<f64>()
+        .expect("failed to convert F tensor to Vec<f64>");
+
+    let y_mat = row_major_to_faer(&y_vec, n_samples, n_features);
+    let f_mat = row_major_to_faer(&f_vec, n_samples, n_targets);
+
+    let xi = stlsq_faer(&y_mat, &f_mat, config.lambda, config.max_iter);
+
+    let xi_vec = faer_to_row_major(&xi);
+
+    Tensor::<B, 2>::from_data(
+        TensorData::new(xi_vec, [n_features, n_targets]),
+        device,
+    )
+}
+
+fn stlsq_faer(
+    y: &Mat<f64>,
+    f: &Mat<f64>,
+    lambda: f64,
+    max_iter: usize,
+) -> Mat<f64> {
+    let n_samples = y.nrows();
+    let n_features = y.ncols();
+    let n_targets = f.ncols();
+
+    assert_eq!(f.nrows(), n_samples);
+
+    // Initial dense least-squares solve: Y Xi ≈ F
+    let mut xi = y.qr().solve_lstsq(f);
+
+    let mut prev_support = vec![true; n_features * n_targets];
+
+    for _ in 0..max_iter {
+        let mut support_changed = false;
+
+        // Threshold small coefficients.
+        let mut support = vec![false; n_features * n_targets];
+
+        for j in 0..n_targets {
+            for i in 0..n_features {
+                let keep = xi[(i, j)].abs() >= lambda;
+                support[i * n_targets + j] = keep;
+
+                if !keep {
+                    xi[(i, j)] = 0.0;
+                }
+
+                if keep != prev_support[i * n_targets + j] {
+                    support_changed = true;
+                }
+            }
+        }
+
+        if !support_changed {
+            break;
+        }
+
+        prev_support = support.clone();
+
+        // Refit each target column on its active feature subset.
+        for j in 0..n_targets {
+            let active: Vec<usize> = (0..n_features)
+                .filter(|&i| support[i * n_targets + j])
+                .collect();
+
+            // If everything was thresholded out, leave this target as all zeros.
+            if active.is_empty() {
+                for i in 0..n_features {
+                    xi[(i, j)] = 0.0;
+                }
+                continue;
+            }
+
+            let y_active = Mat::from_fn(n_samples, active.len(), |r, c| {
+                y[(r, active[c])]
+            });
+
+            let f_col = Mat::from_fn(n_samples, 1, |r, _| f[(r, j)]);
+
+            let xi_active = y_active.qr().solve_lstsq(&f_col);
+
+            // Clear old column, then write active coefficients.
+            for i in 0..n_features {
+                xi[(i, j)] = 0.0;
+            }
+
+            for (local_i, &global_i) in active.iter().enumerate() {
+                xi[(global_i, j)] = xi_active[(local_i, 0)];
+            }
+        }
+    }
+
+    xi
+}
+
+fn row_major_to_faer(data: &[f64], rows: usize, cols: usize) -> Mat<f64> {
+    assert_eq!(data.len(), rows * cols);
+
+    Mat::from_fn(rows, cols, |r, c| {
+        data[r * cols + c]
+    })
+}
+
+fn faer_to_row_major(mat: &Mat<f64>) -> Vec<f64> {
+    let rows = mat.nrows();
+    let cols = mat.ncols();
+
+    let mut out = Vec::with_capacity(rows * cols);
+
+    for r in 0..rows {
+        for c in 0..cols {
+            out.push(mat[(r, c)]);
+        }
+    }
+
+    out
+}
 ```
-Q_{\alpha\beta} = 1/N \sum_{i}^N (p_i,\alpha p_i,\beta - delta_{\alpha\beta}/d)
-```
-where `d` is the dimensions `3`.
 
-where `\alpha` and `\beta` are coordinate components. 
-
-You will need to coares grain this as well, so account for that.
-
-Now, you compute the `J` directly from these fields. You already know `J_rho`. But make sure its similar to the `J_m` present in the `model_fitting`, this is important as any discrepency would fail it. 
-
-Calculate the other fluxes the same way. Its, of course, combining the `velocity` with the previous fields. If there is any difference between this and the method in `model_fitting`, raise it in the planning stage (i.e ask follow up or at least highlight it).
-
-Now, here is what the fit targets.
-```
-Y_rho = gamma(J_rho - U0 P) -> P is polarization
-Y_P = J_P/U0
-Y_Q = J_Q
-```
-
-You will be working with tensors a lot for this, just a recommendation: use `tracel-ai/burn` in Rust for the tensor libraries if neccessary.
-
-Here are the candidate libraries now:
-Use these as the updated libraries.
-
-Y_rho:
-
-Candidates:
-grad rho
-rho grad(rho)
-rho^2 grad rho
-grad lap rho
-(lap rho)grad rho
-|grad rho|^2 grad rho
-grad |grad rho|^2
-
-Y_P:
-Let `A = Q + rho/d * I` where `I` is the identity tensor
-A
-rho A
-rho^2 A
-rho^3 A
-
-Y_Q:
-Let `alpha_ijkl = delta_ij delta_kl + delta_ik delta_jl + delta_il delta_jk`
-Do not coarse grain this.
-
-Also let `F_rho = (THETA XI)_rho = the fit result for rho (vector)`
-
-Candidates:
-`P dot alpha`
-`rho P dot alpha`
-`rho ^2 P dot alpha`
-`P dot II`
-`F_rho I`
-
-
-
-
-I'll also plan out some code-related things:
-1. Make things modular and simple to add more `Y` in the case more targets are needed. 
-2. Remove a lot of the rigorous validation of inputs, etc. I'm only using this, so don't raise errors that much as it makes the code not clean.
-3. Try to use more dataclasses instead of raw `dict` to make the code easier.
-
-I'll attach a paper with the formulas in the last section `Materials and Methods`, cross reference it with the plan. If there are any differences, raise it in the plan or include it in the plan at least (possible issues). Any possible uncertainty you should ask follow up questions. I will also manually edit the plan afters. 
-
-You plan now, include assumptions and edge cases that you have to account for.
-Be quite specific in the plan, and edit into PLAN.md (not codex planning mode).
+But do not follow it strictly, make it simpler and check more for validity. It may not apply in our case

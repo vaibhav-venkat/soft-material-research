@@ -69,13 +69,37 @@ pub fn build_mechanical_fields(
     gamma: f64,
     u0: f64,
 ) -> CoreResult<MechanicalFields> {
-    coarse_grain::validate_inputs(
-        coords, directions, mask, x_centers, y_centers, lx, ly, radius, sigma,
-    )?;
     let (frames, particles, _) = coords.dim();
-    if velocities.dim() != (frames, particles, 2) {
+    if coords.dim().2 != 3 {
         return Err(CoreError::Shape(
-            "velocities must have shape (T,N,2)".to_string(),
+            "coords must have shape (T,N,3)".to_string(),
+        ));
+    }
+    if directions.dim() != (frames, particles, 3) || velocities.dim() != (frames, particles, 2) {
+        return Err(CoreError::Shape(
+            "directions must have shape (T,N,3) and velocities must have shape (T,N,2)"
+                .to_string(),
+        ));
+    }
+    if mask.dim() != (frames, particles) {
+        return Err(CoreError::Shape("mask must have shape (T,N)".to_string()));
+    }
+    if x_centers.is_empty() || y_centers.is_empty() {
+        return Err(CoreError::InvalidInput(
+            "grid centers must be non-empty".to_string(),
+        ));
+    }
+    if !(lx.is_finite()
+        && lx > 0.0
+        && ly.is_finite()
+        && ly > 0.0
+        && radius.is_finite()
+        && radius > 0.0
+        && sigma.is_finite()
+        && sigma > 0.0)
+    {
+        return Err(CoreError::InvalidInput(
+            "geometry values must be positive".to_string(),
         ));
     }
     if !(gamma.is_finite() && u0.is_finite() && u0 != 0.0) {
@@ -212,12 +236,12 @@ fn mechanical_burn_device(
     let ny = y_centers.len();
     let grid = nx * ny;
     let mut rho = Array3::<f64>::zeros((frames, nx, ny));
-    let mut p = Array4::<f64>::zeros((frames, nx, ny, 2));
-    let mut q = Array5::<f64>::zeros((frames, nx, ny, 2, 2));
-    let mut a = Array5::<f64>::zeros((frames, nx, ny, 2, 2));
+    let mut p = Array4::<f64>::zeros((frames, nx, ny, 3));
+    let mut q = Array5::<f64>::zeros((frames, nx, ny, 3, 3));
+    let mut a = Array5::<f64>::zeros((frames, nx, ny, 3, 3));
     let mut j_rho = Array4::<f64>::zeros((frames, nx, ny, 2));
-    let mut j_p = Array5::<f64>::zeros((frames, nx, ny, 2, 2));
-    let mut j_q = Array6::<f64>::zeros((frames, nx, ny, 2, 2, 2));
+    let mut j_p = Array5::<f64>::zeros((frames, nx, ny, 2, 3));
+    let mut j_q = Array6::<f64>::zeros((frames, nx, ny, 2, 3, 3));
     let x_grid = repeated_grid_values(x_centers, ny);
     let y_grid = tiled_grid_values(y_centers, nx);
     let norm = (1.0 / (2.0 * std::f64::consts::PI * sigma * sigma)) as f32;
@@ -235,16 +259,22 @@ fn mechanical_burn_device(
         let dir = [
             frame_component(directions, t, particles, 0, 1.0),
             frame_component(directions, t, particles, 1, 1.0),
+            frame_component(directions, t, particles, 2, 1.0),
         ];
         let vel = [
             frame_component(velocities, t, particles, 0, 1.0),
             frame_component(velocities, t, particles, 1, 1.0),
         ];
         let q_particle = [
-            combine_particle_components(&dir[0], &dir[0], -0.5),
+            combine_particle_components(&dir[0], &dir[0], -1.0 / 3.0),
             combine_particle_components(&dir[0], &dir[1], 0.0),
+            combine_particle_components(&dir[0], &dir[2], 0.0),
             combine_particle_components(&dir[1], &dir[0], 0.0),
-            combine_particle_components(&dir[1], &dir[1], -0.5),
+            combine_particle_components(&dir[1], &dir[1], -1.0 / 3.0),
+            combine_particle_components(&dir[1], &dir[2], 0.0),
+            combine_particle_components(&dir[2], &dir[0], 0.0),
+            combine_particle_components(&dir[2], &dir[1], 0.0),
+            combine_particle_components(&dir[2], &dir[2], -1.0 / 3.0),
         ];
         let mask_tensor = tensor2(frame_mask(mask, t, particles), [1, particles], device);
         let x_particles = tensor2(particle_x, [1, particles], device);
@@ -252,6 +282,7 @@ fn mechanical_burn_device(
         let dir_tensors = [
             tensor2(dir[0].clone(), [1, particles], device),
             tensor2(dir[1].clone(), [1, particles], device),
+            tensor2(dir[2].clone(), [1, particles], device),
         ];
         let vel_tensors = [
             tensor2(vel[0].clone(), [1, particles], device),
@@ -262,6 +293,11 @@ fn mechanical_burn_device(
             tensor2(q_particle[1].clone(), [1, particles], device),
             tensor2(q_particle[2].clone(), [1, particles], device),
             tensor2(q_particle[3].clone(), [1, particles], device),
+            tensor2(q_particle[4].clone(), [1, particles], device),
+            tensor2(q_particle[5].clone(), [1, particles], device),
+            tensor2(q_particle[6].clone(), [1, particles], device),
+            tensor2(q_particle[7].clone(), [1, particles], device),
+            tensor2(q_particle[8].clone(), [1, particles], device),
         ];
 
         for start in (0..grid).step_by(GRID_CHUNK) {
@@ -282,7 +318,7 @@ fn mechanical_burn_device(
                 start,
                 &tensor_vec(weights.clone().sum_dim(1).reshape([chunk]))?,
             );
-            for component in 0..2 {
+            for component in 0..3 {
                 write_chunk4(
                     &mut p,
                     t,
@@ -291,6 +327,8 @@ fn mechanical_burn_device(
                     component,
                     &weighted_sum(&weights, &dir_tensors[component], chunk)?,
                 );
+            }
+            for component in 0..2 {
                 write_chunk4(
                     &mut j_rho,
                     t,
@@ -300,9 +338,9 @@ fn mechanical_burn_device(
                     &weighted_sum(&weights, &vel_tensors[component], chunk)?,
                 );
             }
-            for i in 0..2 {
-                for j in 0..2 {
-                    let q_index = i * 2 + j;
+            for i in 0..3 {
+                for j in 0..3 {
+                    let q_index = i * 3 + j;
                     let q_values = weighted_sum(&weights, &q_tensors[q_index], chunk)?;
                     write_chunk5(&mut q, t, ny, start, i, j, &q_values);
                     for k in 0..2 {
@@ -330,8 +368,8 @@ fn mechanical_burn_device(
     for t in 0..frames {
         for ix in 0..nx {
             for iy in 0..ny {
-                for component in 0..2 {
-                    a[[t, ix, iy, component, component]] += 0.5 * rho[[t, ix, iy]];
+                for component in 0..3 {
+                    a[[t, ix, iy, component, component]] += rho[[t, ix, iy]] / 3.0;
                 }
             }
         }
