@@ -47,10 +47,10 @@ def stability_selection(
 
     _progress(f"running PySINDy SR3 L1 regression rows={X.shape[0]} terms={X.shape[1]}")
     optimizer = ps.SR3(
-        reg_weight_lam=float(alpha),
+        reg_weight_lam=float(1e-1 * alpha),
         regularizer="L1",
         max_iter=int(max_iter),
-        normalize_columns=False,
+        normalize_columns=True,
         unbias=False,
     )
     optimizer.fit_intercept = False

@@ -212,12 +212,13 @@ fn build_density_library(
 }
 
 #[pyfunction]
-#[pyo3(signature = (coords, directions, velocities, mask, x_centers, y_centers, lx, ly, radius, sigma, gamma, u0))]
+#[pyo3(signature = (coords, directions, velocities, psi6_abs, mask, x_centers, y_centers, lx, ly, radius, sigma, gamma, u0))]
 fn build_mechanical_fields(
     py: Python<'_>,
     coords: PyReadonlyArray3<'_, f64>,
     directions: PyReadonlyArray3<'_, f64>,
     velocities: PyReadonlyArray3<'_, f64>,
+    psi6_abs: PyReadonlyArray2<'_, f64>,
     mask: PyReadonlyArray2<'_, bool>,
     x_centers: PyReadonlyArray1<'_, f64>,
     y_centers: PyReadonlyArray1<'_, f64>,
@@ -240,6 +241,7 @@ fn build_mechanical_fields(
             coords.as_array(),
             directions.as_array(),
             velocities.as_array(),
+            psi6_abs.as_array(),
             mask.as_array(),
             x_centers.as_array(),
             y_centers.as_array(),
@@ -258,6 +260,7 @@ fn build_mechanical_fields(
                 coords.as_array(),
                 directions.as_array(),
                 velocities.as_array(),
+                psi6_abs.as_array(),
                 mask.as_array(),
                 x_centers.as_array(),
                 y_centers.as_array(),
@@ -274,6 +277,7 @@ fn build_mechanical_fields(
             coords.as_array(),
             directions.as_array(),
             velocities.as_array(),
+            psi6_abs.as_array(),
             mask.as_array(),
             x_centers.as_array(),
             y_centers.as_array(),
@@ -295,6 +299,7 @@ fn build_mechanical_fields(
         coords.as_array(),
         directions.as_array(),
         velocities.as_array(),
+        psi6_abs.as_array(),
         mask.as_array(),
         x_centers.as_array(),
         y_centers.as_array(),
@@ -312,6 +317,7 @@ fn build_mechanical_fields(
     out.set_item("P", fields.p.into_pyarray(py))?;
     out.set_item("Q", fields.q.into_pyarray(py))?;
     out.set_item("A", fields.a.into_pyarray(py))?;
+    out.set_item("psi6_sq", fields.psi6_sq.into_pyarray(py))?;
     out.set_item("J_rho", fields.j_rho.into_pyarray(py))?;
     out.set_item("J_P", fields.j_p.into_pyarray(py))?;
     out.set_item("J_Q", fields.j_q.into_pyarray(py))?;
@@ -319,11 +325,10 @@ fn build_mechanical_fields(
 }
 
 #[pyfunction]
-#[pyo3(signature = (p, a, j_rho, j_p, j_q, gamma, u0))]
+#[pyo3(signature = (p, j_rho, j_p, j_q, gamma, u0))]
 fn build_mechanical_targets(
     py: Python<'_>,
     p: PyReadonlyArrayDyn<'_, f64>,
-    a: PyReadonlyArrayDyn<'_, f64>,
     j_rho: PyReadonlyArrayDyn<'_, f64>,
     j_p: PyReadonlyArrayDyn<'_, f64>,
     j_q: PyReadonlyArrayDyn<'_, f64>,
@@ -332,7 +337,6 @@ fn build_mechanical_targets(
 ) -> PyResult<Py<PyDict>> {
     let (y_rho, y_p, y_q) = mechanics::build_targets(
         p.as_array(),
-        a.as_array(),
         j_rho.as_array(),
         j_p.as_array(),
         j_q.as_array(),
@@ -348,14 +352,15 @@ fn build_mechanical_targets(
 }
 
 #[pyfunction]
-#[pyo3(signature = (rho, p, q, a, f_rho, lx, ly))]
+#[pyo3(signature = (rho, p, q, a, psi6_sq, y_p, lx, ly))]
 fn build_mechanical_libraries(
     py: Python<'_>,
     rho: PyReadonlyArray3<'_, f64>,
     p: PyReadonlyArrayDyn<'_, f64>,
     q: PyReadonlyArrayDyn<'_, f64>,
     a: PyReadonlyArrayDyn<'_, f64>,
-    f_rho: PyReadonlyArrayDyn<'_, f64>,
+    psi6_sq: PyReadonlyArray3<'_, f64>,
+    y_p: PyReadonlyArrayDyn<'_, f64>,
     lx: f64,
     ly: f64,
 ) -> PyResult<Py<PyDict>> {
@@ -364,7 +369,8 @@ fn build_mechanical_libraries(
         p.as_array(),
         q.as_array(),
         a.as_array(),
-        f_rho.as_array(),
+        psi6_sq.as_array(),
+        y_p.as_array(),
         lx,
         ly,
     )

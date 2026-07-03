@@ -94,17 +94,21 @@ def run(config: RhoFittingConfig) -> RhoFittingResult:
         f"grid=({active.x_centers.size}, {active.theta_centers.size})"
     )
 
-    coarse = coarse_grain_active_fields(active, config)
-    _log(f"mechanical fields coarse-grained rho shape={coarse['rho'].shape}")
-    spectral = spectral_active_fields(active, coarse, config)
-    if config.make_plots and not config.correlations_only:
-        for path in write_temporal_power_plots(
-            config.output_dir,
-            config.case_id,
-            spectral["temporal_power"],
-            settings.cheb_cutoff,
-        ):
-            _log(f"temporal power plot written {path}")
+    if config.fit_only:
+        coarse, spectral = _load_mechanical_fit_cache(active, config)
+        _log(f"loaded cached mechanical fields from {_mechanical_cache_path(config)}")
+    else:
+        coarse = coarse_grain_active_fields(active, config)
+        _log(f"mechanical fields coarse-grained rho shape={coarse['rho'].shape}")
+        spectral = spectral_active_fields(active, coarse, config)
+        if config.make_plots and not config.correlations_only:
+            for path in write_temporal_power_plots(
+                config.output_dir,
+                config.case_id,
+                spectral["temporal_power"],
+                settings.cheb_cutoff,
+            ):
+                _log(f"temporal power plot written {path}")
 
     if config.correlations_only:
         sample_indices = print_mechanical_correlations(active, spectral, config)
@@ -117,13 +121,14 @@ def run(config: RhoFittingConfig) -> RhoFittingResult:
             grid_shape=(active.x_centers.size, active.theta_centers.size),
             sample_count=sample_indices.shape[0],
             active_terms=(),
-            cache_path=config.output_dir,
+            cache_path=_mechanical_cache_path(config) if config.fit_only else config.output_dir,
             report_path=config.output_dir,
         )
 
     fit_payload = fit_mechanical(active, spectral, config)
     output_payload = cast(Mapping[str, np.ndarray | StabilityResult], fit_payload)
-    cache_path, report_path = write_mechanical_outputs(active, coarse, spectral, output_payload, config)
+    output_config = _overwrite_config(config) if config.fit_only else config
+    cache_path, report_path = write_mechanical_outputs(active, coarse, spectral, output_payload, output_config)
     active_terms = tuple(
         f"{target}:{name}"
         for target, fit in (
@@ -153,6 +158,97 @@ def _settings(config: RhoFittingConfig) -> NumericalSettings:
     return config.settings
 
 
+def _overwrite_config(config: RhoFittingConfig) -> RhoFittingConfig:
+    return RhoFittingConfig(
+        case_id=config.case_id,
+        overwrite=True,
+        make_plots=config.make_plots,
+        correlations_only=config.correlations_only,
+        fit_only=config.fit_only,
+        output_dir=config.output_dir,
+        settings=config.settings,
+    )
+
+
+def _mechanical_cache_path(config: RhoFittingConfig) -> Path:
+    return config.output_dir / f"{config.case_id}_fit_result.npz"
+
+
+def _load_mechanical_fit_cache(
+    active: ActiveMatterArrays,
+    config: RhoFittingConfig,
+) -> tuple[dict[str, Array], dict[str, Array]]:
+    path = _mechanical_cache_path(config)
+    assert path.exists(), f"fit-only cache does not exist: {path}"
+    with np.load(path, allow_pickle=False) as cache:
+        required = (
+            "raw_rho",
+            "raw_P",
+            "raw_Q",
+            "raw_A",
+            "raw_psi6_sq",
+            "raw_J_rho",
+            "raw_J_P",
+            "raw_J_Q",
+            "rho",
+            "P",
+            "Q",
+            "A",
+            "psi6_sq",
+            "J_rho",
+            "J_P",
+            "J_Q",
+            "Y_rho",
+            "Y_P",
+            "Y_Q",
+            "J_density",
+            "partial_t_rho",
+            "temporal_power",
+            "cheb_times",
+            "cheb_scaled_times",
+        )
+        missing = [name for name in required if name not in cache.files]
+        assert not missing, f"fit-only cache is missing fields: {', '.join(missing)}"
+        coarse = {
+            "rho": np.asarray(cache["raw_rho"]),
+            "P": np.asarray(cache["raw_P"]),
+            "Q": np.asarray(cache["raw_Q"]),
+            "A": np.asarray(cache["raw_A"]),
+            "psi6_sq": np.asarray(cache["raw_psi6_sq"]),
+            "J_rho": np.asarray(cache["raw_J_rho"]),
+            "J_P": np.asarray(cache["raw_J_P"]),
+            "J_Q": np.asarray(cache["raw_J_Q"]),
+        }
+        coarse["J_density"] = coarse["J_rho"]
+        spectral = {name: np.asarray(cache[name]) for name in required if not name.startswith("raw_")}
+    _validate_cached_fields(active, coarse, spectral, config)
+    return coarse, spectral
+
+
+def _validate_cached_fields(
+    active: ActiveMatterArrays,
+    coarse: dict[str, Array],
+    spectral: dict[str, Array],
+    config: RhoFittingConfig,
+) -> None:
+    settings = _settings(config)
+    grid_shape = (active.coords.shape[0], active.x_centers.size, active.theta_centers.size)
+    assert coarse["rho"].shape == grid_shape, "cached raw rho shape does not match active grid"
+    assert spectral["rho"].shape == grid_shape, "cached rho shape does not match active grid"
+    assert spectral["P"].shape == grid_shape + (3,), "cached P must use 3D orientation axes"
+    assert spectral["Q"].shape == grid_shape + (3, 3), "cached Q must use 3D orientation axes"
+    assert spectral["A"].shape == grid_shape + (3, 3), "cached A must use 3D orientation axes"
+    assert spectral["J_rho"].shape == grid_shape + (2,), "cached J_rho must use 2D surface flux axes"
+    assert spectral["J_P"].shape == grid_shape + (2, 3), "cached J_P must use 2D flux and 3D moment axes"
+    assert spectral["J_Q"].shape == grid_shape + (2, 3, 3), "cached J_Q must use 2D flux and 3D moment axes"
+    assert spectral["psi6_sq"].shape == grid_shape, "cached psi6_sq shape does not match active grid"
+    assert spectral["Y_rho"].shape == grid_shape + (2,), "cached Y_rho shape is invalid"
+    assert spectral["Y_P"].shape == grid_shape + (2, 3), "cached Y_P shape is invalid"
+    assert spectral["Y_Q"].shape == grid_shape + (2, 3, 3), "cached Y_Q shape is invalid"
+    assert int(np.asarray(spectral["cheb_times"]).shape[0]) == active.steps.size, "cached time axis length is invalid"
+    assert settings.cheb_cutoff > 0, "cheb_cutoff must be positive"
+
+
 def _core() -> Any:
     assert _rho_fitting_core is not None, "rho_fitting extension is not built"
     return _rho_fitting_core
@@ -170,10 +266,12 @@ def coarse_grain_active_fields(
     all_particles = np.ones_like(active.shell_mask, dtype=bool)
     directions = particle_tangent_directions(active, config)
     velocities = particle_surface_velocities(active, config)
+    psi6_abs = _load_hexatic_abs_frames(config.paths.hexatic_order_path, active)
     fields = core.build_mechanical_fields(
         coords,
         np.ascontiguousarray(directions, dtype=np.float64),
         np.ascontiguousarray(velocities, dtype=np.float64),
+        np.ascontiguousarray(psi6_abs, dtype=np.float64),
         all_particles,
         np.ascontiguousarray(active.x_centers, dtype=np.float64),
         y_centers,
@@ -203,7 +301,7 @@ def spectral_active_fields(
     )
     filtered = {"rho": rho_time.filtered}
     coefficients = [rho_time.coefficients]
-    for name in ("P", "Q", "A", "J_rho", "J_P", "J_Q"):
+    for name in ("P", "Q", "A", "J_rho", "J_P", "J_Q", "psi6_sq"):
         result = chebyshev_filter_and_derivative(
             coarse[name],
             active.steps,
@@ -221,7 +319,6 @@ def spectral_active_fields(
     )
     targets = core.build_mechanical_targets(
         np.ascontiguousarray(filtered["P"], dtype=np.float64),
-        np.ascontiguousarray(filtered["A"], dtype=np.float64),
         np.ascontiguousarray(filtered["J_rho"], dtype=np.float64),
         np.ascontiguousarray(filtered["J_P"], dtype=np.float64),
         np.ascontiguousarray(filtered["J_Q"], dtype=np.float64),
@@ -236,6 +333,7 @@ def spectral_active_fields(
         "P": filtered["P"],
         "Q": filtered["Q"],
         "A": filtered["A"],
+        "psi6_sq": filtered["psi6_sq"],
         "J_density": filtered["J_rho"],
         "J_rho": filtered["J_rho"],
         "J_P": filtered["J_P"],
@@ -261,10 +359,9 @@ def fit_mechanical(
 ) -> MechanicalFitPayload:
     sample_indices = _mechanical_sample_indices(spectral, config)
     lx, ly = surface_lengths(active.x_edges, active.theta_edges, active.radius)
-    libraries = _mechanical_libraries(spectral, spectral["Y_rho"], lx, ly)
+    libraries = _mechanical_libraries(spectral, lx, ly)
     y_rho_fit, y_rho_rows, y_rho_index = _fit_component_target("Y_rho", spectral["Y_rho"], libraries["Y_rho"], libraries["Y_rho_names"], sample_indices, config)
     f_rho_pred = np.tensordot(y_rho_fit.coefficients, libraries["Y_rho"], axes=(0, 0))
-    libraries = _mechanical_libraries(spectral, f_rho_pred, lx, ly)
     y_p_fit, y_p_rows, y_p_index = _fit_component_target("Y_P", spectral["Y_P"], libraries["Y_P"], libraries["Y_P_names"], sample_indices, config)
     y_q_fit, y_q_rows, y_q_index = _fit_component_target("Y_Q", spectral["Y_Q"], libraries["Y_Q"], libraries["Y_Q_names"], sample_indices, config)
     return {
@@ -295,7 +392,7 @@ def print_mechanical_correlations(
 ) -> Array:
     sample_indices = _mechanical_sample_indices(spectral, config)
     lx, ly = surface_lengths(active.x_edges, active.theta_edges, active.radius)
-    libraries = _mechanical_libraries(spectral, spectral["Y_rho"], lx, ly)
+    libraries = _mechanical_libraries(spectral, lx, ly)
     for target_name, target, library, names in (
         ("Y_rho", spectral["Y_rho"], libraries["Y_rho"], libraries["Y_rho_names"]),
         ("Y_P", spectral["Y_P"], libraries["Y_P"], libraries["Y_P_names"]),
@@ -333,7 +430,6 @@ def _mechanical_sample_indices(spectral: dict[str, Array], config: RhoFittingCon
 
 def _mechanical_libraries(
     spectral: dict[str, Array],
-    f_rho: Array,
     lx: float,
     ly: float,
 ) -> MechanicalLibraries:
@@ -343,7 +439,8 @@ def _mechanical_libraries(
         np.ascontiguousarray(spectral["P"], dtype=np.float64),
         np.ascontiguousarray(spectral["Q"], dtype=np.float64),
         np.ascontiguousarray(spectral["A"], dtype=np.float64),
-        np.ascontiguousarray(f_rho, dtype=np.float64),
+        np.ascontiguousarray(spectral["psi6_sq"], dtype=np.float64),
+        np.ascontiguousarray(spectral["Y_P"], dtype=np.float64),
         lx,
         ly,
     )
@@ -426,7 +523,23 @@ def _mechanical_valid_mask(spectral: dict[str, Array]) -> Array:
     for name in ("P", "A", "J_rho", "J_P", "J_Q", "Y_rho", "Y_P", "Y_Q"):
         axes = tuple(range(3, spectral[name].ndim))
         valid &= np.all(np.isfinite(spectral[name]), axis=axes)
+    valid &= np.isfinite(spectral["psi6_sq"])
     return valid
+
+
+def _load_hexatic_abs_frames(path: Path, active: ActiveMatterArrays) -> Array:
+    table = np.loadtxt(path, dtype=np.float64)
+    assert table.ndim == 2 and table.shape[1] >= 6, "hexatic order table must have at least 6 columns"
+    frame_indices = table[:, 0].astype(np.int64)
+    table_steps = table[:, 1].astype(np.int64)
+    particle_indices = table[:, 2].astype(np.int64)
+    assert np.all((0 <= frame_indices) & (frame_indices < active.steps.size))
+    assert np.all((0 <= particle_indices) & (particle_indices < active.coords.shape[1]))
+    assert np.array_equal(table_steps, active.steps[frame_indices])
+    values = np.full(active.coords.shape[:2], np.nan, dtype=np.float64)
+    values[frame_indices, particle_indices] = table[:, 5]
+    assert np.all(np.isfinite(values)), "hexatic order table is incomplete"
+    return values
 
 
 def fit_density(
@@ -485,31 +598,6 @@ def fit_density(
         "term_fluxes": np.asarray(flux_names()),
         "fit": fit,
     }
-
-
-def _coarse_grain(
-    coords: Array,
-    vectors: Array,
-    mask: Array,
-    active: ActiveMatterArrays,
-    y_centers: Array,
-    lx: float,
-    ly: float,
-    config: RhoFittingConfig,
-) -> Array:
-    core = _core()
-    settings = _settings(config)
-    return core.coarse_grain_fields(
-        coords,
-        np.ascontiguousarray(vectors, dtype=np.float64),
-        np.ascontiguousarray(mask),
-        np.ascontiguousarray(active.x_centers, dtype=np.float64),
-        y_centers,
-        lx,
-        ly,
-        active.radius,
-        float(settings.sigma),
-    )
 
 
 def _validate_temporal_alignment(

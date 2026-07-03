@@ -63,6 +63,7 @@ class RhoFittingConfig:
     overwrite: bool = False
     make_plots: bool = True
     correlations_only: bool = False
+    fit_only: bool = False
     output_dir: Path = DEFAULT_OUTPUT_DIR
     settings: NumericalSettings | None = None
 

@@ -59,6 +59,7 @@ pub fn build_mechanical_fields(
     coords: ArrayView3<'_, f64>,
     directions: ArrayView3<'_, f64>,
     velocities: ArrayView3<'_, f64>,
+    psi6_abs: ArrayView2<'_, f64>,
     mask: ArrayView2<'_, bool>,
     x_centers: ArrayView1<'_, f64>,
     y_centers: ArrayView1<'_, f64>,
@@ -78,6 +79,11 @@ pub fn build_mechanical_fields(
     if directions.dim() != (frames, particles, 3) || velocities.dim() != (frames, particles, 2) {
         return Err(CoreError::Shape(
             "directions must have shape (T,N,3) and velocities must have shape (T,N,2)".to_string(),
+        ));
+    }
+    if psi6_abs.dim() != (frames, particles) {
+        return Err(CoreError::Shape(
+            "psi6_abs must have shape (T,N)".to_string(),
         ));
     }
     if mask.dim() != (frames, particles) {
@@ -111,8 +117,8 @@ pub fn build_mechanical_fields(
         let device = WgpuDevice::DefaultDevice;
         init_setup::<graphics::Metal>(&device, Default::default());
         mechanical_burn_device(
-            coords, directions, velocities, mask, x_centers, y_centers, lx, ly, radius, sigma,
-            &device,
+            coords, directions, velocities, psi6_abs, mask, x_centers, y_centers, lx, ly, radius,
+            sigma, &device,
         )
     })
 }
@@ -221,6 +227,7 @@ fn mechanical_burn_device(
     coords: ArrayView3<'_, f64>,
     directions: ArrayView3<'_, f64>,
     velocities: ArrayView3<'_, f64>,
+    psi6_abs: ArrayView2<'_, f64>,
     mask: ArrayView2<'_, bool>,
     x_centers: ArrayView1<'_, f64>,
     y_centers: ArrayView1<'_, f64>,
@@ -235,6 +242,7 @@ fn mechanical_burn_device(
     let ny = y_centers.len();
     let grid = nx * ny;
     let mut rho = Array3::<f64>::zeros((frames, nx, ny));
+    let mut psi6 = Array3::<f64>::zeros((frames, nx, ny));
     let mut p = Array4::<f64>::zeros((frames, nx, ny, 3));
     let mut q = Array5::<f64>::zeros((frames, nx, ny, 3, 3));
     let mut a = Array5::<f64>::zeros((frames, nx, ny, 3, 3));
@@ -264,6 +272,7 @@ fn mechanical_burn_device(
             frame_component(velocities, t, particles, 0, 1.0),
             frame_component(velocities, t, particles, 1, 1.0),
         ];
+        let psi6_particle = frame_scalar(psi6_abs, t, particles);
         let q_particle = [
             combine_particle_components(&dir[0], &dir[0], -1.0 / 3.0),
             combine_particle_components(&dir[0], &dir[1], 0.0),
@@ -278,6 +287,7 @@ fn mechanical_burn_device(
         let mask_tensor = tensor2(frame_mask(mask, t, particles), [1, particles], device);
         let x_particles = tensor2(particle_x, [1, particles], device);
         let y_particles = tensor2(particle_y, [1, particles], device);
+        let psi6_tensor = tensor2(psi6_particle, [1, particles], device);
         let dir_tensors = [
             tensor2(dir[0].clone(), [1, particles], device),
             tensor2(dir[1].clone(), [1, particles], device),
@@ -316,6 +326,13 @@ fn mechanical_burn_device(
                 ny,
                 start,
                 &tensor_vec(weights.clone().sum_dim(1).reshape([chunk]))?,
+            );
+            write_chunk3(
+                &mut psi6,
+                t,
+                ny,
+                start,
+                &weighted_sum(&weights, &psi6_tensor, chunk)?,
             );
             for component in 0..3 {
                 write_chunk4(
@@ -364,9 +381,14 @@ fn mechanical_burn_device(
     }
 
     a.assign(&q);
+    let mut psi6_sq = Array3::<f64>::from_elem((frames, nx, ny), f64::NAN);
     for t in 0..frames {
         for ix in 0..nx {
             for iy in 0..ny {
+                if rho[[t, ix, iy]].is_finite() && rho[[t, ix, iy]] > 0.0 {
+                    let value = psi6[[t, ix, iy]] / rho[[t, ix, iy]];
+                    psi6_sq[[t, ix, iy]] = value * value;
+                }
                 for component in 0..3 {
                     a[[t, ix, iy, component, component]] += rho[[t, ix, iy]] / 3.0;
                 }
@@ -378,6 +400,7 @@ fn mechanical_burn_device(
         p,
         q,
         a,
+        psi6_sq,
         j_rho,
         j_p,
         j_q,
@@ -495,6 +518,12 @@ fn frame_component(
 ) -> Vec<f32> {
     (0..particles)
         .map(|particle| (scale * values[[frame, particle, component]]) as f32)
+        .collect()
+}
+
+fn frame_scalar(values: ArrayView2<'_, f64>, frame: usize, particles: usize) -> Vec<f32> {
+    (0..particles)
+        .map(|particle| values[[frame, particle]] as f32)
         .collect()
 }
 

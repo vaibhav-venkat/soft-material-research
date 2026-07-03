@@ -14,6 +14,7 @@ class RhoFittingMechanicsTests(unittest.TestCase):
         coords = np.array([[[0.0, 0.0, 1.0]]], dtype=float)
         directions = np.array([[[2.0, 3.0, 4.0]]], dtype=float)
         velocities = np.array([[[5.0, 7.0]]], dtype=float)
+        psi6_abs = np.array([[0.5]], dtype=float)
         mask = np.array([[True]])
         sigma = 2.0
 
@@ -21,6 +22,7 @@ class RhoFittingMechanicsTests(unittest.TestCase):
             coords,
             directions,
             velocities,
+            psi6_abs,
             mask,
             np.array([0.0]),
             np.array([0.0]),
@@ -35,11 +37,13 @@ class RhoFittingMechanicsTests(unittest.TestCase):
         weight = 1.0 / (2.0 * np.pi * sigma**2)
         expected = weight * np.array([[10.0, 15.0, 20.0], [14.0, 21.0, 28.0]])
         np.testing.assert_allclose(np.asarray(fields["J_P"])[0, 0, 0], expected)
+        np.testing.assert_allclose(np.asarray(fields["psi6_sq"])[0, 0, 0], 0.25)
 
     def test_q_uses_3d_traceless_orientation_moment(self) -> None:
         coords = np.array([[[0.0, 0.0, 1.0]]], dtype=float)
         directions = np.array([[[1.0, 0.0, 0.0]]], dtype=float)
         velocities = np.array([[[0.0, 0.0]]], dtype=float)
+        psi6_abs = np.array([[0.0]], dtype=float)
         mask = np.array([[True]])
         sigma = 2.0
 
@@ -47,6 +51,7 @@ class RhoFittingMechanicsTests(unittest.TestCase):
             coords,
             directions,
             velocities,
+            psi6_abs,
             mask,
             np.array([0.0]),
             np.array([0.0]),
@@ -67,39 +72,72 @@ class RhoFittingMechanicsTests(unittest.TestCase):
 
     def test_target_shapes_are_validated(self) -> None:
         p = np.zeros((1, 2, 3, 3))
-        a = np.zeros((1, 2, 3, 3, 3))
         j_rho = np.zeros((1, 2, 3, 2))
         j_p = np.zeros((1, 2, 3, 2, 3))
         j_q = np.zeros((1, 2, 3, 2, 2, 2))
 
         with self.assertRaises(ValueError):
-            _rho_fitting_core.build_mechanical_targets(p, a, j_rho, j_p, j_q, 1.0, 100.0)
+            _rho_fitting_core.build_mechanical_targets(p, j_rho, j_p, j_q, 1.0, 100.0)
 
     def test_old_2d_p_shape_is_rejected(self) -> None:
         p = np.zeros((1, 2, 3, 2))
-        a = np.zeros((1, 2, 3, 3, 3))
         j_rho = np.zeros_like(p)
         j_p = np.zeros((1, 2, 3, 2, 2))
         j_q = np.zeros((1, 2, 3, 2, 2, 2))
 
         with self.assertRaises(ValueError):
-            _rho_fitting_core.build_mechanical_targets(p, a, j_rho, j_p, j_q, 1.0, 100.0)
+            _rho_fitting_core.build_mechanical_targets(p, j_rho, j_p, j_q, 1.0, 100.0)
 
-    def test_y_p_target_is_projected_u_estimate(self) -> None:
+    def test_y_p_target_is_j_p_over_u0(self) -> None:
         p = np.zeros((1, 1, 1, 3))
-        a = np.zeros((1, 1, 1, 3, 3))
         j_rho = np.zeros((1, 1, 1, 2))
         j_p = np.zeros((1, 1, 1, 2, 3))
         j_q = np.zeros((1, 1, 1, 2, 3, 3))
-        a[0, 0, 0, 0, 0] = 2.0
-        a[0, 0, 0, 1, 1] = 1.0
         j_p[0, 0, 0, 0, 0] = 40.0
         j_p[0, 0, 0, 1, 1] = 10.0
 
-        targets = _rho_fitting_core.build_mechanical_targets(p, a, j_rho, j_p, j_q, 1.0, 10.0)
+        targets = _rho_fitting_core.build_mechanical_targets(p, j_rho, j_p, j_q, 1.0, 10.0)
 
-        self.assertEqual(np.asarray(targets["Y_P"]).shape, (1, 1, 1, 1))
-        self.assertAlmostEqual(np.asarray(targets["Y_P"])[0, 0, 0, 0], 1.8)
+        self.assertEqual(np.asarray(targets["Y_P"]).shape, (1, 1, 1, 2, 3))
+        np.testing.assert_allclose(np.asarray(targets["Y_P"]), j_p / 10.0)
+
+    def test_y_p_library_uses_a_and_delta_psi6_sq_a_terms(self) -> None:
+        rho = np.ones((1, 4, 4), dtype=float)
+        p = np.zeros((1, 4, 4, 3), dtype=float)
+        q = np.zeros((1, 4, 4, 3, 3), dtype=float)
+        a = np.zeros((1, 4, 4, 3, 3), dtype=float)
+        a[..., 0, 0] = 1.0
+        psi6_sq = np.arange(16, dtype=float).reshape(1, 4, 4)
+        y_p = np.zeros((1, 4, 4, 2, 3), dtype=float)
+
+        libraries = _rho_fitting_core.build_mechanical_libraries(
+            rho, p, q, a, psi6_sq, y_p, 4.0, 4.0
+        )
+
+        self.assertEqual(
+            tuple(libraries["Y_P_names"]),
+            ("A", "delta_psi6sq_A"),
+        )
+        self.assertEqual(
+            tuple(libraries["Y_rho_names"]),
+            (
+                "rho_Ubar_P_dot_alpha_nn_traceless",
+                "grad_P2",
+                "grad_trQ2",
+                "grad_Qnn",
+                "grad_Pn2",
+            ),
+        )
+        self.assertEqual(
+            tuple(libraries["Y_Q_names"]),
+            (
+                "Ubar_P_dot_alpha_traceless",
+                "rho_Ubar_P_dot_alpha_traceless",
+                "P2_Ubar_P_dot_alpha_traceless",
+            ),
+        )
+        self.assertEqual(np.asarray(libraries["Y_P"]).shape, (2, 1, 4, 4, 2, 3))
+        np.testing.assert_allclose(np.asarray(libraries["Y_P"])[1, ..., 0, 0], psi6_sq - np.mean(psi6_sq))
 
     def test_regression_wrapper_returns_stability_result(self) -> None:
         from hexatic.rho_fitting.regression import stability_selection
