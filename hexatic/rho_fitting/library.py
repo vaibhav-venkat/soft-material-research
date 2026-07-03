@@ -34,21 +34,21 @@ def flux_names() -> tuple[str, ...]:
 
 MECHANICAL_LABELS = {
     "grad_rho": "grad rho",
-    "rho_grad_rho": "rho grad rho",
-    "rho2_grad_rho": "rho^2 grad rho",
     "grad_lap_rho": "grad lap rho",
-    "lap_rho_grad_rho": "lap rho grad rho",
     "grad_rho_cubed": "|grad rho|^2 grad rho",
-    "grad_grad_rho_norm2": "grad |grad rho|^2",
-    "A": "A",
-    "rho_A": "rho A",
-    "rho2_A": "rho^2 A",
-    "rho3_A": "rho^3 A",
+    "Q_dot_grad_rho": "Q dot grad rho",
+    "rho2_Q_dot_grad_rho": "rho^2 Q dot grad rho",
+    "trQ2_grad_rho": "tr(Q^2) grad rho",
+    "P2_grad_rho": "|P|^2 grad rho",
+    "rho": "rho",
+    "rho2": "rho^2",
+    "lap_rho": "lap rho",
+    "bilap_rho": "bilap rho",
+    "lap_rho2": "(lap rho)^2",
     "P_dot_alpha": "P dot alpha",
-    "rho_P_dot_alpha": "rho P dot alpha",
     "rho2_P_dot_alpha": "rho^2 P dot alpha",
-    "P_dot_II": "P dot II",
-    "F_rho_I": "F_rho I",
+    "P2_P_dot_alpha_traceless": "|P|^2 P dot alpha",
+    "trQ2_P_dot_alpha_traceless": "tr(Q^2) P dot alpha",
 }
 
 

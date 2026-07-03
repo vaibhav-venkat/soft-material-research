@@ -5,8 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-
-from . import _rho_fitting_core
+import pysindy as ps
 
 
 @dataclass(frozen=True)
@@ -44,40 +43,48 @@ def stability_selection(
     assert X.shape[1] == len(names) == len(labels), "term metadata must match X columns"
     assert X.shape[0] > 0 and X.shape[1] > 0, "regression matrix must be non-empty"
 
-    assert _rho_fitting_core is not None, "rho_fitting extension is not built"
-    _progress(f"running Rust STLSQ stability selection rows={X.shape[0]} terms={X.shape[1]} subsamples={subsamples}")
-    result = _rho_fitting_core.stability_selection(
-        np.ascontiguousarray(X, dtype=np.float64),
-        np.ascontiguousarray(y, dtype=np.float64),
-        int(seed),
-        float(tau_eps),
-        int(subsamples),
-        float(importance_threshold),
-        float(alpha),
-        int(max_iter),
-    )
+    del seed, tau_eps, subsamples
 
-    raw_correlations = np.asarray(result["raw_correlations"], dtype=np.float64)
+    _progress(f"running PySINDy SR3 L1 regression rows={X.shape[0]} terms={X.shape[1]}")
+    optimizer = ps.SR3(
+        reg_weight_lam=float(alpha),
+        regularizer="L1",
+        max_iter=int(max_iter),
+        normalize_columns=False,
+        unbias=False,
+    )
+    optimizer.fit_intercept = False
+    assert optimizer.fit_intercept is False, "PySINDy SR3 must not fit an intercept"
+    optimizer.fit(np.ascontiguousarray(X, dtype=np.float64), np.ascontiguousarray(y, dtype=np.float64))
+    coefficients = np.asarray(optimizer.coef_, dtype=np.float64).reshape(-1)
+    assert coefficients.shape == (X.shape[1],), "PySINDy returned an unexpected coefficient shape"
+
+    raw_correlations = _raw_feature_correlations(X, y)
     _progress("raw feature correlations with target")
     for label, correlation in zip(labels, raw_correlations, strict=True):
         _progress(f"  {label}: {_format_correlation(correlation)}")
-    tau_index = int(result["tau_index"])
-    if tau_index >= 0:
-        tau_values = np.asarray(result["tau_values"], dtype=np.float64)
-        _progress(f"stability tau {tau_index + 1}/{tau_values.size}: tau={tau_values[tau_index]:.6g}")
+
+    y_pred = X @ coefficients
+    residual = y - y_pred
+    rmse = float(np.sqrt(np.mean(residual * residual)))
+    total = float(np.sum((y - np.mean(y)) ** 2))
+    r2 = 1.0 - float(np.sum(residual * residual)) / total if total > 0.0 else float("nan")
+    importance = _coefficient_importance(coefficients)
+    active = (np.abs(coefficients) > 1.0e-12) & (importance >= float(importance_threshold))
+
     return StabilityResult(
         names,
         labels,
-        np.asarray(result["coefficients"], dtype=np.float64),
-        np.asarray(result["importance"], dtype=np.float64),
+        coefficients,
+        importance,
         raw_correlations,
-        np.asarray(result["importance_path"], dtype=np.float64),
-        np.asarray(result["tau_values"], dtype=np.float64),
-        np.asarray(result["active"], dtype=bool),
-        None if tau_index < 0 else tau_index,
-        np.asarray(result["y_pred"], dtype=np.float64),
-        float(result["rmse"]),
-        float(result["r2"]),
+        importance.reshape(1, -1),
+        np.asarray([], dtype=np.float64),
+        active,
+        None,
+        y_pred,
+        rmse,
+        r2,
     )
 
 
@@ -89,3 +96,23 @@ def _format_correlation(value: float) -> str:
     if not np.isfinite(value):
         return "nan"
     return f"{value:.6g}"
+
+
+def _raw_feature_correlations(X: np.ndarray, y: np.ndarray) -> np.ndarray:
+    y_centered = y - np.mean(y)
+    y_norm = float(np.linalg.norm(y_centered))
+    correlations = np.full(X.shape[1], np.nan, dtype=np.float64)
+    for feature in range(X.shape[1]):
+        x_centered = X[:, feature] - np.mean(X[:, feature])
+        denominator = float(np.linalg.norm(x_centered) * y_norm)
+        if denominator > 0.0:
+            correlations[feature] = float(np.dot(x_centered, y_centered) / denominator)
+    return correlations
+
+
+def _coefficient_importance(coefficients: np.ndarray) -> np.ndarray:
+    magnitudes = np.abs(coefficients)
+    maximum = float(np.max(magnitudes)) if magnitudes.size else 0.0
+    if maximum == 0.0:
+        return np.zeros_like(magnitudes)
+    return magnitudes / maximum

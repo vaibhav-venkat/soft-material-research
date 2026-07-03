@@ -11,7 +11,6 @@ use crate::coarse_grain_burn;
 use crate::fft_ops;
 use crate::library;
 use crate::mechanics;
-use crate::regression;
 use crate::sampling;
 use crate::CoreError;
 
@@ -320,10 +319,11 @@ fn build_mechanical_fields(
 }
 
 #[pyfunction]
-#[pyo3(signature = (p, j_rho, j_p, j_q, gamma, u0))]
+#[pyo3(signature = (p, a, j_rho, j_p, j_q, gamma, u0))]
 fn build_mechanical_targets(
     py: Python<'_>,
     p: PyReadonlyArrayDyn<'_, f64>,
+    a: PyReadonlyArrayDyn<'_, f64>,
     j_rho: PyReadonlyArrayDyn<'_, f64>,
     j_p: PyReadonlyArrayDyn<'_, f64>,
     j_q: PyReadonlyArrayDyn<'_, f64>,
@@ -332,6 +332,7 @@ fn build_mechanical_targets(
 ) -> PyResult<Py<PyDict>> {
     let (y_rho, y_p, y_q) = mechanics::build_targets(
         p.as_array(),
+        a.as_array(),
         j_rho.as_array(),
         j_p.as_array(),
         j_q.as_array(),
@@ -347,11 +348,12 @@ fn build_mechanical_targets(
 }
 
 #[pyfunction]
-#[pyo3(signature = (rho, p, a, f_rho, lx, ly))]
+#[pyo3(signature = (rho, p, q, a, f_rho, lx, ly))]
 fn build_mechanical_libraries(
     py: Python<'_>,
     rho: PyReadonlyArray3<'_, f64>,
     p: PyReadonlyArrayDyn<'_, f64>,
+    q: PyReadonlyArrayDyn<'_, f64>,
     a: PyReadonlyArrayDyn<'_, f64>,
     f_rho: PyReadonlyArrayDyn<'_, f64>,
     lx: f64,
@@ -360,6 +362,7 @@ fn build_mechanical_libraries(
     let libs = mechanics::build_mechanical_libraries(
         rho.as_array(),
         p.as_array(),
+        q.as_array(),
         a.as_array(),
         f_rho.as_array(),
         lx,
@@ -396,44 +399,6 @@ fn sample_component_rows(
     Ok(out.unbind())
 }
 
-#[pyfunction]
-#[pyo3(signature = (x, y, seed, tau_eps, subsamples, importance_threshold, alpha, max_iter))]
-fn stability_selection(
-    py: Python<'_>,
-    x: PyReadonlyArray2<'_, f64>,
-    y: PyReadonlyArray1<'_, f64>,
-    seed: u64,
-    tau_eps: f64,
-    subsamples: usize,
-    importance_threshold: f64,
-    alpha: f64,
-    max_iter: usize,
-) -> PyResult<Py<PyDict>> {
-    let result = regression::stability_selection(
-        x.as_array(),
-        y.as_array(),
-        seed,
-        tau_eps,
-        subsamples,
-        importance_threshold,
-        alpha,
-        max_iter,
-    )
-    .map_err(to_py_err)?;
-    let out = PyDict::new(py);
-    out.set_item("coefficients", result.coefficients.into_pyarray(py))?;
-    out.set_item("importance", result.importance.into_pyarray(py))?;
-    out.set_item("raw_correlations", result.raw_correlations.into_pyarray(py))?;
-    out.set_item("importance_path", result.importance_path.into_pyarray(py))?;
-    out.set_item("tau_values", result.tau_values.into_pyarray(py))?;
-    out.set_item("active", result.active.into_pyarray(py))?;
-    out.set_item("tau_index", result.tau_index)?;
-    out.set_item("y_pred", result.y_pred.into_pyarray(py))?;
-    out.set_item("rmse", result.rmse)?;
-    out.set_item("r2", result.r2)?;
-    Ok(out.unbind())
-}
-
 #[pymodule]
 fn _rho_fitting_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
@@ -446,7 +411,6 @@ fn _rho_fitting_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(build_mechanical_targets, m)?)?;
     m.add_function(wrap_pyfunction!(build_mechanical_libraries, m)?)?;
     m.add_function(wrap_pyfunction!(sample_component_rows, m)?)?;
-    m.add_function(wrap_pyfunction!(stability_selection, m)?)?;
     Ok(())
 }
 

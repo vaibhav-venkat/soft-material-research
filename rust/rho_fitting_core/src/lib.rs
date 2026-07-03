@@ -8,7 +8,6 @@ pub mod geometry;
 pub mod library;
 pub mod mechanics;
 pub mod python;
-pub mod regression;
 pub mod sampling;
 
 pub use errors::{CoreError, CoreResult};

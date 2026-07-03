@@ -15,6 +15,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--no-plots", action="store_true")
     parser.add_argument("--no-plot", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--correlations-only", action="store_true")
     return parser
 
 
@@ -29,6 +30,7 @@ def main(argv: list[str] | None = None) -> int:
         case_id=args.case,
         overwrite=args.overwrite,
         make_plots=not (args.no_plots or args.no_plot),
+        correlations_only=args.correlations_only,
         settings=settings,
     )
     result = run(config)

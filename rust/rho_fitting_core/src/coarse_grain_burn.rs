@@ -77,8 +77,7 @@ pub fn build_mechanical_fields(
     }
     if directions.dim() != (frames, particles, 3) || velocities.dim() != (frames, particles, 2) {
         return Err(CoreError::Shape(
-            "directions must have shape (T,N,3) and velocities must have shape (T,N,2)"
-                .to_string(),
+            "directions must have shape (T,N,3) and velocities must have shape (T,N,2)".to_string(),
         ));
     }
     if mask.dim() != (frames, particles) {

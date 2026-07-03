@@ -153,6 +153,7 @@ pub fn build_mechanical_fields(
 
 pub fn build_targets(
     p: ArrayViewD<'_, f64>,
+    a: ArrayViewD<'_, f64>,
     j_rho: ArrayViewD<'_, f64>,
     j_p: ArrayViewD<'_, f64>,
     j_q: ArrayViewD<'_, f64>,
@@ -171,7 +172,13 @@ pub fn build_targets(
         ));
     }
     let expected_j_p = [p.shape()[0], p.shape()[1], p.shape()[2], 2, 3];
+    let expected_a = [p.shape()[0], p.shape()[1], p.shape()[2], 3, 3];
     let expected_j_q = [p.shape()[0], p.shape()[1], p.shape()[2], 2, 3, 3];
+    if a.shape() != expected_a {
+        return Err(CoreError::Shape(
+            "A must have shape (T,Nx,Ny,3,3)".to_string(),
+        ));
+    }
     if j_p.shape() != expected_j_p {
         return Err(CoreError::Shape(
             "J_P must have shape (T,Nx,Ny,2,3)".to_string(),
@@ -198,14 +205,43 @@ pub fn build_targets(
         }
     }
     let y_rho = (&j_rho - &(p_surface * u0)) * gamma;
-    let y_p = j_p.to_owned() / u0;
+    let y_p = u_estimate(a, j_p, u0);
     let y_q = j_q.to_owned();
     Ok((y_rho, y_p, y_q))
+}
+
+fn u_estimate(a: ArrayViewD<'_, f64>, j_p: ArrayViewD<'_, f64>, u0: f64) -> ArrayD<f64> {
+    let frames = a.shape()[0];
+    let nx = a.shape()[1];
+    let ny = a.shape()[2];
+    let mut out = ArrayD::<f64>::zeros(IxDyn(&[frames, nx, ny, 1]));
+    for t in 0..frames {
+        for ix in 0..nx {
+            for iy in 0..ny {
+                let mut numerator = 0.0;
+                let mut denominator = 0.0;
+                for k in 0..2 {
+                    for component in 0..3 {
+                        let a_value = a[IxDyn(&[t, ix, iy, k, component])];
+                        numerator += (j_p[IxDyn(&[t, ix, iy, k, component])] / u0) * a_value;
+                        denominator += a_value * a_value;
+                    }
+                }
+                out[IxDyn(&[t, ix, iy, 0])] = if denominator > 0.0 {
+                    numerator / denominator
+                } else {
+                    f64::NAN
+                };
+            }
+        }
+    }
+    out
 }
 
 pub fn build_mechanical_libraries(
     rho: ArrayView3<'_, f64>,
     p: ArrayViewD<'_, f64>,
+    q: ArrayViewD<'_, f64>,
     a: ArrayViewD<'_, f64>,
     f_rho: ArrayViewD<'_, f64>,
     lx: f64,
@@ -215,6 +251,9 @@ pub fn build_mechanical_libraries(
     let p4 = p
         .into_dimensionality::<ndarray::Ix4>()
         .map_err(|_| CoreError::Shape("P must be (T,Nx,Ny,3)".to_string()))?;
+    let q5 = q
+        .into_dimensionality::<ndarray::Ix5>()
+        .map_err(|_| CoreError::Shape("Q must be (T,Nx,Ny,3,3)".to_string()))?;
     let a5 = a
         .into_dimensionality::<ndarray::Ix5>()
         .map_err(|_| CoreError::Shape("A must be (T,Nx,Ny,3,3)".to_string()))?;
@@ -223,6 +262,7 @@ pub fn build_mechanical_libraries(
         .map_err(|_| CoreError::Shape("F_rho must be (T,Nx,Ny,2)".to_string()))?;
     if p4.dim() != (rho.dim().0, rho.dim().1, rho.dim().2, 3)
         || f4.dim() != (rho.dim().0, rho.dim().1, rho.dim().2, 2)
+        || q5.dim() != (rho.dim().0, rho.dim().1, rho.dim().2, 3, 3)
         || a5.dim() != (rho.dim().0, rho.dim().1, rho.dim().2, 3, 3)
     {
         return Err(CoreError::Shape(
@@ -232,30 +272,30 @@ pub fn build_mechanical_libraries(
 
     let y_rho_names = vec![
         "grad_rho".to_string(),
-        "rho_grad_rho".to_string(),
-        "rho2_grad_rho".to_string(),
         "grad_lap_rho".to_string(),
-        "lap_rho_grad_rho".to_string(),
         "grad_rho_cubed".to_string(),
-        "grad_grad_rho_norm2".to_string(),
+        "Q_dot_grad_rho".to_string(),
+        "rho2_Q_dot_grad_rho".to_string(),
+        "trQ2_grad_rho".to_string(),
+        "P2_grad_rho".to_string(),
     ];
     let y_p_names = vec![
-        "A".to_string(),
-        "rho_A".to_string(),
-        "rho2_A".to_string(),
-        "rho3_A".to_string(),
+        "rho".to_string(),
+        "rho2".to_string(),
+        "lap_rho".to_string(),
+        "bilap_rho".to_string(),
+        "lap_rho2".to_string(),
     ];
     let y_q_names = vec![
         "P_dot_alpha".to_string(),
-        "rho_P_dot_alpha".to_string(),
         "rho2_P_dot_alpha".to_string(),
-        "P_dot_II".to_string(),
-        "F_rho_I".to_string(),
+        "P2_P_dot_alpha_traceless".to_string(),
+        "trQ2_P_dot_alpha_traceless".to_string(),
     ];
 
-    let y_rho = stack_vector_terms(&build_y_rho_terms(rho, lx, ly)?);
-    let y_p = stack_rank2_terms(&build_y_p_terms(rho, a5));
-    let y_q = stack_rank3_terms(&build_y_q_terms(rho, p4, f4));
+    let y_rho = stack_vector_terms(&build_y_rho_terms(rho, p4, q5, lx, ly)?);
+    let y_p = stack_scalar_terms(&build_y_p_terms(rho, lx, ly)?);
+    let y_q = stack_rank3_terms(&build_y_q_terms(rho, p4, q5));
     Ok(MechanicalLibraries {
         y_rho_names,
         y_p_names,
@@ -326,47 +366,57 @@ pub fn sample_component_rows(
     Ok((x, meta))
 }
 
-fn build_y_rho_terms(rho: ArrayView3<'_, f64>, lx: f64, ly: f64) -> CoreResult<Vec<Array4<f64>>> {
+fn build_y_rho_terms(
+    rho: ArrayView3<'_, f64>,
+    p: ndarray::ArrayView4<'_, f64>,
+    q: ndarray::ArrayView5<'_, f64>,
+    lx: f64,
+    ly: f64,
+) -> CoreResult<Vec<Array4<f64>>> {
     let grad = fft_ops::gradient_scalar(rho, lx, ly)?;
     let lap = fft_ops::laplacian_scalar(rho, lx, ly)?;
     let grad_lap = fft_ops::gradient_scalar(lap.view(), lx, ly)?;
-    let lap_grad = scalar_times_vector(lap.view(), grad.view());
     let grad_cubed = cubic_gradient_flux(grad.view());
-    let norm2 = gradient_norm2(grad.view());
-    let grad_norm2 = fft_ops::gradient_scalar(norm2.view(), lx, ly)?;
+    let q_grad = q_dot_grad_rho(q, grad.view());
+    let tr_q2 = tr_q2(q);
+    let p2 = p2(p);
     Ok(vec![
         grad.clone(),
-        rho_times_vector(rho, grad.view(), 1),
-        rho_times_vector(rho, grad.view(), 2),
         grad_lap,
-        lap_grad,
         grad_cubed,
-        grad_norm2,
+        q_grad.clone(),
+        rho_times_vector(rho, q_grad.view(), 2),
+        scalar_times_vector(tr_q2.view(), grad.view()),
+        scalar_times_vector(p2.view(), grad.view()),
     ])
 }
 
-fn build_y_p_terms(rho: ArrayView3<'_, f64>, a: ndarray::ArrayView5<'_, f64>) -> Vec<Array5<f64>> {
-    let a_surface = surface_rows_rank2(a);
-    vec![
-        a_surface.clone(),
-        rho_times_rank2(rho, a_surface.view(), 1),
-        rho_times_rank2(rho, a_surface.view(), 2),
-        rho_times_rank2(rho, a_surface.view(), 3),
-    ]
+fn build_y_p_terms(rho: ArrayView3<'_, f64>, lx: f64, ly: f64) -> CoreResult<Vec<Array4<f64>>> {
+    let lap = fft_ops::laplacian_scalar(rho, lx, ly)?;
+    let bilap = fft_ops::laplacian_scalar(lap.view(), lx, ly)?;
+    let lap2 = lap.mapv(|value| value * value);
+    Ok(vec![
+        scalar_component(rho),
+        scalar_component_pow(rho, 2),
+        scalar_component(lap.view()),
+        scalar_component(bilap.view()),
+        scalar_component(lap2.view()),
+    ])
 }
 
 fn build_y_q_terms(
     rho: ArrayView3<'_, f64>,
     p: ndarray::ArrayView4<'_, f64>,
-    f_rho: ndarray::ArrayView4<'_, f64>,
+    q: ndarray::ArrayView5<'_, f64>,
 ) -> Vec<Array6<f64>> {
-    let p_alpha = p_dot_alpha(p);
+    let tr_q2 = tr_q2(q);
+    let p2 = p2(p);
+    let p_alpha = vector_dot_alpha_traceless(p);
     vec![
         p_alpha.clone(),
-        rho_times_rank3(rho, p_alpha.view(), 1),
         rho_times_rank3(rho, p_alpha.view(), 2),
-        p_dot_ii(p),
-        vector_identity(f_rho),
+        scalar_times_rank3(p2.view(), p_alpha.view()),
+        scalar_times_rank3(tr_q2.view(), p_alpha.view()),
     ]
 }
 
@@ -387,24 +437,15 @@ fn stack_vector_terms(terms: &[Array4<f64>]) -> ArrayD<f64> {
     out
 }
 
-fn stack_rank2_terms(terms: &[Array5<f64>]) -> ArrayD<f64> {
+fn stack_scalar_terms(terms: &[Array4<f64>]) -> ArrayD<f64> {
     let shape = terms[0].dim();
-    let mut out = ArrayD::<f64>::zeros(IxDyn(&[
-        terms.len(),
-        shape.0,
-        shape.1,
-        shape.2,
-        shape.3,
-        shape.4,
-    ]));
+    let mut out = ArrayD::<f64>::zeros(IxDyn(&[terms.len(), shape.0, shape.1, shape.2, shape.3]));
     for (term, values) in terms.iter().enumerate() {
         for t in 0..shape.0 {
             for ix in 0..shape.1 {
                 for iy in 0..shape.2 {
-                    for i in 0..shape.3 {
-                        for j in 0..shape.4 {
-                            out[IxDyn(&[term, t, ix, iy, i, j])] = values[[t, ix, iy, i, j]];
-                        }
+                    for component in 0..shape.3 {
+                        out[IxDyn(&[term, t, ix, iy, component])] = values[[t, ix, iy, component]];
                     }
                 }
             }
@@ -443,16 +484,79 @@ fn stack_rank3_terms(terms: &[Array6<f64>]) -> ArrayD<f64> {
     out
 }
 
+fn scalar_component(scalar: ArrayView3<'_, f64>) -> Array4<f64> {
+    let (frames, nx, ny) = scalar.dim();
+    let mut out = Array4::<f64>::zeros((frames, nx, ny, 1));
+    for t in 0..frames {
+        for ix in 0..nx {
+            for iy in 0..ny {
+                out[[t, ix, iy, 0]] = scalar[[t, ix, iy]];
+            }
+        }
+    }
+    out
+}
+
+fn scalar_component_pow(scalar: ArrayView3<'_, f64>, power: i32) -> Array4<f64> {
+    let (frames, nx, ny) = scalar.dim();
+    let mut out = Array4::<f64>::zeros((frames, nx, ny, 1));
+    for t in 0..frames {
+        for ix in 0..nx {
+            for iy in 0..ny {
+                out[[t, ix, iy, 0]] = scalar[[t, ix, iy]].powi(power);
+            }
+        }
+    }
+    out
+}
+
+fn tr_q2(q: ndarray::ArrayView5<'_, f64>) -> Array3<f64> {
+    let (frames, nx, ny, _, _) = q.dim();
+    let mut out = Array3::<f64>::zeros((frames, nx, ny));
+    for t in 0..frames {
+        for ix in 0..nx {
+            for iy in 0..ny {
+                let mut value = 0.0;
+                for a in 0..3 {
+                    for b in 0..3 {
+                        value += q[[t, ix, iy, a, b]] * q[[t, ix, iy, a, b]];
+                    }
+                }
+                out[[t, ix, iy]] = value;
+            }
+        }
+    }
+    out
+}
+
+fn p2(p: ndarray::ArrayView4<'_, f64>) -> Array3<f64> {
+    let (frames, nx, ny, _) = p.dim();
+    let mut out = Array3::<f64>::zeros((frames, nx, ny));
+    for t in 0..frames {
+        for ix in 0..nx {
+            for iy in 0..ny {
+                let mut value = 0.0;
+                for a in 0..3 {
+                    value += p[[t, ix, iy, a]] * p[[t, ix, iy, a]];
+                }
+                out[[t, ix, iy]] = value;
+            }
+        }
+    }
+    out
+}
+
 fn scalar_times_vector(
     scalar: ArrayView3<'_, f64>,
     vector: ndarray::ArrayView4<'_, f64>,
 ) -> Array4<f64> {
     let (frames, nx, ny) = scalar.dim();
-    let mut out = Array4::<f64>::zeros((frames, nx, ny, 2));
+    let shape = vector.dim();
+    let mut out = Array4::<f64>::zeros(shape);
     for t in 0..frames {
         for ix in 0..nx {
             for iy in 0..ny {
-                for component in 0..2 {
+                for component in 0..shape.3 {
                     out[[t, ix, iy, component]] =
                         scalar[[t, ix, iy]] * vector[[t, ix, iy, component]];
                 }
@@ -462,16 +566,45 @@ fn scalar_times_vector(
     out
 }
 
-fn surface_rows_rank2(values: ndarray::ArrayView5<'_, f64>) -> Array5<f64> {
-    let (frames, nx, ny, _, orientation_components) = values.dim();
-    let mut out = Array5::<f64>::zeros((frames, nx, ny, 2, orientation_components));
+fn scalar_times_rank3(
+    scalar: ArrayView3<'_, f64>,
+    values: ndarray::ArrayView6<'_, f64>,
+) -> Array6<f64> {
+    let (frames, nx, ny) = scalar.dim();
+    let shape = values.dim();
+    let mut out = Array6::<f64>::zeros(shape);
+    for t in 0..frames {
+        for ix in 0..nx {
+            for iy in 0..ny {
+                for k in 0..shape.3 {
+                    for i in 0..shape.4 {
+                        for j in 0..shape.5 {
+                            out[[t, ix, iy, k, i, j]] =
+                                scalar[[t, ix, iy]] * values[[t, ix, iy, k, i, j]];
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+fn q_dot_grad_rho(
+    q: ndarray::ArrayView5<'_, f64>,
+    grad: ndarray::ArrayView4<'_, f64>,
+) -> Array4<f64> {
+    let (frames, nx, ny, _, _) = q.dim();
+    let mut out = Array4::<f64>::zeros((frames, nx, ny, 2));
     for t in 0..frames {
         for ix in 0..nx {
             for iy in 0..ny {
                 for k in 0..2 {
-                    for component in 0..orientation_components {
-                        out[[t, ix, iy, k, component]] = values[[t, ix, iy, k, component]];
+                    let mut value = 0.0;
+                    for l in 0..2 {
+                        value += q[[t, ix, iy, k, l]] * grad[[t, ix, iy, l]];
                     }
+                    out[[t, ix, iy, k]] = value;
                 }
             }
         }
@@ -492,29 +625,6 @@ fn rho_times_vector(
                 let scale = rho[[t, ix, iy]].powi(power);
                 for component in 0..2 {
                     out[[t, ix, iy, component]] = scale * vector[[t, ix, iy, component]];
-                }
-            }
-        }
-    }
-    out
-}
-
-fn rho_times_rank2(
-    rho: ArrayView3<'_, f64>,
-    values: ndarray::ArrayView5<'_, f64>,
-    power: i32,
-) -> Array5<f64> {
-    let (frames, nx, ny) = rho.dim();
-    let shape = values.dim();
-    let mut out = Array5::<f64>::zeros(shape);
-    for t in 0..frames {
-        for ix in 0..nx {
-            for iy in 0..ny {
-                let scale = rho[[t, ix, iy]].powi(power);
-                for i in 0..shape.3 {
-                    for j in 0..shape.4 {
-                        out[[t, ix, iy, i, j]] = scale * values[[t, ix, iy, i, j]];
-                    }
                 }
             }
         }
@@ -562,21 +672,8 @@ fn cubic_gradient_flux(grad: ndarray::ArrayView4<'_, f64>) -> Array4<f64> {
     out
 }
 
-fn gradient_norm2(grad: ndarray::ArrayView4<'_, f64>) -> Array3<f64> {
-    let (frames, nx, ny, _) = grad.dim();
-    let mut out = Array3::<f64>::zeros((frames, nx, ny));
-    for t in 0..frames {
-        for ix in 0..nx {
-            for iy in 0..ny {
-                out[[t, ix, iy]] = grad[[t, ix, iy, 0]].powi(2) + grad[[t, ix, iy, 1]].powi(2);
-            }
-        }
-    }
-    out
-}
-
-fn p_dot_alpha(p: ndarray::ArrayView4<'_, f64>) -> Array6<f64> {
-    let (frames, nx, ny, _) = p.dim();
+fn vector_dot_alpha_traceless(vector: ndarray::ArrayView4<'_, f64>) -> Array6<f64> {
+    let (frames, nx, ny, components) = vector.dim();
     let mut out = Array6::<f64>::zeros((frames, nx, ny, 2, 3, 3));
     for t in 0..frames {
         for ix in 0..nx {
@@ -584,9 +681,13 @@ fn p_dot_alpha(p: ndarray::ArrayView4<'_, f64>) -> Array6<f64> {
                 for k in 0..2 {
                     for i in 0..3 {
                         for j in 0..3 {
-                            out[[t, ix, iy, k, i, j]] = p[[t, ix, iy, k]] * delta(i, j)
-                                + p[[t, ix, iy, i]] * delta(k, j)
-                                + p[[t, ix, iy, j]] * delta(k, i);
+                            out[[t, ix, iy, k, i, j]] =
+                                vector_component(vector, t, ix, iy, i, components) * delta(k, j)
+                                    + vector_component(vector, t, ix, iy, j, components)
+                                        * delta(k, i)
+                                    - (2.0 / 3.0)
+                                        * vector_component(vector, t, ix, iy, k, components)
+                                        * delta(i, j);
                         }
                     }
                 }
@@ -596,38 +697,19 @@ fn p_dot_alpha(p: ndarray::ArrayView4<'_, f64>) -> Array6<f64> {
     out
 }
 
-fn p_dot_ii(p: ndarray::ArrayView4<'_, f64>) -> Array6<f64> {
-    let (frames, nx, ny, _) = p.dim();
-    let mut out = Array6::<f64>::zeros((frames, nx, ny, 2, 3, 3));
-    for t in 0..frames {
-        for ix in 0..nx {
-            for iy in 0..ny {
-                for k in 0..2 {
-                    for i in 0..3 {
-                        out[[t, ix, iy, k, i, i]] = p[[t, ix, iy, k]];
-                    }
-                }
-            }
-        }
+fn vector_component(
+    vector: ndarray::ArrayView4<'_, f64>,
+    t: usize,
+    ix: usize,
+    iy: usize,
+    component: usize,
+    components: usize,
+) -> f64 {
+    if component < components {
+        vector[[t, ix, iy, component]]
+    } else {
+        0.0
     }
-    out
-}
-
-fn vector_identity(vector: ndarray::ArrayView4<'_, f64>) -> Array6<f64> {
-    let (frames, nx, ny, _) = vector.dim();
-    let mut out = Array6::<f64>::zeros((frames, nx, ny, 2, 3, 3));
-    for t in 0..frames {
-        for ix in 0..nx {
-            for iy in 0..ny {
-                for k in 0..2 {
-                    for i in 0..3 {
-                        out[[t, ix, iy, k, i, i]] = vector[[t, ix, iy, k]];
-                    }
-                }
-            }
-        }
-    }
-    out
 }
 
 fn delta(a: usize, b: usize) -> f64 {
@@ -694,8 +776,7 @@ fn validate_particle_fields(
     }
     if directions.dim() != (frames, particles, 3) || velocities.dim() != (frames, particles, 2) {
         return Err(CoreError::Shape(
-            "directions must have shape (T,N,3) and velocities must have shape (T,N,2)"
-                .to_string(),
+            "directions must have shape (T,N,3) and velocities must have shape (T,N,2)".to_string(),
         ));
     }
     if mask.dim() != (frames, particles) {
@@ -725,4 +806,113 @@ fn validate_particle_fields(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ndarray::{array, Array3, Array4, Array5};
+
+    #[test]
+    fn scalar_contractions_use_all_3d_orientation_axes() {
+        let p = array![[[[2.0, 3.0, 5.0]]]];
+        let mut q = Array5::<f64>::zeros((1, 1, 1, 3, 3));
+        q[[0, 0, 0, 0, 0]] = 1.0;
+        q[[0, 0, 0, 0, 1]] = 2.0;
+        q[[0, 0, 0, 0, 2]] = 3.0;
+        q[[0, 0, 0, 1, 0]] = 4.0;
+        q[[0, 0, 0, 1, 1]] = 5.0;
+        q[[0, 0, 0, 1, 2]] = 6.0;
+        q[[0, 0, 0, 2, 0]] = 7.0;
+        q[[0, 0, 0, 2, 1]] = 8.0;
+        q[[0, 0, 0, 2, 2]] = 9.0;
+        let grad = array![[[[11.0, 13.0]]]];
+        let a = Array5::<f64>::ones((1, 1, 1, 2, 3));
+
+        let trq2 = tr_q2(q.view());
+        let p_norm2 = p2(p.view());
+        let grad_norm2 = vector_norm2(grad.view());
+        let trq2_grad = scalar_times_vector(trq2.view(), grad.view());
+        let p2_a = scalar_times_rank2(p_norm2.view(), a.view());
+
+        assert_eq!(trq2[[0, 0, 0]], 285.0);
+        assert_eq!(p_norm2[[0, 0, 0]], 38.0);
+        assert_eq!(grad_norm2[[0, 0, 0]], 290.0);
+        assert_eq!(trq2_grad[[0, 0, 0, 1]], 3705.0);
+        assert_eq!(p2_a[[0, 0, 0, 1, 2]], 38.0);
+    }
+
+    #[test]
+    fn q_rank3_candidates_are_traceless() {
+        let p = array![[[[2.0, 3.0, 5.0]]]];
+        let mut q = Array5::<f64>::zeros((1, 1, 1, 3, 3));
+        q[[0, 0, 0, 0, 0]] = 2.0;
+        q[[0, 0, 0, 1, 1]] = -1.0;
+        q[[0, 0, 0, 2, 2]] = -1.0;
+        q[[0, 0, 0, 0, 1]] = 0.5;
+        q[[0, 0, 0, 1, 0]] = 0.5;
+
+        let alpha = vector_dot_alpha_traceless(p.view());
+        let p2_alpha = scalar_times_rank3(p2(p.view()).view(), alpha.view());
+        let trq2_alpha = scalar_times_rank3(tr_q2(q.view()).view(), alpha.view());
+        for k in 0..2 {
+            let alpha_trace =
+                alpha[[0, 0, 0, k, 0, 0]] + alpha[[0, 0, 0, k, 1, 1]] + alpha[[0, 0, 0, k, 2, 2]];
+            let p2_alpha_trace = p2_alpha[[0, 0, 0, k, 0, 0]]
+                + p2_alpha[[0, 0, 0, k, 1, 1]]
+                + p2_alpha[[0, 0, 0, k, 2, 2]];
+            let trq2_alpha_trace = trq2_alpha[[0, 0, 0, k, 0, 0]]
+                + trq2_alpha[[0, 0, 0, k, 1, 1]]
+                + trq2_alpha[[0, 0, 0, k, 2, 2]];
+            assert!(alpha_trace.abs() < 1.0e-12);
+            assert!(p2_alpha_trace.abs() < 1.0e-12);
+            assert!(trq2_alpha_trace.abs() < 1.0e-12);
+        }
+    }
+
+    #[test]
+    fn mechanical_library_names_match_candidate_set() {
+        let rho = Array3::<f64>::ones((1, 4, 4));
+        let p = Array4::<f64>::zeros((1, 4, 4, 3));
+        let q = Array5::<f64>::zeros((1, 4, 4, 3, 3));
+        let a = Array5::<f64>::zeros((1, 4, 4, 3, 3));
+        let f_rho = Array4::<f64>::zeros((1, 4, 4, 2));
+
+        let libraries = build_mechanical_libraries(
+            rho.view(),
+            p.view().into_dyn(),
+            q.view().into_dyn(),
+            a.view().into_dyn(),
+            f_rho.view().into_dyn(),
+            1.0,
+            1.0,
+        )
+        .expect("libraries should build");
+
+        assert_eq!(
+            libraries.y_rho_names,
+            vec![
+                "grad_rho",
+                "grad_lap_rho",
+                "grad_rho_cubed",
+                "Q_dot_grad_rho",
+                "rho2_Q_dot_grad_rho",
+                "trQ2_grad_rho",
+                "P2_grad_rho"
+            ]
+        );
+        assert_eq!(
+            libraries.y_p_names,
+            vec!["rho", "rho2", "lap_rho", "bilap_rho", "lap_rho2"]
+        );
+        assert_eq!(
+            libraries.y_q_names,
+            vec![
+                "P_dot_alpha",
+                "rho2_P_dot_alpha",
+                "P2_P_dot_alpha_traceless",
+                "trQ2_P_dot_alpha_traceless"
+            ]
+        );
+    }
 }

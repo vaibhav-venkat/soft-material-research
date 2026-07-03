@@ -67,21 +67,39 @@ class RhoFittingMechanicsTests(unittest.TestCase):
 
     def test_target_shapes_are_validated(self) -> None:
         p = np.zeros((1, 2, 3, 3))
+        a = np.zeros((1, 2, 3, 3, 3))
         j_rho = np.zeros((1, 2, 3, 2))
         j_p = np.zeros((1, 2, 3, 2, 3))
         j_q = np.zeros((1, 2, 3, 2, 2, 2))
 
         with self.assertRaises(ValueError):
-            _rho_fitting_core.build_mechanical_targets(p, j_rho, j_p, j_q, 1.0, 100.0)
+            _rho_fitting_core.build_mechanical_targets(p, a, j_rho, j_p, j_q, 1.0, 100.0)
 
     def test_old_2d_p_shape_is_rejected(self) -> None:
         p = np.zeros((1, 2, 3, 2))
+        a = np.zeros((1, 2, 3, 3, 3))
         j_rho = np.zeros_like(p)
         j_p = np.zeros((1, 2, 3, 2, 2))
         j_q = np.zeros((1, 2, 3, 2, 2, 2))
 
         with self.assertRaises(ValueError):
-            _rho_fitting_core.build_mechanical_targets(p, j_rho, j_p, j_q, 1.0, 100.0)
+            _rho_fitting_core.build_mechanical_targets(p, a, j_rho, j_p, j_q, 1.0, 100.0)
+
+    def test_y_p_target_is_projected_u_estimate(self) -> None:
+        p = np.zeros((1, 1, 1, 3))
+        a = np.zeros((1, 1, 1, 3, 3))
+        j_rho = np.zeros((1, 1, 1, 2))
+        j_p = np.zeros((1, 1, 1, 2, 3))
+        j_q = np.zeros((1, 1, 1, 2, 3, 3))
+        a[0, 0, 0, 0, 0] = 2.0
+        a[0, 0, 0, 1, 1] = 1.0
+        j_p[0, 0, 0, 0, 0] = 40.0
+        j_p[0, 0, 0, 1, 1] = 10.0
+
+        targets = _rho_fitting_core.build_mechanical_targets(p, a, j_rho, j_p, j_q, 1.0, 10.0)
+
+        self.assertEqual(np.asarray(targets["Y_P"]).shape, (1, 1, 1, 1))
+        self.assertAlmostEqual(np.asarray(targets["Y_P"])[0, 0, 0, 0], 1.8)
 
     def test_regression_wrapper_returns_stability_result(self) -> None:
         from hexatic.rho_fitting.regression import stability_selection
@@ -97,15 +115,15 @@ class RhoFittingMechanicsTests(unittest.TestCase):
             tau_eps=1e-2,
             subsamples=8,
             importance_threshold=0.0,
-            alpha=10.0,
+            alpha=1.0e-9,
             max_iter=20,
         )
 
         self.assertEqual(fit.coefficients.shape, (1,))
-        self.assertEqual(fit.tau_index, 0)
-        self.assertEqual(fit.tau_values.shape, (1,))
+        self.assertIsNone(fit.tau_index)
+        self.assertEqual(fit.tau_values.shape, (0,))
         self.assertEqual(fit.importance_path.shape, (1, 1))
-        self.assertAlmostEqual(fit.coefficients[0], 2.0, places=8)
+        self.assertAlmostEqual(fit.coefficients[0], 2.0, places=6)
 
     def test_mechanical_report_formats_coefficients(self) -> None:
         fit = StabilityResult(
