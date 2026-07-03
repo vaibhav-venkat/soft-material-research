@@ -250,32 +250,20 @@ pub fn build_mechanical_libraries(
     }
 
     let y_rho_names = vec![
-        "rho_Ubar_P_dot_alpha_nn_traceless".to_string(),
+        "grad_rho".to_string(),
+        "grad_lap_rho".to_string(),
+        "grad_rho_cubed".to_string(),
         "grad_P2".to_string(),
-        "grad_trQ2".to_string(),
         "grad_Qnn".to_string(),
-        "grad_Pn2".to_string(),
     ];
     let y_p_names = vec!["A".to_string(), "delta_psi6sq_A".to_string()];
-    let y_q_names = vec![
-        "Ubar_P_dot_alpha_traceless".to_string(),
-        "rho_Ubar_P_dot_alpha_traceless".to_string(),
-        "P2_Ubar_P_dot_alpha_traceless".to_string(),
-    ];
+    let y_q_names = vec!["Ubar_P_dot_alpha_traceless".to_string()];
 
     let ubar = estimate_ubar(y_p5, a5);
     let p_alpha = vector_dot_alpha_traceless(p4);
-    let y_rho = stack_vector_terms(&build_y_rho_terms(
-        rho,
-        p4,
-        q5,
-        ubar.view(),
-        p_alpha.view(),
-        lx,
-        ly,
-    )?);
+    let y_rho = stack_vector_terms(&build_y_rho_terms(rho, p4, q5, lx, ly)?);
     let y_p = stack_rank2_terms(&build_y_p_terms(a5, psi6_sq));
-    let y_q = stack_rank3_terms(&build_y_q_terms(rho, p4, ubar.view(), p_alpha.view()));
+    let y_q = stack_rank3_terms(&build_y_q_terms(ubar.view(), p_alpha.view()));
     Ok(MechanicalLibraries {
         y_rho_names,
         y_p_names,
@@ -350,23 +338,19 @@ fn build_y_rho_terms(
     rho: ArrayView3<'_, f64>,
     p: ndarray::ArrayView4<'_, f64>,
     q: ndarray::ArrayView5<'_, f64>,
-    ubar: ArrayView3<'_, f64>,
-    p_alpha: ndarray::ArrayView6<'_, f64>,
     lx: f64,
     ly: f64,
 ) -> CoreResult<Vec<Array4<f64>>> {
+    let lap_rho = fft_ops::laplacian_scalar(rho, lx, ly)?;
+    let grad_rho = fft_ops::gradient_scalar(rho, lx, ly)?;
     let p2 = p2(p);
-    let tr_q2 = tr_q2(q);
     let qnn = qnn(q);
-    let pn2 = pn2(p);
-    let alpha_nn = alpha_nn_vector(p_alpha);
-    let ubar_alpha_nn = scalar_times_vector(ubar, alpha_nn.view());
     Ok(vec![
-        scalar_times_vector(rho, ubar_alpha_nn.view()),
+        grad_rho.clone(),
+        fft_ops::gradient_scalar(lap_rho.view(), lx, ly)?,
+        cubic_gradient_flux(grad_rho.view()),
         fft_ops::gradient_scalar(p2.view(), lx, ly)?,
-        fft_ops::gradient_scalar(tr_q2.view(), lx, ly)?,
         fft_ops::gradient_scalar(qnn.view(), lx, ly)?,
-        fft_ops::gradient_scalar(pn2.view(), lx, ly)?,
     ])
 }
 
@@ -383,18 +367,11 @@ fn build_y_p_terms(
 }
 
 fn build_y_q_terms(
-    rho: ArrayView3<'_, f64>,
-    p: ndarray::ArrayView4<'_, f64>,
     ubar: ArrayView3<'_, f64>,
     p_alpha: ndarray::ArrayView6<'_, f64>,
 ) -> Vec<Array6<f64>> {
-    let p2 = p2(p);
     let ubar_alpha = scalar_times_rank3(ubar, p_alpha);
-    vec![
-        ubar_alpha.clone(),
-        scalar_times_rank3(rho, ubar_alpha.view()),
-        scalar_times_rank3(p2.view(), ubar_alpha.view()),
-    ]
+    vec![ubar_alpha]
 }
 
 fn stack_vector_terms(terms: &[Array4<f64>]) -> ArrayD<f64> {
@@ -487,25 +464,6 @@ fn surface_rows_rank2(values: ndarray::ArrayView5<'_, f64>) -> Array5<f64> {
     out
 }
 
-fn tr_q2(q: ndarray::ArrayView5<'_, f64>) -> Array3<f64> {
-    let (frames, nx, ny, _, _) = q.dim();
-    let mut out = Array3::<f64>::zeros((frames, nx, ny));
-    for t in 0..frames {
-        for ix in 0..nx {
-            for iy in 0..ny {
-                let mut value = 0.0;
-                for a in 0..3 {
-                    for b in 0..3 {
-                        value += q[[t, ix, iy, a, b]] * q[[t, ix, iy, a, b]];
-                    }
-                }
-                out[[t, ix, iy]] = value;
-            }
-        }
-    }
-    out
-}
-
 fn p2(p: ndarray::ArrayView4<'_, f64>) -> Array3<f64> {
     let (frames, nx, ny, _) = p.dim();
     let mut out = Array3::<f64>::zeros((frames, nx, ny));
@@ -523,19 +481,6 @@ fn p2(p: ndarray::ArrayView4<'_, f64>) -> Array3<f64> {
     out
 }
 
-fn pn2(p: ndarray::ArrayView4<'_, f64>) -> Array3<f64> {
-    let (frames, nx, ny, _) = p.dim();
-    let mut out = Array3::<f64>::zeros((frames, nx, ny));
-    for t in 0..frames {
-        for ix in 0..nx {
-            for iy in 0..ny {
-                out[[t, ix, iy]] = p[[t, ix, iy, 2]].powi(2);
-            }
-        }
-    }
-    out
-}
-
 fn qnn(q: ndarray::ArrayView5<'_, f64>) -> Array3<f64> {
     let (frames, nx, ny, _, _) = q.dim();
     let mut out = Array3::<f64>::zeros((frames, nx, ny));
@@ -543,6 +488,21 @@ fn qnn(q: ndarray::ArrayView5<'_, f64>) -> Array3<f64> {
         for ix in 0..nx {
             for iy in 0..ny {
                 out[[t, ix, iy]] = q[[t, ix, iy, 2, 2]];
+            }
+        }
+    }
+    out
+}
+
+fn cubic_gradient_flux(grad: ndarray::ArrayView4<'_, f64>) -> Array4<f64> {
+    let (frames, nx, ny, _) = grad.dim();
+    let mut out = Array4::<f64>::zeros((frames, nx, ny, 2));
+    for t in 0..frames {
+        for ix in 0..nx {
+            for iy in 0..ny {
+                let norm2 = grad[[t, ix, iy, 0]].powi(2) + grad[[t, ix, iy, 1]].powi(2);
+                out[[t, ix, iy, 0]] = norm2 * grad[[t, ix, iy, 0]];
+                out[[t, ix, iy, 1]] = norm2 * grad[[t, ix, iy, 1]];
             }
         }
     }
@@ -582,41 +542,6 @@ fn estimate_ubar(
                 }
                 if denominator > 0.0 {
                     out[[t, ix, iy]] = numerator / denominator;
-                }
-            }
-        }
-    }
-    out
-}
-
-fn alpha_nn_vector(values: ndarray::ArrayView6<'_, f64>) -> Array4<f64> {
-    let (frames, nx, ny, _, _, _) = values.dim();
-    let mut out = Array4::<f64>::zeros((frames, nx, ny, 2));
-    for t in 0..frames {
-        for ix in 0..nx {
-            for iy in 0..ny {
-                for k in 0..2 {
-                    out[[t, ix, iy, k]] = values[[t, ix, iy, k, 2, 2]];
-                }
-            }
-        }
-    }
-    out
-}
-
-fn scalar_times_vector(
-    scalar: ArrayView3<'_, f64>,
-    vector: ndarray::ArrayView4<'_, f64>,
-) -> Array4<f64> {
-    let (frames, nx, ny) = scalar.dim();
-    let shape = vector.dim();
-    let mut out = Array4::<f64>::zeros(shape);
-    for t in 0..frames {
-        for ix in 0..nx {
-            for iy in 0..ny {
-                for component in 0..shape.3 {
-                    out[[t, ix, iy, component]] =
-                        scalar[[t, ix, iy]] * vector[[t, ix, iy, component]];
                 }
             }
         }

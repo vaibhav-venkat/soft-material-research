@@ -40,11 +40,8 @@ MECHANICAL_LABELS = {
     "rho2_Q_dot_grad_rho": "rho^2 Q dot grad rho",
     "trQ2_grad_rho": "tr(Q^2) grad rho",
     "P2_grad_rho": "|P|^2 grad rho",
-    "rho_Ubar_P_dot_alpha_nn_traceless": "rho Ubar (P dot alpha)_nn",
     "grad_P2": "grad |P|^2",
-    "grad_trQ2": "grad tr(Q^2)",
     "grad_Qnn": "grad Q_nn",
-    "grad_Pn2": "grad P_n^2",
     "A": "A",
     "delta_psi6sq_A": "delta (psi6)^2 A",
     "P_dot_alpha": "P dot alpha",
@@ -52,8 +49,6 @@ MECHANICAL_LABELS = {
     "P2_P_dot_alpha_traceless": "|P|^2 P dot alpha",
     "trQ2_P_dot_alpha_traceless": "tr(Q^2) P dot alpha",
     "Ubar_P_dot_alpha_traceless": "Ubar P dot alpha",
-    "rho_Ubar_P_dot_alpha_traceless": "rho Ubar P dot alpha",
-    "P2_Ubar_P_dot_alpha_traceless": "|P|^2 Ubar P dot alpha",
 }
 
 

@@ -121,20 +121,16 @@ class RhoFittingMechanicsTests(unittest.TestCase):
         self.assertEqual(
             tuple(libraries["Y_rho_names"]),
             (
-                "rho_Ubar_P_dot_alpha_nn_traceless",
+                "grad_rho",
+                "grad_lap_rho",
+                "grad_rho_cubed",
                 "grad_P2",
-                "grad_trQ2",
                 "grad_Qnn",
-                "grad_Pn2",
             ),
         )
         self.assertEqual(
             tuple(libraries["Y_Q_names"]),
-            (
-                "Ubar_P_dot_alpha_traceless",
-                "rho_Ubar_P_dot_alpha_traceless",
-                "P2_Ubar_P_dot_alpha_traceless",
-            ),
+            ("Ubar_P_dot_alpha_traceless",),
         )
         self.assertEqual(np.asarray(libraries["Y_P"]).shape, (2, 1, 4, 4, 2, 3))
         np.testing.assert_allclose(np.asarray(libraries["Y_P"])[1, ..., 0, 0], psi6_sq - np.mean(psi6_sq))
