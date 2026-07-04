@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 
@@ -31,6 +32,8 @@ def write_mechanical_outputs(
     assert isinstance(y_rho_fit, StabilityResult)
     assert isinstance(y_p_fit, StabilityResult)
     assert isinstance(y_q_fit, StabilityResult)
+    arrays = cast(Mapping[str, np.ndarray], fit_payload)
+    assert config.settings is not None, "rho fitting settings were not initialized"
     write_npz_atomic(
         cache_path,
         overwrite=config.overwrite,
@@ -55,30 +58,39 @@ def write_mechanical_outputs(
         Y_rho=spectral["Y_rho"],
         Y_P=spectral["Y_P"],
         Y_Q=spectral["Y_Q"],
-        F_rho_prediction=fit_payload["F_rho_prediction"],
+        F_rho_prediction=arrays["F_rho_prediction"],
         partial_t_rho=spectral["partial_t_rho"],
         temporal_power=spectral["temporal_power"],
         cheb_times=spectral["cheb_times"],
         cheb_scaled_times=spectral["cheb_scaled_times"],
-        sample_indices=fit_payload["sample_indices"],
-        Y_rho_rows=fit_payload["Y_rho_rows"],
-        Y_P_rows=fit_payload["Y_P_rows"],
-        Y_Q_rows=fit_payload["Y_Q_rows"],
-        Y_rho_row_index=fit_payload["Y_rho_row_index"],
-        Y_P_row_index=fit_payload["Y_P_row_index"],
-        Y_Q_row_index=fit_payload["Y_Q_row_index"],
-        Y_rho_library=fit_payload["Y_rho_library"],
-        Y_P_library=fit_payload["Y_P_library"],
-        Y_Q_library=fit_payload["Y_Q_library"],
-        Y_rho_names=fit_payload["Y_rho_names"],
-        Y_P_names=fit_payload["Y_P_names"],
-        Y_Q_names=fit_payload["Y_Q_names"],
+        sample_indices=arrays["sample_indices"],
+        Y_rho_rows=arrays["Y_rho_rows"],
+        Y_P_rows=arrays["Y_P_rows"],
+        Y_Q_rows=arrays["Y_Q_rows"],
+        Y_rho_row_index=arrays["Y_rho_row_index"],
+        Y_P_row_index=arrays["Y_P_row_index"],
+        Y_Q_row_index=arrays["Y_Q_row_index"],
+        Y_rho_library=arrays["Y_rho_library"],
+        Y_P_library=arrays["Y_P_library"],
+        Y_Q_library=arrays["Y_Q_library"],
+        Y_rho_names=arrays["Y_rho_names"],
+        Y_P_names=arrays["Y_P_names"],
+        Y_Q_names=arrays["Y_Q_names"],
         Y_rho_coefficients=y_rho_fit.coefficients,
         Y_P_coefficients=y_p_fit.coefficients,
         Y_Q_coefficients=y_q_fit.coefficients,
         Y_rho_importance=y_rho_fit.importance,
         Y_P_importance=y_p_fit.importance,
         Y_Q_importance=y_q_fit.importance,
+        Y_rho_importance_path=y_rho_fit.importance_path,
+        Y_P_importance_path=y_p_fit.importance_path,
+        Y_Q_importance_path=y_q_fit.importance_path,
+        Y_rho_tau_values=y_rho_fit.tau_values,
+        Y_P_tau_values=y_p_fit.tau_values,
+        Y_Q_tau_values=y_q_fit.tau_values,
+        Y_rho_tau_index=np.asarray(-1 if y_rho_fit.tau_index is None else y_rho_fit.tau_index),
+        Y_P_tau_index=np.asarray(-1 if y_p_fit.tau_index is None else y_p_fit.tau_index),
+        Y_Q_tau_index=np.asarray(-1 if y_q_fit.tau_index is None else y_q_fit.tau_index),
         Y_rho_active=y_rho_fit.active,
         Y_P_active=y_p_fit.active,
         Y_Q_active=y_q_fit.active,
@@ -93,7 +105,7 @@ def write_mechanical_outputs(
         report_path,
         mechanical_report_lines(
             case_id=config.case_id,
-            nd=fit_payload["sample_indices"].shape[0],
+            nd=arrays["sample_indices"].shape[0],
             frames=active.coords.shape[0],
             grid_shape=(active.x_centers.size, active.theta_centers.size),
             sigma=config.settings.sigma,
@@ -148,10 +160,23 @@ def mechanical_report_lines(
             strict=True,
         ):
             lines.append(
-                f"| {label} | {int(active)} | {coefficient:.10g} | "
+                f"| {_markdown_cell(label)} | {int(active)} | {coefficient:.10g} | "
                 f"{importance:.4f} | {format_float(raw_correlation)} |"
             )
         lines.append("")
+        if fit.tau_values.size:
+            lines.extend(
+                [
+                    f"### {target} tau importance path",
+                    "",
+                    "| tau index | tau | " + " | ".join(_markdown_cell(label) for label in fit.labels) + " |",
+                    "|---:|---:|" + "---:|" * len(fit.labels),
+                ]
+            )
+            for tau_index, tau in enumerate(fit.tau_values):
+                values = " | ".join(f"{value:.4f}" for value in fit.importance_path[tau_index])
+                lines.append(f"| {tau_index} | {tau:.6g} | {values} |")
+            lines.append("")
     return lines
 
 
@@ -164,6 +189,8 @@ def write_density_outputs(
 ) -> tuple[Path, Path]:
     fit = fit_payload["fit"]
     assert isinstance(fit, StabilityResult), "fit payload is missing StabilityResult"
+    arrays = cast(Mapping[str, np.ndarray], fit_payload)
+    assert config.settings is not None, "rho fitting settings were not initialized"
     cache_path = config.output_dir / f"{config.case_id}_fit_result.npz"
     report_path = config.output_dir / f"{config.case_id}_rho_fitting_report.md"
     write_npz_atomic(
@@ -182,13 +209,13 @@ def write_density_outputs(
         temporal_power=spectral["temporal_power"],
         cheb_times=spectral["cheb_times"],
         cheb_scaled_times=spectral["cheb_scaled_times"],
-        sample_indices=fit_payload["sample_indices"],
-        X_density=fit_payload["X_density"],
-        y_density=fit_payload["y_density"],
+        sample_indices=arrays["sample_indices"],
+        X_density=arrays["X_density"],
+        y_density=arrays["y_density"],
         y_pred=fit.y_pred,
-        term_names=fit_payload["term_names"],
-        term_labels=fit_payload["term_labels"],
-        term_fluxes=fit_payload["term_fluxes"],
+        term_names=arrays["term_names"],
+        term_labels=arrays["term_labels"],
+        term_fluxes=arrays["term_fluxes"],
         coefficients=fit.coefficients,
         importance=fit.importance,
         importance_path=fit.importance_path,
@@ -203,7 +230,7 @@ def write_density_outputs(
         report_path,
         density_report_lines(
             case_id=config.case_id,
-            nd=fit_payload["sample_indices"].shape[0],
+            nd=arrays["sample_indices"].shape[0],
             frames=active.coords.shape[0],
             grid_shape=(active.x_centers.size, active.theta_centers.size),
             sigma=config.settings.sigma,
@@ -218,7 +245,7 @@ def write_density_outputs(
             config.output_dir,
             config.case_id,
             fit,
-            fit_payload["y_density"],
+            arrays["y_density"],
             spectral["rho"],
             spectral["partial_t_rho"],
             spectral["temporal_power"],
@@ -230,6 +257,7 @@ def write_density_outputs(
 
 
 def cache_metadata(active: ActiveMatterArrays, config: RhoFittingConfig) -> dict[str, object]:
+    assert config.settings is not None, "rho fitting settings were not initialized"
     lx, ly = surface_lengths(active.x_edges, active.theta_edges, active.radius)
     return {
         "case_id": config.case_id,
@@ -245,6 +273,8 @@ def cache_metadata(active: ActiveMatterArrays, config: RhoFittingConfig) -> dict
         "nd": int(config.settings.nd),
         "seed": int(config.settings.seed),
         "replace": bool(config.settings.replace),
+        "tau_count": int(config.settings.tau_count),
+        "tau_eps": float(config.settings.tau_eps),
         "analysis": "global_density_flux_divergence",
     }
 
@@ -253,3 +283,7 @@ def format_float(value: float) -> str:
     if not np.isfinite(value):
         return "nan"
     return f"{value:.4f}"
+
+
+def _markdown_cell(value: str) -> str:
+    return value.replace("|", "\\|")

@@ -31,6 +31,7 @@ def stability_selection(
     labels: tuple[str, ...],
     *,
     seed: int,
+    tau_count: int,
     tau_eps: float,
     subsamples: int,
     importance_threshold: float,
@@ -43,21 +44,21 @@ def stability_selection(
     assert X.shape[1] == len(names) == len(labels), "term metadata must match X columns"
     assert X.shape[0] > 0 and X.shape[1] > 0, "regression matrix must be non-empty"
 
-    del seed, tau_eps, subsamples
+    del seed, subsamples
 
-    _progress(f"running PySINDy SR3 L1 regression rows={X.shape[0]} terms={X.shape[1]}")
-    optimizer = ps.SR3(
-        reg_weight_lam=float(alpha),
-        regularizer="L1",
-        max_iter=int(max_iter),
-        normalize_columns=True,
-        unbias=False,
+    tau_values = tau_path(float(alpha), int(tau_count), float(tau_eps))
+    tau_index = max(0, tau_values.size - 10)
+    _progress(
+        f"running PySINDy SR3 L1 regression rows={X.shape[0]} terms={X.shape[1]} "
+        f"tau_count={tau_values.size}"
     )
-    optimizer.fit_intercept = False
-    assert optimizer.fit_intercept is False, "PySINDy SR3 must not fit an intercept"
-    optimizer.fit(np.ascontiguousarray(X, dtype=np.float64), np.ascontiguousarray(y, dtype=np.float64))
-    coefficients = np.asarray(optimizer.coef_, dtype=np.float64).reshape(-1)
-    assert coefficients.shape == (X.shape[1],), "PySINDy returned an unexpected coefficient shape"
+    coefficients_path = np.zeros((tau_values.size, X.shape[1]), dtype=np.float64)
+    importance_path = np.zeros_like(coefficients_path)
+    for index, tau in enumerate(tau_values):
+        _progress(f"  tau {index + 1}/{tau_values.size}: {tau:.6g}")
+        coefficients_path[index] = _sr3_coefficients(X, y, reg_weight_lam=float(tau), max_iter=max_iter)
+        importance_path[index] = _coefficient_importance(coefficients_path[index])
+    coefficients = coefficients_path[tau_index]
 
     raw_correlations = _raw_feature_correlations(X, y)
     _progress("raw feature correlations with target")
@@ -69,7 +70,7 @@ def stability_selection(
     rmse = float(np.sqrt(np.mean(residual * residual)))
     total = float(np.sum((y - np.mean(y)) ** 2))
     r2 = 1.0 - float(np.sum(residual * residual)) / total if total > 0.0 else float("nan")
-    importance = _coefficient_importance(coefficients)
+    importance = importance_path[tau_index]
     active = (np.abs(coefficients) > 1.0e-12) & (importance >= float(importance_threshold))
 
     return StabilityResult(
@@ -78,10 +79,10 @@ def stability_selection(
         coefficients,
         importance,
         raw_correlations,
-        importance.reshape(1, -1),
-        np.asarray([], dtype=np.float64),
+        importance_path,
+        tau_values,
         active,
-        None,
+        tau_index,
         y_pred,
         rmse,
         r2,
@@ -108,6 +109,35 @@ def _raw_feature_correlations(X: np.ndarray, y: np.ndarray) -> np.ndarray:
         if denominator > 0.0:
             correlations[feature] = float(np.dot(x_centered, y_centered) / denominator)
     return correlations
+
+
+def tau_path(alpha: float, count: int = 40, eps: float = 1e-2) -> np.ndarray:
+    assert alpha > 0.0, "alpha must be positive"
+    assert count > 0, "tau count must be positive"
+    assert eps > 0.0, "tau eps must be positive"
+    return alpha * np.logspace(np.log10(1.0 / eps), np.log10(eps), count)
+
+
+def _sr3_coefficients(
+    X: np.ndarray,
+    y: np.ndarray,
+    *,
+    reg_weight_lam: float,
+    max_iter: int,
+) -> np.ndarray:
+    optimizer = ps.SR3(
+        reg_weight_lam=float(reg_weight_lam),
+        regularizer="L1",
+        max_iter=int(max_iter),
+        normalize_columns=True,
+        unbias=False,
+    )
+    optimizer.fit_intercept = False
+    assert optimizer.fit_intercept is False, "PySINDy SR3 must not fit an intercept"
+    optimizer.fit(np.ascontiguousarray(X, dtype=np.float64), np.ascontiguousarray(y, dtype=np.float64))
+    coefficients = np.asarray(optimizer.coef_, dtype=np.float64).reshape(-1)
+    assert coefficients.shape == (X.shape[1],), "PySINDy returned an unexpected coefficient shape"
+    return coefficients
 
 
 def _coefficient_importance(coefficients: np.ndarray) -> np.ndarray:

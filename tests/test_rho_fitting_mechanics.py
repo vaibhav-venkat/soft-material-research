@@ -116,24 +116,88 @@ class RhoFittingMechanicsTests(unittest.TestCase):
 
         self.assertEqual(
             tuple(libraries["Y_P_names"]),
-            ("A", "delta_psi6sq_A"),
+            (
+                "A",
+                "rho_A",
+                "delta_A",
+                "psi6_A",
+                "psi6sq_A",
+                "delta_psi6_A",
+                "delta_psi6sq_A",
+                "rho_psi6sq_A",
+                "trQ2_A",
+                "P2_A",
+                "P",
+                "rho_P",
+                "P2_P",
+                "trQ2_P",
+                "psi6sq_P",
+                "lap_P",
+                "grad_div_P",
+                "P_dot_grad_P",
+                "Q_dot_P",
+                "Q2_dot_P",
+                "A_dot_Q",
+                "Q_dot_A_dot_Q",
+                "Q_colon_A_P",
+            ),
         )
         self.assertEqual(
             tuple(libraries["Y_rho_names"]),
             (
                 "grad_rho",
                 "grad_lap_rho",
-                "grad_rho_cubed",
+                "Q_dot_grad_rho",
+                "Q2_dot_grad_rho",
+                "trQ2_grad_rho",
+                "rho_Q_dot_grad_rho",
+                "div_Q",
+                "rho_div_Q",
+                "div_rho_Q",
+                "Q_dot_grad_lap_rho",
+                "P",
+                "rho_P",
+                "P_dot_grad_rho_P",
+                "P2_grad_rho",
+                "div_P_P",
+                "P_dot_grad_P",
                 "grad_P2",
-                "grad_Qnn",
+                "div_A",
+                "grad_trA",
+                "A_dot_grad_rho",
+                "trA_grad_rho",
+                "Q_dot_div_A",
             ),
         )
         self.assertEqual(
             tuple(libraries["Y_Q_names"]),
-            ("Ubar_P_dot_alpha_traceless",),
+            (
+                "P_dot_alpha_traceless",
+                "Ubar_P_dot_alpha_traceless",
+                "rho_Ubar_P_dot_alpha_traceless",
+                "delta_Ubar_P_dot_alpha_traceless",
+                "psi6sq_Ubar_P_dot_alpha_traceless",
+                "trQ2_Ubar_P_dot_alpha_traceless",
+                "P2_Ubar_P_dot_alpha_traceless",
+                "Q",
+                "rho_Q",
+                "delta_Q",
+                "trQ2_Q",
+                "psi6sq_Q",
+                "P2_Q",
+                "lap_Q",
+                "bilap_Q",
+                "PP_traceless_2d",
+                "rho_PP_traceless_2d",
+                "AA_traceless_2d",
+                "QA_plus_AQ",
+                "Q2_traceless_2d",
+                "sym_grad_P_traceless_2d",
+                "hess_rho_traceless_2d",
+            ),
         )
-        self.assertEqual(np.asarray(libraries["Y_P"]).shape, (2, 1, 4, 4, 2, 3))
-        np.testing.assert_allclose(np.asarray(libraries["Y_P"])[1, ..., 0, 0], psi6_sq - np.mean(psi6_sq))
+        self.assertEqual(np.asarray(libraries["Y_P"]).shape, (23, 1, 4, 4, 2, 3))
+        np.testing.assert_allclose(np.asarray(libraries["Y_P"])[6, ..., 0, 0], psi6_sq - np.mean(psi6_sq))
 
     def test_regression_wrapper_returns_stability_result(self) -> None:
         from hexatic.rho_fitting.regression import stability_selection
@@ -146,6 +210,7 @@ class RhoFittingMechanicsTests(unittest.TestCase):
             ("x",),
             ("x",),
             seed=7,
+            tau_count=40,
             tau_eps=1e-2,
             subsamples=8,
             importance_threshold=0.0,
@@ -154,9 +219,9 @@ class RhoFittingMechanicsTests(unittest.TestCase):
         )
 
         self.assertEqual(fit.coefficients.shape, (1,))
-        self.assertIsNone(fit.tau_index)
-        self.assertEqual(fit.tau_values.shape, (0,))
-        self.assertEqual(fit.importance_path.shape, (1, 1))
+        self.assertEqual(fit.tau_index, 30)
+        self.assertEqual(fit.tau_values.shape, (40,))
+        self.assertEqual(fit.importance_path.shape, (40, 1))
         self.assertAlmostEqual(fit.coefficients[0], 2.0, places=6)
 
     def test_mechanical_report_formats_coefficients(self) -> None:

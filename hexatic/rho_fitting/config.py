@@ -48,6 +48,7 @@ class NumericalSettings:
     nd: int = 500_000
     seed: int = 0
     replace: bool = False
+    tau_count: int = 40
     tau_eps: float = 1e-2
     subsamples: int = 200
     importance_threshold: float = 0.6
@@ -72,6 +73,8 @@ class RhoFittingConfig:
         assert settings.nd > 0, "nd must be positive"
         assert settings.sigma > 0.0, "sigma must be positive"
         assert settings.cheb_cutoff > 0, "cheb_cutoff must be positive"
+        assert settings.tau_count > 0, "tau_count must be positive"
+        assert settings.tau_eps > 0.0, "tau_eps must be positive"
         assert settings.timestep > 0.0, "timestep must be positive"
         assert settings.u0 != 0.0, "u0 must be nonzero"
         object.__setattr__(self, "settings", settings)
