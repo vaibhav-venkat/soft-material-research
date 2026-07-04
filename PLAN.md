@@ -1,376 +1,372 @@
-# Plan: Burn-backed Mechanical Fits in `hexatic/rho_fitting`
+# Plan: py-pde validation for `rho_fitting`
 
 ## Goal
 
-Extend `hexatic/rho_fitting/` so it fits:
-
-- `Y_rho = gamma * (J_rho - U0 * P)`
-- `Y_P = J_P / U0`
-- `Y_Q = J_Q`
-
-The workflow stays self-contained in `hexatic/rho_fitting/` plus its dedicated Rust crate `rust/rho_fitting_core`. Do not import from `hexatic/model_fitting/`. Constants and neutral shared utilities are fine.
-
-## Decisions
-
-- Use all particles for all new fields and fits. No shell-specific `S_cross`, shell entry/exit source, or disclination-only logic.
-- Treat current `rho_fitting` `J_density` as `J_rho`.
-- Use the `rho_fitting` current convention:
-  - centered particle surface velocities for interior frames;
-  - one-sided velocities at endpoints;
-  - frame-time Gaussian coarse-graining;
-  - Chebyshev filtering for time alignment.
-- Use the unwrapped cylinder basis `(x, y)` with `y = R * theta`.
-- Use density-weighted moments:
-  - `P = sum_i p_i W_i`
-  - `Q = sum_i (p_i p_i - I/d) W_i`
-  - `A = Q + rho I/d`
-- Use 2D surface tensors for this implementation:
-  - `P: (..., 2)`
-  - `Q, A, J_P: (..., 2, 2)`
-  - `J_Q: (..., 2, 2, 2)`
-
-## Paper Alignment
-
-From Omar et al. 2023 Materials and Methods:
-
-- Eq. 25: `partial_t rho + div J_rho = 0`.
-- Eq. 26 motivates `gamma * (J_rho - U0 * P)` with `P` as polar density.
-- Eq. 27b motivates fitting `J_P / U0` against density powers of `A = Q + rho I/d`.
-- Eq. 28b motivates `J_Q` terms from `P dot alpha`, `P dot II`, and a force-like `F_rho I` term.
-
-The implementation follows the paper's density-weighted moment convention, not normalized local averages.
-
-## Ownership Boundary
-
-Python code lives in:
+Add a new validation workflow under:
 
 ```text
-hexatic/rho_fitting/
+hexatic/rho_fitting/pde_validation/
+```
+
+The workflow loads the existing fitted mechanical fields, evolves the coupled
+`rho`, `P`, and `Q` equations with `py-pde`, and compares the simulated
+`rho_fit(t)` against the measured `rho(t)` on the cylinder. The only required
+visual output is a Plotly 3D animation showing fitted density and measured
+density in the same time axis.
+
+Use the Pixi `sap` environment for all commands. `py-pde` and `plotly` are
+already in `pixi.toml`, so no dependency change is needed.
+
+## Equations
+
+Use the three equations together as one coupled system:
+
+```text
+partial_t rho = -div(U0 P_surface + F_rho / gamma)
+partial_t P_i = -div(U0 F_P[:, i]) - P_i * (d - 1) / tau_r
+partial_t Q_ij = -div(F_Q[:, i, j]) - (2d / tau_r) * Q_ij
+```
+
+with:
+
+```text
+d = 3
+A_ij = Q_ij + rho * delta_ij / 3
+P_surface = (P_0, P_1)
+```
+
+Important coupling rule: `A` is not loaded as an independent cached state during
+rollout. It is recomputed inside every PDE RHS call from the currently evolved
+`rho` and `Q`, so the `P` equation depends on the simulated `Q` dynamics.
+
+`psi6_sq` is a hard auxiliary value/field because there is no fitted
+`partial_t psi6` yet. It is not evolved. Default to a frozen field from the
+initial validation frame, with a CLI option to use a scalar hard value if needed.
+
+## Data Sources
+
+Read from the existing fit cache by default:
+
+```text
+hexatic/rho_fitting/output/radius_15D_fit_result.npz
+```
+
+Required arrays:
+
+- `rho`: measured density used for comparison, shape `(T, Nx, Ny)`.
+- `P`: initial polar density, shape `(T, Nx, Ny, 3)`.
+- `Q`: initial nematic tensor density, shape `(T, Nx, Ny, 3, 3)`.
+- `psi6_sq`: fixed auxiliary field source.
+- `Y_rho_names`, `Y_P_names`, `Y_Q_names`.
+- `Y_rho_coefficients`, `Y_P_coefficients`, `Y_Q_coefficients`.
+- `cheb_times`: physical output times.
+
+Also load grid metadata from `CasePaths.active_fields_path`:
+
+- `x_edges`, `x_centers`.
+- `theta_edges`, `theta_centers`.
+- `cylinder_radius`.
+
+Use `surface_lengths` from `hexatic/rho_fitting/geometry.py` so the periodic
+unwrapped grid remains `(x, y = R theta)`.
+
+## New Package Layout
+
+```text
+hexatic/rho_fitting/pde_validation/
+  __init__.py
   __main__.py
   config.py
-  io.py
-  geometry.py
-  basis.py
-  fields.py
-  library.py
-  regression.py
-  fit.py
-  report.py
-  plots.py
-  cache.py
+  data.py
+  state.py
+  forces.py
+  equations.py
+  rollout.py
+  metrics.py
+  plotly_animation.py
+  README.md
+  output/
 ```
 
-Rust numerical code lives in:
+Responsibilities:
 
-```text
-rust/rho_fitting_core/
-```
+- `config.py`: dataclasses for case id, cache path, output path, frame window,
+  `tau_r`, fixed `psi6` policy, solver settings, and Plotly settings.
+- `data.py`: load fit cache and active-field grid metadata; validate shapes.
+- `state.py`: pack/unpack `rho`, `P`, and `Q` between NumPy arrays and a
+  `py-pde` `FieldCollection` of scalar fields.
+- `forces.py`: evaluate fitted `F_rho`, `F_P`, and `F_Q` from the current PDE
+  state and fit coefficients.
+- `equations.py`: `RhoMomentPDE(PDEBase)` with the coupled RHS.
+- `rollout.py`: run the solver from the initial frame and store `rho_fit(t)`.
+- `metrics.py`: RMSE, relative RMSE, correlation, mass drift, and framewise
+  error fields.
+- `plotly_animation.py`: write interactive 3D HTML animations.
+- `README.md`: short command examples and output descriptions.
 
-Python responsibilities:
+## py-pde Representation
 
-- load GSD/NPZ data;
-- resolve config, case paths, constants, and output paths;
-- call `_rho_fitting_core`;
-- run or orchestrate stability selection;
-- write cache, reports, and plots.
-
-Rust/Burn responsibilities:
-
-- compute particle surface velocities;
-- compute Gaussian weights and coarse-grained fields;
-- compute all tensor moments and fluxes;
-- compute spatial derivatives and candidate libraries;
-- build sampled regression rows for scalar, vector, rank-2, and rank-3 targets.
-
-## Current Baseline
-
-Existing `J_density` review:
-
-- `hexatic/rho_fitting/fit.py` computes `J_density` by coarse-graining particle surface velocities.
-- It maps angular displacement to `R * dtheta`, uses minimum-image wrapping, and uses saved steps times `settings.timestep`.
-- It already uses `all_particles = np.ones_like(active.shell_mask)`, which matches the new global requirement.
-- Keep `partial_t rho + div J_rho` as a diagnostic. Do not change the current convention unless this residual exposes a real problem.
-
-Current Rust-core gap:
-
-- `rho_fitting_core` currently uses `ndarray` plus explicit loops for density/vector coarse-graining.
-- It has density-only candidate flux helpers.
-- It does not compute `P`, `Q`, `A`, `J_P`, `J_Q`, tensor candidate libraries, or the actual STLSQ regression.
-
-## Burn-backed Rust Core
-
-Use Burn as the tensor engine inside `rho_fitting_core`.
-
-Why Burn here:
-
-- The next workflow is tensor-heavy, with repeated vector/rank-2/rank-3 operations.
-- The same code should eventually run on CPU/GPU without rewriting the tensor logic.
-- Python should receive NumPy arrays, but Python should not own the expensive tensor loops.
-
-Cargo plan:
-
-- Add Burn dependencies to `rust/rho_fitting_core/Cargo.toml`.
-- Keep `pyo3`, `numpy`, and `ndarray` for Python boundary conversion.
-- Keep `rustfft` unless Burn-backed derivative support is proven equivalent. Better: use both Burn and rustfft together.
-- Start with a reliable CPU and GPU via `metal` backend .
-- Here is ONE way to convert from the numpy directly into the `burn`, without redundant double-copying (best):
-```rust
-let shared = bytes::Bytes::copy_from_slice(bytemuck::cast_slice::<f32, u8>(slice));
-let bytes = Bytes::from_shared(shared, AllocationProperty::Managed);
-let data = TensorData::from_bytes(bytes, [rows, cols], DType::F32);
-```
-This is just an example
-- There can be alternatives. Aim to use mostly Burn, and also use the GPU metal building.
-
-Proposed Rust modules:
-
-```text
-src/
-  lib.rs
-  python.rs
-  errors.rs
-  arrays.rs
-  burn_backend.rs
-  geometry.rs
-  particles.rs
-  gaussian.rs
-  moments.rs
-  fluxes.rs
-  derivatives.rs
-  tensors.rs
-  library.rs
-  sampling.rs
-  regression_rows.rs
-```
-
-Module responsibilities:
-
-- `burn_backend.rs`: backend aliases, device selection, feature flags.
-- `particles.rs`: surface velocities and tangent direction preparation.
-- `gaussian.rs`: minimum-image pair distances and Gaussian weights.
-- `moments.rs`: `rho`, `P`, `Q`, `A`.
-- `fluxes.rs`: `J_rho`, `J_P`, `J_Q`.
-- `derivatives.rs`: gradient, divergence, laplacian, `grad(lap rho)`, `grad(|grad rho|^2)`.
-- `tensors.rs`: `alpha`, `II`, contractions, `F_rho I`.
-- `library.rs`: `Y_rho`, `Y_P`, `Y_Q` candidate fields.
-- `regression_rows.rs`: flatten target/library arrays into sampled rows with shared coefficients across components. This just calculates the rows, not the actual regression.
-
-Python API from `_rho_fitting_core`:
+Use a 2D periodic Cartesian grid over the unwrapped cylinder surface:
 
 ```python
-build_mechanical_fields(...) -> dict
-build_mechanical_libraries(...) -> dict
-sample_component_rows(...) -> dict
-build_density_fluxes(...) -> dict  # keep during migration
+CartesianGrid([(0.0, lx), (0.0, ly)], [nx, ny], periodic=[True, True])
 ```
 
-`build_mechanical_fields` returns NumPy arrays:
+Represent the 13 state components as scalar fields in a `FieldCollection`:
 
-- `rho`
-- `P`
-- `Q`
-- `A`
-- `J_rho`
-- `J_P`
-- `J_Q`
-- `Y_rho`
-- `Y_P`
-- `Y_Q`
-- `continuity_residual`
+```text
+rho
+P0, P1, P2
+Q00, Q01, Q02, Q10, Q11, Q12, Q20, Q21, Q22
+```
 
-All Burn tensors stay inside Rust.
+Do not use `VectorField` or `Tensor2Field` for `P`/`Q` themselves because
+`py-pde` vector/tensor dimensions follow the 2D grid, while this model needs
+3D orientational components. Use temporary 2D `VectorField`s only for surface
+fluxes before taking divergence.
 
-## Field Construction
+## Fitted Force Evaluation
 
-1. Python loads active fields with `load_active_matter_npz`.
-2. Python builds or loads tangent directions `p_i = (p_x, p_y)`:
-   - prefer `direction_cylindrical`;
-   - otherwise use `active_direction`;
-   - otherwise derive from GSD orientation locally in `rho_fitting`.
-3. Python passes contiguous arrays and scalar settings to `_rho_fitting_core`.
-4. Rust/Burn computes surface velocities using the `rho_fitting` convention.
-5. Rust/Burn computes Gaussian all-particle moments:
-   - `rho = sum W_i`
-   - `P = sum p_i W_i`
-   - `Q = sum (p_i p_i - I/d) W_i`
-   - `A = Q + rho I/d`
-6. Rust/Burn computes Gaussian all-particle fluxes:
-   - `J_rho = sum v_i W_i`
-   - `J_P = sum v_i outer p_i W_i`
-   - `J_Q = sum v_i outer (p_i p_i - I/d) W_i`
-7. Chebyshev filtering may initially remain in Python through `basis.py`.
-8. Targets are computed after filtering:
-   - `Y_rho = gamma * (J_rho - U0 * P)`
-   - `Y_P = J_P / U0`
-   - `Y_Q = J_Q`
+`forces.py` should reconstruct the same fitted equations used by
+`rho_fitting`, but evaluated on the current PDE state rather than on cached
+time slices.
 
-Do not implement coarse-graining in Python, do it in Rust.
+For `F_rho`, support the current names:
 
-## Candidate Libraries
+```text
+grad_rho
+grad_lap_rho
+Q_dot_grad_rho
+```
 
-### `Y_rho`
+where:
 
-Target shape: `(frames, nx, ny, 2)`.
+```text
+(Q_dot_grad_rho)_k = Q_k0 * grad_rho_0 + Q_k1 * grad_rho_1
+k in {0, 1}
+```
 
-Candidates:
+For `F_P`, support:
 
-- `grad_rho`
-- `rho * grad_rho`
-- `rho^2 * grad_rho`
-- `grad(lap_rho)`
-- `lap_rho * grad_rho`
-- `|grad_rho|^2 * grad_rho`
-- `grad(|grad_rho|^2)`
+```text
+A
+rho_delta_psi6sq_A
+```
 
-Compute in `rho_fitting_core`, using Burn for tensor algebra and the existing derivative backend until replaced.
+Use only surface rows of `A` for the surface flux:
 
-### `Y_P`
+```text
+F_P[:, i] = c_A * A_surface[:, i]
+          + c_psi * rho * (psi6_sq_hard - mean_psi6_sq_hard) * A_surface[:, i]
+```
 
-Target shape: `(frames, nx, ny, 2, 2)`.
+Because `A = Q + rho I / 3` is recomputed from the PDE state, this term couples
+the `P` rollout to the evolved `Q` rollout.
 
-Candidates:
+For `F_Q`, support:
 
-- `A`
-- `rho * A`
-- `rho^2 * A`
-- `rho^3 * A`
+```text
+Ubar_P_dot_alpha_traceless
+```
 
-Compute in `rho_fitting_core`.
+Build the traceless tensor exactly like the Rust helper:
 
-### `Y_Q`
+```text
+alpha_kij = P_i * delta_kj + P_j * delta_ki - (2/3) * P_k * delta_ij
+```
 
-Target shape: `(frames, nx, ny, 2, 2, 2)`.
+Then:
 
-Let `F_rho` default to the fitted prediction for `Y_rho`.
+```text
+F_Q[k, i, j] = c_Q * Ubar * alpha_kij
+```
 
-Candidates:
+Compute `Ubar` inside each RHS call from the current `F_P` and current `A` using
+the same projection as the Rust fit code:
 
-- `P dot alpha`
-- `rho * P dot alpha`
-- `rho^2 * P dot alpha`
-- `P dot II`
-- `F_rho I`
+```text
+Ubar = sum_k,i F_P[k, i] * A_surface[k, i] / sum_k,i A_surface[k, i]^2
+```
 
+Use `0.0` where the denominator is zero. This keeps the Q equation tied to the
+current fitted P flux instead of replaying a cached target.
 
-`alpha_ijkl = delta_ij delta_kl + delta_ik delta_jl + delta_il delta_jk` is a constant 2D tensor. It is not coarse-grained. `delta` is the Kronecker delta, not the Gaussian kernel.
+## PDE RHS
 
-`P dot II` is a tensor contraction, so `(P dot II)_kij = P_k delta_ij` where `delta_ij` is the identity matrix.
+`RhoMomentPDE.evolution_rate(state, t)` should:
 
-ALl other fields should follow a similar index ordering based on the shape.
+1. Unpack `rho`, `P`, and `Q`.
+2. Recompute `A = Q + rho I / 3`.
+3. Evaluate `F_rho`, `F_P`, and `F_Q`.
+4. Build density current:
 
-## Regression
+   ```text
+   J_rho_fit = U0 * P_surface + F_rho / gamma
+   ```
 
-Keep Python stability selection first. Move only row construction into Rust.
+5. Return:
 
-Plan:
+   ```text
+   partial_t rho = -div(J_rho_fit)
+   partial_t P_i = -div(U0 * F_P[:, i]) - 2 * P_i / tau_r
+   partial_t Q_ij = -div(F_Q[:, i, j]) - 6 * Q_ij / tau_r
+   ```
 
-1. Rust builds candidate fields.
-2. Rust samples valid `(frame, x, y)` rows.
-3. Rust flattens component axes so every component shares the same candidate coefficients.
-4. Python runs the existing STLSQ/stability-selection code on returned `X`, `y`, names, and labels. 
-  5. It's important to leave this relatively unchanged unless there is an issue
-5. Python sends `F_rho` back into Rust to build the `Y_Q` library.
+since `d = 3`.
 
-Default: coefficients are shared across components, matching the existing vector-fit philosophy.
+Use periodic boundary conditions for all gradients, Laplacians, and divergences.
+Prefer `py-pde` operators first. If component-wise flux divergence is awkward,
+add a small local NumPy FFT helper that mirrors the existing `rho_fitting`
+periodic derivative convention.
 
-## Cache and Outputs
+## Rollout Policy
+
+Initial condition:
+
+```text
+rho_fit(t0) = rho_data[t0]
+P_fit(t0) = P_data[t0]
+Q_fit(t0) = Q_data[t0]
+psi6_sq_hard = psi6_sq_data[t0] by default
+```
+
+Run one coupled simulation over `cheb_times`. Store the simulated state at the
+same frame times as the data. Use internal substeps if the solver requires a
+smaller stable step.
+
+CLI sketch:
+
+```text
+pixi run python -m hexatic.rho_fitting.pde_validation \
+  --case radius_15D \
+  --fit-cache hexatic/rho_fitting/output/radius_15D_fit_result.npz \
+  --output-dir hexatic/rho_fitting/pde_validation/output \
+  --tau-r <value> \
+  --overwrite
+```
+
+`tau_r` must be explicit unless there is already a trusted constant in
+`hexatic/constants/`. Inspect constants before choosing a default.
+
+Useful options:
+
+- `--start-frame`, `--stop-frame`: validate a shorter window.
+- `--dt`: internal solver step.
+- `--solver`: start with explicit Euler or RK; keep the interface open for
+  py-pde solver choices.
+- `--psi6-policy initial-field|scalar`.
+- `--psi6-value`: scalar hard value when `--psi6-policy scalar`.
+- `--max-frames-plot`: downsample the animation if HTML gets too large.
+
+## Outputs
 
 Write outputs under:
 
 ```text
-hexatic/rho_fitting/output/
+hexatic/rho_fitting/pde_validation/output/
 ```
 
-Cache:
+Files:
 
-- filtered `rho`, `P`, `Q`, `A`;
-- filtered `J_rho`, `J_P`, `J_Q`;
-- `Y_rho`, `Y_P`, `Y_Q`;
-- candidate names/labels per target;
-- sampled rows per target;
-- coefficients, active masks, predictions, residuals, metrics;
-- `partial_t rho + div J_rho` diagnostic;
-- metadata: case id, radius, `lx`, `ly`, sigma, timestep, Chebyshev cutoff, `gamma`, `U0`, Burn backend, cache version.
+- `{case_id}_pde_validation.npz`
+  - `rho_fit`
+  - `rho_data`
+  - `P_fit_final`
+  - `Q_fit_final`
+  - `times`
+  - `x_centers`
+  - `theta_centers`
+  - `radius`
+  - error metrics
+- `{case_id}_rho_fit_vs_data_3d.html`
+- `{case_id}_rho_fit_vs_data_metrics.md`
 
-Do not overwrite generated outputs unless `overwrite=True`.
+The NPZ should never overwrite unless `--overwrite` is passed.
+
+## Plotly 3D Animation
+
+Convert the unwrapped grid back to cylinder coordinates:
+
+```text
+X = x
+Y = R cos(theta)
+Z = R sin(theta)
+```
+
+Render two animated cylinder surfaces:
+
+- left: `rho_fit(t)`.
+- right: measured `rho(t)`.
+
+Use the same color scale and fixed color range for both surfaces. Add a third
+optional animation mode for error:
+
+```text
+rho_fit(t) - rho_data(t)
+```
+
+Keep the primary deliverable as one HTML file with a time slider and play/pause
+buttons.
+
+## Validation Metrics
+
+Compute:
+
+- framewise RMSE of `rho_fit - rho_data`.
+- relative RMSE using RMS of `rho_data`.
+- Pearson correlation per frame.
+- total mass in `rho_fit` and `rho_data`.
+- mass drift from the initial frame.
+- final-frame error heatmap data in the NPZ.
+
+Report whether mass drift is small enough to trust the rollout before reading
+the fit-vs-data error too strongly.
 
 ## Tests
 
-No formal tests, but frequent smaller parity tests with the data.
+Add focused tests in:
 
-## Open Questions
+```text
+tests/test_rho_fitting_pde_validation.py
+```
 
-1. What exact contraction should `P dot II` use? **answer**: It is a tensor contraction, so `(P dot II)_kij = P_k delta_ij` where `delta_ij` is the identity matrix.
-2. Should `F_rho` in `Y_Q` remain the fitted `Y_rho` prediction? **answer** yes.
-3. Are `gamma=1` and `U0=100` always correct for these saved datasets, or should they be loaded from per-case metadata? **answer** load them from the constants file present within the code.
-4. Should first implementation target only `radius_15D` or all `rho_fitting` case paths? **answer** Accept a flag `--case` which specifies. I.e `--case radius_15D`
+Tests:
 
-## Edge Cases and Potential Issues
+- state pack/unpack preserves shapes and component order.
+- `A` is recomputed from the current `rho` and `Q`.
+- fixed `psi6_sq` remains unchanged across RHS calls.
+- zero coefficients and zero initial fields produce zero RHS.
+- constant `rho`, `P`, and `Q` have zero divergence terms on a periodic grid.
+- `F_rho_prediction` reconstructed from cached coefficients matches the cache
+  on a small fixture or sampled frames.
 
-Data and metadata:
+Run:
 
-- Missing radius metadata can silently corrupt `y = R theta`; fail early unless fallback is explicit.
-- Constants may not match old generated data if simulations were run with different `gamma`, `U0`, or timestep. 
-  - **This applies more for `Lx`, which already handled in the rho_fitting. Don't worry about the others**
-- NPZ direction arrays may be normalized directions, means, or density-weighted quantities; verify before using as particle `p_i`.
-- GSD/NPZ step mismatch must block orientation fallback.
-- Old density-only caches must be invalidated with a cache-version bump.
+```text
+pixi run python -m compileall hexatic/rho_fitting/pde_validation
+pixi run python -m unittest tests.test_rho_fitting_pde_validation
+```
 
-Geometry:
+Do not run long simulations in tests.
 
-- `theta` wrapping near `0`/`2*pi` must use minimum-image deltas.
-- `x` wrapping must use the period from `x_edges`, not global constants.
-- FFT derivatives assume periodicity in both `x` and `y`.
-- Radial drift is ignored; all fields are projected to the cylinder surface.
-- Radius changes alter `dy`, `ly`, and derivative scales; recompute per case.
+## Implementation Order
 
-Coarse-graining and tensors:
+1. Create `hexatic/rho_fitting/pde_validation/` with config, data loading, and
+   state packing.
+2. Implement fitted force reconstruction and verify it against cached fitted
+   fields where possible.
+3. Implement the coupled `py-pde` RHS with `A` recomputed from evolved `Q`.
+4. Add a short rollout CLI for a small frame window.
+5. Add metrics and NPZ output.
+6. Add Plotly 3D animation for `rho_fit(t)` vs measured `rho(t)`.
+7. Add tests and compile checks.
+8. Run a short validation first, then the full `radius_15D` rollout only when
+   the short run is stable.
 
-- Large `sigma` can wash out gradients and make libraries rank-deficient. For now, keep `sigma = 1`
-- Small `sigma` can create sparse/noisy fields and unstable derivatives.
-- Low-density cells can dominate errors; sample with a finite/density mask.
-- `Q` should be symmetric and traceless per particle contribution; small numerical trace drift is possible after summation.
-- `A = Q + rho I/d` should equal `sum p_i p_i W_i`; use this as a sanity check.
-- Endpoint velocities are one-sided and may be noisier than centered interior frames.
-- Do not mix midpoint displacement currents with frame-time `rho_fitting` fields.
+## Non-Goals
 
-Burn/Rust:
-
-- Burn tensor axes can be semantically wrong even if shapes compile; add explicit shape comments and small hand-computed checks during implementation.
-- Backend differences can create small numeric drift; tolerances should be explicit.
-- Converting large tensors back to NumPy can dominate runtime/memory; return only needed arrays.
-- Full dense libraries for rank-3 targets can be large; prefer sampled row construction in Rust when possible.
-- Keep old `ndarray` density/current code as a reference until Burn parity is stable.
-- Adding Burn may require Pixi/Cargo lockfile updates.
-
-Libraries and regression:
-
-- Candidate signs must match the plan; do not silently reuse old `neg_div_*` names.
-- `P dot alpha`, `P dot II`, and `F_rho I` must all match `J_Q` shape.
-- `F_rho` makes `Y_Q` depend on first-stage fit quality; report that dependency.
-- Density powers of `A` may be highly correlated.
-- Zero-scale columns should be inactive and reported.
-- If sampled rows are all invalid or `tau_max` is zero, return a clear no-fit result.
-- Sampling must be deterministic for a fixed seed.
-
-Outputs:
-
-- Never overwrite simulation data.
-- Write cache files atomically.
-- Reports should include assumptions and any disabled/uncertain terms.
-- Plot labels should not imply shell-local physics; this workflow is all-particle/global.
-
-## Small Guide
-
-1. Add all depencies required like `burn` for Rust.
-2. Add/Edit Rust modules for GPU and CPU support, particles, Gaussian weights, moments, fluxes, tensors, and libraries.
-3. Use Burn as specified within the code for the tensors.
-5. Add Python dataclasses and stricter types, that aren't verbose, however.
-6. Add target metadata in `hexatic/rho_fitting/library.py`; numerical field construction happens in Rust.
-7. Rework `hexatic/rho_fitting/fit.py` to fit `Y_rho`, then `Y_P`, then `Y_Q`.
-  8. Keep the old regression functionality within the Python through `PySINDY`, not Rust. Rust will do the row computation only, not the regresion.
-8. Add cache/report/plot support for the three targets.
-9. Add `partial_t rho + div J_rho` diagnostic.
-10. Add the same plots and report, which should report `R^2` and other statistics directly for `fit vs target`.
-
-**Big idea**: Most of the functionality is already built-in, but you should still verify everything. If i'm missing something, you probably can pick it up. This plan is not exhaustive so don't strictly follow the guide, you should be able to pick up on the gaps (i.e i forgot to include something in the guide) or see existing functionality to understand what is necessary.
+- Do not rerun HOOMD simulations.
+- Do not overwrite GSD or source NPZ simulation data.
+- Do not evolve `psi6_sq` until a real `partial_t psi6` model exists.
+- Do not treat cached `A` as the PDE state. It is derived from current `rho`
+  and current `Q`.
