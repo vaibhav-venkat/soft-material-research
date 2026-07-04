@@ -111,7 +111,7 @@ def _raw_feature_correlations(X: np.ndarray, y: np.ndarray) -> np.ndarray:
     return correlations
 
 
-def tau_path(alpha: float, count: int = 40, eps: float = 1e-2) -> np.ndarray:
+def tau_path(alpha: float, count: int = 40, eps: float = 1e-3) -> np.ndarray:
     assert alpha > 0.0, "alpha must be positive"
     assert count > 0, "tau count must be positive"
     assert eps > 0.0, "tau eps must be positive"

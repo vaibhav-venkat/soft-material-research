@@ -49,7 +49,7 @@ class NumericalSettings:
     seed: int = 0
     replace: bool = False
     tau_count: int = 40
-    tau_eps: float = 1e-2
+    tau_eps: float = 1e-3
     subsamples: int = 200
     importance_threshold: float = 0.6
     alpha: float = 1e-6

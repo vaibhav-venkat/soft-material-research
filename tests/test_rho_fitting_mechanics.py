@@ -116,7 +116,7 @@ class RhoFittingMechanicsTests(unittest.TestCase):
 
         self.assertEqual(
             tuple(libraries["Y_P_names"]),
-            ("A", "rho_delta_psi6sq_A", "rho_grad_div_P", "rho_lap_P"),
+            ("A", "rho_delta_psi6sq_A"),
         )
         self.assertEqual(
             tuple(libraries["Y_rho_names"]),
@@ -124,21 +124,13 @@ class RhoFittingMechanicsTests(unittest.TestCase):
                 "grad_rho",
                 "grad_lap_rho",
                 "Q_dot_grad_rho",
-                "phi1_rho_grad_rho",
-                "P_dot_grad_P",
-                "grad_bilap_rho",
             ),
         )
         self.assertEqual(
             tuple(libraries["Y_Q_names"]),
-            (
-                "Ubar_P_dot_alpha_traceless",
-                "sym_grad_P_traceless_2d",
-                "lap_Q",
-                "rho_Q",
-            ),
+            ("Ubar_P_dot_alpha_traceless",),
         )
-        self.assertEqual(np.asarray(libraries["Y_P"]).shape, (4, 1, 4, 4, 2, 3))
+        self.assertEqual(np.asarray(libraries["Y_P"]).shape, (2, 1, 4, 4, 2, 3))
         np.testing.assert_allclose(np.asarray(libraries["Y_P"])[1, ..., 0, 0], psi6_sq - np.mean(psi6_sq))
 
     def test_regression_wrapper_returns_stability_result(self) -> None:
@@ -165,6 +157,15 @@ class RhoFittingMechanicsTests(unittest.TestCase):
         self.assertEqual(fit.tau_values.shape, (40,))
         self.assertEqual(fit.importance_path.shape, (40, 1))
         self.assertAlmostEqual(fit.coefficients[0], 2.0, places=6)
+
+    def test_default_tau_path_spans_strict_and_permissive_sr3_weights(self) -> None:
+        from hexatic.rho_fitting.regression import tau_path
+
+        values = tau_path(alpha=1.0e-6, count=40)
+
+        self.assertEqual(values.shape, (40,))
+        self.assertAlmostEqual(values[0], 1.0e-3)
+        self.assertAlmostEqual(values[-1], 1.0e-9)
 
     def test_mechanical_report_formats_coefficients(self) -> None:
         fit = StabilityResult(
