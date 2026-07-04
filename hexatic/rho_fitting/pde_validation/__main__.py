@@ -10,7 +10,7 @@ import numpy as np
 from hexatic.rho_fitting.cache import write_npz_atomic
 from hexatic.rho_fitting.config import DEFAULT_OUTPUT_DIR
 
-from .model import run_validation_from_cache
+from .model import ValidationOptions, run_validation_from_cache
 from .plot import write_p_animation, write_q_animation, write_rho_animation
 
 
@@ -41,11 +41,13 @@ def main(argv: list[str] | None = None) -> int:
     for run_mode in modes:
         inputs, result = run_validation_from_cache(
             cache_path,
-            max_frames=args.max_frames,
-            solver=args.solver,
-            dt=args.dt,
-            filter_sigma=args.filter_sigma,
-            mode=run_mode,
+            ValidationOptions(
+                max_frames=args.max_frames,
+                solver=args.solver,
+                dt=args.dt,
+                filter_sigma=args.filter_sigma,
+                mode=run_mode,
+            ),
         )
         output_path = args.output_dir / f"{args.case}_pde_validation_{run_mode}.npz"
         write_npz_atomic(

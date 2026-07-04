@@ -10,6 +10,7 @@ pub const DENSITY_TERM_NAMES: [&str; 4] = [
     "neg_div_grad_rho_cubed",
 ];
 
+#[non_exhaustive]
 pub struct DensityFluxes {
     pub grad_rho: Array4<f64>,
     pub grad_lap_rho: Array4<f64>,

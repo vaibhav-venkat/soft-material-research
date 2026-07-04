@@ -8,6 +8,7 @@ import numpy as np
 from hexatic.rho_fitting.pde_validation.cache import ValidationInputs
 from hexatic.rho_fitting.pde_validation.model import (
     RhoFitPDE,
+    ValidationOptions,
     interpolated_p_q,
     make_grid,
     pack_state,
@@ -95,7 +96,7 @@ class RhoFittingPdeValidationTests(unittest.TestCase):
 
     def test_rho_only_validation_uses_hard_p_q_fields(self) -> None:
         inputs = synthetic_inputs()
-        result = run_validation(inputs, rho_only=True)
+        result = run_validation(inputs, ValidationOptions(mode="rho-only"))
         p_mid, q_mid = interpolated_p_q(inputs, 0.005)
 
         self.assertEqual(result.rho_fit.shape, inputs.rho.shape)
@@ -105,8 +106,8 @@ class RhoFittingPdeValidationTests(unittest.TestCase):
 
     def test_single_field_validation_modes_return_field_trajectories(self) -> None:
         inputs = synthetic_inputs()
-        p_result = run_validation(inputs, mode="p-only")
-        q_result = run_validation(inputs, mode="q-only")
+        p_result = run_validation(inputs, ValidationOptions(mode="p-only"))
+        q_result = run_validation(inputs, ValidationOptions(mode="q-only"))
 
         self.assertEqual(p_result.p_fit.shape, inputs.p.shape)
         self.assertEqual(q_result.q_fit.shape, inputs.q.shape)

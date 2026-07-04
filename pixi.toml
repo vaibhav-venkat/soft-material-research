@@ -35,3 +35,4 @@ py-pde = ">=0.57.0,<0.58"
 
 [pypi-dependencies]
 pysindy = { version = ">=2.1.0, <3", extras = ["miosr", "sbr", "cvxpy"] }
+desloppify = ">=1.0, <2"

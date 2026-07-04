@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 
-from .config import RhoFittingConfig
+from .config import NumericalSettings, RhoFittingConfig
 from .fit import run
 
 
@@ -13,7 +13,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--case", default="radius_15D")
     parser.add_argument("--nd", type=int, default=None)
     parser.add_argument("--mechanical-flux-weight", type=float, default=None)
-    parser.add_argument("--rho-divergence-weight", type=float, default=None, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--rho-divergence-weight",
+        dest="mechanical_flux_weight",
+        type=float,
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--no-plots", action="store_true")
     parser.add_argument("--no-plot", action="store_true", help=argparse.SUPPRESS)
@@ -25,16 +30,12 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     settings = None
-    if args.nd is not None or args.mechanical_flux_weight is not None or args.rho_divergence_weight is not None:
-        from .config import NumericalSettings
-
+    if args.nd is not None or args.mechanical_flux_weight is not None:
         kwargs = {}
         if args.nd is not None:
             kwargs["nd"] = args.nd
         if args.mechanical_flux_weight is not None:
             kwargs["mechanical_flux_weight"] = args.mechanical_flux_weight
-        if args.rho_divergence_weight is not None:
-            kwargs["mechanical_flux_weight"] = args.rho_divergence_weight
         settings = NumericalSettings(**kwargs)
     config = RhoFittingConfig(
         case_id=args.case,

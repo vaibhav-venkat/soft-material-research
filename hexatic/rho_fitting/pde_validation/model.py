@@ -35,6 +35,15 @@ class ValidationResult:
     r2_t: Array
 
 
+@dataclass(frozen=True)
+class ValidationOptions:
+    max_frames: int | None = None
+    solver: str = "filtered-euler"
+    dt: float | None = None
+    filter_sigma: float | None = None
+    mode: str = "full"
+
+
 class RhoFitPDE(PDEBase):
     def __init__(self, inputs: ValidationInputs, filter_sigma: float | None = None):
         super().__init__()
@@ -156,36 +165,21 @@ def _symmetric_bound(values: Array) -> float:
 
 def run_validation(
     inputs: ValidationInputs,
-    *,
-    max_frames: int | None = None,
-    solver: str = "filtered-euler",
-    dt: float | None = None,
-    filter_sigma: float | None = None,
-    rho_only: bool = False,
-    mode: str | None = None,
+    options: ValidationOptions | None = None,
 ) -> ValidationResult:
-    if mode is None:
-        mode = "rho-only" if rho_only else "full"
-    frame_count = inputs.rho.shape[0] if max_frames is None else min(int(max_frames), inputs.rho.shape[0])
+    options = ValidationOptions() if options is None else options
+    frame_count = (
+        inputs.rho.shape[0]
+        if options.max_frames is None
+        else min(int(options.max_frames), inputs.rho.shape[0])
+    )
     assert frame_count >= 2, "validation needs at least two frames"
     times = inputs.times[:frame_count]
     grid = make_grid(inputs)
-    if solver == "filtered-euler" and filter_sigma is None:
-        dx = inputs.lx / inputs.rho.shape[1]
-        dy = inputs.ly / inputs.rho.shape[2]
-        filter_sigma = float(inputs.metadata.get("sigma", min(dx, dy)))
-    pde = RhoFitPDE(inputs, filter_sigma=filter_sigma if solver == "filtered-euler" else None)
+    pde = RhoFitPDE(inputs, filter_sigma=_validation_filter_sigma(inputs, options))
     state = pack_state(grid, inputs.rho[0], inputs.p[0], inputs.q[0])
     pde.project_state(state)
-    if solver == "scipy":
-        assert mode == "full", "single-equation modes currently support euler and filtered-euler solvers"
-        rho_fit, p_fit, q_fit = _run_scipy(pde, state, times, dt)
-    elif solver in {"euler", "filtered-euler"}:
-        if dt is None:
-            dt = 5.0e-3
-        rho_fit, p_fit, q_fit = _run_euler(pde, state, times, dt, mode)
-    else:
-        raise AssertionError(f"unknown validation solver: {solver}")
+    rho_fit, p_fit, q_fit = _run_solver(pde, state, times, options)
     assert np.all(np.isfinite(rho_fit)), "rho_fit became non-finite; try a smaller --dt or inspect closure stability"
     assert np.all(np.isfinite(p_fit)), "P_fit became non-finite; try a smaller --dt or inspect closure stability"
     assert np.all(np.isfinite(q_fit)), "Q_fit became non-finite; try a smaller --dt or inspect closure stability"
@@ -193,7 +187,15 @@ def run_validation(
     rho_true = inputs.rho[:frame_count]
     p_true = inputs.p[:frame_count]
     q_true = inputs.q[:frame_count]
-    metric_fit, metric_true, metric_axes = validation_metric_arrays(mode, rho_fit, p_fit, q_fit, rho_true, p_true, q_true)
+    metric_fit, metric_true, metric_axes = validation_metric_arrays(
+        options.mode,
+        rho_fit,
+        p_fit,
+        q_fit,
+        rho_true,
+        p_true,
+        q_true,
+    )
     residual = metric_fit - metric_true
     rmse_t = np.sqrt(np.mean(residual * residual, axis=metric_axes))
     centered = metric_true - np.mean(metric_true, axis=metric_axes, keepdims=True)
@@ -229,6 +231,31 @@ def validation_metric_arrays(
     if mode == "q-only":
         return q_fit, q_true, (1, 2, 3, 4)
     raise AssertionError(f"unknown validation mode: {mode}")
+
+
+def _validation_filter_sigma(inputs: ValidationInputs, options: ValidationOptions) -> float | None:
+    if options.solver != "filtered-euler":
+        return None
+    if options.filter_sigma is not None:
+        return options.filter_sigma
+    dx = inputs.lx / inputs.rho.shape[1]
+    dy = inputs.ly / inputs.rho.shape[2]
+    return float(inputs.metadata.get("sigma", min(dx, dy)))
+
+
+def _run_solver(
+    pde: RhoFitPDE,
+    state: FieldCollection,
+    times: Array,
+    options: ValidationOptions,
+) -> tuple[Array, Array, Array]:
+    if options.solver == "scipy":
+        assert options.mode == "full", "single-equation modes currently support euler and filtered-euler solvers"
+        return _run_scipy(pde, state, times, options.dt)
+    if options.solver in {"euler", "filtered-euler"}:
+        dt = 5.0e-3 if options.dt is None else options.dt
+        return _run_euler(pde, state, times, dt, options.mode)
+    raise AssertionError(f"unknown validation solver: {options.solver}")
 
 
 def _run_scipy(pde: RhoFitPDE, state: FieldCollection, times: Array, dt: float | None) -> tuple[Array, Array, Array]:
@@ -305,51 +332,65 @@ def _run_euler(
         for substep in range(substeps):
             t = float(times[index]) + substep * step_dt
             if mode == "full":
-                rate = pde.evolution_rate(state, t)
-                state.data[...] = state.data + step_dt * pde.stable_rate_data(rate, step_dt)
-                pde.project_state(state)
+                _step_full_state(pde, state, t, step_dt)
             else:
-                rho_data, p_data, q_data = interpolated_fields(pde.inputs, t)
-                rho, p, q = unpack_state(state)
-                rho_eval = rho if mode == "rho-only" else rho_data
-                p_eval = p if mode == "p-only" else p_data
-                q_eval = q if mode == "q-only" else q_data
-                hard_state = pack_state(state.grid, rho_eval, p_eval, q_eval)
-                rate = pde.evolution_rate(hard_state, t)
-                rate_data = pde.stable_rate_data(rate, step_dt)
-                if mode == "rho-only":
-                    state.data[0] = state.data[0] + step_dt * rate_data[0]
-                    state.data[1:] = hard_state.data[1:]
-                elif mode == "p-only":
-                    state.data[0] = hard_state.data[0]
-                    state.data[1:4] = state.data[1:4] + step_dt * rate_data[1:4]
-                    state.data[4:] = hard_state.data[4:]
-                else:
-                    state.data[:4] = hard_state.data[:4]
-                    state.data[4:] = state.data[4:] + step_dt * rate_data[4:]
-                pde.project_state(state)
+                _step_single_field_state(pde, state, t, step_dt, mode)
             assert np.all(np.isfinite(state.data)), "validation state became non-finite"
         rho_fit[index + 1], p_fit[index + 1], q_fit[index + 1] = unpack_state(state)
     return rho_fit, p_fit, q_fit
 
 
+def _step_full_state(
+    pde: RhoFitPDE,
+    state: FieldCollection,
+    t: float,
+    step_dt: float,
+) -> None:
+    rate = pde.evolution_rate(state, t)
+    state.data[...] = state.data + step_dt * pde.stable_rate_data(rate, step_dt)
+    pde.project_state(state)
+
+
+def _step_single_field_state(
+    pde: RhoFitPDE,
+    state: FieldCollection,
+    t: float,
+    step_dt: float,
+    mode: str,
+) -> None:
+    hard_state = _single_field_reference_state(pde, state, t, mode)
+    rate = pde.evolution_rate(hard_state, t)
+    rate_data = pde.stable_rate_data(rate, step_dt)
+    if mode == "rho-only":
+        state.data[0] = state.data[0] + step_dt * rate_data[0]
+        state.data[1:] = hard_state.data[1:]
+    elif mode == "p-only":
+        state.data[0] = hard_state.data[0]
+        state.data[1:4] = state.data[1:4] + step_dt * rate_data[1:4]
+        state.data[4:] = hard_state.data[4:]
+    else:
+        state.data[:4] = hard_state.data[:4]
+        state.data[4:] = state.data[4:] + step_dt * rate_data[4:]
+    pde.project_state(state)
+
+
+def _single_field_reference_state(
+    pde: RhoFitPDE,
+    state: FieldCollection,
+    t: float,
+    mode: str,
+) -> FieldCollection:
+    rho_data, p_data, q_data = interpolated_fields(pde.inputs, t)
+    rho, p, q = unpack_state(state)
+    rho_eval = rho if mode == "rho-only" else rho_data
+    p_eval = p if mode == "p-only" else p_data
+    q_eval = q if mode == "q-only" else q_data
+    return pack_state(state.grid, rho_eval, p_eval, q_eval)
+
+
 def run_validation_from_cache(
     cache_path: Path,
-    *,
-    max_frames: int | None = None,
-    solver: str = "filtered-euler",
-    dt: float | None = None,
-    filter_sigma: float | None = None,
-    rho_only: bool = False,
-    mode: str | None = None,
+    options: ValidationOptions | None = None,
 ) -> tuple[ValidationInputs, ValidationResult]:
     inputs = load_validation_inputs(cache_path)
-    return inputs, run_validation(
-        inputs,
-        max_frames=max_frames,
-        solver=solver,
-        dt=dt,
-        filter_sigma=filter_sigma,
-        rho_only=rho_only,
-        mode=mode,
-    )
+    return inputs, run_validation(inputs, options)

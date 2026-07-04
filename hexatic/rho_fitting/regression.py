@@ -46,23 +46,9 @@ def stability_selection(
 ) -> StabilityResult:
     X = np.asarray(X, dtype=np.float64)
     y = np.asarray(y, dtype=np.float64)
-    assert X.ndim == 2 and y.ndim == 1 and X.shape[0] == y.size, "X must be (N, terms) and y must be (N,)"
-    assert X.shape[1] == len(names) == len(labels), "term metadata must match X columns"
-    assert X.shape[0] > 0 and X.shape[1] > 0, "regression matrix must be non-empty"
-    if evaluation_X is None:
-        evaluation_X = X
-    if evaluation_y is None:
-        evaluation_y = y
-    evaluation_X = np.asarray(evaluation_X, dtype=np.float64)
-    evaluation_y = np.asarray(evaluation_y, dtype=np.float64)
-    assert evaluation_X.ndim == 2 and evaluation_y.ndim == 1, "evaluation rows must be matrix/vector"
-    assert evaluation_X.shape[1] == X.shape[1] and evaluation_X.shape[0] == evaluation_y.size, "evaluation rows must match fit terms"
-    if auxiliary_X is not None or auxiliary_y is not None:
-        assert auxiliary_X is not None and auxiliary_y is not None, "auxiliary rows need both X and y"
-        auxiliary_X = np.asarray(auxiliary_X, dtype=np.float64)
-        auxiliary_y = np.asarray(auxiliary_y, dtype=np.float64)
-        assert auxiliary_X.ndim == 2 and auxiliary_y.ndim == 1, "auxiliary rows must be matrix/vector"
-        assert auxiliary_X.shape[1] == X.shape[1] and auxiliary_X.shape[0] == auxiliary_y.size, "auxiliary rows must match fit terms"
+    _validate_fit_inputs(X, y, names, labels)
+    evaluation_X, evaluation_y = _evaluation_rows(X, y, evaluation_X, evaluation_y)
+    auxiliary_rows = _auxiliary_rows(X, auxiliary_X, auxiliary_y)
 
     del seed, subsamples
 
@@ -72,12 +58,7 @@ def stability_selection(
         f"running PySINDy SR3 L1 regression rows={X.shape[0]} terms={X.shape[1]} "
         f"tau_count={tau_values.size}"
     )
-    coefficients_path = np.zeros((tau_values.size, X.shape[1]), dtype=np.float64)
-    importance_path = np.zeros_like(coefficients_path)
-    for index, tau in enumerate(tau_values):
-        _progress(f"  tau {index + 1}/{tau_values.size}: {tau:.6g}")
-        coefficients_path[index] = _sr3_coefficients(X, y, reg_weight_lam=float(tau), max_iter=max_iter)
-        importance_path[index] = _coefficient_importance(coefficients_path[index])
+    coefficients_path, importance_path = _fit_tau_path(X, y, tau_values, max_iter)
     coefficients = coefficients_path[tau_index]
 
     raw_correlations = _raw_feature_correlations(evaluation_X, evaluation_y)
@@ -86,18 +67,13 @@ def stability_selection(
         _progress(f"  {label}: {_format_correlation(correlation)}")
 
     y_pred = evaluation_X @ coefficients
-    residual = evaluation_y - y_pred
-    rmse = float(np.sqrt(np.mean(residual * residual)))
-    total = float(np.sum((evaluation_y - np.mean(evaluation_y)) ** 2))
-    r2 = 1.0 - float(np.sum(residual * residual)) / total if total > 0.0 else float("nan")
+    rmse, r2 = _regression_metrics(evaluation_y, y_pred)
     auxiliary_rmse = None
     auxiliary_r2 = None
-    if auxiliary_X is not None and auxiliary_y is not None:
+    if auxiliary_rows is not None:
+        auxiliary_X, auxiliary_y = auxiliary_rows
         auxiliary_pred = auxiliary_X @ coefficients
-        auxiliary_residual = auxiliary_y - auxiliary_pred
-        auxiliary_rmse = float(np.sqrt(np.mean(auxiliary_residual * auxiliary_residual)))
-        auxiliary_total = float(np.sum((auxiliary_y - np.mean(auxiliary_y)) ** 2))
-        auxiliary_r2 = 1.0 - float(np.sum(auxiliary_residual * auxiliary_residual)) / auxiliary_total if auxiliary_total > 0.0 else float("nan")
+        auxiliary_rmse, auxiliary_r2 = _regression_metrics(auxiliary_y, auxiliary_pred)
     importance = importance_path[tau_index]
     active = (np.abs(coefficients) > 1.0e-12) & (importance >= float(importance_threshold))
 
@@ -117,6 +93,76 @@ def stability_selection(
         auxiliary_rmse,
         auxiliary_r2,
     )
+
+
+def _validate_fit_inputs(
+    X: np.ndarray,
+    y: np.ndarray,
+    names: tuple[str, ...],
+    labels: tuple[str, ...],
+) -> None:
+    assert X.ndim == 2 and y.ndim == 1 and X.shape[0] == y.size, "X must be (N, terms) and y must be (N,)"
+    assert X.shape[1] == len(names) == len(labels), "term metadata must match X columns"
+    assert X.shape[0] > 0 and X.shape[1] > 0, "regression matrix must be non-empty"
+
+
+def _evaluation_rows(
+    X: np.ndarray,
+    y: np.ndarray,
+    evaluation_X: np.ndarray | None,
+    evaluation_y: np.ndarray | None,
+) -> tuple[np.ndarray, np.ndarray]:
+    if evaluation_X is None:
+        evaluation_X = X
+    if evaluation_y is None:
+        evaluation_y = y
+    evaluation_X = np.asarray(evaluation_X, dtype=np.float64)
+    evaluation_y = np.asarray(evaluation_y, dtype=np.float64)
+    assert evaluation_X.ndim == 2 and evaluation_y.ndim == 1, "evaluation rows must be matrix/vector"
+    assert evaluation_X.shape[1] == X.shape[1] and evaluation_X.shape[0] == evaluation_y.size, (
+        "evaluation rows must match fit terms"
+    )
+    return evaluation_X, evaluation_y
+
+
+def _auxiliary_rows(
+    X: np.ndarray,
+    auxiliary_X: np.ndarray | None,
+    auxiliary_y: np.ndarray | None,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    if auxiliary_X is None and auxiliary_y is None:
+        return None
+    assert auxiliary_X is not None and auxiliary_y is not None, "auxiliary rows need both X and y"
+    auxiliary_X = np.asarray(auxiliary_X, dtype=np.float64)
+    auxiliary_y = np.asarray(auxiliary_y, dtype=np.float64)
+    assert auxiliary_X.ndim == 2 and auxiliary_y.ndim == 1, "auxiliary rows must be matrix/vector"
+    assert auxiliary_X.shape[1] == X.shape[1] and auxiliary_X.shape[0] == auxiliary_y.size, (
+        "auxiliary rows must match fit terms"
+    )
+    return auxiliary_X, auxiliary_y
+
+
+def _fit_tau_path(
+    X: np.ndarray,
+    y: np.ndarray,
+    tau_values: np.ndarray,
+    max_iter: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    coefficients_path = np.zeros((tau_values.size, X.shape[1]), dtype=np.float64)
+    importance_path = np.zeros_like(coefficients_path)
+    for index, tau in enumerate(tau_values):
+        _progress(f"  tau {index + 1}/{tau_values.size}: {tau:.6g}")
+        coefficients_path[index] = _sr3_coefficients(X, y, reg_weight_lam=float(tau), max_iter=max_iter)
+        importance_path[index] = _coefficient_importance(coefficients_path[index])
+    return coefficients_path, importance_path
+
+
+def _regression_metrics(y: np.ndarray, y_pred: np.ndarray) -> tuple[float, float]:
+    residual = y - y_pred
+    rmse = float(np.sqrt(np.mean(residual * residual)))
+    total = float(np.sum((y - np.mean(y)) ** 2))
+    r2 = 1.0 - float(np.sum(residual * residual)) / total if total > 0.0 else float("nan")
+    return rmse, r2
 
 
 def _progress(message: str) -> None:

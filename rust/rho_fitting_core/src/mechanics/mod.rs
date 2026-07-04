@@ -17,6 +17,7 @@ pub use sampling::sample_component_rows;
 use math::delta;
 use validation::validate_particle_fields;
 
+#[non_exhaustive]
 pub struct MechanicalFields {
     pub rho: Array3<f64>,
     pub p: Array4<f64>,
@@ -28,6 +29,7 @@ pub struct MechanicalFields {
     pub j_q: Array6<f64>,
 }
 
+#[non_exhaustive]
 pub struct MechanicalLibraries {
     pub y_rho_names: Vec<String>,
     pub y_p_names: Vec<String>,

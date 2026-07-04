@@ -234,6 +234,8 @@ fn launch_kernel<R: Runtime>(
 ) {
     let cube_dim = 256u32;
     let cubes = output_len.div_ceil(cube_dim as usize) as u32;
+    // SAFETY: every raw handle is allocated above for the exact length passed
+    // here, and the kernel only indexes within the frame/particle/grid bounds.
     unsafe {
         coarse_grain_kernel::launch_unchecked::<f32, R>(
             client,

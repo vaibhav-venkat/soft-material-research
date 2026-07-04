@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 import numpy as np
 
@@ -13,7 +14,17 @@ def write_report(path: Path, lines: list[str], overwrite: bool = False) -> None:
     if path.exists() and not overwrite:
         raise FileExistsError(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines) + "\n")
+    contents = "\n".join(lines) + "\n"
+    with NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        delete=False,
+    ) as handle:
+        tmp_path = Path(handle.name)
+        handle.write(contents)
+    tmp_path.replace(path)
 
 
 def density_report_lines(

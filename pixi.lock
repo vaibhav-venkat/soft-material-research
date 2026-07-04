@@ -246,6 +246,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/b0/8f/13650cfe25762b51175c677330e6471d5d2c5851a6fbd6df77f0681bb34e/clarabel-0.11.1-cp39-abi3-macosx_11_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/b5/64/7660f8a4a8e53c924d0fa05dc3a55c9cee10bbd82b11c5afb27d44b096ce/markupsafe-3.0.3-cp314-cp314-macosx_11_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/c7/8d/46455f0b58eba0044edb48c6bd495455c1d6f1872a701e5a4fb94f93618d/pysindy-2.1.0-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/cb/44/dfc6b21433f85acd2a904d2885a6cfe191dead3e1dee9c3d0687a4ec8fcf/desloppify-1.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/cd/3a/6a615fa5a1fb1e11f0ad41febedea907a2f20a310f7a9fc5b3a16639c2ad/derivative-0.6.3-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/f2/0d/27471ec9f1d04674f6e62de809412371e097aed3eca7d9483e677c54c214/jaxlib-0.10.2-cp314-cp314-macosx_11_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/f4/5b/d548c9543bea1cd90093f6445e0abdf7650269c7b39aac0a3759035065d6/highspy-1.15.0-cp314-cp314-macosx_11_0_arm64.whl
@@ -3819,6 +3820,24 @@ packages:
   - numpyro ; extra == 'sbr'
   - jax ; extra == 'sbr'
   requires_python: '>=3.10'
+- pypi: https://files.pythonhosted.org/packages/cb/44/dfc6b21433f85acd2a904d2885a6cfe191dead3e1dee9c3d0687a4ec8fcf/desloppify-1.0-py3-none-any.whl
+  name: desloppify
+  version: '1.0'
+  sha256: 77d8bcfacd21edb8efc064fd94ab3adec7221f5efff192b7a2a0f0c55564f007
+  requires_dist:
+  - tree-sitter>=0.21 ; extra == 'treesitter'
+  - tree-sitter-language-pack>=0.3,<1.8 ; extra == 'treesitter'
+  - defusedxml>=0.7.0 ; extra == 'csharp-xml'
+  - bandit>=1.7.8 ; extra == 'python-security'
+  - pillow>=9.0.0 ; extra == 'scorecard'
+  - pyyaml>=6.0 ; extra == 'plan-yaml'
+  - defusedxml>=0.7.0 ; extra == 'full'
+  - tree-sitter>=0.21 ; extra == 'full'
+  - tree-sitter-language-pack>=0.3,<1.8 ; extra == 'full'
+  - bandit>=1.7.8 ; extra == 'full'
+  - pillow>=9.0.0 ; extra == 'full'
+  - pyyaml>=6.0 ; extra == 'full'
+  requires_python: '>=3.11'
 - pypi: https://files.pythonhosted.org/packages/cd/3a/6a615fa5a1fb1e11f0ad41febedea907a2f20a310f7a9fc5b3a16639c2ad/derivative-0.6.3-py3-none-any.whl
   name: derivative
   version: 0.6.3

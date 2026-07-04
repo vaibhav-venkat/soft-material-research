@@ -299,18 +299,25 @@ def spectral_active_fields(
         settings.timestep,
         settings.cheb_cutoff,
     )
-    filtered = {"rho": rho_time.filtered}
     coefficients = [rho_time.coefficients]
-    for name in ("P", "Q", "A", "J_rho", "J_P", "J_Q", "psi6_sq"):
-        result = chebyshev_filter_and_derivative(
-            coarse[name],
-            active.steps,
-            settings.timestep,
-            settings.cheb_cutoff,
+    p_time = _filter_coarse_field("P", coarse, active, settings, rho_time)
+    q_time = _filter_coarse_field("Q", coarse, active, settings, rho_time)
+    a_time = _filter_coarse_field("A", coarse, active, settings, rho_time)
+    j_rho_time = _filter_coarse_field("J_rho", coarse, active, settings, rho_time)
+    j_p_time = _filter_coarse_field("J_P", coarse, active, settings, rho_time)
+    j_q_time = _filter_coarse_field("J_Q", coarse, active, settings, rho_time)
+    psi6_sq_time = _filter_coarse_field("psi6_sq", coarse, active, settings, rho_time)
+    coefficients.extend(
+        (
+            p_time.coefficients,
+            q_time.coefficients,
+            a_time.coefficients,
+            j_rho_time.coefficients,
+            j_p_time.coefficients,
+            j_q_time.coefficients,
+            psi6_sq_time.coefficients,
         )
-        _validate_temporal_alignment(rho_time, result)
-        filtered[name] = result.filtered
-        coefficients.append(result.coefficients)
+    )
     lx, ly = surface_lengths(active.x_edges, active.theta_edges, active.radius)
     fluxes = core.build_density_fluxes(
         np.ascontiguousarray(rho_time.filtered, dtype=np.float64),
@@ -318,10 +325,10 @@ def spectral_active_fields(
         ly,
     )
     targets = core.build_mechanical_targets(
-        np.ascontiguousarray(filtered["P"], dtype=np.float64),
-        np.ascontiguousarray(filtered["J_rho"], dtype=np.float64),
-        np.ascontiguousarray(filtered["J_P"], dtype=np.float64),
-        np.ascontiguousarray(filtered["J_Q"], dtype=np.float64),
+        np.ascontiguousarray(p_time.filtered, dtype=np.float64),
+        np.ascontiguousarray(j_rho_time.filtered, dtype=np.float64),
+        np.ascontiguousarray(j_p_time.filtered, dtype=np.float64),
+        np.ascontiguousarray(j_q_time.filtered, dtype=np.float64),
         float(settings.gamma),
         float(settings.u0),
     )
@@ -330,14 +337,14 @@ def spectral_active_fields(
         _log(f"warning: filtered rho has negative values; min={min_rho:.6g}")
     return {
         "rho": rho_time.filtered,
-        "P": filtered["P"],
-        "Q": filtered["Q"],
-        "A": filtered["A"],
-        "psi6_sq": filtered["psi6_sq"],
-        "J_density": filtered["J_rho"],
-        "J_rho": filtered["J_rho"],
-        "J_P": filtered["J_P"],
-        "J_Q": filtered["J_Q"],
+        "P": p_time.filtered,
+        "Q": q_time.filtered,
+        "A": a_time.filtered,
+        "psi6_sq": psi6_sq_time.filtered,
+        "J_density": j_rho_time.filtered,
+        "J_rho": j_rho_time.filtered,
+        "J_P": j_p_time.filtered,
+        "J_Q": j_q_time.filtered,
         "Y_rho": np.asarray(targets["Y_rho"]),
         "Y_P": np.asarray(targets["Y_P"]),
         "Y_Q": np.asarray(targets["Y_Q"]),
@@ -350,6 +357,23 @@ def spectral_active_fields(
         "cheb_times": rho_time.times,
         "cheb_scaled_times": rho_time.scaled_times,
     }
+
+
+def _filter_coarse_field(
+    name: str,
+    coarse: dict[str, Array],
+    active: ActiveMatterArrays,
+    settings: NumericalSettings,
+    reference: ChebyshevTimeResult,
+) -> ChebyshevTimeResult:
+    result = chebyshev_filter_and_derivative(
+        coarse[name],
+        active.steps,
+        settings.timestep,
+        settings.cheb_cutoff,
+    )
+    _validate_temporal_alignment(reference, result)
+    return result
 
 
 def fit_mechanical(
@@ -452,34 +476,6 @@ def _mechanical_libraries(
         "Y_P_names": tuple(str(name) for name in libs["Y_P_names"]),
         "Y_Q_names": tuple(str(name) for name in libs["Y_Q_names"]),
     }
-
-
-def _fit_component_target(
-    target_name: str,
-    target: Array,
-    library: Array,
-    names: tuple[str, ...],
-    sample_indices: Array,
-    config: RhoFittingConfig,
-) -> tuple[StabilityResult, Array, Array]:
-    settings = _settings(config)
-    rows, row_index, y, X = _sample_component_matrix(target, library, sample_indices)
-    labels = mechanical_labels(names)
-    _log(f"{target_name} fit rows={X.shape[0]} terms={', '.join(names)}")
-    fit = stability_selection(
-        X,
-        y,
-        names,
-        labels,
-        seed=settings.seed,
-        tau_count=settings.tau_count,
-        tau_eps=settings.tau_eps,
-        subsamples=settings.subsamples,
-        importance_threshold=settings.importance_threshold,
-        alpha=settings.alpha,
-        max_iter=settings.stlsq_max_iter,
-    )
-    return fit, rows, row_index
 
 
 def _fit_divergence_primary_target(

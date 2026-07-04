@@ -23,3 +23,5 @@ CORE.md
 *.pkl
 *.csv
 *.bak
+.desloppify/
+.agents

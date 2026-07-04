@@ -10,6 +10,8 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from hexatic.constants import cylinder
+
 
 Array = NDArray[Any]
 
@@ -48,27 +50,14 @@ class ValidationInputs:
 
 
 def load_validation_inputs(cache_path: Path) -> ValidationInputs:
-    from hexatic.constants import cylinder
-
     with np.load(cache_path, allow_pickle=False) as cache:
         metadata = json.loads(str(cache["metadata_json"])) if "metadata_json" in cache.files else {}
-        y_rho_names = tuple(str(name) for name in cache["Y_rho_names"])
-        y_p_names = tuple(str(name) for name in cache["Y_P_names"])
-        y_q_names = tuple(str(name) for name in cache["Y_Q_names"])
-        assert y_rho_names == Y_RHO_NAMES, f"unexpected Y_rho names: {y_rho_names}"
-        assert y_p_names == Y_P_NAMES, f"unexpected Y_P names: {y_p_names}"
-        assert y_q_names == Y_Q_NAMES, f"unexpected Y_Q names: {y_q_names}"
-
-        rho = np.asarray(cache["rho"], dtype=np.float64)
-        p = np.asarray(cache["P"], dtype=np.float64)
-        q = np.asarray(cache["Q"], dtype=np.float64)
-        a = np.asarray(cache["A"], dtype=np.float64)
-        psi6_sq = np.asarray(cache["psi6_sq"], dtype=np.float64)
-        y_p = np.asarray(cache["Y_P"], dtype=np.float64)
-        times = np.asarray(cache["cheb_times"], dtype=np.float64)
-        y_rho_coefficients = np.asarray(cache["Y_rho_coefficients"], dtype=np.float64)
-        y_p_coefficients = np.asarray(cache["Y_P_coefficients"], dtype=np.float64)
-        y_q_coefficients = np.asarray(cache["Y_Q_coefficients"], dtype=np.float64)
+        _validate_library_names(cache)
+        rho, p, q, a, psi6_sq, y_p = _load_field_arrays(cache)
+        times = _load_array(cache, "cheb_times")
+        y_rho_coefficients = _load_array(cache, "Y_rho_coefficients")
+        y_p_coefficients = _load_array(cache, "Y_P_coefficients")
+        y_q_coefficients = _load_array(cache, "Y_Q_coefficients")
 
     assert rho.ndim == 3, "rho must be (T,Nx,Ny)"
     assert p.shape == rho.shape + (3,), "P must be (T,Nx,Ny,3)"
@@ -110,3 +99,29 @@ def load_validation_inputs(cache_path: Path) -> ValidationInputs:
         gamma=gamma,
         tau_r=tau_r,
     )
+
+
+def _validate_library_names(cache: np.lib.npyio.NpzFile) -> None:
+    y_rho_names = tuple(str(name) for name in cache["Y_rho_names"])
+    y_p_names = tuple(str(name) for name in cache["Y_P_names"])
+    y_q_names = tuple(str(name) for name in cache["Y_Q_names"])
+    assert y_rho_names == Y_RHO_NAMES, f"unexpected Y_rho names: {y_rho_names}"
+    assert y_p_names == Y_P_NAMES, f"unexpected Y_P names: {y_p_names}"
+    assert y_q_names == Y_Q_NAMES, f"unexpected Y_Q names: {y_q_names}"
+
+
+def _load_field_arrays(
+    cache: np.lib.npyio.NpzFile,
+) -> tuple[Array, Array, Array, Array, Array, Array]:
+    return (
+        _load_array(cache, "rho"),
+        _load_array(cache, "P"),
+        _load_array(cache, "Q"),
+        _load_array(cache, "A"),
+        _load_array(cache, "psi6_sq"),
+        _load_array(cache, "Y_P"),
+    )
+
+
+def _load_array(cache: np.lib.npyio.NpzFile, name: str) -> Array:
+    return np.asarray(cache[name], dtype=np.float64)
