@@ -360,10 +360,10 @@ def fit_mechanical(
     sample_indices = _mechanical_sample_indices(spectral, config)
     lx, ly = surface_lengths(active.x_edges, active.theta_edges, active.radius)
     libraries = _mechanical_libraries(spectral, lx, ly)
-    y_rho_fit, y_rho_rows, y_rho_index = _fit_component_target("Y_rho", spectral["Y_rho"], libraries["Y_rho"], libraries["Y_rho_names"], sample_indices, config)
+    y_rho_fit, y_rho_rows, y_rho_index = _fit_divergence_primary_target("Y_rho", spectral["Y_rho"], libraries["Y_rho"], libraries["Y_rho_names"], sample_indices, config, lx, ly)
     f_rho_pred = np.tensordot(y_rho_fit.coefficients, libraries["Y_rho"], axes=(0, 0))
-    y_p_fit, y_p_rows, y_p_index = _fit_component_target("Y_P", spectral["Y_P"], libraries["Y_P"], libraries["Y_P_names"], sample_indices, config)
-    y_q_fit, y_q_rows, y_q_index = _fit_component_target("Y_Q", spectral["Y_Q"], libraries["Y_Q"], libraries["Y_Q_names"], sample_indices, config)
+    y_p_fit, y_p_rows, y_p_index = _fit_divergence_primary_target("Y_P", spectral["Y_P"], libraries["Y_P"], libraries["Y_P_names"], sample_indices, config, lx, ly)
+    y_q_fit, y_q_rows, y_q_index = _fit_divergence_primary_target("Y_Q", spectral["Y_Q"], libraries["Y_Q"], libraries["Y_Q_names"], sample_indices, config, lx, ly)
     return {
         "sample_indices": sample_indices,
         "Y_rho_fit": y_rho_fit,
@@ -482,6 +482,51 @@ def _fit_component_target(
     return fit, rows, row_index
 
 
+def _fit_divergence_primary_target(
+    target_name: str,
+    target: Array,
+    library: Array,
+    names: tuple[str, ...],
+    sample_indices: Array,
+    config: RhoFittingConfig,
+    lx: float,
+    ly: float,
+) -> tuple[StabilityResult, Array, Array]:
+    settings = _settings(config)
+    rows, row_index, y_flux, X_flux = _sample_component_matrix(target, library, sample_indices)
+    y_div, X_div = _sample_divergence_matrix(target, library, sample_indices, lx, ly)
+    labels = mechanical_labels(names)
+    weight = float(settings.mechanical_flux_weight)
+    _log(
+        f"{target_name} divergence fit rows={X_div.shape[0]} flux_rows={X_flux.shape[0]} "
+        f"flux_weight={weight:.6g} terms={', '.join(names)}"
+    )
+    if weight > 0.0:
+        X_fit = np.vstack((X_div, weight * X_flux))
+        y_fit = np.concatenate((y_div, weight * y_flux))
+    else:
+        X_fit = X_div
+        y_fit = y_div
+    fit = stability_selection(
+        X_fit,
+        y_fit,
+        names,
+        labels,
+        seed=settings.seed,
+        tau_count=settings.tau_count,
+        tau_eps=settings.tau_eps,
+        subsamples=settings.subsamples,
+        importance_threshold=settings.importance_threshold,
+        alpha=settings.alpha,
+        max_iter=settings.stlsq_max_iter,
+        evaluation_X=X_div,
+        evaluation_y=y_div,
+        auxiliary_X=X_flux,
+        auxiliary_y=y_flux,
+    )
+    return fit, rows, row_index
+
+
 def _sample_component_matrix(
     target: Array,
     library: Array,
@@ -499,6 +544,37 @@ def _sample_component_matrix(
     X = rows[:, 1:]
     finite = np.isfinite(y) & np.all(np.isfinite(X), axis=1)
     return rows[finite], row_index[finite], y[finite], X[finite]
+
+
+def _sample_divergence_matrix(
+    target: Array,
+    library: Array,
+    sample_indices: Array,
+    lx: float,
+    ly: float,
+) -> tuple[Array, Array]:
+    target_div = _divergence_surface_flux_field(target, lx, ly)
+    div_terms = np.asarray([_divergence_surface_flux_field(term, lx, ly) for term in library], dtype=np.float64)
+    if target_div.ndim == 3:
+        y_div = _sample_scalar(target_div, sample_indices)
+        X_div = np.stack([_sample_scalar(term, sample_indices) for term in div_terms], axis=1)
+    else:
+        _rows, _row_index, y_div, X_div = _sample_component_matrix(target_div, div_terms, sample_indices)
+    finite = np.isfinite(y_div) & np.all(np.isfinite(X_div), axis=1)
+    return y_div[finite], X_div[finite]
+
+
+def _divergence_surface_flux_field(field: Array, lx: float, ly: float) -> Array:
+    field = np.asarray(field, dtype=np.float64)
+    assert field.ndim >= 4 and field.shape[3] == 2, "surface flux field must have shape (T,Nx,Ny,2,...)"
+    nx = field.shape[1]
+    ny = field.shape[2]
+    dx = lx / nx
+    dy = ly / ny
+    return (
+        (np.roll(field[:, :, :, 0, ...], -1, axis=1) - np.roll(field[:, :, :, 0, ...], 1, axis=1)) / (2.0 * dx)
+        + (np.roll(field[:, :, :, 1, ...], -1, axis=2) - np.roll(field[:, :, :, 1, ...], 1, axis=2)) / (2.0 * dy)
+    )
 
 
 def _raw_feature_correlations(X: Array, y: Array) -> Array:

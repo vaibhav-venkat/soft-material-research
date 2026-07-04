@@ -101,7 +101,7 @@ class RhoFittingMechanicsTests(unittest.TestCase):
         self.assertEqual(np.asarray(targets["Y_P"]).shape, (1, 1, 1, 2, 3))
         np.testing.assert_allclose(np.asarray(targets["Y_P"]), j_p / 10.0)
 
-    def test_y_p_library_uses_a_and_delta_psi6_sq_a_terms(self) -> None:
+    def test_mechanical_library_uses_expanded_p_q_terms(self) -> None:
         rho = np.ones((1, 4, 4), dtype=float)
         p = np.zeros((1, 4, 4, 3), dtype=float)
         q = np.zeros((1, 4, 4, 3, 3), dtype=float)
@@ -116,7 +116,7 @@ class RhoFittingMechanicsTests(unittest.TestCase):
 
         self.assertEqual(
             tuple(libraries["Y_P_names"]),
-            ("A", "rho_delta_psi6sq_A"),
+            ("A", "rho_A", "psi6sq_A", "grad_P", "rho_grad_P", "grad_lap_P"),
         )
         self.assertEqual(
             tuple(libraries["Y_rho_names"]),
@@ -128,10 +128,19 @@ class RhoFittingMechanicsTests(unittest.TestCase):
         )
         self.assertEqual(
             tuple(libraries["Y_Q_names"]),
-            ("Ubar_P_dot_alpha_traceless",),
+            (
+                "Ubar_P_dot_alpha_traceless",
+                "grad_P_symmetric_traceless",
+                "grad_Q",
+                "rho_grad_Q",
+                "grad_lap_Q",
+            ),
         )
-        self.assertEqual(np.asarray(libraries["Y_P"]).shape, (2, 1, 4, 4, 2, 3))
-        np.testing.assert_allclose(np.asarray(libraries["Y_P"])[1, ..., 0, 0], psi6_sq - np.mean(psi6_sq))
+        self.assertEqual(np.asarray(libraries["Y_P"]).shape, (6, 1, 4, 4, 2, 3))
+        self.assertEqual(np.asarray(libraries["Y_Q"]).shape, (5, 1, 4, 4, 2, 3, 3))
+        np.testing.assert_allclose(np.asarray(libraries["Y_P"])[0, ..., 0, 0], 1.0)
+        np.testing.assert_allclose(np.asarray(libraries["Y_P"])[1, ..., 0, 0], rho)
+        np.testing.assert_allclose(np.asarray(libraries["Y_P"])[2, ..., 0, 0], psi6_sq)
 
     def test_regression_wrapper_returns_stability_result(self) -> None:
         from hexatic.rho_fitting.regression import stability_selection

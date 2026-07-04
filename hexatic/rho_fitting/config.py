@@ -54,6 +54,7 @@ class NumericalSettings:
     importance_threshold: float = 0.6
     alpha: float = 1e-6
     stlsq_max_iter: int = 20
+    mechanical_flux_weight: float = 1.0
     gamma: float = float(cylinder.SIMULATION.gamma)
     u0: float = float(cylinder.SIMULATION.u0)
 
@@ -75,6 +76,7 @@ class RhoFittingConfig:
         assert settings.cheb_cutoff > 0, "cheb_cutoff must be positive"
         assert settings.tau_count > 0, "tau_count must be positive"
         assert settings.tau_eps > 0.0, "tau_eps must be positive"
+        assert settings.mechanical_flux_weight >= 0.0, "mechanical_flux_weight must be non-negative"
         assert settings.timestep > 0.0, "timestep must be positive"
         assert settings.u0 != 0.0, "u0 must be nonzero"
         object.__setattr__(self, "settings", settings)

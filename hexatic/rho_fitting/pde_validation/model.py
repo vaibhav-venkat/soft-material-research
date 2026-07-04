@@ -12,12 +12,14 @@ from pde import CartesianGrid, FieldCollection, MemoryStorage, PDEBase, ScalarFi
 from scipy.ndimage import gaussian_filter
 
 from .cache import ValidationInputs, load_validation_inputs
-from .operators import closure_fields, divergence_surface_flux, divergence_vector
+from .operators import closure_fields, divergence_surface_flux, divergence_vector, estimate_ubar
 
 
 Array = NDArray[Any]
 D = 3
 COMPONENTS = 13
+RELAXATION_LAMBDA = -0.01
+VALIDATION_BOUND_SCALE = 10.0
 
 
 @dataclass(frozen=True)
@@ -41,11 +43,16 @@ class RhoFitPDE(PDEBase):
         self.dy = inputs.ly / inputs.rho.shape[2]
         self.psi6_sq_fixed = np.asarray(inputs.psi6_sq[0], dtype=np.float64)
         self.filter_sigma = filter_sigma
+        self.rho_min, self.rho_max = _scalar_bounds(inputs.rho)
+        self.p_limit = _symmetric_bound(inputs.p)
+        self.q_limit = _symmetric_bound(inputs.q)
 
     def evolution_rate(self, state: FieldCollection, t: float = 0.0) -> FieldCollection:
-        del t
         rho, p, q = unpack_state(state)
+        rho, p, q = self.project_fields(rho, p, q)
         rho_eval, p_eval, q_eval = self.filtered_fields(rho, p, q)
+        rho_eval, p_eval, q_eval = self.project_fields(rho_eval, p_eval, q_eval)
+        ubar = self.fit_time_ubar(t)
         closures = closure_fields(
             rho_eval,
             p_eval,
@@ -56,15 +63,42 @@ class RhoFitPDE(PDEBase):
             self.inputs.y_q_coefficients,
             self.dx,
             self.dy,
+            ubar_override=ubar,
         )
 
         rho_flux = self.inputs.u0 * p_eval[..., :2] + closures.f_rho / self.inputs.gamma
         d_rho = -divergence_vector(rho_flux, self.dx, self.dy)
         d_p = -self.inputs.u0 * divergence_surface_flux(closures.f_p[..., :, :, None], self.dx, self.dy)[..., 0]
-        d_p -= p * ((D - 1.0) / self.inputs.tau_r)
+        d_p -= p * RELAXATION_LAMBDA
         d_q = -divergence_surface_flux(closures.f_q, self.dx, self.dy)
-        d_q -= q * ((2.0 * D) / self.inputs.tau_r)
+        d_q -= q * RELAXATION_LAMBDA
         return pack_state(state.grid, d_rho, d_p, d_q)
+
+    def project_fields(self, rho: Array, p: Array, q: Array) -> tuple[Array, Array, Array]:
+        rho_out = np.nan_to_num(rho, nan=self.rho_min, posinf=self.rho_max, neginf=self.rho_min)
+        p_out = np.nan_to_num(p, nan=0.0, posinf=self.p_limit, neginf=-self.p_limit)
+        q_out = np.nan_to_num(q, nan=0.0, posinf=self.q_limit, neginf=-self.q_limit)
+        return (
+            np.clip(rho_out, self.rho_min, self.rho_max),
+            np.clip(p_out, -self.p_limit, self.p_limit),
+            np.clip(q_out, -self.q_limit, self.q_limit),
+        )
+
+    def project_state(self, state: FieldCollection) -> None:
+        rho, p, q = self.project_fields(*unpack_state(state))
+        state.data[...] = pack_state(state.grid, rho, p, q).data
+
+    def stable_rate_data(self, rate: FieldCollection, step_dt: float) -> Array:
+        assert step_dt > 0.0, "step_dt must be positive"
+        values = np.nan_to_num(rate.data, nan=0.0, posinf=0.0, neginf=0.0)
+        out = np.empty_like(values, dtype=np.float64)
+        rho_limit = (self.rho_max - self.rho_min) / step_dt
+        out[0] = np.clip(values[0], -rho_limit, rho_limit)
+        p_rate_limit = (2.0 * self.p_limit) / step_dt
+        q_rate_limit = (2.0 * self.q_limit) / step_dt
+        out[1:4] = np.clip(values[1:4], -p_rate_limit, p_rate_limit)
+        out[4:] = np.clip(values[4:], -q_rate_limit, q_rate_limit)
+        return out
 
     def filtered_fields(self, rho: Array, p: Array, q: Array) -> tuple[Array, Array, Array]:
         if self.filter_sigma is None or self.filter_sigma <= 0.0:
@@ -75,6 +109,10 @@ class RhoFitPDE(PDEBase):
         p_out = gaussian_filter(p, sigma=(sx, sy, 0.0), mode=("wrap", "wrap", "nearest"))
         q_out = gaussian_filter(q, sigma=(sx, sy, 0.0, 0.0), mode=("wrap", "wrap", "nearest", "nearest"))
         return rho_out, p_out, q_out
+
+    def fit_time_ubar(self, t: float) -> Array:
+        _, _, _, a, y_p = interpolated_cached_fields(self.inputs, t)
+        return estimate_ubar(y_p, a)
 
 
 def make_grid(inputs: ValidationInputs) -> CartesianGrid:
@@ -100,6 +138,22 @@ def unpack_state(state: FieldCollection) -> tuple[Array, Array, Array]:
     return rho, p, q
 
 
+def _scalar_bounds(values: Array) -> tuple[float, float]:
+    finite = np.asarray(values[np.isfinite(values)], dtype=np.float64)
+    assert finite.size > 0, "validation input has no finite scalar values"
+    minimum = float(np.min(finite))
+    maximum = float(np.max(finite))
+    span = max(maximum - minimum, abs(maximum), abs(minimum), 1.0)
+    padding = VALIDATION_BOUND_SCALE * span
+    return minimum - padding, maximum + padding
+
+
+def _symmetric_bound(values: Array) -> float:
+    finite = np.asarray(values[np.isfinite(values)], dtype=np.float64)
+    assert finite.size > 0, "validation input has no finite tensor values"
+    return max(float(np.max(np.abs(finite))) * VALIDATION_BOUND_SCALE, 1.0)
+
+
 def run_validation(
     inputs: ValidationInputs,
     *,
@@ -122,6 +176,7 @@ def run_validation(
         filter_sigma = float(inputs.metadata.get("sigma", min(dx, dy)))
     pde = RhoFitPDE(inputs, filter_sigma=filter_sigma if solver == "filtered-euler" else None)
     state = pack_state(grid, inputs.rho[0], inputs.p[0], inputs.q[0])
+    pde.project_state(state)
     if solver == "scipy":
         assert mode == "full", "single-equation modes currently support euler and filtered-euler solvers"
         rho_fit, p_fit, q_fit = _run_scipy(pde, state, times, dt)
@@ -196,16 +251,32 @@ def _run_scipy(pde: RhoFitPDE, state: FieldCollection, times: Array, dt: float |
     return rho_fit, p_fit, q_fit
 
 
-def interpolated_fields(inputs: ValidationInputs, t: float) -> tuple[Array, Array, Array]:
-    index = int(np.searchsorted(inputs.times, t, side="right") - 1)
-    index = max(0, min(index, inputs.times.size - 2))
-    t0 = float(inputs.times[index])
-    t1 = float(inputs.times[index + 1])
+def interpolation_index_weight(times: Array, t: float) -> tuple[int, float]:
+    index = int(np.searchsorted(times, t, side="right") - 1)
+    index = max(0, min(index, times.size - 2))
+    t0 = float(times[index])
+    t1 = float(times[index + 1])
     weight = 0.0 if t1 == t0 else (t - t0) / (t1 - t0)
-    rho = (1.0 - weight) * inputs.rho[index] + weight * inputs.rho[index + 1]
-    p = (1.0 - weight) * inputs.p[index] + weight * inputs.p[index + 1]
-    q = (1.0 - weight) * inputs.q[index] + weight * inputs.q[index + 1]
+    return index, weight
+
+
+def interpolate_time_series(values: Array, times: Array, t: float) -> Array:
+    index, weight = interpolation_index_weight(times, t)
+    return (1.0 - weight) * values[index] + weight * values[index + 1]
+
+
+def interpolated_fields(inputs: ValidationInputs, t: float) -> tuple[Array, Array, Array]:
+    rho, p, q, _, _ = interpolated_cached_fields(inputs, t)
     return rho, p, q
+
+
+def interpolated_cached_fields(inputs: ValidationInputs, t: float) -> tuple[Array, Array, Array, Array, Array]:
+    rho = interpolate_time_series(inputs.rho, inputs.times, t)
+    p = interpolate_time_series(inputs.p, inputs.times, t)
+    q = interpolate_time_series(inputs.q, inputs.times, t)
+    a = interpolate_time_series(inputs.a, inputs.times, t)
+    y_p = interpolate_time_series(inputs.y_p, inputs.times, t)
+    return rho, p, q, a, y_p
 
 
 def interpolated_p_q(inputs: ValidationInputs, t: float) -> tuple[Array, Array]:
@@ -235,7 +306,8 @@ def _run_euler(
             t = float(times[index]) + substep * step_dt
             if mode == "full":
                 rate = pde.evolution_rate(state, t)
-                state.data[...] = state.data + step_dt * rate.data
+                state.data[...] = state.data + step_dt * pde.stable_rate_data(rate, step_dt)
+                pde.project_state(state)
             else:
                 rho_data, p_data, q_data = interpolated_fields(pde.inputs, t)
                 rho, p, q = unpack_state(state)
@@ -244,16 +316,18 @@ def _run_euler(
                 q_eval = q if mode == "q-only" else q_data
                 hard_state = pack_state(state.grid, rho_eval, p_eval, q_eval)
                 rate = pde.evolution_rate(hard_state, t)
+                rate_data = pde.stable_rate_data(rate, step_dt)
                 if mode == "rho-only":
-                    state.data[0] = state.data[0] + step_dt * rate.data[0]
+                    state.data[0] = state.data[0] + step_dt * rate_data[0]
                     state.data[1:] = hard_state.data[1:]
                 elif mode == "p-only":
                     state.data[0] = hard_state.data[0]
-                    state.data[1:4] = state.data[1:4] + step_dt * rate.data[1:4]
+                    state.data[1:4] = state.data[1:4] + step_dt * rate_data[1:4]
                     state.data[4:] = hard_state.data[4:]
                 else:
                     state.data[:4] = hard_state.data[:4]
-                    state.data[4:] = state.data[4:] + step_dt * rate.data[4:]
+                    state.data[4:] = state.data[4:] + step_dt * rate_data[4:]
+                pde.project_state(state)
             assert np.all(np.isfinite(state.data)), "validation state became non-finite"
         rho_fit[index + 1], p_fit[index + 1], q_fit[index + 1] = unpack_state(state)
     return rho_fit, p_fit, q_fit

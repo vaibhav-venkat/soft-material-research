@@ -15,8 +15,14 @@ Array = NDArray[Any]
 
 
 Y_RHO_NAMES = ("grad_rho", "grad_lap_rho", "Q_dot_grad_rho")
-Y_P_NAMES = ("A", "rho_delta_psi6sq_A")
-Y_Q_NAMES = ("Ubar_P_dot_alpha_traceless",)
+Y_P_NAMES = ("A", "rho_A", "psi6sq_A", "grad_P", "rho_grad_P", "grad_lap_P")
+Y_Q_NAMES = (
+    "Ubar_P_dot_alpha_traceless",
+    "grad_P_symmetric_traceless",
+    "grad_Q",
+    "rho_grad_Q",
+    "grad_lap_Q",
+)
 
 
 @dataclass(frozen=True)
@@ -26,7 +32,9 @@ class ValidationInputs:
     rho: Array
     p: Array
     q: Array
+    a: Array
     psi6_sq: Array
+    y_p: Array
     times: Array
     y_rho_coefficients: Array
     y_p_coefficients: Array
@@ -54,7 +62,9 @@ def load_validation_inputs(cache_path: Path) -> ValidationInputs:
         rho = np.asarray(cache["rho"], dtype=np.float64)
         p = np.asarray(cache["P"], dtype=np.float64)
         q = np.asarray(cache["Q"], dtype=np.float64)
+        a = np.asarray(cache["A"], dtype=np.float64)
         psi6_sq = np.asarray(cache["psi6_sq"], dtype=np.float64)
+        y_p = np.asarray(cache["Y_P"], dtype=np.float64)
         times = np.asarray(cache["cheb_times"], dtype=np.float64)
         y_rho_coefficients = np.asarray(cache["Y_rho_coefficients"], dtype=np.float64)
         y_p_coefficients = np.asarray(cache["Y_P_coefficients"], dtype=np.float64)
@@ -63,11 +73,13 @@ def load_validation_inputs(cache_path: Path) -> ValidationInputs:
     assert rho.ndim == 3, "rho must be (T,Nx,Ny)"
     assert p.shape == rho.shape + (3,), "P must be (T,Nx,Ny,3)"
     assert q.shape == rho.shape + (3, 3), "Q must be (T,Nx,Ny,3,3)"
+    assert a.shape == rho.shape + (3, 3), "A must be (T,Nx,Ny,3,3)"
     assert psi6_sq.shape == rho.shape, "psi6_sq must be (T,Nx,Ny)"
+    assert y_p.shape == rho.shape + (2, 3), "Y_P must be (T,Nx,Ny,2,3)"
     assert times.shape == (rho.shape[0],), "cheb_times must match rho time axis"
     assert y_rho_coefficients.shape == (3,), "Y_rho coefficients must match current library"
-    assert y_p_coefficients.shape == (2,), "Y_P coefficients must match current library"
-    assert y_q_coefficients.shape == (1,), "Y_Q coefficients must match current library"
+    assert y_p_coefficients.shape == (6,), "Y_P coefficients must match current library"
+    assert y_q_coefficients.shape == (5,), "Y_Q coefficients must match current library"
 
     lx = float(metadata["lx"])
     ly = float(metadata["ly"])
@@ -84,7 +96,9 @@ def load_validation_inputs(cache_path: Path) -> ValidationInputs:
         rho=rho,
         p=p,
         q=q,
+        a=a,
         psi6_sq=psi6_sq,
+        y_p=y_p,
         times=times,
         y_rho_coefficients=y_rho_coefficients,
         y_p_coefficients=y_p_coefficients,

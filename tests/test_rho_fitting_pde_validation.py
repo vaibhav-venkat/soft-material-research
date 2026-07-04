@@ -29,6 +29,9 @@ def synthetic_inputs() -> ValidationInputs:
     q[..., 0, 0] = 0.01
     q[..., 1, 1] = -0.005
     q[..., 2, 2] = -0.005
+    identity = np.eye(3, dtype=np.float64)
+    a = q + rho[..., None, None] * identity / 3.0
+    y_p = 0.2 * a[..., :2, :]
     psi6_sq = np.repeat((0.5 + 0.01 * x + 0.02 * y)[None, ...], times.size, axis=0)
     return ValidationInputs(
         cache_path=Path("synthetic.npz"),
@@ -36,11 +39,13 @@ def synthetic_inputs() -> ValidationInputs:
         rho=rho,
         p=p,
         q=q,
+        a=a,
         psi6_sq=psi6_sq,
+        y_p=y_p,
         times=times,
         y_rho_coefficients=np.array([0.1, 0.01, 0.2]),
-        y_p_coefficients=np.array([0.3, -0.1]),
-        y_q_coefficients=np.array([0.4]),
+        y_p_coefficients=np.array([0.3, -0.1, 0.05, 0.02, -0.01, 0.001]),
+        y_q_coefficients=np.array([0.4, -0.03, 0.02, -0.01, 0.001]),
         lx=1.0,
         ly=1.0,
         radius=1.0,

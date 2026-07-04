@@ -100,6 +100,12 @@ def write_mechanical_outputs(
         Y_rho_r2=np.asarray(y_rho_fit.r2),
         Y_P_r2=np.asarray(y_p_fit.r2),
         Y_Q_r2=np.asarray(y_q_fit.r2),
+        Y_rho_flux_rmse=np.asarray(np.nan if y_rho_fit.auxiliary_rmse is None else y_rho_fit.auxiliary_rmse),
+        Y_P_flux_rmse=np.asarray(np.nan if y_p_fit.auxiliary_rmse is None else y_p_fit.auxiliary_rmse),
+        Y_Q_flux_rmse=np.asarray(np.nan if y_q_fit.auxiliary_rmse is None else y_q_fit.auxiliary_rmse),
+        Y_rho_flux_r2=np.asarray(np.nan if y_rho_fit.auxiliary_r2 is None else y_rho_fit.auxiliary_r2),
+        Y_P_flux_r2=np.asarray(np.nan if y_p_fit.auxiliary_r2 is None else y_p_fit.auxiliary_r2),
+        Y_Q_flux_r2=np.asarray(np.nan if y_q_fit.auxiliary_r2 is None else y_q_fit.auxiliary_r2),
     )
     write_report(
         report_path,
@@ -136,15 +142,17 @@ def mechanical_report_lines(
         f"- samples: {nd}",
         f"- sigma: {sigma:.8g}",
         f"- cheb_cutoff: {cheb_cutoff}",
-        "- analysis: global mechanical moment fits with y = R theta",
+        "- analysis: divergence-first mechanical moment fits with y = R theta",
         "",
     ]
     for target, fit in fits.items():
         lines.extend(
             [
                 f"## {target}",
-                f"- rmse: {fit.rmse:.8g}",
-                f"- r2: {fit.r2:.8g}",
+                f"- divergence rmse: {fit.rmse:.8g}",
+                f"- divergence r2: {fit.r2:.8g}",
+                f"- flux rmse: {_optional_float(fit.auxiliary_rmse)}",
+                f"- flux r2: {_optional_float(fit.auxiliary_r2)}",
                 f"- tau_index: {fit.tau_index if fit.tau_index is not None else 'none'}",
                 "",
                 "| term | active | coefficient | importance | raw corr |",
@@ -275,6 +283,7 @@ def cache_metadata(active: ActiveMatterArrays, config: RhoFittingConfig) -> dict
         "replace": bool(config.settings.replace),
         "tau_count": int(config.settings.tau_count),
         "tau_eps": float(config.settings.tau_eps),
+        "mechanical_flux_weight": float(config.settings.mechanical_flux_weight),
         "analysis": "global_density_flux_divergence",
     }
 
@@ -287,3 +296,9 @@ def format_float(value: float) -> str:
 
 def _markdown_cell(value: str) -> str:
     return value.replace("|", "\\|")
+
+
+def _optional_float(value: float | None) -> str:
+    if value is None:
+        return "none"
+    return f"{value:.8g}"

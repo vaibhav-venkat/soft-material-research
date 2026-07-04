@@ -1,6 +1,5 @@
-use ndarray::{Array4, Array5, Array6, ArrayD, ArrayView3, ArrayViewD, IxDyn};
+use ndarray::{Array3, Array4, Array5, Array6, ArrayD, ArrayView3, ArrayViewD, IxDyn};
 
-use super::math::centered_scalar;
 use super::operators::{
     estimate_ubar, q_dot_grad_rho, scalar_times_rank2, scalar_times_rank3, surface_rows_rank2,
     vector_dot_alpha_traceless,
@@ -49,14 +48,35 @@ pub fn build_mechanical_libraries(
         "grad_lap_rho".to_string(),
         "Q_dot_grad_rho".to_string(),
     ];
-    let y_p_names = vec!["A".to_string(), "rho_delta_psi6sq_A".to_string()];
-    let y_q_names = vec!["Ubar_P_dot_alpha_traceless".to_string()];
+    let y_p_names = vec![
+        "A".to_string(),
+        "rho_A".to_string(),
+        "psi6sq_A".to_string(),
+        "grad_P".to_string(),
+        "rho_grad_P".to_string(),
+        "grad_lap_P".to_string(),
+    ];
+    let y_q_names = vec![
+        "Ubar_P_dot_alpha_traceless".to_string(),
+        "grad_P_symmetric_traceless".to_string(),
+        "grad_Q".to_string(),
+        "rho_grad_Q".to_string(),
+        "grad_lap_Q".to_string(),
+    ];
 
     let ubar = estimate_ubar(y_p5, a5);
     let p_alpha = vector_dot_alpha_traceless(p4);
     let y_rho = stack_vector_terms(&build_y_rho_terms(rho, q5, lx, ly)?);
-    let y_p = stack_rank2_terms(&build_y_p_terms(rho, a5, psi6_sq));
-    let y_q = stack_rank3_terms(&build_y_q_terms(ubar.view(), p_alpha.view()));
+    let y_p = stack_rank2_terms(&build_y_p_terms(rho, p4, a5, psi6_sq, lx, ly)?);
+    let y_q = stack_rank3_terms(&build_y_q_terms(
+        rho,
+        p4,
+        q5,
+        ubar.view(),
+        p_alpha.view(),
+        lx,
+        ly,
+    )?);
     Ok(MechanicalLibraries {
         y_rho_names,
         y_p_names,
@@ -82,26 +102,193 @@ fn build_y_rho_terms(
 
 fn build_y_p_terms(
     rho: ArrayView3<'_, f64>,
+    p: ndarray::ArrayView4<'_, f64>,
     a: ndarray::ArrayView5<'_, f64>,
     psi6_sq: ArrayView3<'_, f64>,
-) -> Vec<Array5<f64>> {
+    lx: f64,
+    ly: f64,
+) -> CoreResult<Vec<Array5<f64>>> {
     let a_surface = surface_rows_rank2(a);
-    let delta_psi6_sq = centered_scalar(psi6_sq);
-    vec![
+    let grad_p = gradient_vector3(p, lx, ly)?;
+    let lap_p = laplacian_vector3(p, lx, ly)?;
+    let grad_lap_p = gradient_vector3(lap_p.view(), lx, ly)?;
+    Ok(vec![
         a_surface.clone(),
-        scalar_times_rank2(
-            rho,
-            scalar_times_rank2(delta_psi6_sq.view(), a_surface.view()).view(),
-        ),
-    ]
+        scalar_times_rank2(rho, a_surface.view()),
+        scalar_times_rank2(psi6_sq, a_surface.view()),
+        grad_p.clone(),
+        scalar_times_rank2(rho, grad_p.view()),
+        grad_lap_p,
+    ])
 }
 
 fn build_y_q_terms(
+    rho: ArrayView3<'_, f64>,
+    p: ndarray::ArrayView4<'_, f64>,
+    q: ndarray::ArrayView5<'_, f64>,
     ubar: ArrayView3<'_, f64>,
     p_alpha: ndarray::ArrayView6<'_, f64>,
-) -> Vec<Array6<f64>> {
+    lx: f64,
+    ly: f64,
+) -> CoreResult<Vec<Array6<f64>>> {
     let ubar_alpha = scalar_times_rank3(ubar, p_alpha);
-    vec![ubar_alpha]
+    let grad_q = gradient_rank2(q, lx, ly)?;
+    let lap_q = laplacian_rank2(q, lx, ly)?;
+    let grad_lap_q = gradient_rank2(lap_q.view(), lx, ly)?;
+    Ok(vec![
+        ubar_alpha,
+        grad_p_symmetric_traceless(p, lx, ly)?,
+        grad_q.clone(),
+        scalar_times_rank3(rho, grad_q.view()),
+        grad_lap_q,
+    ])
+}
+
+fn gradient_vector3(
+    values: ndarray::ArrayView4<'_, f64>,
+    lx: f64,
+    ly: f64,
+) -> CoreResult<Array5<f64>> {
+    let (frames, nx, ny, components) = values.dim();
+    let mut out = Array5::<f64>::zeros((frames, nx, ny, 2, components));
+    for component in 0..components {
+        let scalar = scalar_component(values, component);
+        let grad = fft_ops::gradient_scalar(scalar.view(), lx, ly)?;
+        for t in 0..frames {
+            for ix in 0..nx {
+                for iy in 0..ny {
+                    for k in 0..2 {
+                        out[[t, ix, iy, k, component]] = grad[[t, ix, iy, k]];
+                    }
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn laplacian_vector3(
+    values: ndarray::ArrayView4<'_, f64>,
+    lx: f64,
+    ly: f64,
+) -> CoreResult<Array4<f64>> {
+    let (frames, nx, ny, components) = values.dim();
+    let mut out = Array4::<f64>::zeros((frames, nx, ny, components));
+    for component in 0..components {
+        let scalar = scalar_component(values, component);
+        let lap = fft_ops::laplacian_scalar(scalar.view(), lx, ly)?;
+        for t in 0..frames {
+            for ix in 0..nx {
+                for iy in 0..ny {
+                    out[[t, ix, iy, component]] = lap[[t, ix, iy]];
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn gradient_rank2(
+    values: ndarray::ArrayView5<'_, f64>,
+    lx: f64,
+    ly: f64,
+) -> CoreResult<Array6<f64>> {
+    let (frames, nx, ny, rows, cols) = values.dim();
+    let mut out = Array6::<f64>::zeros((frames, nx, ny, 2, rows, cols));
+    for row in 0..rows {
+        for col in 0..cols {
+            let scalar = rank2_component(values, row, col);
+            let grad = fft_ops::gradient_scalar(scalar.view(), lx, ly)?;
+            for t in 0..frames {
+                for ix in 0..nx {
+                    for iy in 0..ny {
+                        for k in 0..2 {
+                            out[[t, ix, iy, k, row, col]] = grad[[t, ix, iy, k]];
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn laplacian_rank2(
+    values: ndarray::ArrayView5<'_, f64>,
+    lx: f64,
+    ly: f64,
+) -> CoreResult<Array5<f64>> {
+    let (frames, nx, ny, rows, cols) = values.dim();
+    let mut out = Array5::<f64>::zeros((frames, nx, ny, rows, cols));
+    for row in 0..rows {
+        for col in 0..cols {
+            let scalar = rank2_component(values, row, col);
+            let lap = fft_ops::laplacian_scalar(scalar.view(), lx, ly)?;
+            for t in 0..frames {
+                for ix in 0..nx {
+                    for iy in 0..ny {
+                        out[[t, ix, iy, row, col]] = lap[[t, ix, iy]];
+                    }
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn grad_p_symmetric_traceless(
+    p: ndarray::ArrayView4<'_, f64>,
+    lx: f64,
+    ly: f64,
+) -> CoreResult<Array6<f64>> {
+    let grad_p = gradient_vector3(p, lx, ly)?;
+    let (frames, nx, ny, _, _) = grad_p.dim();
+    let mut out = Array6::<f64>::zeros((frames, nx, ny, 2, 3, 3));
+    for t in 0..frames {
+        for ix in 0..nx {
+            for iy in 0..ny {
+                for k in 0..2 {
+                    let trace_part = (2.0 / 3.0) * grad_p[[t, ix, iy, k, k]];
+                    for a in 0..3 {
+                        for b in 0..3 {
+                            let grad_ka = grad_p[[t, ix, iy, k, a]];
+                            let grad_kb = grad_p[[t, ix, iy, k, b]];
+                            out[[t, ix, iy, k, a, b]] = grad_ka * super::math::delta(k, b)
+                                + grad_kb * super::math::delta(k, a)
+                                - trace_part * super::math::delta(a, b);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn scalar_component(values: ndarray::ArrayView4<'_, f64>, component: usize) -> Array3<f64> {
+    let (frames, nx, ny, _) = values.dim();
+    let mut out = Array3::<f64>::zeros((frames, nx, ny));
+    for t in 0..frames {
+        for ix in 0..nx {
+            for iy in 0..ny {
+                out[[t, ix, iy]] = values[[t, ix, iy, component]];
+            }
+        }
+    }
+    out
+}
+
+fn rank2_component(values: ndarray::ArrayView5<'_, f64>, row: usize, col: usize) -> Array3<f64> {
+    let (frames, nx, ny, _, _) = values.dim();
+    let mut out = Array3::<f64>::zeros((frames, nx, ny));
+    for t in 0..frames {
+        for ix in 0..nx {
+            for iy in 0..ny {
+                out[[t, ix, iy]] = values[[t, ix, iy, row, col]];
+            }
+        }
+    }
+    out
 }
 
 fn stack_vector_terms(terms: &[Array4<f64>]) -> ArrayD<f64> {

@@ -22,6 +22,8 @@ class StabilityResult:
     y_pred: np.ndarray
     rmse: float
     r2: float
+    auxiliary_rmse: float | None = None
+    auxiliary_r2: float | None = None
 
 
 def stability_selection(
@@ -37,12 +39,30 @@ def stability_selection(
     importance_threshold: float,
     alpha: float,
     max_iter: int,
+    evaluation_X: np.ndarray | None = None,
+    evaluation_y: np.ndarray | None = None,
+    auxiliary_X: np.ndarray | None = None,
+    auxiliary_y: np.ndarray | None = None,
 ) -> StabilityResult:
     X = np.asarray(X, dtype=np.float64)
     y = np.asarray(y, dtype=np.float64)
     assert X.ndim == 2 and y.ndim == 1 and X.shape[0] == y.size, "X must be (N, terms) and y must be (N,)"
     assert X.shape[1] == len(names) == len(labels), "term metadata must match X columns"
     assert X.shape[0] > 0 and X.shape[1] > 0, "regression matrix must be non-empty"
+    if evaluation_X is None:
+        evaluation_X = X
+    if evaluation_y is None:
+        evaluation_y = y
+    evaluation_X = np.asarray(evaluation_X, dtype=np.float64)
+    evaluation_y = np.asarray(evaluation_y, dtype=np.float64)
+    assert evaluation_X.ndim == 2 and evaluation_y.ndim == 1, "evaluation rows must be matrix/vector"
+    assert evaluation_X.shape[1] == X.shape[1] and evaluation_X.shape[0] == evaluation_y.size, "evaluation rows must match fit terms"
+    if auxiliary_X is not None or auxiliary_y is not None:
+        assert auxiliary_X is not None and auxiliary_y is not None, "auxiliary rows need both X and y"
+        auxiliary_X = np.asarray(auxiliary_X, dtype=np.float64)
+        auxiliary_y = np.asarray(auxiliary_y, dtype=np.float64)
+        assert auxiliary_X.ndim == 2 and auxiliary_y.ndim == 1, "auxiliary rows must be matrix/vector"
+        assert auxiliary_X.shape[1] == X.shape[1] and auxiliary_X.shape[0] == auxiliary_y.size, "auxiliary rows must match fit terms"
 
     del seed, subsamples
 
@@ -60,16 +80,24 @@ def stability_selection(
         importance_path[index] = _coefficient_importance(coefficients_path[index])
     coefficients = coefficients_path[tau_index]
 
-    raw_correlations = _raw_feature_correlations(X, y)
+    raw_correlations = _raw_feature_correlations(evaluation_X, evaluation_y)
     _progress("raw feature correlations with target")
     for label, correlation in zip(labels, raw_correlations, strict=True):
         _progress(f"  {label}: {_format_correlation(correlation)}")
 
-    y_pred = X @ coefficients
-    residual = y - y_pred
+    y_pred = evaluation_X @ coefficients
+    residual = evaluation_y - y_pred
     rmse = float(np.sqrt(np.mean(residual * residual)))
-    total = float(np.sum((y - np.mean(y)) ** 2))
+    total = float(np.sum((evaluation_y - np.mean(evaluation_y)) ** 2))
     r2 = 1.0 - float(np.sum(residual * residual)) / total if total > 0.0 else float("nan")
+    auxiliary_rmse = None
+    auxiliary_r2 = None
+    if auxiliary_X is not None and auxiliary_y is not None:
+        auxiliary_pred = auxiliary_X @ coefficients
+        auxiliary_residual = auxiliary_y - auxiliary_pred
+        auxiliary_rmse = float(np.sqrt(np.mean(auxiliary_residual * auxiliary_residual)))
+        auxiliary_total = float(np.sum((auxiliary_y - np.mean(auxiliary_y)) ** 2))
+        auxiliary_r2 = 1.0 - float(np.sum(auxiliary_residual * auxiliary_residual)) / auxiliary_total if auxiliary_total > 0.0 else float("nan")
     importance = importance_path[tau_index]
     active = (np.abs(coefficients) > 1.0e-12) & (importance >= float(importance_threshold))
 
@@ -86,6 +114,8 @@ def stability_selection(
         y_pred,
         rmse,
         r2,
+        auxiliary_rmse,
+        auxiliary_r2,
     )
 
 
