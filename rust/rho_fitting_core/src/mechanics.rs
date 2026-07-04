@@ -253,86 +253,31 @@ pub fn build_mechanical_libraries(
         "grad_rho".to_string(),
         "grad_lap_rho".to_string(),
         "Q_dot_grad_rho".to_string(),
-        "Q2_dot_grad_rho".to_string(),
-        "trQ2_grad_rho".to_string(),
-        "rho_Q_dot_grad_rho".to_string(),
-        "div_Q".to_string(),
-        "rho_div_Q".to_string(),
-        "div_rho_Q".to_string(),
-        "Q_dot_grad_lap_rho".to_string(),
-        "P".to_string(),
-        "rho_P".to_string(),
-        "P_dot_grad_rho_P".to_string(),
-        "P2_grad_rho".to_string(),
-        "div_P_P".to_string(),
+        "phi1_rho_grad_rho".to_string(),
         "P_dot_grad_P".to_string(),
-        "grad_P2".to_string(),
-        "div_A".to_string(),
-        "grad_trA".to_string(),
-        "A_dot_grad_rho".to_string(),
-        "trA_grad_rho".to_string(),
-        "Q_dot_div_A".to_string(),
+        "grad_bilap_rho".to_string(),
     ];
     let y_p_names = vec![
         "A".to_string(),
-        "rho_A".to_string(),
-        "delta_A".to_string(),
-        "psi6_A".to_string(),
-        "psi6sq_A".to_string(),
-        "delta_psi6_A".to_string(),
-        "delta_psi6sq_A".to_string(),
-        "rho_psi6sq_A".to_string(),
-        "trQ2_A".to_string(),
-        "P2_A".to_string(),
-        "P".to_string(),
-        "rho_P".to_string(),
-        "P2_P".to_string(),
-        "trQ2_P".to_string(),
-        "psi6sq_P".to_string(),
-        "lap_P".to_string(),
-        "grad_div_P".to_string(),
-        "P_dot_grad_P".to_string(),
-        "Q_dot_P".to_string(),
-        "Q2_dot_P".to_string(),
-        "A_dot_Q".to_string(),
-        "Q_dot_A_dot_Q".to_string(),
-        "Q_colon_A_P".to_string(),
+        "rho_delta_psi6sq_A".to_string(),
+        "rho_grad_div_P".to_string(),
+        "rho_lap_P".to_string(),
     ];
     let y_q_names = vec![
-        "P_dot_alpha_traceless".to_string(),
         "Ubar_P_dot_alpha_traceless".to_string(),
-        "rho_Ubar_P_dot_alpha_traceless".to_string(),
-        "delta_Ubar_P_dot_alpha_traceless".to_string(),
-        "psi6sq_Ubar_P_dot_alpha_traceless".to_string(),
-        "trQ2_Ubar_P_dot_alpha_traceless".to_string(),
-        "P2_Ubar_P_dot_alpha_traceless".to_string(),
-        "Q".to_string(),
-        "rho_Q".to_string(),
-        "delta_Q".to_string(),
-        "trQ2_Q".to_string(),
-        "psi6sq_Q".to_string(),
-        "P2_Q".to_string(),
-        "lap_Q".to_string(),
-        "bilap_Q".to_string(),
-        "PP_traceless_2d".to_string(),
-        "rho_PP_traceless_2d".to_string(),
-        "AA_traceless_2d".to_string(),
-        "QA_plus_AQ".to_string(),
-        "Q2_traceless_2d".to_string(),
         "sym_grad_P_traceless_2d".to_string(),
-        "hess_rho_traceless_2d".to_string(),
+        "lap_Q".to_string(),
+        "rho_Q".to_string(),
     ];
 
     let ubar = estimate_ubar(y_p5, a5);
     let p_alpha = vector_dot_alpha_traceless(p4);
-    let y_rho = stack_vector_terms(&build_y_rho_terms(rho, p4, q5, a5, lx, ly)?);
-    let y_p = stack_rank2_terms(&build_y_p_terms(rho, p4, q5, a5, psi6_sq, lx, ly)?);
+    let y_rho = stack_vector_terms(&build_y_rho_terms(rho, p4, q5, lx, ly)?);
+    let y_p = stack_rank2_terms(&build_y_p_terms(rho, p4, a5, psi6_sq, lx, ly)?);
     let y_q = stack_rank3_terms(&build_y_q_terms(
         rho,
         p4,
         q5,
-        a5,
-        psi6_sq,
         ubar.view(),
         p_alpha.view(),
         lx,
@@ -412,142 +357,67 @@ fn build_y_rho_terms(
     rho: ArrayView3<'_, f64>,
     p: ndarray::ArrayView4<'_, f64>,
     q: ndarray::ArrayView5<'_, f64>,
-    a: ndarray::ArrayView5<'_, f64>,
     lx: f64,
     ly: f64,
 ) -> CoreResult<Vec<Array4<f64>>> {
     let lap_rho = fft_ops::laplacian_scalar(rho, lx, ly)?;
+    let bilap_rho = fft_ops::laplacian_scalar(lap_rho.view(), lx, ly)?;
     let grad_rho = fft_ops::gradient_scalar(rho, lx, ly)?;
     let grad_lap_rho = fft_ops::gradient_scalar(lap_rho.view(), lx, ly)?;
+    let grad_bilap_rho = fft_ops::gradient_scalar(bilap_rho.view(), lx, ly)?;
     let p_surface = surface_vector(p);
-    let p2 = vector_norm2_3(p);
-    let tr_q2 = trace_square(q);
-    let tr_a = trace_rank2(a);
-    let div_p = fft_ops::divergence_vector(p_surface.view(), lx, ly)?;
-    let div_q = divergence_rank2_surface(q, lx, ly)?;
-    let div_a = divergence_rank2_surface(a, lx, ly)?;
-    let rho_q = scalar_times_full_rank2(rho, q);
     let q_grad_rho = q_dot_grad_rho(q, grad_rho.view());
+    let phi1 = standardized_centered_scalar(rho);
     Ok(vec![
         grad_rho.clone(),
         grad_lap_rho.clone(),
         q_grad_rho.clone(),
-        q2_dot_vector(q, grad_rho.view()),
-        scalar_times_vector(tr_q2.view(), grad_rho.view()),
-        scalar_times_vector(rho, q_grad_rho.view()),
-        div_q.clone(),
-        scalar_times_vector(rho, div_q.view()),
-        divergence_rank2_surface(rho_q.view(), lx, ly)?,
-        q_dot_grad_rho(q, grad_lap_rho.view()),
-        p_surface.clone(),
-        scalar_times_vector(rho, p_surface.view()),
-        scalar_times_vector(
-            dot_vectors(p_surface.view(), grad_rho.view()).view(),
-            p_surface.view(),
-        ),
-        scalar_times_vector(p2.view(), grad_rho.view()),
-        scalar_times_vector(div_p.view(), p_surface.view()),
+        scalar_times_vector(phi1.view(), grad_rho.view()),
         advective_derivative_vector(p_surface.view(), p_surface.view(), lx, ly)?,
-        fft_ops::gradient_scalar(p2.view(), lx, ly)?,
-        div_a.clone(),
-        fft_ops::gradient_scalar(tr_a.view(), lx, ly)?,
-        a_dot_vector(a, grad_rho.view()),
-        scalar_times_vector(tr_a.view(), grad_rho.view()),
-        q_dot_vector(q, div_a.view()),
+        grad_bilap_rho,
     ])
 }
 
 fn build_y_p_terms(
     rho: ArrayView3<'_, f64>,
     p: ndarray::ArrayView4<'_, f64>,
-    q: ndarray::ArrayView5<'_, f64>,
     a: ndarray::ArrayView5<'_, f64>,
     psi6_sq: ArrayView3<'_, f64>,
     lx: f64,
     ly: f64,
 ) -> CoreResult<Vec<Array5<f64>>> {
     let a_surface = surface_rows_rank2(a);
-    let delta_rho = centered_scalar(rho);
-    let psi6 = sqrt_nonnegative_scalar(psi6_sq);
-    let delta_psi6 = centered_scalar(psi6.view());
     let delta_psi6_sq = centered_scalar(psi6_sq);
-    let tr_q2 = trace_square(q);
-    let p2 = vector_norm2_3(p);
     let p_rank2 = vector_as_rank2(p);
     let lap_p = laplacian_rank2(p_rank2.view(), lx, ly)?;
     let grad_div_p = grad_div_rank2(p, lx, ly)?;
-    let p_surface = surface_vector(p);
-    let p_dot_grad_p = advective_derivative_vector(p_surface.view(), p_surface.view(), lx, ly)?;
     Ok(vec![
         a_surface.clone(),
-        scalar_times_rank2(rho, a_surface.view()),
-        scalar_times_rank2(delta_rho.view(), a_surface.view()),
-        scalar_times_rank2(psi6.view(), a_surface.view()),
-        scalar_times_rank2(psi6_sq, a_surface.view()),
-        scalar_times_rank2(delta_psi6.view(), a_surface.view()),
-        scalar_times_rank2(delta_psi6_sq.view(), a_surface.view()),
-        scalar_times_rank2(rho, scalar_times_rank2(psi6_sq, a_surface.view()).view()),
-        scalar_times_rank2(tr_q2.view(), a_surface.view()),
-        scalar_times_rank2(p2.view(), a_surface.view()),
-        p_rank2.clone(),
-        scalar_times_rank2(rho, p_rank2.view()),
-        scalar_times_rank2(p2.view(), p_rank2.view()),
-        scalar_times_rank2(tr_q2.view(), p_rank2.view()),
-        scalar_times_rank2(psi6_sq, p_rank2.view()),
-        lap_p,
-        grad_div_p,
-        vector_as_rank2_from_surface(p_dot_grad_p.view()),
-        vector_as_rank2(q_dot_p(q, p).view()),
-        vector_as_rank2(q2_dot_p(q, p).view()),
-        surface_rows_rank2(matrix_product(a, q).view()),
-        surface_rows_rank2(q_a_q(q, a).view()),
-        scalar_times_rank2(q_colon_a(q, a).view(), p_rank2.view()),
+        scalar_times_rank2(
+            rho,
+            scalar_times_rank2(delta_psi6_sq.view(), a_surface.view()).view(),
+        ),
+        scalar_times_rank2(rho, grad_div_p.view()),
+        scalar_times_rank2(rho, lap_p.view()),
     ])
 }
 
-#[allow(clippy::too_many_arguments)]
 fn build_y_q_terms(
     rho: ArrayView3<'_, f64>,
     p: ndarray::ArrayView4<'_, f64>,
     q: ndarray::ArrayView5<'_, f64>,
-    a: ndarray::ArrayView5<'_, f64>,
-    psi6_sq: ArrayView3<'_, f64>,
     ubar: ArrayView3<'_, f64>,
     p_alpha: ndarray::ArrayView6<'_, f64>,
     lx: f64,
     ly: f64,
 ) -> CoreResult<Vec<Array6<f64>>> {
     let ubar_alpha = scalar_times_rank3(ubar, p_alpha);
-    let delta_rho = centered_scalar(rho);
-    let delta_ubar = centered_scalar(ubar);
-    let tr_q2 = trace_square(q);
-    let p2 = vector_norm2_3(p);
     let q_rank3 = broadcast_rank2_to_rank3(q);
-    let pp = pp_traceless_2d(p);
-    let pp_rank3 = broadcast_rank2_to_rank3(pp.view());
     Ok(vec![
-        p_alpha.to_owned(),
         ubar_alpha.clone(),
-        scalar_times_rank3(rho, ubar_alpha.view()),
-        scalar_times_rank3(delta_ubar.view(), p_alpha),
-        scalar_times_rank3(psi6_sq, ubar_alpha.view()),
-        scalar_times_rank3(tr_q2.view(), ubar_alpha.view()),
-        scalar_times_rank3(p2.view(), ubar_alpha.view()),
-        q_rank3.clone(),
-        scalar_times_rank3(rho, q_rank3.view()),
-        scalar_times_rank3(delta_rho.view(), q_rank3.view()),
-        scalar_times_rank3(tr_q2.view(), q_rank3.view()),
-        scalar_times_rank3(psi6_sq, q_rank3.view()),
-        scalar_times_rank3(p2.view(), q_rank3.view()),
-        laplacian_rank3(q, lx, ly)?,
-        bilaplacian_rank3(q, lx, ly)?,
-        pp_rank3.clone(),
-        scalar_times_rank3(rho, pp_rank3.view()),
-        broadcast_rank2_to_rank3(aa_traceless_2d(a).view()),
-        broadcast_rank2_to_rank3(qa_plus_aq(q, a).view()),
-        broadcast_rank2_to_rank3(q2_traceless_2d(q).view()),
         broadcast_rank2_to_rank3(sym_grad_p_traceless_2d(p, lx, ly)?.view()),
-        broadcast_rank2_to_rank3(hess_rho_traceless_2d(rho, lx, ly)?.view()),
+        laplacian_rank3(q, lx, ly)?,
+        scalar_times_rank3(rho, q_rank3.view()),
     ])
 }
 
@@ -691,20 +561,6 @@ fn vector_as_rank2_from_surface(values: ndarray::ArrayView4<'_, f64>) -> Array5<
     out
 }
 
-fn dot_vectors(a: ndarray::ArrayView4<'_, f64>, b: ndarray::ArrayView4<'_, f64>) -> Array3<f64> {
-    let (frames, nx, ny, _) = a.dim();
-    let mut out = Array3::<f64>::zeros((frames, nx, ny));
-    for t in 0..frames {
-        for ix in 0..nx {
-            for iy in 0..ny {
-                out[[t, ix, iy]] =
-                    a[[t, ix, iy, 0]] * b[[t, ix, iy, 0]] + a[[t, ix, iy, 1]] * b[[t, ix, iy, 1]];
-            }
-        }
-    }
-    out
-}
-
 fn q_dot_grad_rho(
     q: ndarray::ArrayView5<'_, f64>,
     grad: ndarray::ArrayView4<'_, f64>,
@@ -729,53 +585,6 @@ fn q_dot_vector(
         }
     }
     out
-}
-
-fn a_dot_vector(
-    a: ndarray::ArrayView5<'_, f64>,
-    vector: ndarray::ArrayView4<'_, f64>,
-) -> Array4<f64> {
-    let (frames, nx, ny, _, _) = a.dim();
-    let mut out = Array4::<f64>::zeros((frames, nx, ny, 2));
-    for t in 0..frames {
-        for ix in 0..nx {
-            for iy in 0..ny {
-                for k in 0..2 {
-                    out[[t, ix, iy, k]] = a[[t, ix, iy, k, 0]] * vector[[t, ix, iy, 0]]
-                        + a[[t, ix, iy, k, 1]] * vector[[t, ix, iy, 1]];
-                }
-            }
-        }
-    }
-    out
-}
-
-fn q2_dot_vector(
-    q: ndarray::ArrayView5<'_, f64>,
-    vector: ndarray::ArrayView4<'_, f64>,
-) -> Array4<f64> {
-    q_dot_vector(matrix_product(q, q).view(), vector)
-}
-
-fn q_dot_p(q: ndarray::ArrayView5<'_, f64>, p: ndarray::ArrayView4<'_, f64>) -> Array4<f64> {
-    let (frames, nx, ny, _, _) = q.dim();
-    let mut out = Array4::<f64>::zeros((frames, nx, ny, 3));
-    for t in 0..frames {
-        for ix in 0..nx {
-            for iy in 0..ny {
-                for i in 0..3 {
-                    for j in 0..3 {
-                        out[[t, ix, iy, i]] += q[[t, ix, iy, i, j]] * p[[t, ix, iy, j]];
-                    }
-                }
-            }
-        }
-    }
-    out
-}
-
-fn q2_dot_p(q: ndarray::ArrayView5<'_, f64>, p: ndarray::ArrayView4<'_, f64>) -> Array4<f64> {
-    q_dot_p(matrix_product(q, q).view(), p)
 }
 
 fn scalar_times_vector(
@@ -809,6 +618,28 @@ fn centered_scalar(values: ArrayView3<'_, f64>) -> Array3<f64> {
     }
     let mean = if count > 0 { sum / count as f64 } else { 0.0 };
     values.mapv(|value| value - mean)
+}
+
+fn standardized_centered_scalar(values: ArrayView3<'_, f64>) -> Array3<f64> {
+    let centered = centered_scalar(values);
+    let mut sum_sq = 0.0;
+    let mut count = 0usize;
+    for value in centered.iter().copied() {
+        if value.is_finite() {
+            sum_sq += value * value;
+            count += 1;
+        }
+    }
+    let std = if count > 0 {
+        (sum_sq / count as f64).sqrt()
+    } else {
+        0.0
+    };
+    if std > 0.0 {
+        centered.mapv(|value| value / std)
+    } else {
+        centered
+    }
 }
 
 fn estimate_ubar(
@@ -883,113 +714,6 @@ fn scalar_times_rank3(
     out
 }
 
-fn scalar_times_full_rank2(
-    scalar: ArrayView3<'_, f64>,
-    values: ndarray::ArrayView5<'_, f64>,
-) -> Array5<f64> {
-    let (frames, nx, ny) = scalar.dim();
-    let shape = values.dim();
-    let mut out = Array5::<f64>::zeros(shape);
-    for t in 0..frames {
-        for ix in 0..nx {
-            for iy in 0..ny {
-                for i in 0..shape.3 {
-                    for j in 0..shape.4 {
-                        out[[t, ix, iy, i, j]] = scalar[[t, ix, iy]] * values[[t, ix, iy, i, j]];
-                    }
-                }
-            }
-        }
-    }
-    out
-}
-
-fn sqrt_nonnegative_scalar(values: ArrayView3<'_, f64>) -> Array3<f64> {
-    values.mapv(|value| {
-        if value.is_finite() && value > 0.0 {
-            value.sqrt()
-        } else {
-            0.0
-        }
-    })
-}
-
-fn vector_norm2_3(values: ndarray::ArrayView4<'_, f64>) -> Array3<f64> {
-    let (frames, nx, ny, _) = values.dim();
-    let mut out = Array3::<f64>::zeros((frames, nx, ny));
-    for t in 0..frames {
-        for ix in 0..nx {
-            for iy in 0..ny {
-                out[[t, ix, iy]] = values[[t, ix, iy, 0]].powi(2)
-                    + values[[t, ix, iy, 1]].powi(2)
-                    + values[[t, ix, iy, 2]].powi(2);
-            }
-        }
-    }
-    out
-}
-
-fn trace_square(values: ndarray::ArrayView5<'_, f64>) -> Array3<f64> {
-    let (frames, nx, ny, _, _) = values.dim();
-    let mut out = Array3::<f64>::zeros((frames, nx, ny));
-    for t in 0..frames {
-        for ix in 0..nx {
-            for iy in 0..ny {
-                for i in 0..3 {
-                    for j in 0..3 {
-                        out[[t, ix, iy]] += values[[t, ix, iy, i, j]] * values[[t, ix, iy, i, j]];
-                    }
-                }
-            }
-        }
-    }
-    out
-}
-
-fn trace_rank2(values: ndarray::ArrayView5<'_, f64>) -> Array3<f64> {
-    let (frames, nx, ny, _, _) = values.dim();
-    let mut out = Array3::<f64>::zeros((frames, nx, ny));
-    for t in 0..frames {
-        for ix in 0..nx {
-            for iy in 0..ny {
-                out[[t, ix, iy]] = values[[t, ix, iy, 0, 0]]
-                    + values[[t, ix, iy, 1, 1]]
-                    + values[[t, ix, iy, 2, 2]];
-            }
-        }
-    }
-    out
-}
-
-fn divergence_rank2_surface(
-    values: ndarray::ArrayView5<'_, f64>,
-    lx: f64,
-    ly: f64,
-) -> CoreResult<Array4<f64>> {
-    let (frames, nx, ny, _, _) = values.dim();
-    let mut out = Array4::<f64>::zeros((frames, nx, ny, 2));
-    for component in 0..2 {
-        let mut vector = Array4::<f64>::zeros((frames, nx, ny, 2));
-        for t in 0..frames {
-            for ix in 0..nx {
-                for iy in 0..ny {
-                    vector[[t, ix, iy, 0]] = values[[t, ix, iy, component, 0]];
-                    vector[[t, ix, iy, 1]] = values[[t, ix, iy, component, 1]];
-                }
-            }
-        }
-        let div = fft_ops::divergence_vector(vector.view(), lx, ly)?;
-        for t in 0..frames {
-            for ix in 0..nx {
-                for iy in 0..ny {
-                    out[[t, ix, iy, component]] = div[[t, ix, iy]];
-                }
-            }
-        }
-    }
-    Ok(out)
-}
-
 fn advective_derivative_vector(
     advecting: ndarray::ArrayView4<'_, f64>,
     vector: ndarray::ArrayView4<'_, f64>,
@@ -1054,15 +778,6 @@ fn laplacian_rank3(
     laplacian_rank3_full(rank3.view(), lx, ly)
 }
 
-fn bilaplacian_rank3(
-    values: ndarray::ArrayView5<'_, f64>,
-    lx: f64,
-    ly: f64,
-) -> CoreResult<Array6<f64>> {
-    let lap = laplacian_rank3(values, lx, ly)?;
-    laplacian_rank3_full(lap.view(), lx, ly)
-}
-
 fn laplacian_rank3_full(
     values: ndarray::ArrayView6<'_, f64>,
     lx: f64,
@@ -1111,119 +826,6 @@ fn broadcast_rank2_to_rank3(values: ndarray::ArrayView5<'_, f64>) -> Array6<f64>
     out
 }
 
-fn matrix_product(
-    left: ndarray::ArrayView5<'_, f64>,
-    right: ndarray::ArrayView5<'_, f64>,
-) -> Array5<f64> {
-    let (frames, nx, ny, _, _) = left.dim();
-    let mut out = Array5::<f64>::zeros((frames, nx, ny, 3, 3));
-    for t in 0..frames {
-        for ix in 0..nx {
-            for iy in 0..ny {
-                for i in 0..3 {
-                    for j in 0..3 {
-                        for k in 0..3 {
-                            out[[t, ix, iy, i, j]] +=
-                                left[[t, ix, iy, i, k]] * right[[t, ix, iy, k, j]];
-                        }
-                    }
-                }
-            }
-        }
-    }
-    out
-}
-
-fn q_a_q(q: ndarray::ArrayView5<'_, f64>, a: ndarray::ArrayView5<'_, f64>) -> Array5<f64> {
-    let qa = matrix_product(q, a);
-    matrix_product(qa.view(), q)
-}
-
-fn q_colon_a(q: ndarray::ArrayView5<'_, f64>, a: ndarray::ArrayView5<'_, f64>) -> Array3<f64> {
-    let (frames, nx, ny, _, _) = q.dim();
-    let mut out = Array3::<f64>::zeros((frames, nx, ny));
-    for t in 0..frames {
-        for ix in 0..nx {
-            for iy in 0..ny {
-                for i in 0..3 {
-                    for j in 0..3 {
-                        out[[t, ix, iy]] += q[[t, ix, iy, i, j]] * a[[t, ix, iy, i, j]];
-                    }
-                }
-            }
-        }
-    }
-    out
-}
-
-fn pp_traceless_2d(p: ndarray::ArrayView4<'_, f64>) -> Array5<f64> {
-    let (frames, nx, ny, _) = p.dim();
-    let p2 = vector_norm2_3(p);
-    let mut out = Array5::<f64>::zeros((frames, nx, ny, 3, 3));
-    for t in 0..frames {
-        for ix in 0..nx {
-            for iy in 0..ny {
-                for i in 0..3 {
-                    for j in 0..3 {
-                        out[[t, ix, iy, i, j]] = p[[t, ix, iy, i]] * p[[t, ix, iy, j]]
-                            - 0.5 * p2[[t, ix, iy]] * delta(i, j);
-                    }
-                }
-            }
-        }
-    }
-    out
-}
-
-fn aa_traceless_2d(a: ndarray::ArrayView5<'_, f64>) -> Array5<f64> {
-    let aa = matrix_product(a, a);
-    let tr = trace_rank2(aa.view());
-    subtract_half_trace_identity(aa.view(), tr.view())
-}
-
-fn qa_plus_aq(q: ndarray::ArrayView5<'_, f64>, a: ndarray::ArrayView5<'_, f64>) -> Array5<f64> {
-    let qa = matrix_product(q, a);
-    let aq = matrix_product(a, q);
-    let shape = qa.dim();
-    let mut out = Array5::<f64>::zeros(shape);
-    for t in 0..shape.0 {
-        for ix in 0..shape.1 {
-            for iy in 0..shape.2 {
-                for i in 0..3 {
-                    for j in 0..3 {
-                        out[[t, ix, iy, i, j]] = qa[[t, ix, iy, i, j]] + aq[[t, ix, iy, i, j]];
-                    }
-                }
-            }
-        }
-    }
-    out
-}
-
-fn q2_traceless_2d(q: ndarray::ArrayView5<'_, f64>) -> Array5<f64> {
-    let q2 = matrix_product(q, q);
-    let tr = trace_rank2(q2.view());
-    subtract_half_trace_identity(q2.view(), tr.view())
-}
-
-fn subtract_half_trace_identity(
-    values: ndarray::ArrayView5<'_, f64>,
-    trace: ArrayView3<'_, f64>,
-) -> Array5<f64> {
-    let shape = values.dim();
-    let mut out = values.to_owned();
-    for t in 0..shape.0 {
-        for ix in 0..shape.1 {
-            for iy in 0..shape.2 {
-                for i in 0..3 {
-                    out[[t, ix, iy, i, i]] -= 0.5 * trace[[t, ix, iy]];
-                }
-            }
-        }
-    }
-    out
-}
-
 fn sym_grad_p_traceless_2d(
     p: ndarray::ArrayView4<'_, f64>,
     lx: f64,
@@ -1260,36 +862,6 @@ fn sym_grad_p_traceless_2d(
         }
     }
     Ok(out)
-}
-
-fn hess_rho_traceless_2d(rho: ArrayView3<'_, f64>, lx: f64, ly: f64) -> CoreResult<Array5<f64>> {
-    let (frames, nx, ny) = rho.dim();
-    let grad = fft_ops::gradient_scalar(rho, lx, ly)?;
-    let mut hess = Array5::<f64>::zeros((frames, nx, ny, 3, 3));
-    for component in 0..2 {
-        let scalar = grad.index_axis(ndarray::Axis(3), component).to_owned();
-        let derivative = fft_ops::gradient_scalar(scalar.view(), lx, ly)?;
-        for t in 0..frames {
-            for ix in 0..nx {
-                for iy in 0..ny {
-                    for k in 0..2 {
-                        hess[[t, ix, iy, k, component]] = derivative[[t, ix, iy, k]];
-                    }
-                }
-            }
-        }
-    }
-    let lap = fft_ops::laplacian_scalar(rho, lx, ly)?;
-    for t in 0..frames {
-        for ix in 0..nx {
-            for iy in 0..ny {
-                for i in 0..3 {
-                    hess[[t, ix, iy, i, i]] -= 0.5 * lap[[t, ix, iy]];
-                }
-            }
-        }
-    }
-    Ok(hess)
 }
 
 fn vector_dot_alpha_traceless(vector: ndarray::ArrayView4<'_, f64>) -> Array6<f64> {
