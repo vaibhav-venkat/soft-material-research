@@ -2,6 +2,22 @@ use ndarray::{ArrayView1, ArrayView2, ArrayView3};
 
 use crate::{CoreError, CoreResult};
 
+pub(super) struct ParticleFieldInputs<'a> {
+    pub coords: ArrayView3<'a, f64>,
+    pub directions: ArrayView3<'a, f64>,
+    pub velocities: ArrayView3<'a, f64>,
+    pub psi6_abs: ArrayView2<'a, f64>,
+    pub mask: ArrayView2<'a, bool>,
+    pub x_centers: ArrayView1<'a, f64>,
+    pub y_centers: ArrayView1<'a, f64>,
+    pub lx: f64,
+    pub ly: f64,
+    pub radius: f64,
+    pub sigma: f64,
+    pub gamma: f64,
+    pub u0: f64,
+}
+
 pub(super) fn validate_grid(rho: ArrayView3<'_, f64>, lx: f64, ly: f64) -> CoreResult<()> {
     let (frames, nx, ny) = rho.dim();
     if frames == 0 || nx == 0 || ny == 0 {
@@ -17,22 +33,22 @@ pub(super) fn validate_grid(rho: ArrayView3<'_, f64>, lx: f64, ly: f64) -> CoreR
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) fn validate_particle_fields(
-    coords: ArrayView3<'_, f64>,
-    directions: ArrayView3<'_, f64>,
-    velocities: ArrayView3<'_, f64>,
-    psi6_abs: ArrayView2<'_, f64>,
-    mask: ArrayView2<'_, bool>,
-    x_centers: ArrayView1<'_, f64>,
-    y_centers: ArrayView1<'_, f64>,
-    lx: f64,
-    ly: f64,
-    radius: f64,
-    sigma: f64,
-    gamma: f64,
-    u0: f64,
-) -> CoreResult<()> {
+pub(super) fn validate_particle_fields(inputs: ParticleFieldInputs<'_>) -> CoreResult<()> {
+    let ParticleFieldInputs {
+        coords,
+        directions,
+        velocities,
+        psi6_abs,
+        mask,
+        x_centers,
+        y_centers,
+        lx,
+        ly,
+        radius,
+        sigma,
+        gamma,
+        u0,
+    } = inputs;
     let (frames, particles, coord_components) = coords.dim();
     if coord_components != 3 {
         return Err(CoreError::Shape(

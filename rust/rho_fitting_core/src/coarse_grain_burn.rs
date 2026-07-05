@@ -12,6 +12,32 @@ type BurnBackend = Metal<f32, i32, u8>;
 
 const GRID_CHUNK: usize = 512;
 
+struct CoarseGrainInputs<'a> {
+    coords: ArrayView3<'a, f64>,
+    p_particles: ArrayView3<'a, f64>,
+    shell_mask: ArrayView2<'a, bool>,
+    x_centers: ArrayView1<'a, f64>,
+    y_centers: ArrayView1<'a, f64>,
+    lx: f64,
+    ly: f64,
+    radius: f64,
+    sigma: f64,
+}
+
+struct MechanicalInputs<'a> {
+    coords: ArrayView3<'a, f64>,
+    directions: ArrayView3<'a, f64>,
+    velocities: ArrayView3<'a, f64>,
+    psi6_abs: ArrayView2<'a, f64>,
+    mask: ArrayView2<'a, bool>,
+    x_centers: ArrayView1<'a, f64>,
+    y_centers: ArrayView1<'a, f64>,
+    lx: f64,
+    ly: f64,
+    radius: f64,
+    sigma: f64,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn coarse_grain_fields(
     coords: ArrayView3<'_, f64>,
@@ -39,7 +65,7 @@ pub fn coarse_grain_fields(
     catch_burn_panic(|| {
         let device = WgpuDevice::DefaultDevice;
         init_setup::<graphics::Metal>(&device, Default::default());
-        coarse_grain_burn_device(
+        let inputs = CoarseGrainInputs {
             coords,
             p_particles,
             shell_mask,
@@ -49,8 +75,8 @@ pub fn coarse_grain_fields(
             ly,
             radius,
             sigma,
-            &device,
-        )
+        };
+        coarse_grain_burn_device(inputs, &device)
     })
 }
 
@@ -116,10 +142,20 @@ pub fn build_mechanical_fields(
     catch_burn_panic(|| {
         let device = WgpuDevice::DefaultDevice;
         init_setup::<graphics::Metal>(&device, Default::default());
-        mechanical_burn_device(
-            coords, directions, velocities, psi6_abs, mask, x_centers, y_centers, lx, ly, radius,
-            sigma, &device,
-        )
+        let inputs = MechanicalInputs {
+            coords,
+            directions,
+            velocities,
+            psi6_abs,
+            mask,
+            x_centers,
+            y_centers,
+            lx,
+            ly,
+            radius,
+            sigma,
+        };
+        mechanical_burn_device(inputs, &device)
     })
 }
 
@@ -133,19 +169,21 @@ fn catch_burn_panic<T>(func: impl FnOnce() -> CoreResult<T>) -> CoreResult<T> {
     })?
 }
 
-#[allow(clippy::too_many_arguments)]
 fn coarse_grain_burn_device(
-    coords: ArrayView3<'_, f64>,
-    p_particles: ArrayView3<'_, f64>,
-    shell_mask: ArrayView2<'_, bool>,
-    x_centers: ArrayView1<'_, f64>,
-    y_centers: ArrayView1<'_, f64>,
-    lx: f64,
-    ly: f64,
-    radius: f64,
-    sigma: f64,
+    inputs: CoarseGrainInputs<'_>,
     device: &WgpuDevice,
 ) -> CoreResult<(Array3<f64>, Array4<f64>)> {
+    let CoarseGrainInputs {
+        coords,
+        p_particles,
+        shell_mask,
+        x_centers,
+        y_centers,
+        lx,
+        ly,
+        radius,
+        sigma,
+    } = inputs;
     let (frames, particles, _) = coords.dim();
     let nx = x_centers.len();
     let ny = y_centers.len();
@@ -222,21 +260,23 @@ fn tensor_vec(tensor: Tensor<BurnBackend, 1>) -> CoreResult<Vec<f32>> {
         .map_err(|error| CoreError::InvalidInput(format!("Burn data conversion failed: {error}")))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn mechanical_burn_device(
-    coords: ArrayView3<'_, f64>,
-    directions: ArrayView3<'_, f64>,
-    velocities: ArrayView3<'_, f64>,
-    psi6_abs: ArrayView2<'_, f64>,
-    mask: ArrayView2<'_, bool>,
-    x_centers: ArrayView1<'_, f64>,
-    y_centers: ArrayView1<'_, f64>,
-    lx: f64,
-    ly: f64,
-    radius: f64,
-    sigma: f64,
+    inputs: MechanicalInputs<'_>,
     device: &WgpuDevice,
 ) -> CoreResult<MechanicalFields> {
+    let MechanicalInputs {
+        coords,
+        directions,
+        velocities,
+        psi6_abs,
+        mask,
+        x_centers,
+        y_centers,
+        lx,
+        ly,
+        radius,
+        sigma,
+    } = inputs;
     let (frames, particles, _) = coords.dim();
     let nx = x_centers.len();
     let ny = y_centers.len();

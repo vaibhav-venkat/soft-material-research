@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 from .model import ValidationResult
 
@@ -51,4 +52,8 @@ def write_pde_validation_report(
     if path.exists() and not overwrite:
         raise FileExistsError(f"{path} exists; pass --overwrite to replace it")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(pde_validation_report_lines(case=case, cache_path=cache_path, results=results)) + "\n")
+    content = "\n".join(pde_validation_report_lines(case=case, cache_path=cache_path, results=results)) + "\n"
+    with NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as tmp:
+        tmp.write(content)
+        tmp_path = Path(tmp.name)
+    tmp_path.replace(path)

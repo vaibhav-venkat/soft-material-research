@@ -15,7 +15,7 @@ pub use libraries::build_mechanical_libraries;
 pub use sampling::sample_component_rows;
 
 use math::delta;
-use validation::validate_particle_fields;
+use validation::{validate_particle_fields, ParticleFieldInputs};
 
 #[non_exhaustive]
 pub struct MechanicalFields {
@@ -55,10 +55,21 @@ pub fn build_mechanical_fields(
     gamma: f64,
     u0: f64,
 ) -> CoreResult<MechanicalFields> {
-    validate_particle_fields(
-        coords, directions, velocities, psi6_abs, mask, x_centers, y_centers, lx, ly, radius,
-        sigma, gamma, u0,
-    )?;
+    validate_particle_fields(ParticleFieldInputs {
+        coords,
+        directions,
+        velocities,
+        psi6_abs,
+        mask,
+        x_centers,
+        y_centers,
+        lx,
+        ly,
+        radius,
+        sigma,
+        gamma,
+        u0,
+    })?;
     let (frames, particles, _) = coords.dim();
     let nx = x_centers.len();
     let ny = y_centers.len();

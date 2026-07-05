@@ -103,19 +103,25 @@ def validate_active_matter_arrays(arrays: ActiveMatterArrays) -> None:
     assert arrays.coords.ndim == 3 and arrays.coords.shape[-1] == 3, "coords must have shape (frames, particles, 3)"
     assert arrays.steps.shape == (arrays.coords.shape[0],), "steps must match coords frame axis"
     assert arrays.shell_mask.shape == arrays.coords.shape[:2], "shell_mask must match coords frame/particle axes"
-    assert _optional_vector_matches(arrays.active_direction, arrays.coords), (
-        "active_direction must match coords frame/particle axes"
-    )
-    assert _optional_vector_matches(arrays.direction_cylindrical, arrays.coords), (
-        "direction_cylindrical must match coords frame/particle axes"
-    )
-    assert _optional_vector_matches(arrays.flux_cylindrical, arrays.coords), (
-        "flux_cylindrical must match coords frame/particle axes"
-    )
+    _validate_optional_vectors(arrays)
+    _validate_grid_axes(arrays)
+    assert arrays.radius > 0.0, "radius must be positive"
+
+
+def _validate_optional_vectors(arrays: ActiveMatterArrays) -> None:
+    optional_vectors = {
+        "active_direction": arrays.active_direction,
+        "direction_cylindrical": arrays.direction_cylindrical,
+        "flux_cylindrical": arrays.flux_cylindrical,
+    }
+    for name, values in optional_vectors.items():
+        assert _optional_vector_matches(values, arrays.coords), f"{name} must match coords frame/particle axes"
+
+
+def _validate_grid_axes(arrays: ActiveMatterArrays) -> None:
     assert arrays.x_edges.ndim == 1 and arrays.theta_edges.ndim == 1, "grid edges must be one-dimensional"
     assert arrays.x_centers.shape == (arrays.x_edges.size - 1,), "x_centers must match x_edges"
     assert arrays.theta_centers.shape == (arrays.theta_edges.size - 1,), "theta_centers must match theta_edges"
-    assert arrays.radius > 0.0, "radius must be positive"
 
 
 def _read_radius(data: np.lib.npyio.NpzFile, fallback_radius: float | None) -> float:
