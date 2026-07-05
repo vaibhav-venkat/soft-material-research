@@ -25,6 +25,8 @@ Array: TypeAlias = NDArray[Any]
 
 
 class MechanicalLibraries(TypedDict):
+    """Mechanical candidate libraries and names returned by the Rust extension."""
+
     Y_rho: Array
     Y_P: Array
     Y_Q: Array
@@ -34,6 +36,8 @@ class MechanicalLibraries(TypedDict):
 
 
 class MechanicalFitPayload(TypedDict):
+    """Mechanical fit matrices, row indices, libraries, and fitted model results."""
+
     sample_indices: Array
     Y_rho_fit: StabilityResult
     Y_P_fit: StabilityResult
@@ -54,6 +58,8 @@ class MechanicalFitPayload(TypedDict):
 
 
 class DensityFitPayload(TypedDict):
+    """Density fit matrix, sampled target, candidate metadata, and fitted model result."""
+
     X_density: Array
     y_density: Array
     sample_indices: Array
@@ -65,6 +71,8 @@ class DensityFitPayload(TypedDict):
 
 @dataclass(frozen=True)
 class RhoFittingResult:
+    """Summary of one rho-fitting workflow run and its generated artifacts."""
+
     case_id: str
     status: str
     nd: int
@@ -77,6 +85,7 @@ class RhoFittingResult:
     report_path: Path
 
     def summary(self) -> str:
+        """Return a single-line status summary suitable for CLI output."""
         active = ",".join(self.active_terms) if self.active_terms else "none"
         return (
             f"[rho_fitting] case={self.case_id} status={self.status} nd={self.nd} "
@@ -86,6 +95,23 @@ class RhoFittingResult:
 
 
 def run(config: RhoFittingConfig) -> RhoFittingResult:
+    """Run the rho-fitting workflow for one configured case.
+
+    Parameters:
+        config: Case id, output controls, and numerical settings for coarse-graining,
+            filtering, sampling, and regression.
+
+    Returns:
+        ``RhoFittingResult`` describing whether correlations or full mechanical fits were
+        produced and where the cache/report were written.
+
+    Examples:
+        ``result = run(RhoFittingConfig(case_id="radius_15D", fit_only=True))``
+
+    Edge cases:
+        ``fit_only`` requires an existing mechanical cache; it skips coarse-graining but
+        still rewrites fit outputs with overwrite enabled.
+    """
     settings = _settings(config)
     config.output_dir.mkdir(parents=True, exist_ok=True)
     active = load_active_matter_npz(config.paths.active_fields_path, radius_from_case_id(config.case_id))
@@ -154,11 +180,13 @@ def run(config: RhoFittingConfig) -> RhoFittingResult:
 
 
 def _settings(config: RhoFittingConfig) -> NumericalSettings:
+    """Return initialized numerical settings from a validated config."""
     assert config.settings is not None, "rho fitting settings were not initialized"
     return config.settings
 
 
 def _overwrite_config(config: RhoFittingConfig) -> RhoFittingConfig:
+    """Return a copy of a config that permits replacing generated output files."""
     return RhoFittingConfig(
         case_id=config.case_id,
         overwrite=True,
@@ -171,6 +199,7 @@ def _overwrite_config(config: RhoFittingConfig) -> RhoFittingConfig:
 
 
 def _mechanical_cache_path(config: RhoFittingConfig) -> Path:
+    """Return the standard mechanical fit NPZ cache path for a case."""
     return config.output_dir / f"{config.case_id}_fit_result.npz"
 
 
@@ -178,6 +207,20 @@ def _load_mechanical_fit_cache(
     active: ActiveMatterArrays,
     config: RhoFittingConfig,
 ) -> tuple[dict[str, Array], dict[str, Array]]:
+    """Load raw and filtered mechanical fields from an existing fit cache.
+
+    Parameters:
+        active: Current active-matter input arrays used to validate cached grid shapes.
+        config: Run configuration whose output directory and case id locate the cache.
+
+    Returns:
+        ``(coarse, spectral)`` dictionaries matching the outputs normally produced by
+        coarse-graining and Chebyshev filtering.
+
+    Edge cases:
+        The cache must contain both raw and filtered fields; missing keys are reported
+        before shape validation.
+    """
     path = _mechanical_cache_path(config)
     assert path.exists(), f"fit-only cache does not exist: {path}"
     with np.load(path, allow_pickle=False) as cache:
@@ -231,6 +274,7 @@ def _validate_cached_fields(
     spectral: dict[str, Array],
     config: RhoFittingConfig,
 ) -> None:
+    """Validate cached mechanical field shapes against the active input grid."""
     settings = _settings(config)
     grid_shape = (active.coords.shape[0], active.x_centers.size, active.theta_centers.size)
     assert coarse["rho"].shape == grid_shape, "cached raw rho shape does not match active grid"
@@ -250,6 +294,7 @@ def _validate_cached_fields(
 
 
 def _core() -> Any:
+    """Return the compiled Rust extension or fail with a clear build message."""
     assert _rho_fitting_core is not None, "rho_fitting extension is not built"
     return _rho_fitting_core
 
@@ -258,6 +303,23 @@ def coarse_grain_active_fields(
     active: ActiveMatterArrays,
     config: RhoFittingConfig,
 ) -> dict[str, Array]:
+    """Build raw coarse-grained density, moments, currents, and mechanical fields.
+
+    Parameters:
+        active: Particle positions, masks, directions, and grid metadata.
+        config: Numerical settings and paths for hexatic order and fallback orientations.
+
+    Returns:
+        Dictionary of raw grid fields including ``rho``, ``P``, ``Q``, ``A``, ``psi6_sq``,
+        and current tensors with surface flux axes.
+
+    Examples:
+        ``coarse = coarse_grain_active_fields(active, config)``
+
+    Edge cases:
+        Uses all particles rather than ``shell_mask`` for the current mechanical pass, and
+        expects hexatic-order text rows to cover every frame/particle pair.
+    """
     core = _core()
     settings = _settings(config)
     lx, ly = surface_lengths(active.x_edges, active.theta_edges, active.radius)
@@ -291,6 +353,21 @@ def spectral_active_fields(
     coarse: dict[str, Array],
     config: RhoFittingConfig,
 ) -> dict[str, Array]:
+    """Filter raw coarse fields over time and build spectral targets/libraries.
+
+    Parameters:
+        active: Input arrays providing time steps and grid geometry.
+        coarse: Raw coarse-grained field dictionary from ``coarse_grain_active_fields``.
+        config: Numerical settings controlling Chebyshev filtering and physical constants.
+
+    Returns:
+        Dictionary of filtered fields, mechanical targets ``Y_*``, density flux candidates,
+        ``partial_t_rho``, and Chebyshev diagnostic arrays.
+
+    Edge cases:
+        Negative filtered density is only logged as a warning because polynomial filtering
+        can overshoot near sharp temporal features.
+    """
     core = _core()
     settings = _settings(config)
     rho_time = chebyshev_filter_and_derivative(
@@ -366,6 +443,7 @@ def _filter_coarse_field(
     settings: NumericalSettings,
     reference: ChebyshevTimeResult,
 ) -> ChebyshevTimeResult:
+    """Filter one coarse field and assert it shares the reference time grid."""
     result = chebyshev_filter_and_derivative(
         coarse[name],
         active.steps,
@@ -381,6 +459,24 @@ def fit_mechanical(
     spectral: dict[str, Array],
     config: RhoFittingConfig,
 ) -> MechanicalFitPayload:
+    """Fit divergence-aware closures for density, P, and Q mechanical flux targets.
+
+    Parameters:
+        active: Input grid metadata used for periodic divergence lengths.
+        spectral: Filtered fields and target arrays from ``spectral_active_fields``.
+        config: Sampling, weighting, and sparse-regression settings.
+
+    Returns:
+        Payload containing sampled rows, fitted models, full libraries, term names, and
+        the reconstructed ``F_rho`` prediction field.
+
+    Examples:
+        ``payload = fit_mechanical(active, spectral, config)``
+
+    Edge cases:
+        Primary fit metrics are computed on divergence rows; flux rows are auxiliary and
+        may be weighted into the fit without becoming the reported PDE metric.
+    """
     sample_indices = _mechanical_sample_indices(spectral, config)
     lx, ly = surface_lengths(active.x_edges, active.theta_edges, active.radius)
     libraries = _mechanical_libraries(spectral, lx, ly)
@@ -414,6 +510,7 @@ def print_mechanical_correlations(
     spectral: dict[str, Array],
     config: RhoFittingConfig,
 ) -> Array:
+    """Print raw target-feature correlations for each mechanical library."""
     sample_indices = _mechanical_sample_indices(spectral, config)
     lx, ly = surface_lengths(active.x_edges, active.theta_edges, active.radius)
     libraries = _mechanical_libraries(spectral, lx, ly)
@@ -437,6 +534,7 @@ def print_mechanical_correlations(
 
 
 def _mechanical_sample_indices(spectral: dict[str, Array], config: RhoFittingConfig) -> Array:
+    """Sample valid ``(time, x, y)`` grid indices for mechanical regression."""
     core = _core()
     settings = _settings(config)
     valid_mask = _mechanical_valid_mask(spectral)
@@ -457,6 +555,7 @@ def _mechanical_libraries(
     lx: float,
     ly: float,
 ) -> MechanicalLibraries:
+    """Build mechanical candidate libraries from filtered fields using the Rust core."""
     core = _core()
     libs = core.build_mechanical_libraries(
         np.ascontiguousarray(spectral["rho"], dtype=np.float64),
@@ -488,6 +587,26 @@ def _fit_divergence_primary_target(
     lx: float,
     ly: float,
 ) -> tuple[StabilityResult, Array, Array]:
+    """Fit one mechanical target with divergence rows as the primary evaluation target.
+
+    Parameters:
+        target_name: Report label for progress logging.
+        target: Flux target with shape ``(T, Nx, Ny, 2, ...)``.
+        library: Candidate fluxes with shape ``(terms, T, Nx, Ny, 2, ...)``.
+        names: Candidate names aligned with ``library`` axis 0.
+        sample_indices: Sampled ``(T, Nx, Ny)`` locations.
+        config: Regression settings including optional flux-row weight.
+        lx: Axial period.
+        ly: Unwrapped angular period.
+
+    Returns:
+        ``(fit, rows, row_index)`` where ``fit`` is evaluated on divergence rows and
+        ``rows``/``row_index`` preserve the sampled flux-row payload for reports.
+
+    Edge cases:
+        Setting ``mechanical_flux_weight`` to zero removes flux rows from the fit entirely;
+        finite filtering is applied separately to flux and divergence rows.
+    """
     settings = _settings(config)
     rows, row_index, y_flux, X_flux = _sample_component_matrix(target, library, sample_indices)
     y_div, X_div = _sample_divergence_matrix(target, library, sample_indices, lx, ly)
@@ -529,6 +648,7 @@ def _sample_component_matrix(
     library: Array,
     sample_indices: Array,
 ) -> tuple[Array, Array, Array, Array]:
+    """Sample all tensor components at grid locations into ``[target, features...]`` rows."""
     core = _core()
     row_payload = core.sample_component_rows(
         np.ascontiguousarray(target, dtype=np.float64),
@@ -550,6 +670,7 @@ def _sample_divergence_matrix(
     lx: float,
     ly: float,
 ) -> tuple[Array, Array]:
+    """Sample divergence of a flux target and all candidate flux terms."""
     target_div = _divergence_surface_flux_field(target, lx, ly)
     div_terms = np.asarray([_divergence_surface_flux_field(term, lx, ly) for term in library], dtype=np.float64)
     if target_div.ndim == 3:
@@ -562,6 +683,7 @@ def _sample_divergence_matrix(
 
 
 def _divergence_surface_flux_field(field: Array, lx: float, ly: float) -> Array:
+    """Compute centered periodic divergence for ``(T, Nx, Ny, 2, ...)`` flux fields."""
     field = np.asarray(field, dtype=np.float64)
     assert field.ndim >= 4 and field.shape[3] == 2, "surface flux field must have shape (T,Nx,Ny,2,...)"
     nx = field.shape[1]
@@ -575,6 +697,7 @@ def _divergence_surface_flux_field(field: Array, lx: float, ly: float) -> Array:
 
 
 def _raw_feature_correlations(X: Array, y: Array) -> Array:
+    """Compute Pearson correlations between each feature column and the target."""
     y_centered = y - np.mean(y)
     y_norm = float(np.linalg.norm(y_centered))
     correlations = np.full(X.shape[1], np.nan, dtype=np.float64)
@@ -587,12 +710,14 @@ def _raw_feature_correlations(X: Array, y: Array) -> Array:
 
 
 def _format_correlation(value: float) -> str:
+    """Format finite correlations compactly and preserve non-finite values as ``nan``."""
     if not np.isfinite(value):
         return "nan"
     return f"{value:.6g}"
 
 
 def _mechanical_valid_mask(spectral: dict[str, Array]) -> Array:
+    """Return grid points where all mechanical target and candidate inputs are finite."""
     valid = np.isfinite(spectral["rho"])
     for name in ("P", "A", "J_rho", "J_P", "J_Q", "Y_rho", "Y_P", "Y_Q"):
         axes = tuple(range(3, spectral[name].ndim))
@@ -602,6 +727,19 @@ def _mechanical_valid_mask(spectral: dict[str, Array]) -> Array:
 
 
 def _load_hexatic_abs_frames(path: Path, active: ActiveMatterArrays) -> Array:
+    """Load per-particle ``|psi6|`` values from the hexatic text table.
+
+    Parameters:
+        path: Text table with frame, step, particle, and hexatic-order columns.
+        active: Active-matter arrays that define expected frame steps and particle count.
+
+    Returns:
+        Dense ``(frames, particles)`` array of hexatic magnitudes.
+
+    Edge cases:
+        The table must be complete and step-aligned; missing particle rows remain NaN and
+        cause validation to fail.
+    """
     table = np.loadtxt(path, dtype=np.float64)
     assert table.ndim == 2 and table.shape[1] >= 6, "hexatic order table must have at least 6 columns"
     frame_indices = table[:, 0].astype(np.int64)
@@ -621,6 +759,20 @@ def fit_density(
     spectral: dict[str, Array],
     config: RhoFittingConfig,
 ) -> DensityFitPayload:
+    """Fit the older scalar density continuity library against ``partial_t_rho``.
+
+    Parameters:
+        active: Input grid metadata used to build periodic derivative terms.
+        spectral: Filtered density fields and density time derivative.
+        config: Sampling and sparse-regression settings.
+
+    Returns:
+        Sampled density design matrix, target vector, term metadata, flux keys, and fit.
+
+    Edge cases:
+        This fits scalar continuity terms only and is separate from the mechanical
+        divergence-aware ``Y_rho``, ``Y_P``, and ``Y_Q`` closures.
+    """
     core = _core()
     settings = _settings(config)
     names = term_names()
@@ -679,6 +831,7 @@ def _validate_temporal_alignment(
     rho_time: ChebyshevTimeResult,
     j_time: ChebyshevTimeResult,
 ) -> None:
+    """Assert that a filtered field uses the same time coordinates as rho."""
     assert rho_time.filtered.shape == rho_time.derivative.shape
     assert j_time.filtered.shape[:3] == rho_time.filtered.shape
     assert np.array_equal(rho_time.times, j_time.times)
@@ -686,10 +839,12 @@ def _validate_temporal_alignment(
 
 
 def _sample_scalar(field: Array, sample_indices: Array) -> Array:
+    """Sample scalar field values at ``(time, x, y)`` integer indices."""
     return field[sample_indices[:, 0], sample_indices[:, 1], sample_indices[:, 2]]
 
 
 def _validate_sample_count(requested: int, actual: int, replace: bool) -> None:
+    """Reject undersampling when sampling without replacement."""
     if not replace:
         assert actual == requested, (
             f"requested {requested} rows without replacement, but only {actual} valid rows were available"
@@ -697,4 +852,5 @@ def _validate_sample_count(requested: int, actual: int, replace: bool) -> None:
 
 
 def _log(message: str) -> None:
+    """Print a flushed rho-fitting progress message."""
     print(f"[rho_fitting] {message}", flush=True)

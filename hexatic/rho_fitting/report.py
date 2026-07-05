@@ -11,6 +11,7 @@ from .regression import StabilityResult
 
 
 def write_report(path: Path, lines: list[str], overwrite: bool = False) -> None:
+    """Write report lines atomically, refusing to replace existing files unless allowed."""
     if path.exists() and not overwrite:
         raise FileExistsError(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -38,6 +39,7 @@ def density_report_lines(
     fit: StabilityResult,
     warnings: tuple[str, ...] = (),
 ) -> list[str]:
+    """Build markdown report lines for the scalar density regression workflow."""
     lines = [
         f"# Rho fitting report: {case_id}",
         "",
@@ -85,6 +87,7 @@ def density_report_lines(
 
 
 def _format_float(value: float) -> str:
+    """Format finite floats for compact report tables."""
     if not np.isfinite(value):
         return "nan"
     return f"{value:.4f}"

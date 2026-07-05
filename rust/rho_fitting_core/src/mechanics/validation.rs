@@ -3,6 +3,7 @@ use ndarray::{ArrayView1, ArrayView2, ArrayView3};
 use crate::{CoreError, CoreResult};
 
 pub(super) struct ParticleFieldInputs<'a> {
+    /// Borrowed particle arrays and scalar controls validated before mechanical gridding.
     pub coords: ArrayView3<'a, f64>,
     pub directions: ArrayView3<'a, f64>,
     pub velocities: ArrayView3<'a, f64>,
@@ -19,6 +20,7 @@ pub(super) struct ParticleFieldInputs<'a> {
 }
 
 pub(super) fn validate_grid(rho: ArrayView3<'_, f64>, lx: f64, ly: f64) -> CoreResult<()> {
+    // Validate non-empty periodic grid axes and positive domain lengths.
     let (frames, nx, ny) = rho.dim();
     if frames == 0 || nx == 0 || ny == 0 {
         return Err(CoreError::InvalidInput(
@@ -34,6 +36,7 @@ pub(super) fn validate_grid(rho: ArrayView3<'_, f64>, lx: f64, ly: f64) -> CoreR
 }
 
 pub(super) fn validate_particle_fields(inputs: ParticleFieldInputs<'_>) -> CoreResult<()> {
+    // Validate particle field shapes and finite scalar controls before coarse-graining.
     let ParticleFieldInputs {
         coords,
         directions,

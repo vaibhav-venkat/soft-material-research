@@ -17,6 +17,7 @@ def pde_validation_report_lines(
     cache_path: Path,
     results: dict[str, ValidationResult],
 ) -> list[str]:
+    """Build tab-separated text lines summarizing validation metrics at fixed steps."""
     lines = [
         f"Rho fitting PDE validation report: {case}",
         "",
@@ -49,6 +50,7 @@ def write_pde_validation_report(
     results: dict[str, ValidationResult],
     overwrite: bool,
 ) -> None:
+    """Write the PDE validation text report through a temporary file."""
     if path.exists() and not overwrite:
         raise FileExistsError(f"{path} exists; pass --overwrite to replace it")
     path.parent.mkdir(parents=True, exist_ok=True)

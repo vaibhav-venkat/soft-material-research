@@ -5,6 +5,13 @@ use rand_chacha::ChaCha8Rng;
 
 use crate::{CoreError, CoreResult};
 
+/// Sample valid `(frame, ix, iy)` rows from a boolean mask.
+///
+/// `valid_mask` has shape `(T, Nx, Ny)`, `nd` is the requested number of
+/// rows, and `replace` controls whether repeated rows are allowed.
+///
+/// Edge cases: without replacement, fewer than `nd` rows can be returned if
+/// the mask has too few valid entries; Python validates that policy.
 pub fn sample_rows(
     valid_mask: ArrayView3<'_, bool>,
     nd: usize,
@@ -44,6 +51,7 @@ pub fn sample_rows(
     Ok(out)
 }
 
+/// Construct the deterministic RNG used for regression row sampling.
 pub fn seeded_rng(seed: u64) -> ChaCha8Rng {
     ChaCha8Rng::seed_from_u64(seed)
 }

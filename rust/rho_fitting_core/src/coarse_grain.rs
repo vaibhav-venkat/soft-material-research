@@ -3,6 +3,14 @@ use ndarray::{Array3, Array4, ArrayView1, ArrayView2, ArrayView3};
 use crate::geometry::{gaussian_2d, minimum_image};
 use crate::{CoreError, CoreResult};
 
+/// Coarse-grain scalar density and two-component polarization density.
+///
+/// `coords` is `(T, N, 3)` with angular coordinate in column 1, `p_particles`
+/// is `(T, N, 2)`, and `shell_mask` selects particles to include. Returns
+/// `rho` shaped `(T, Nx, Ny)` and `p_density` shaped `(T, Nx, Ny, 2)`.
+///
+/// Edge cases: non-finite particle positions or directions are skipped, and
+/// the Gaussian kernel is truncated at `4*sigma`.
 pub fn coarse_grain_fields(
     coords: ArrayView3<'_, f64>,
     p_particles: ArrayView3<'_, f64>,
@@ -74,6 +82,7 @@ pub fn coarse_grain_fields(
     Ok((rho, p_density))
 }
 
+/// Validate shapes and scalar geometry controls for legacy coarse-graining.
 pub fn validate_inputs(
     coords: ArrayView3<'_, f64>,
     p_particles: ArrayView3<'_, f64>,

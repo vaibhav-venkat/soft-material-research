@@ -7,6 +7,8 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class DensityTerm:
+    """Name, report label, and flux-cache key for one density-library term."""
+
     name: str
     label: str
     flux: str
@@ -21,14 +23,17 @@ DENSITY_TERMS: tuple[DensityTerm, ...] = (
 
 
 def term_names() -> tuple[str, ...]:
+    """Return density-library term names in coefficient order."""
     return tuple(term.name for term in DENSITY_TERMS)
 
 
 def term_labels() -> tuple[str, ...]:
+    """Return display labels for density-library terms in coefficient order."""
     return tuple(term.label for term in DENSITY_TERMS)
 
 
 def flux_names() -> tuple[str, ...]:
+    """Return flux field keys corresponding to density-library terms."""
     return tuple(term.flux for term in DENSITY_TERMS)
 
 
@@ -52,4 +57,5 @@ MECHANICAL_LABELS = {
 
 
 def mechanical_labels(names: tuple[str, ...]) -> tuple[str, ...]:
+    """Map mechanical library term names to report labels while preserving unknown names."""
     return tuple(MECHANICAL_LABELS.get(name, name) for name in names)

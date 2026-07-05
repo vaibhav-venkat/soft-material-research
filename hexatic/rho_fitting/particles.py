@@ -13,6 +13,20 @@ def particle_tangent_directions(
     active: ActiveMatterArrays,
     config: RhoFittingConfig,
 ) -> np.ndarray:
+    """Return particle active directions in the surface-oriented moment basis.
+
+    Parameters:
+        active: Loaded particle arrays, optionally including cached direction fields.
+        config: Run configuration used to locate the GSD trajectory if quaternions are
+            needed as a fallback.
+
+    Returns:
+        Contiguous ``(frames, particles, 3)`` array ordered as axial, azimuthal, radial.
+
+    Edge cases:
+        GSD orientations are loaded only when neither cylindrical nor Cartesian cached
+        directions exist, and their steps must exactly match the NPZ cache.
+    """
     orientation = None
     if active.direction_cylindrical is None and active.active_direction is None:
         gsd = load_gsd_orientations(config.paths.gsd_path)
@@ -30,6 +44,19 @@ def particle_surface_velocities(
     active: ActiveMatterArrays,
     config: RhoFittingConfig,
 ) -> np.ndarray:
+    """Estimate particle velocities on the unwrapped periodic cylinder surface.
+
+    Parameters:
+        active: Particle coordinates whose last axis stores ``x`` and ``theta``.
+        config: Run configuration providing the simulation timestep.
+
+    Returns:
+        ``(frames, particles, 2)`` velocities in axial and ``R*theta`` directions.
+
+    Edge cases:
+        End frames use one-sided two-frame differences; all angular and axial
+        displacements use minimum-image wrapping.
+    """
     coords = np.asarray(active.coords, dtype=np.float64)
     assert coords.shape[0] >= 2, "at least two frames are required for surface velocities"
     velocities = np.zeros((*coords.shape[:2], 2), dtype=np.float64)

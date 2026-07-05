@@ -12,12 +12,18 @@ pub const DENSITY_TERM_NAMES: [&str; 4] = [
 
 #[non_exhaustive]
 pub struct DensityFluxes {
+    /// Candidate density flux fields before divergence is applied for scalar fitting.
     pub grad_rho: Array4<f64>,
     pub grad_lap_rho: Array4<f64>,
     pub lap_rho_grad_rho: Array4<f64>,
     pub grad_rho_cubed: Array4<f64>,
 }
 
+/// Build the density candidate fluxes from a scalar rho field.
+///
+/// `rho` is shaped `(T, Nx, Ny)`, and `lx`/`ly` are the periodic surface
+/// lengths used by spectral derivatives. The returned fluxes all use shape
+/// `(T, Nx, Ny, 2)`.
 pub fn build_density_fluxes(
     rho: ArrayView3<'_, f64>,
     lx: f64,
@@ -36,6 +42,14 @@ pub fn build_density_fluxes(
     })
 }
 
+/// Sample named density-library divergence terms at selected grid rows.
+///
+/// `sample_indices` must be `(N, 3)` with `(frame, ix, iy)` rows. The
+/// returned matrix is `(N, term_names.len())` in the same order as
+/// `term_names`.
+///
+/// Edge cases: unknown term names are rejected, and sampled indices are
+/// bounds-checked before any term matrix is returned.
 pub fn build_density_library(
     rho: ArrayView3<'_, f64>,
     sample_indices: ArrayView2<'_, i64>,
@@ -66,6 +80,7 @@ pub fn build_density_library(
     Ok(out)
 }
 
+/// Return whether a density term name is available in this library.
 pub fn known_density_term(name: &str) -> bool {
     DENSITY_TERM_NAMES.contains(&name)
 }

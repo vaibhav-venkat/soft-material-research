@@ -17,6 +17,18 @@ def write_npz_atomic(
     metadata: dict[str, object] | None = None,
     **arrays: np.ndarray,
 ) -> None:
+    """Write a compressed NPZ cache through a temporary file and atomic replace.
+
+    Parameters:
+        path: Final cache path.
+        overwrite: Whether an existing final path may be replaced.
+        metadata: JSON-serializable metadata stored under ``metadata_json``.
+        arrays: Named arrays to store alongside the schema version.
+
+    Edge cases:
+        A stale ``.tmp`` file from a failed write may be overwritten, but an existing final
+        cache is preserved unless ``overwrite`` is true.
+    """
     if path.exists() and not overwrite:
         raise FileExistsError(path)
     path.parent.mkdir(parents=True, exist_ok=True)

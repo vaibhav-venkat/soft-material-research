@@ -29,6 +29,8 @@ Y_Q_NAMES = (
 
 @dataclass(frozen=True)
 class ValidationInputs:
+    """Validated fields, coefficients, geometry, and constants for PDE rollout tests."""
+
     cache_path: Path
     metadata: dict[str, Any]
     rho: Array
@@ -50,6 +52,19 @@ class ValidationInputs:
 
 
 def load_validation_inputs(cache_path: Path) -> ValidationInputs:
+    """Load and validate PDE validation inputs from a rho-fitting NPZ cache.
+
+    Parameters:
+        cache_path: Mechanical fit cache containing filtered fields, fitted coefficients,
+            library names, Chebyshev times, and metadata.
+
+    Returns:
+        ``ValidationInputs`` with shape-checked arrays and positive domain constants.
+
+    Edge cases:
+        Library names must exactly match the current validation operators because
+        coefficients are interpreted positionally.
+    """
     with np.load(cache_path, allow_pickle=False) as cache:
         metadata = json.loads(str(cache["metadata_json"])) if "metadata_json" in cache.files else {}
         _validate_library_names(cache)
@@ -108,6 +123,7 @@ def _validate_shapes(
     y_p_coefficients: Array,
     y_q_coefficients: Array,
 ) -> None:
+    """Validate cached field and coefficient shapes expected by PDE validation."""
     assert rho.ndim == 3, "rho must be (T,Nx,Ny)"
     assert p.shape == rho.shape + (3,), "P must be (T,Nx,Ny,3)"
     assert q.shape == rho.shape + (3, 3), "Q must be (T,Nx,Ny,3,3)"
@@ -121,6 +137,7 @@ def _validate_shapes(
 
 
 def _metadata_values(metadata: dict[str, Any]) -> tuple[float, float, float, float, float, float]:
+    """Extract positive geometry and simulation constants from cache metadata."""
     lx = float(metadata["lx"])
     ly = float(metadata["ly"])
     radius = float(metadata["radius"])
@@ -133,6 +150,7 @@ def _metadata_values(metadata: dict[str, Any]) -> tuple[float, float, float, flo
 
 
 def _validate_library_names(cache: np.lib.npyio.NpzFile) -> None:
+    """Assert cached mechanical library names match the validation coefficient order."""
     y_rho_names = tuple(str(name) for name in cache["Y_rho_names"])
     y_p_names = tuple(str(name) for name in cache["Y_P_names"])
     y_q_names = tuple(str(name) for name in cache["Y_Q_names"])
@@ -144,6 +162,7 @@ def _validate_library_names(cache: np.lib.npyio.NpzFile) -> None:
 def _load_field_arrays(
     cache: np.lib.npyio.NpzFile,
 ) -> tuple[Array, Array, Array, Array, Array, Array]:
+    """Load the filtered field arrays required by validation rollouts."""
     return (
         _load_array(cache, "rho"),
         _load_array(cache, "P"),
@@ -155,4 +174,5 @@ def _load_field_arrays(
 
 
 def _load_array(cache: np.lib.npyio.NpzFile, name: str) -> Array:
+    """Load one cache array as float64 without allowing object pickles."""
     return np.asarray(cache[name], dtype=np.float64)

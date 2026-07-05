@@ -3,6 +3,7 @@ use ndarray::{Array3, Array4, Array5, Array6, ArrayView3};
 use super::math::{delta, vector_component};
 
 pub(super) fn surface_rows_rank2(values: ndarray::ArrayView5<'_, f64>) -> Array5<f64> {
+    // Extract the two surface rows from a rank-2 orientation tensor field.
     let (frames, nx, ny, _, orientation_components) = values.dim();
     let mut out = Array5::<f64>::zeros((frames, nx, ny, 2, orientation_components));
     for t in 0..frames {
@@ -23,6 +24,7 @@ pub(super) fn q_dot_grad_rho(
     q: ndarray::ArrayView5<'_, f64>,
     grad: ndarray::ArrayView4<'_, f64>,
 ) -> Array4<f64> {
+    // Contract the surface block of Q against the two-component rho gradient.
     let (frames, nx, ny, _, _) = q.dim();
     let mut out = Array4::<f64>::zeros((frames, nx, ny, 2));
     for t in 0..frames {
@@ -42,6 +44,7 @@ pub(super) fn estimate_ubar(
     y_p: ndarray::ArrayView5<'_, f64>,
     a: ndarray::ArrayView5<'_, f64>,
 ) -> Array3<f64> {
+    // Project Y_P onto the surface rows of A to estimate the scalar transport speed.
     let (frames, nx, ny, _, _) = y_p.dim();
     let mut out = Array3::<f64>::zeros((frames, nx, ny));
     for t in 0..frames {
@@ -69,6 +72,7 @@ pub(super) fn scalar_times_rank2(
     scalar: ArrayView3<'_, f64>,
     values: ndarray::ArrayView5<'_, f64>,
 ) -> Array5<f64> {
+    // Multiply each grid-local rank-2 value by a scalar field sharing the grid axes.
     let (frames, nx, ny) = scalar.dim();
     let shape = values.dim();
     let mut out = Array5::<f64>::zeros(shape);
@@ -90,6 +94,7 @@ pub(super) fn scalar_times_rank3(
     scalar: ArrayView3<'_, f64>,
     values: ndarray::ArrayView6<'_, f64>,
 ) -> Array6<f64> {
+    // Multiply each grid-local rank-3 value by a scalar field sharing the grid axes.
     let (frames, nx, ny) = scalar.dim();
     let shape = values.dim();
     let mut out = Array6::<f64>::zeros(shape);
@@ -111,6 +116,7 @@ pub(super) fn scalar_times_rank3(
 }
 
 pub(super) fn vector_dot_alpha_traceless(vector: ndarray::ArrayView4<'_, f64>) -> Array6<f64> {
+    // Build the symmetric traceless vector-alignment tensor used by the Q library.
     let (frames, nx, ny, components) = vector.dim();
     let mut out = Array6::<f64>::zeros((frames, nx, ny, 2, 3, 3));
     for t in 0..frames {

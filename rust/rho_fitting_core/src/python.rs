@@ -15,16 +15,19 @@ use crate::sampling;
 use crate::CoreError;
 
 fn to_py_err(error: CoreError) -> PyErr {
+    // Convert Rust core errors into Python ValueError exceptions.
     PyValueError::new_err(error.to_string())
 }
 
 #[pyfunction]
+/// Return the compiled rho-fitting core crate version.
 fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
 #[pyfunction]
 #[pyo3(signature = (coords, p_particles, shell_mask, x_centers, y_centers, lx, ly, radius, sigma))]
+/// Python wrapper for legacy density and polarization coarse-graining.
 fn coarse_grain_fields(
     py: Python<'_>,
     coords: PyReadonlyArray3<'_, f64>,
@@ -113,6 +116,7 @@ fn coarse_grain_fields(
 
 #[pyfunction]
 #[pyo3(signature = (rho, lx, ly, requested))]
+/// Return selected spectral derivative fields for a scalar rho grid.
 fn spatial_derivatives(
     py: Python<'_>,
     rho: PyReadonlyArray3<'_, f64>,
@@ -154,6 +158,7 @@ fn spatial_derivatives(
 
 #[pyfunction]
 #[pyo3(signature = (valid_mask, nd, seed, replace))]
+/// Sample `(frame, ix, iy)` rows from a boolean valid-mask grid.
 fn sample_rows(
     py: Python<'_>,
     valid_mask: PyReadonlyArray3<'_, bool>,
@@ -168,6 +173,7 @@ fn sample_rows(
 
 #[pyfunction]
 #[pyo3(signature = (rho, lx, ly))]
+/// Build density candidate flux fields for Python-side fitting and plotting.
 fn build_density_fluxes(
     py: Python<'_>,
     rho: PyReadonlyArray3<'_, f64>,
@@ -185,6 +191,7 @@ fn build_density_fluxes(
 
 #[pyfunction]
 #[pyo3(signature = (rho, sample_indices, term_names, lx, ly))]
+/// Build sampled scalar density-library columns for the requested term names.
 fn build_density_library(
     py: Python<'_>,
     rho: PyReadonlyArray3<'_, f64>,
@@ -213,6 +220,7 @@ fn build_density_library(
 
 #[pyfunction]
 #[pyo3(signature = (coords, directions, velocities, psi6_abs, mask, x_centers, y_centers, lx, ly, radius, sigma, gamma, u0))]
+/// Python wrapper for mechanical coarse-grained fields and current tensors.
 fn build_mechanical_fields(
     py: Python<'_>,
     coords: PyReadonlyArray3<'_, f64>,
@@ -326,6 +334,7 @@ fn build_mechanical_fields(
 
 #[pyfunction]
 #[pyo3(signature = (p, j_rho, j_p, j_q, gamma, u0))]
+/// Convert filtered currents into mechanical closure targets.
 fn build_mechanical_targets(
     py: Python<'_>,
     p: PyReadonlyArrayDyn<'_, f64>,
@@ -353,6 +362,7 @@ fn build_mechanical_targets(
 
 #[pyfunction]
 #[pyo3(signature = (rho, p, q, a, psi6_sq, y_p, lx, ly))]
+/// Build mechanical candidate flux libraries and coefficient-order names.
 fn build_mechanical_libraries(
     py: Python<'_>,
     rho: PyReadonlyArray3<'_, f64>,
@@ -387,6 +397,7 @@ fn build_mechanical_libraries(
 
 #[pyfunction]
 #[pyo3(signature = (target, library, sample_indices))]
+/// Sample target/library tensor components into regression rows and metadata.
 fn sample_component_rows(
     py: Python<'_>,
     target: PyReadonlyArrayDyn<'_, f64>,
@@ -406,6 +417,7 @@ fn sample_component_rows(
 }
 
 #[pymodule]
+/// Register the Python module functions exposed by the compiled extension.
 fn _rho_fitting_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(coarse_grain_fields, m)?)?;
@@ -421,6 +433,7 @@ fn _rho_fitting_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 }
 
 fn lap_order(name: &str) -> Option<usize> {
+    // Parse derivative names like `lap_rho` and `lap2_rho` into Laplacian order.
     if name == "lap_rho" {
         return Some(1);
     }
