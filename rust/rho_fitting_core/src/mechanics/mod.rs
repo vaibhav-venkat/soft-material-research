@@ -15,10 +15,11 @@ pub use libraries::build_mechanical_libraries;
 pub use sampling::sample_component_rows;
 
 use math::delta;
-use validation::validate_particle_fields;
+use validation::{validate_particle_fields, ParticleFieldInputs};
 
 #[non_exhaustive]
 pub struct MechanicalFields {
+    /// Coarse-grained scalar density and mechanical moments/currents on the surface grid.
     pub rho: Array3<f64>,
     pub p: Array4<f64>,
     pub q: Array5<f64>,
@@ -31,6 +32,7 @@ pub struct MechanicalFields {
 
 #[non_exhaustive]
 pub struct MechanicalLibraries {
+    /// Candidate mechanical flux libraries and their coefficient-order names.
     pub y_rho_names: Vec<String>,
     pub y_p_names: Vec<String>,
     pub y_q_names: Vec<String>,
@@ -39,6 +41,17 @@ pub struct MechanicalLibraries {
     pub y_q: ArrayD<f64>,
 }
 
+/// Coarse-grain particle positions, orientations, velocities, and hexatic order into fields.
+///
+/// Particle arrays use `(T, N, component)` axes, grid centers define the
+/// unwrapped periodic cylinder surface, and the returned fields use 3D moment
+/// components with 2D surface flux directions.
+///
+/// Example: `build_mechanical_fields(coords, dirs, vels, psi6, mask, xs, ys, lx, ly, radius, sigma, gamma, u0)`.
+///
+/// Edge cases: particles with non-finite position, direction, velocity, or
+/// hexatic value are skipped; `psi6_sq` is left `NaN` where coarse-grained
+/// density is zero.
 #[allow(clippy::too_many_arguments)]
 pub fn build_mechanical_fields(
     coords: ArrayView3<'_, f64>,
@@ -55,10 +68,21 @@ pub fn build_mechanical_fields(
     gamma: f64,
     u0: f64,
 ) -> CoreResult<MechanicalFields> {
-    validate_particle_fields(
-        coords, directions, velocities, psi6_abs, mask, x_centers, y_centers, lx, ly, radius,
-        sigma, gamma, u0,
-    )?;
+    validate_particle_fields(ParticleFieldInputs {
+        coords,
+        directions,
+        velocities,
+        psi6_abs,
+        mask,
+        x_centers,
+        y_centers,
+        lx,
+        ly,
+        radius,
+        sigma,
+        gamma,
+        u0,
+    })?;
     let (frames, particles, _) = coords.dim();
     let nx = x_centers.len();
     let ny = y_centers.len();
@@ -175,6 +199,14 @@ pub fn build_mechanical_fields(
     })
 }
 
+/// Convert measured current tensors into mechanical closure targets.
+///
+/// `P` must be `(T,Nx,Ny,3)`, `J_rho` `(T,Nx,Ny,2)`, `J_P`
+/// `(T,Nx,Ny,2,3)`, and `J_Q` `(T,Nx,Ny,2,3,3)`. Returns `(Y_rho,
+/// Y_P, Y_Q)` with the same target shapes.
+///
+/// Edge cases: `u0` must be nonzero because `Y_P` divides by propulsion
+/// speed; `gamma` is allowed to be negative only if finite.
 pub fn build_targets(
     p: ArrayViewD<'_, f64>,
     j_rho: ArrayViewD<'_, f64>,

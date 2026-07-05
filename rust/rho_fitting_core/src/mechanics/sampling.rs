@@ -2,6 +2,15 @@ use ndarray::{Array2, ArrayView2, ArrayViewD, IxDyn};
 
 use crate::{CoreError, CoreResult};
 
+/// Expand sampled grid rows across all target components into regression rows.
+///
+/// `target` is `(T, Nx, Ny, ...)`, `library` is `(terms, T, Nx, Ny, ...)`,
+/// and `sample_indices` is `(N, 3)`. The returned data matrix stores the
+/// target in column 0 and term values in columns 1.., while the metadata
+/// matrix stores grid indices followed by component indices.
+///
+/// Edge cases: component axes are flattened in row-major order and restored
+/// only through the returned metadata.
 pub fn sample_component_rows(
     target: ArrayViewD<'_, f64>,
     library: ArrayViewD<'_, f64>,

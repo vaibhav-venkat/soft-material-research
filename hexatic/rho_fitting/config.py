@@ -16,6 +16,8 @@ DEFAULT_OUTPUT_DIR = PACKAGE_DIR / "output"
 
 @dataclass(frozen=True)
 class CasePaths:
+    """Canonical input paths for one rho-fitting case id."""
+
     case_id: str
     gsd_path: Path
     active_fields_path: Path
@@ -25,6 +27,7 @@ class CasePaths:
 
     @classmethod
     def from_case_id(cls, case_id: str) -> "CasePaths":
+        """Build the standard local file paths for a case such as ``radius_15D``."""
         return cls(
             case_id=case_id,
             gsd_path=PACKAGE_DIR / "gsd" / f"trajectory_{case_id}.gsd",
@@ -36,12 +39,15 @@ class CasePaths:
 
 
 def radius_from_case_id(case_id: str) -> float | None:
+    """Parse a radius in particle diameters from case ids like ``radius_15D``."""
     match = re.search(r"radius_([0-9]+(?:\.[0-9]+)?)D", case_id)
     return float(match.group(1)) if match else None
 
 
 @dataclass(frozen=True)
 class NumericalSettings:
+    """Numerical controls for coarse-graining, filtering, sampling, and sparse regression."""
+
     sigma: float = 5.0 * PARTICLE_DIAMETER
     cheb_cutoff: int = 10
     timestep: float = cylinder.SIMULATION.timestep
@@ -61,6 +67,8 @@ class NumericalSettings:
 
 @dataclass(frozen=True)
 class RhoFittingConfig:
+    """Top-level rho-fitting run configuration and derived case paths."""
+
     case_id: str = "radius_15D"
     overwrite: bool = False
     make_plots: bool = True
@@ -70,6 +78,7 @@ class RhoFittingConfig:
     settings: NumericalSettings | None = None
 
     def __post_init__(self) -> None:
+        """Fill default numerical settings and reject invalid scalar controls."""
         settings = self.settings or NumericalSettings()
         assert settings.nd > 0, "nd must be positive"
         assert settings.sigma > 0.0, "sigma must be positive"
@@ -83,4 +92,5 @@ class RhoFittingConfig:
 
     @property
     def paths(self) -> CasePaths:
+        """Return canonical input paths for this configuration's case id."""
         return CasePaths.from_case_id(self.case_id)

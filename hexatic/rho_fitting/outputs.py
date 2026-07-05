@@ -24,6 +24,7 @@ def write_mechanical_outputs(
     fit_payload: Mapping[str, np.ndarray | StabilityResult],
     config: RhoFittingConfig,
 ) -> tuple[Path, Path]:
+    """Write mechanical fit cache arrays and the markdown summary report."""
     cache_path = config.output_dir / f"{config.case_id}_fit_result.npz"
     report_path = config.output_dir / f"{config.case_id}_rho_fitting_report.md"
     y_rho_fit = fit_payload["Y_rho_fit"]
@@ -133,6 +134,7 @@ def mechanical_report_lines(
     cheb_cutoff: int,
     fits: dict[str, StabilityResult],
 ) -> list[str]:
+    """Build markdown report lines for divergence-first mechanical closure fits."""
     lines = [
         f"# Rho fitting report: {case_id}",
         "",
@@ -195,6 +197,7 @@ def write_density_outputs(
     fit_payload: Mapping[str, np.ndarray | StabilityResult],
     config: RhoFittingConfig,
 ) -> tuple[Path, Path]:
+    """Write density fit cache arrays, report text, and optional plots."""
     fit = fit_payload["fit"]
     assert isinstance(fit, StabilityResult), "fit payload is missing StabilityResult"
     arrays = cast(Mapping[str, np.ndarray], fit_payload)
@@ -265,6 +268,7 @@ def write_density_outputs(
 
 
 def cache_metadata(active: ActiveMatterArrays, config: RhoFittingConfig) -> dict[str, object]:
+    """Collect run metadata stored alongside rho-fitting NPZ outputs."""
     assert config.settings is not None, "rho fitting settings were not initialized"
     lx, ly = surface_lengths(active.x_edges, active.theta_edges, active.radius)
     return {
@@ -289,16 +293,19 @@ def cache_metadata(active: ActiveMatterArrays, config: RhoFittingConfig) -> dict
 
 
 def format_float(value: float) -> str:
+    """Format finite floats for compact report tables."""
     if not np.isfinite(value):
         return "nan"
     return f"{value:.4f}"
 
 
 def _markdown_cell(value: str) -> str:
+    """Escape markdown table separators inside a cell value."""
     return value.replace("|", "\\|")
 
 
 def _optional_float(value: float | None) -> str:
+    """Format an optional float for report text."""
     if value is None:
         return "none"
     return f"{value:.8g}"

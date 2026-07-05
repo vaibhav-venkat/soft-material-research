@@ -18,12 +18,14 @@ from .operators import closure_fields, divergence_surface_flux, divergence_vecto
 Array = NDArray[Any]
 D = 3
 COMPONENTS = 13
-RELAXATION_LAMBDA = -0.01
+RELAXATION_COEFFICIENT = -0.01
 VALIDATION_BOUND_SCALE = 10.0
 
 
 @dataclass(frozen=True)
 class ValidationResult:
+    """Predicted and reference rollout fields with per-frame validation metrics."""
+
     rho_fit: Array
     p_fit: Array
     q_fit: Array
@@ -37,6 +39,8 @@ class ValidationResult:
 
 @dataclass(frozen=True)
 class ValidationOptions:
+    """Solver, filtering, frame-count, and validation-mode controls for PDE rollouts."""
+
     max_frames: int | None = None
     solver: str = "filtered-euler"
     dt: float | None = None
@@ -45,7 +49,10 @@ class ValidationOptions:
 
 
 class RhoFitPDE(PDEBase):
+    """py-pde model that advances fitted rho, P, and Q closure equations."""
+
     def __init__(self, inputs: ValidationInputs, filter_sigma: float | None = None):
+        """Initialize grid spacing, fixed inputs, filters, and projection bounds."""
         super().__init__()
         self.inputs = inputs
         self.dx = inputs.lx / inputs.rho.shape[1]
@@ -57,6 +64,7 @@ class RhoFitPDE(PDEBase):
         self.q_limit = _symmetric_bound(inputs.q)
 
     def evolution_rate(self, state: FieldCollection, t: float = 0.0) -> FieldCollection:
+        """Return the coupled PDE time derivative for the current state and time."""
         rho, p, q = unpack_state(state)
         rho, p, q = self.project_fields(rho, p, q)
         rho_eval, p_eval, q_eval = self.filtered_fields(rho, p, q)
@@ -78,12 +86,13 @@ class RhoFitPDE(PDEBase):
         rho_flux = self.inputs.u0 * p_eval[..., :2] + closures.f_rho / self.inputs.gamma
         d_rho = -divergence_vector(rho_flux, self.dx, self.dy)
         d_p = -self.inputs.u0 * divergence_surface_flux(closures.f_p[..., :, :, None], self.dx, self.dy)[..., 0]
-        d_p -= p * RELAXATION_LAMBDA
+        d_p += RELAXATION_COEFFICIENT * p
         d_q = -divergence_surface_flux(closures.f_q, self.dx, self.dy)
-        d_q -= q * RELAXATION_LAMBDA
+        d_q += RELAXATION_COEFFICIENT * q
         return pack_state(state.grid, d_rho, d_p, d_q)
 
     def project_fields(self, rho: Array, p: Array, q: Array) -> tuple[Array, Array, Array]:
+        """Clip non-finite and runaway fields back into validation-derived bounds."""
         rho_out = np.nan_to_num(rho, nan=self.rho_min, posinf=self.rho_max, neginf=self.rho_min)
         p_out = np.nan_to_num(p, nan=0.0, posinf=self.p_limit, neginf=-self.p_limit)
         q_out = np.nan_to_num(q, nan=0.0, posinf=self.q_limit, neginf=-self.q_limit)
@@ -94,10 +103,12 @@ class RhoFitPDE(PDEBase):
         )
 
     def project_state(self, state: FieldCollection) -> None:
+        """Apply field projection in-place to a packed py-pde state."""
         rho, p, q = self.project_fields(*unpack_state(state))
         state.data[...] = pack_state(state.grid, rho, p, q).data
 
     def stable_rate_data(self, rate: FieldCollection, step_dt: float) -> Array:
+        """Clip rate data so one explicit step cannot jump outside projection bounds."""
         assert step_dt > 0.0, "step_dt must be positive"
         values = np.nan_to_num(rate.data, nan=0.0, posinf=0.0, neginf=0.0)
         out = np.empty_like(values, dtype=np.float64)
@@ -110,6 +121,7 @@ class RhoFitPDE(PDEBase):
         return out
 
     def filtered_fields(self, rho: Array, p: Array, q: Array) -> tuple[Array, Array, Array]:
+        """Optionally smooth fields with periodic Gaussian filtering on surface axes."""
         if self.filter_sigma is None or self.filter_sigma <= 0.0:
             return rho, p, q
         sx = self.filter_sigma / self.dx
@@ -120,15 +132,18 @@ class RhoFitPDE(PDEBase):
         return rho_out, p_out, q_out
 
     def fit_time_ubar(self, t: float) -> Array:
+        """Estimate cached-time transport speed by interpolating ``A`` and ``Y_P``."""
         _, _, _, a, y_p = interpolated_cached_fields(self.inputs, t)
         return estimate_ubar(y_p, a)
 
 
 def make_grid(inputs: ValidationInputs) -> CartesianGrid:
+    """Create the periodic two-dimensional py-pde grid for validation fields."""
     return CartesianGrid([(0.0, inputs.lx), (0.0, inputs.ly)], inputs.rho.shape[1:], periodic=True)
 
 
 def pack_state(grid: Any, rho: Array, p: Array, q: Array) -> FieldCollection:
+    """Pack rho, three P components, and nine Q components into a FieldCollection."""
     fields = [ScalarField(grid, rho, label="rho")]
     fields.extend(ScalarField(grid, p[..., component], label=f"P{component}") for component in range(3))
     fields.extend(ScalarField(grid, q[..., a, b], label=f"Q{a}{b}") for a in range(3) for b in range(3))
@@ -136,6 +151,7 @@ def pack_state(grid: Any, rho: Array, p: Array, q: Array) -> FieldCollection:
 
 
 def unpack_state(state: FieldCollection) -> tuple[Array, Array, Array]:
+    """Unpack a FieldCollection into ``rho``, ``P``, and ``Q`` arrays."""
     assert len(state) == COMPONENTS, f"expected {COMPONENTS} fields"
     rho = np.asarray(state[0].data, dtype=np.float64)
     p = np.stack([np.asarray(state[1 + component].data, dtype=np.float64) for component in range(3)], axis=-1)
@@ -148,6 +164,7 @@ def unpack_state(state: FieldCollection) -> tuple[Array, Array, Array]:
 
 
 def _scalar_bounds(values: Array) -> tuple[float, float]:
+    """Return padded scalar bounds derived from finite validation input values."""
     finite = np.asarray(values[np.isfinite(values)], dtype=np.float64)
     assert finite.size > 0, "validation input has no finite scalar values"
     minimum = float(np.min(finite))
@@ -158,6 +175,7 @@ def _scalar_bounds(values: Array) -> tuple[float, float]:
 
 
 def _symmetric_bound(values: Array) -> float:
+    """Return a symmetric absolute bound derived from finite tensor input values."""
     finite = np.asarray(values[np.isfinite(values)], dtype=np.float64)
     assert finite.size > 0, "validation input has no finite tensor values"
     return max(float(np.max(np.abs(finite))) * VALIDATION_BOUND_SCALE, 1.0)
@@ -167,6 +185,24 @@ def run_validation(
     inputs: ValidationInputs,
     options: ValidationOptions | None = None,
 ) -> ValidationResult:
+    """Run a PDE rollout from cached frame zero and compare against cached fields.
+
+    Parameters:
+        inputs: Validated fields, coefficients, geometry, and constants from a fit cache.
+        options: Solver settings, optional frame limit, smoothing, and metric mode.
+
+    Returns:
+        ``ValidationResult`` containing fitted fields, reference fields, times, RMSE, and
+        R^2 arrays over the rollout frames.
+
+    Examples:
+        ``result = run_validation(inputs, ValidationOptions(max_frames=20, mode="rho-only"))``
+
+    Edge cases:
+        Single-field modes hard-reset the other fields to interpolated cached references
+        before each step, so they test one equation conditionally rather than the full
+        coupled rollout.
+    """
     options = ValidationOptions() if options is None else options
     frame_count = (
         inputs.rho.shape[0]
@@ -224,6 +260,7 @@ def validation_metric_arrays(
     p_true: Array,
     q_true: Array,
 ) -> tuple[Array, Array, tuple[int, ...]]:
+    """Select fitted/reference arrays and reduction axes for a validation mode."""
     if mode in {"full", "rho-only"}:
         return rho_fit, rho_true, (1, 2)
     if mode == "p-only":
@@ -234,6 +271,7 @@ def validation_metric_arrays(
 
 
 def _validation_filter_sigma(inputs: ValidationInputs, options: ValidationOptions) -> float | None:
+    """Choose the Gaussian filter width used by the filtered explicit Euler solver."""
     if options.solver != "filtered-euler":
         return None
     if options.filter_sigma is not None:
@@ -249,6 +287,7 @@ def _run_solver(
     times: Array,
     options: ValidationOptions,
 ) -> tuple[Array, Array, Array]:
+    """Dispatch validation rollout to the requested solver implementation."""
     if options.solver == "scipy":
         assert options.mode == "full", "single-equation modes currently support euler and filtered-euler solvers"
         return _run_scipy(pde, state, times, options.dt)
@@ -259,6 +298,7 @@ def _run_solver(
 
 
 def _run_scipy(pde: RhoFitPDE, state: FieldCollection, times: Array, dt: float | None) -> tuple[Array, Array, Array]:
+    """Run the full coupled PDE with py-pde's SciPy BDF solver."""
     storage = MemoryStorage()
     kwargs: dict[str, Any] = {"method": "BDF"}
     if dt is not None:
@@ -279,6 +319,7 @@ def _run_scipy(pde: RhoFitPDE, state: FieldCollection, times: Array, dt: float |
 
 
 def interpolation_index_weight(times: Array, t: float) -> tuple[int, float]:
+    """Return bracketing time index and linear interpolation weight for ``t``."""
     index = int(np.searchsorted(times, t, side="right") - 1)
     index = max(0, min(index, times.size - 2))
     t0 = float(times[index])
@@ -288,16 +329,19 @@ def interpolation_index_weight(times: Array, t: float) -> tuple[int, float]:
 
 
 def interpolate_time_series(values: Array, times: Array, t: float) -> Array:
+    """Linearly interpolate a time-indexed array at physical time ``t``."""
     index, weight = interpolation_index_weight(times, t)
     return (1.0 - weight) * values[index] + weight * values[index + 1]
 
 
 def interpolated_fields(inputs: ValidationInputs, t: float) -> tuple[Array, Array, Array]:
+    """Return interpolated cached rho, P, and Q fields at physical time ``t``."""
     rho, p, q, _, _ = interpolated_cached_fields(inputs, t)
     return rho, p, q
 
 
 def interpolated_cached_fields(inputs: ValidationInputs, t: float) -> tuple[Array, Array, Array, Array, Array]:
+    """Return interpolated cached rho, P, Q, A, and Y_P fields at physical time ``t``."""
     rho = interpolate_time_series(inputs.rho, inputs.times, t)
     p = interpolate_time_series(inputs.p, inputs.times, t)
     q = interpolate_time_series(inputs.q, inputs.times, t)
@@ -307,6 +351,7 @@ def interpolated_cached_fields(inputs: ValidationInputs, t: float) -> tuple[Arra
 
 
 def interpolated_p_q(inputs: ValidationInputs, t: float) -> tuple[Array, Array]:
+    """Return interpolated cached P and Q fields at physical time ``t``."""
     _, p, q = interpolated_fields(inputs, t)
     return p, q
 
@@ -318,6 +363,7 @@ def _run_euler(
     dt: float,
     mode: str,
 ) -> tuple[Array, Array, Array]:
+    """Run explicit Euler validation with optional single-equation modes."""
     assert mode in {"full", "rho-only", "p-only", "q-only"}, f"unknown validation mode: {mode}"
     rho_fit = np.empty((times.size,) + state.grid.shape, dtype=np.float64)
     p_fit = np.empty((times.size,) + state.grid.shape + (3,), dtype=np.float64)
@@ -346,6 +392,7 @@ def _step_full_state(
     t: float,
     step_dt: float,
 ) -> None:
+    """Advance all packed fields by one projected explicit Euler step."""
     rate = pde.evolution_rate(state, t)
     state.data[...] = state.data + step_dt * pde.stable_rate_data(rate, step_dt)
     pde.project_state(state)
@@ -358,6 +405,7 @@ def _step_single_field_state(
     step_dt: float,
     mode: str,
 ) -> None:
+    """Advance only the selected field while resetting other fields to cached references."""
     hard_state = _single_field_reference_state(pde, state, t, mode)
     rate = pde.evolution_rate(hard_state, t)
     rate_data = pde.stable_rate_data(rate, step_dt)
@@ -380,6 +428,7 @@ def _single_field_reference_state(
     t: float,
     mode: str,
 ) -> FieldCollection:
+    """Build a state mixing the live selected field with cached reference fields."""
     rho_data, p_data, q_data = interpolated_fields(pde.inputs, t)
     rho, p, q = unpack_state(state)
     rho_eval = rho if mode == "rho-only" else rho_data
@@ -392,5 +441,6 @@ def run_validation_from_cache(
     cache_path: Path,
     options: ValidationOptions | None = None,
 ) -> tuple[ValidationInputs, ValidationResult]:
+    """Load validation inputs from a cache path and run one validation rollout."""
     inputs = load_validation_inputs(cache_path)
     return inputs, run_validation(inputs, options)

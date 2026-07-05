@@ -10,6 +10,8 @@ import numpy as np
 
 @dataclass(frozen=True)
 class ActiveMatterArrays:
+    """Cached active-matter particle arrays and grid metadata loaded from an NPZ file."""
+
     steps: np.ndarray
     coords: np.ndarray
     shell_mask: np.ndarray
@@ -25,11 +27,27 @@ class ActiveMatterArrays:
 
 @dataclass(frozen=True)
 class GsdOrientationArrays:
+    """Particle orientation quaternions loaded from a GSD trajectory."""
+
     steps: np.ndarray
     orientation: np.ndarray
 
 
 def load_active_matter_npz(path: Path, fallback_radius: float | None = None) -> ActiveMatterArrays:
+    """Load active-matter particle fields and validate their frame/grid alignment.
+
+    Parameters:
+        path: NPZ file containing coordinates, shell mask, grid axes, and optional
+            particle direction arrays.
+        fallback_radius: Radius used only when the cache lacks explicit radius metadata.
+
+    Returns:
+        ``ActiveMatterArrays`` with coordinates shaped ``(frames, particles, 3)`` and
+        optional vector arrays aligned to the first two axes.
+
+    Edge cases:
+        Missing radius metadata is allowed only when ``fallback_radius`` is supplied.
+    """
     if not path.exists():
         raise FileNotFoundError(path)
 
@@ -70,6 +88,7 @@ def load_active_matter_npz(path: Path, fallback_radius: float | None = None) -> 
 
 
 def load_gsd_orientations(path: Path) -> GsdOrientationArrays:
+    """Load per-frame HOOMD particle orientation quaternions from a GSD trajectory."""
     if not path.exists():
         raise FileNotFoundError(path)
 
@@ -92,6 +111,7 @@ def load_gsd_orientations(path: Path) -> GsdOrientationArrays:
 
 
 def validate_step_alignment(active: ActiveMatterArrays, gsd: GsdOrientationArrays | None) -> None:
+    """Assert that NPZ and GSD frame step numbers are identical when GSD data is present."""
     if gsd is None:
         return
     assert active.steps.shape == gsd.steps.shape and np.array_equal(active.steps, gsd.steps), (
@@ -100,25 +120,35 @@ def validate_step_alignment(active: ActiveMatterArrays, gsd: GsdOrientationArray
 
 
 def validate_active_matter_arrays(arrays: ActiveMatterArrays) -> None:
+    """Validate core shapes, optional vector shapes, grid axes, and positive radius."""
     assert arrays.coords.ndim == 3 and arrays.coords.shape[-1] == 3, "coords must have shape (frames, particles, 3)"
     assert arrays.steps.shape == (arrays.coords.shape[0],), "steps must match coords frame axis"
     assert arrays.shell_mask.shape == arrays.coords.shape[:2], "shell_mask must match coords frame/particle axes"
-    assert _optional_vector_matches(arrays.active_direction, arrays.coords), (
-        "active_direction must match coords frame/particle axes"
-    )
-    assert _optional_vector_matches(arrays.direction_cylindrical, arrays.coords), (
-        "direction_cylindrical must match coords frame/particle axes"
-    )
-    assert _optional_vector_matches(arrays.flux_cylindrical, arrays.coords), (
-        "flux_cylindrical must match coords frame/particle axes"
-    )
-    assert arrays.x_edges.ndim == 1 and arrays.theta_edges.ndim == 1, "grid edges must be one-dimensional"
-    assert arrays.x_centers.shape == (arrays.x_edges.size - 1,), "x_centers must match x_edges"
-    assert arrays.theta_centers.shape == (arrays.theta_edges.size - 1,), "theta_centers must match theta_edges"
+    _validate_optional_vectors(arrays)
+    _validate_grid_axes(arrays)
     assert arrays.radius > 0.0, "radius must be positive"
 
 
+def _validate_optional_vectors(arrays: ActiveMatterArrays) -> None:
+    """Validate optional particle vector arrays against coordinate frame and particle axes."""
+    optional_vectors = {
+        "active_direction": arrays.active_direction,
+        "direction_cylindrical": arrays.direction_cylindrical,
+        "flux_cylindrical": arrays.flux_cylindrical,
+    }
+    for name, values in optional_vectors.items():
+        assert _optional_vector_matches(values, arrays.coords), f"{name} must match coords frame/particle axes"
+
+
+def _validate_grid_axes(arrays: ActiveMatterArrays) -> None:
+    """Validate one-dimensional edge arrays and matching center arrays."""
+    assert arrays.x_edges.ndim == 1 and arrays.theta_edges.ndim == 1, "grid edges must be one-dimensional"
+    assert arrays.x_centers.shape == (arrays.x_edges.size - 1,), "x_centers must match x_edges"
+    assert arrays.theta_centers.shape == (arrays.theta_edges.size - 1,), "theta_centers must match theta_edges"
+
+
 def _read_radius(data: np.lib.npyio.NpzFile, fallback_radius: float | None) -> float:
+    """Read radius metadata from known cache keys or from the explicit fallback."""
     for name in ("cylinder_radius", "radius"):
         if name in data.files:
             return float(np.asarray(data[name]).reshape(-1)[0])
@@ -128,6 +158,7 @@ def _read_radius(data: np.lib.npyio.NpzFile, fallback_radius: float | None) -> f
 
 
 def _read_centers(data: np.lib.npyio.NpzFile, axis: str) -> np.ndarray:
+    """Read grid centers from cache or derive them from neighboring grid edges."""
     center_name = f"{axis}_centers"
     edge_name = f"{axis}_edges"
     if center_name in data.files:
@@ -137,4 +168,5 @@ def _read_centers(data: np.lib.npyio.NpzFile, axis: str) -> np.ndarray:
 
 
 def _optional_vector_matches(values: np.ndarray | None, coords: np.ndarray) -> bool:
+    """Return whether an optional vector array is absent or aligned with particle coords."""
     return values is None or (values.shape[:2] == coords.shape[:2] and values.shape[-1] == 3)

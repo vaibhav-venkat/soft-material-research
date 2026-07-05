@@ -10,8 +10,10 @@ rho-fitting-build = "maturin develop --manifest-path rust/rho_fitting_core/Cargo
 rho-fitting-smoke = "python -um hexatic.rho_fitting --case radius_15D --nd 1000 --no-plot"
 rho-fitting = "RHO_FITTING_GPU=1 python -um hexatic.rho_fitting --overwrite --nd 100000"
 rho-fitting-lite = "RHO_FITTING_GPU=1 python -um hexatic.rho_fitting --overwrite --nd 10000"
+rho-fitting-regression= "RHO_FITTING_GPU=1 python -um hexatic.rho_fitting --overwrite --nd 20000 --fit-only"
 rho-fitting-corr = "RHO_FITTING_GPU=1 python -um hexatic.rho_fitting --overwrite --correlations-only --no-plot --nd 10000"
 rho-plot = "python -um hexatic.rho_fitting"
+pde-validate="python -um hexatic.rho_fitting.pde_validation --case radius_15D --mode all --overwrite"
 
 [dependencies]
 python = "3.14.*"

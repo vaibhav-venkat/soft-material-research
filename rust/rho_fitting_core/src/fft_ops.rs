@@ -7,6 +7,14 @@ use rustfft::{Fft, FftPlanner};
 
 use crate::{CoreError, CoreResult};
 
+/// Compute spectral periodic gradients of a scalar field as `(T, Nx, Ny, 2)`.
+///
+/// `field` is shaped `(T, Nx, Ny)`, while `lx` and `ly` are the periodic
+/// lengths of the two surface axes. The returned last axis stores derivatives
+/// along `x` and unwrapped `R theta`.
+///
+/// Edge cases: this assumes both spatial axes are periodic and non-empty; it
+/// does not window or pad non-periodic data.
 pub fn gradient_scalar(field: ArrayView3<'_, f64>, lx: f64, ly: f64) -> CoreResult<Array4<f64>> {
     let (frames, nx, ny) = validate_scalar(field, lx, ly)?;
     let kx = wavenumbers(nx, lx);
@@ -26,26 +34,34 @@ pub fn gradient_scalar(field: ArrayView3<'_, f64>, lx: f64, ly: f64) -> CoreResu
     Ok(out)
 }
 
+/// Compute the spectral periodic scalar Laplacian.
 pub fn laplacian_scalar(field: ArrayView3<'_, f64>, lx: f64, ly: f64) -> CoreResult<Array3<f64>> {
     repeated_laplacian_scalar(field, lx, ly, 1)
 }
 
+/// Compute the spectral periodic scalar bi-Laplacian.
 pub fn bilaplacian_scalar(field: ArrayView3<'_, f64>, lx: f64, ly: f64) -> CoreResult<Array3<f64>> {
     repeated_laplacian_scalar(field, lx, ly, 2)
 }
 
+/// Apply the scalar Laplacian `order` times in spectral space.
 pub fn repeated_laplacian_scalar(
     field: ArrayView3<'_, f64>,
     lx: f64,
     ly: f64,
     order: usize,
 ) -> CoreResult<Array3<f64>> {
+    // Apply the scalar Laplacian `order` times in spectral space.
     if order == 0 {
         return Ok(field.to_owned());
     }
     scalar_k_power(field, lx, ly, order)
 }
 
+/// Compute the spectral periodic divergence of a two-component surface vector.
+///
+/// `field` must be shaped `(T, Nx, Ny, 2)`. The last axis is interpreted as
+/// surface flux direction, not a 3D orientation component.
 pub fn divergence_vector(field: ArrayView4<'_, f64>, lx: f64, ly: f64) -> CoreResult<Array3<f64>> {
     let (frames, nx, ny) = validate_vector(field, lx, ly)?;
     let kx = wavenumbers(nx, lx);
@@ -72,14 +88,17 @@ pub fn divergence_vector(field: ArrayView4<'_, f64>, lx: f64, ly: f64) -> CoreRe
     Ok(out)
 }
 
+/// Apply the spectral scalar Laplacian to each component of a surface vector.
 pub fn laplacian_vector(field: ArrayView4<'_, f64>, lx: f64, ly: f64) -> CoreResult<Array4<f64>> {
     vector_k_power(field, lx, ly, 1)
 }
 
+/// Apply the spectral scalar bi-Laplacian to each surface-vector component.
 pub fn bilaplacian_vector(field: ArrayView4<'_, f64>, lx: f64, ly: f64) -> CoreResult<Array4<f64>> {
     vector_k_power(field, lx, ly, 2)
 }
 
+/// Compute the gradient of the divergence of a surface vector field.
 pub fn grad_div_vector(field: ArrayView4<'_, f64>, lx: f64, ly: f64) -> CoreResult<Array4<f64>> {
     let div = divergence_vector(field, lx, ly)?;
     gradient_scalar(div.view(), lx, ly)
@@ -91,6 +110,7 @@ fn scalar_k_power(
     ly: f64,
     order: usize,
 ) -> CoreResult<Array3<f64>> {
+    // Apply `(-k^2)^order` to a scalar spectrum and transform back to real space.
     let (frames, nx, ny) = validate_scalar(field, lx, ly)?;
     let kx = wavenumbers(nx, lx);
     let ky = wavenumbers(ny, ly);

@@ -29,6 +29,8 @@ Y_Q_NAMES = (
 
 @dataclass(frozen=True)
 class ValidationInputs:
+    """Validated fields, coefficients, geometry, and constants for PDE rollout tests."""
+
     cache_path: Path
     metadata: dict[str, Any]
     rho: Array
@@ -50,6 +52,19 @@ class ValidationInputs:
 
 
 def load_validation_inputs(cache_path: Path) -> ValidationInputs:
+    """Load and validate PDE validation inputs from a rho-fitting NPZ cache.
+
+    Parameters:
+        cache_path: Mechanical fit cache containing filtered fields, fitted coefficients,
+            library names, Chebyshev times, and metadata.
+
+    Returns:
+        ``ValidationInputs`` with shape-checked arrays and positive domain constants.
+
+    Edge cases:
+        Library names must exactly match the current validation operators because
+        coefficients are interpreted positionally.
+    """
     with np.load(cache_path, allow_pickle=False) as cache:
         metadata = json.loads(str(cache["metadata_json"])) if "metadata_json" in cache.files else {}
         _validate_library_names(cache)
@@ -59,25 +74,19 @@ def load_validation_inputs(cache_path: Path) -> ValidationInputs:
         y_p_coefficients = _load_array(cache, "Y_P_coefficients")
         y_q_coefficients = _load_array(cache, "Y_Q_coefficients")
 
-    assert rho.ndim == 3, "rho must be (T,Nx,Ny)"
-    assert p.shape == rho.shape + (3,), "P must be (T,Nx,Ny,3)"
-    assert q.shape == rho.shape + (3, 3), "Q must be (T,Nx,Ny,3,3)"
-    assert a.shape == rho.shape + (3, 3), "A must be (T,Nx,Ny,3,3)"
-    assert psi6_sq.shape == rho.shape, "psi6_sq must be (T,Nx,Ny)"
-    assert y_p.shape == rho.shape + (2, 3), "Y_P must be (T,Nx,Ny,2,3)"
-    assert times.shape == (rho.shape[0],), "cheb_times must match rho time axis"
-    assert y_rho_coefficients.shape == (3,), "Y_rho coefficients must match current library"
-    assert y_p_coefficients.shape == (6,), "Y_P coefficients must match current library"
-    assert y_q_coefficients.shape == (5,), "Y_Q coefficients must match current library"
-
-    lx = float(metadata["lx"])
-    ly = float(metadata["ly"])
-    radius = float(metadata["radius"])
-    u0 = float(metadata.get("u0", cylinder.SIMULATION.u0))
-    gamma = float(metadata.get("gamma", cylinder.SIMULATION.gamma))
-    tau_r = float(metadata.get("tau_r", cylinder.SIMULATION.tau_r))
-    assert lx > 0.0 and ly > 0.0 and radius > 0.0, "domain metadata must be positive"
-    assert gamma != 0.0 and tau_r > 0.0, "gamma must be nonzero and tau_r positive"
+    _validate_shapes(
+        rho=rho,
+        p=p,
+        q=q,
+        a=a,
+        psi6_sq=psi6_sq,
+        y_p=y_p,
+        times=times,
+        y_rho_coefficients=y_rho_coefficients,
+        y_p_coefficients=y_p_coefficients,
+        y_q_coefficients=y_q_coefficients,
+    )
+    lx, ly, radius, u0, gamma, tau_r = _metadata_values(metadata)
 
     return ValidationInputs(
         cache_path=cache_path,
@@ -101,7 +110,47 @@ def load_validation_inputs(cache_path: Path) -> ValidationInputs:
     )
 
 
+def _validate_shapes(
+    *,
+    rho: Array,
+    p: Array,
+    q: Array,
+    a: Array,
+    psi6_sq: Array,
+    y_p: Array,
+    times: Array,
+    y_rho_coefficients: Array,
+    y_p_coefficients: Array,
+    y_q_coefficients: Array,
+) -> None:
+    """Validate cached field and coefficient shapes expected by PDE validation."""
+    assert rho.ndim == 3, "rho must be (T,Nx,Ny)"
+    assert p.shape == rho.shape + (3,), "P must be (T,Nx,Ny,3)"
+    assert q.shape == rho.shape + (3, 3), "Q must be (T,Nx,Ny,3,3)"
+    assert a.shape == rho.shape + (3, 3), "A must be (T,Nx,Ny,3,3)"
+    assert psi6_sq.shape == rho.shape, "psi6_sq must be (T,Nx,Ny)"
+    assert y_p.shape == rho.shape + (2, 3), "Y_P must be (T,Nx,Ny,2,3)"
+    assert times.shape == (rho.shape[0],), "cheb_times must match rho time axis"
+    assert y_rho_coefficients.shape == (3,), "Y_rho coefficients must match current library"
+    assert y_p_coefficients.shape == (6,), "Y_P coefficients must match current library"
+    assert y_q_coefficients.shape == (5,), "Y_Q coefficients must match current library"
+
+
+def _metadata_values(metadata: dict[str, Any]) -> tuple[float, float, float, float, float, float]:
+    """Extract positive geometry and simulation constants from cache metadata."""
+    lx = float(metadata["lx"])
+    ly = float(metadata["ly"])
+    radius = float(metadata["radius"])
+    u0 = float(metadata.get("u0", cylinder.SIMULATION.u0))
+    gamma = float(metadata.get("gamma", cylinder.SIMULATION.gamma))
+    tau_r = float(metadata.get("tau_r", cylinder.SIMULATION.tau_r))
+    assert lx > 0.0 and ly > 0.0 and radius > 0.0, "domain metadata must be positive"
+    assert gamma != 0.0 and tau_r > 0.0, "gamma must be nonzero and tau_r positive"
+    return lx, ly, radius, u0, gamma, tau_r
+
+
 def _validate_library_names(cache: np.lib.npyio.NpzFile) -> None:
+    """Assert cached mechanical library names match the validation coefficient order."""
     y_rho_names = tuple(str(name) for name in cache["Y_rho_names"])
     y_p_names = tuple(str(name) for name in cache["Y_P_names"])
     y_q_names = tuple(str(name) for name in cache["Y_Q_names"])
@@ -113,6 +162,7 @@ def _validate_library_names(cache: np.lib.npyio.NpzFile) -> None:
 def _load_field_arrays(
     cache: np.lib.npyio.NpzFile,
 ) -> tuple[Array, Array, Array, Array, Array, Array]:
+    """Load the filtered field arrays required by validation rollouts."""
     return (
         _load_array(cache, "rho"),
         _load_array(cache, "P"),
@@ -124,4 +174,5 @@ def _load_field_arrays(
 
 
 def _load_array(cache: np.lib.npyio.NpzFile, name: str) -> Array:
+    """Load one cache array as float64 without allowing object pickles."""
     return np.asarray(cache[name], dtype=np.float64)

@@ -9,6 +9,16 @@ use super::MechanicalLibraries;
 use crate::fft_ops;
 use crate::{CoreError, CoreResult};
 
+/// Build candidate flux libraries for the `Y_rho`, `Y_P`, and `Y_Q` targets.
+///
+/// Inputs must share `(T, Nx, Ny)` leading axes; `P` has 3 components, `Q`
+/// and `A` are `3x3`, and `Y_P` is the measured `(2,3)` flux target used
+/// to estimate `Ubar`.
+///
+/// Example: `build_mechanical_libraries(rho, p.into_dyn(), q.into_dyn(), a.into_dyn(), psi6_sq, y_p.into_dyn(), lx, ly)`.
+///
+/// Edge cases: coefficient order is defined by the returned name vectors and
+/// is expected to stay aligned with Python PDE validation.
 pub fn build_mechanical_libraries(
     rho: ArrayView3<'_, f64>,
     p: ArrayViewD<'_, f64>,
