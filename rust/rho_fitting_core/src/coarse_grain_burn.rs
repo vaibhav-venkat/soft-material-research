@@ -38,6 +38,16 @@ struct MechanicalInputs<'a> {
     sigma: f64,
 }
 
+/// Coarse-grain density and two-component polarization density on the Metal backend.
+///
+/// `coords` is `(T,N,3)`, `p_particles` is `(T,N,2)`, and `shell_mask` is
+/// `(T,N)`. Returns `rho` shaped `(T,Nx,Ny)` and `P_density` shaped
+/// `(T,Nx,Ny,2)`.
+///
+/// Example: `coarse_grain_fields(coords, p_particles, mask, x_centers, y_centers, lx, ly, radius, sigma)`.
+///
+/// Edge cases: computation runs in `f32` on the GPU, and Burn initialization
+/// panics are converted to `CoreError` so the Python wrapper can fall back.
 #[allow(clippy::too_many_arguments)]
 pub fn coarse_grain_fields(
     coords: ArrayView3<'_, f64>,
@@ -80,6 +90,15 @@ pub fn coarse_grain_fields(
     })
 }
 
+/// Build mechanical moment fields and current tensors on the Metal backend.
+///
+/// Particle arrays use `(T,N,component)` axes, output moments use 3D
+/// orientation components, and fluxes use two surface directions.
+///
+/// Example: `build_mechanical_fields(coords, directions, velocities, psi6, mask, xs, ys, lx, ly, radius, sigma, gamma, u0)`.
+///
+/// Edge cases: this path validates shapes locally, computes in `f32`, and leaves
+/// `psi6_sq` as `NaN` where coarse-grained density is zero.
 #[allow(clippy::too_many_arguments)]
 pub fn build_mechanical_fields(
     coords: ArrayView3<'_, f64>,
@@ -160,6 +179,7 @@ pub fn build_mechanical_fields(
 }
 
 fn catch_burn_panic<T>(func: impl FnOnce() -> CoreResult<T>) -> CoreResult<T> {
+    // Suppress Burn's panic hook and report initialization panics as recoverable errors.
     let hook = take_hook();
     set_hook(Box::new(|_| {}));
     let result = catch_unwind(AssertUnwindSafe(func));
@@ -173,6 +193,7 @@ fn coarse_grain_burn_device(
     inputs: CoarseGrainInputs<'_>,
     device: &WgpuDevice,
 ) -> CoreResult<(Array3<f64>, Array4<f64>)> {
+    // Execute legacy coarse-graining on an already-initialized Burn device.
     let CoarseGrainInputs {
         coords,
         p_particles,
@@ -245,14 +266,17 @@ fn coarse_grain_burn_device(
 }
 
 fn minimum_image_tensor(tensor: Tensor<BurnBackend, 2>, period: f32) -> Tensor<BurnBackend, 2> {
+    // Wrap tensor displacements into the centered periodic minimum-image interval.
     tensor.clone() - (tensor / period).round() * period
 }
 
 fn tensor2(values: Vec<f32>, shape: [usize; 2], device: &WgpuDevice) -> Tensor<BurnBackend, 2> {
+    // Move a row/column matrix of f32 values onto the Burn device.
     Tensor::<BurnBackend, 2>::from_data(TensorData::new(values, shape), device)
 }
 
 fn tensor_vec(tensor: Tensor<BurnBackend, 1>) -> CoreResult<Vec<f32>> {
+    // Read a one-dimensional Burn tensor back to host memory as f32 values.
     tensor
         .try_into_data()
         .map_err(|error| CoreError::InvalidInput(format!("Burn readback failed: {error}")))?
@@ -264,6 +288,7 @@ fn mechanical_burn_device(
     inputs: MechanicalInputs<'_>,
     device: &WgpuDevice,
 ) -> CoreResult<MechanicalFields> {
+    // Execute mechanical moment coarse-graining on an already-initialized Burn device.
     let MechanicalInputs {
         coords,
         directions,
@@ -452,6 +477,7 @@ fn weighted_sum(
     values: &Tensor<BurnBackend, 2>,
     chunk: usize,
 ) -> CoreResult<Vec<f32>> {
+    // Sum `weights * values` over particles for each grid point in a chunk.
     tensor_vec(
         (weights.clone() * values.clone())
             .sum_dim(1)
@@ -465,6 +491,7 @@ fn weighted_sum_product(
     right: &Tensor<BurnBackend, 2>,
     chunk: usize,
 ) -> CoreResult<Vec<f32>> {
+    // Sum `weights * left * right` over particles for each grid point in a chunk.
     tensor_vec(
         (weights.clone() * left.clone() * right.clone())
             .sum_dim(1)
@@ -473,6 +500,7 @@ fn weighted_sum_product(
 }
 
 fn combine_particle_components(left: &[f32], right: &[f32], diagonal_shift: f32) -> Vec<f32> {
+    // Build per-particle products, optionally subtracting the traceless diagonal shift.
     left.iter()
         .zip(right.iter())
         .map(|(a, b)| a * b + diagonal_shift)
@@ -480,6 +508,7 @@ fn combine_particle_components(left: &[f32], right: &[f32], diagonal_shift: f32)
 }
 
 fn write_chunk3(out: &mut Array3<f64>, t: usize, ny: usize, start: usize, values: &[f32]) {
+    // Write a flattened grid chunk into a `(T,Nx,Ny)` host array.
     for (local, value) in values.iter().enumerate() {
         let flat = start + local;
         out[[t, flat / ny, flat % ny]] = *value as f64;
@@ -494,6 +523,7 @@ fn write_chunk4(
     component: usize,
     values: &[f32],
 ) {
+    // Write a flattened grid chunk into one component of a rank-1 host field.
     for (local, value) in values.iter().enumerate() {
         let flat = start + local;
         out[[t, flat / ny, flat % ny, component]] = *value as f64;
@@ -509,6 +539,7 @@ fn write_chunk5(
     j: usize,
     values: &[f32],
 ) {
+    // Write a flattened grid chunk into one component pair of a rank-2 host field.
     for (local, value) in values.iter().enumerate() {
         let flat = start + local;
         out[[t, flat / ny, flat % ny, i, j]] = *value as f64;
@@ -525,6 +556,7 @@ fn write_chunk6(
     j: usize,
     values: &[f32],
 ) {
+    // Write a flattened grid chunk into one flux/tensor component of a rank-3 host field.
     for (local, value) in values.iter().enumerate() {
         let flat = start + local;
         out[[t, flat / ny, flat % ny, k, i, j]] = *value as f64;
@@ -532,6 +564,7 @@ fn write_chunk6(
 }
 
 fn repeated_grid_values(values: ArrayView1<'_, f64>, repeat: usize) -> Vec<f32> {
+    // Expand x centers so flat grid order maps `flat / ny` to x index.
     let mut out = Vec::with_capacity(values.len() * repeat);
     for value in values {
         for _ in 0..repeat {
@@ -542,6 +575,7 @@ fn repeated_grid_values(values: ArrayView1<'_, f64>, repeat: usize) -> Vec<f32> 
 }
 
 fn tiled_grid_values(values: ArrayView1<'_, f64>, tiles: usize) -> Vec<f32> {
+    // Tile y centers so flat grid order maps `flat % ny` to y index.
     let mut out = Vec::with_capacity(values.len() * tiles);
     for _ in 0..tiles {
         out.extend(values.iter().map(|value| *value as f32));
@@ -556,18 +590,21 @@ fn frame_component(
     component: usize,
     scale: f64,
 ) -> Vec<f32> {
+    // Extract one frame/component from a particle array and apply an optional scale.
     (0..particles)
         .map(|particle| (scale * values[[frame, particle, component]]) as f32)
         .collect()
 }
 
 fn frame_scalar(values: ArrayView2<'_, f64>, frame: usize, particles: usize) -> Vec<f32> {
+    // Extract one frame from a scalar particle array as f32 values.
     (0..particles)
         .map(|particle| values[[frame, particle]] as f32)
         .collect()
 }
 
 fn frame_mask(mask: ArrayView2<'_, bool>, frame: usize, particles: usize) -> Vec<f32> {
+    // Convert one boolean mask frame into multiplicative f32 weights.
     (0..particles)
         .map(|particle| if mask[[frame, particle]] { 1.0 } else { 0.0 })
         .collect()
