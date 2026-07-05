@@ -12,6 +12,7 @@ rho-fitting = "RHO_FITTING_GPU=1 python -um hexatic.rho_fitting --overwrite --nd
 rho-fitting-lite = "RHO_FITTING_GPU=1 python -um hexatic.rho_fitting --overwrite --nd 10000"
 rho-fitting-corr = "RHO_FITTING_GPU=1 python -um hexatic.rho_fitting --overwrite --correlations-only --no-plot --nd 10000"
 rho-plot = "python -um hexatic.rho_fitting"
+pde-validate="python -um hexatic.rho_fitting.pde_validation --case radius_15D --mode all --overwrite"
 
 [dependencies]
 python = "3.14.*"

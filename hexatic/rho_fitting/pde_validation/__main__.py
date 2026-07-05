@@ -12,6 +12,7 @@ from hexatic.rho_fitting.config import DEFAULT_OUTPUT_DIR
 
 from .model import ValidationOptions, run_validation_from_cache
 from .plot import write_p_animation, write_q_animation, write_rho_animation
+from .report import write_pde_validation_report
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -38,6 +39,7 @@ def main(argv: list[str] | None = None) -> int:
     modes = ("full", "rho-only", "p-only", "q-only") if mode == "all" else (mode,)
     html_dir = args.output_dir / "html"
     output_paths = []
+    report_results = {}
     for run_mode in modes:
         inputs, result = run_validation_from_cache(
             cache_path,
@@ -49,6 +51,7 @@ def main(argv: list[str] | None = None) -> int:
                 mode=run_mode,
             ),
         )
+        report_results[run_mode] = result
         output_path = args.output_dir / f"{args.case}_pde_validation_{run_mode}.npz"
         write_npz_atomic(
             output_path,
@@ -78,6 +81,15 @@ def main(argv: list[str] | None = None) -> int:
             f"r2_final={result.r2_t[-1]:.6g} output={output_path}",
             flush=True,
         )
+    report_path = args.output_dir / f"{args.case}_pde_validation_report.txt"
+    write_pde_validation_report(
+        report_path,
+        case=args.case,
+        cache_path=cache_path,
+        results=report_results,
+        overwrite=args.overwrite,
+    )
+    print(f"[rho_fitting.pde_validation] report={report_path}", flush=True)
     return 0
 
 
