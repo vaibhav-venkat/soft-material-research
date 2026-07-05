@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import warnings
 
 import numpy as np
 import pysindy as ps
+from sklearn.exceptions import ConvergenceWarning
 
 
 @dataclass(frozen=True)
@@ -43,6 +45,7 @@ def stability_selection(
     evaluation_y: np.ndarray | None = None,
     auxiliary_X: np.ndarray | None = None,
     auxiliary_y: np.ndarray | None = None,
+    non_positive_names: tuple[str, ...] = (),
 ) -> StabilityResult:
     X = np.asarray(X, dtype=np.float64)
     y = np.asarray(y, dtype=np.float64)
@@ -55,10 +58,11 @@ def stability_selection(
     tau_values = tau_path(float(alpha), int(tau_count), float(tau_eps))
     tau_index = max(0, tau_values.size - 10)
     _progress(
-        f"running PySINDy SR3 L1 regression rows={X.shape[0]} terms={X.shape[1]} "
+        f"running PySINDy ConstrainedSR3 L1 regression rows={X.shape[0]} terms={X.shape[1]} "
         f"tau_count={tau_values.size}"
     )
-    coefficients_path, importance_path = _fit_tau_path(X, y, tau_values, max_iter)
+    constrained_indices = _constraint_indices(names, non_positive_names)
+    coefficients_path, importance_path = _fit_tau_path(X, y, tau_values, max_iter, constrained_indices)
     coefficients = coefficients_path[tau_index]
 
     raw_correlations = _raw_feature_correlations(evaluation_X, evaluation_y)
@@ -147,12 +151,19 @@ def _fit_tau_path(
     y: np.ndarray,
     tau_values: np.ndarray,
     max_iter: int,
+    constrained_indices: tuple[int, ...],
 ) -> tuple[np.ndarray, np.ndarray]:
     coefficients_path = np.zeros((tau_values.size, X.shape[1]), dtype=np.float64)
     importance_path = np.zeros_like(coefficients_path)
     for index, tau in enumerate(tau_values):
         _progress(f"  tau {index + 1}/{tau_values.size}: {tau:.6g}")
-        coefficients_path[index] = _sr3_coefficients(X, y, reg_weight_lam=float(tau), max_iter=max_iter)
+        coefficients_path[index] = _constrained_sr3_coefficients(
+            X,
+            y,
+            reg_weight_lam=float(tau),
+            max_iter=max_iter,
+            constrained_indices=constrained_indices,
+        )
         importance_path[index] = _coefficient_importance(coefficients_path[index])
     return coefficients_path, importance_path
 
@@ -194,26 +205,111 @@ def tau_path(alpha: float, count: int = 40, eps: float = 1e-3) -> np.ndarray:
     return alpha * np.logspace(np.log10(1.0 / eps), np.log10(eps), count)
 
 
-def _sr3_coefficients(
+def _constrained_sr3_coefficients(
     X: np.ndarray,
     y: np.ndarray,
     *,
     reg_weight_lam: float,
     max_iter: int,
+    constrained_indices: tuple[int, ...],
 ) -> np.ndarray:
-    optimizer = ps.SR3(
+    constraint_lhs = _non_positive_constraint_lhs(X.shape[1], 1, constrained_indices)
+    constraint_rhs = np.zeros(1, dtype=np.float64) if constraint_lhs is not None else None
+    optimizer = _ConstrainedSR3(
         reg_weight_lam=float(reg_weight_lam),
         regularizer="L1",
         max_iter=int(max_iter),
         normalize_columns=True,
         unbias=False,
+        constraint_lhs=constraint_lhs,
+        constraint_rhs=constraint_rhs,
+        constraint_order="feature",
+        inequality_constraints=constraint_lhs is not None,
     )
     optimizer.fit_intercept = False
-    assert optimizer.fit_intercept is False, "PySINDy SR3 must not fit an intercept"
+    assert optimizer.fit_intercept is False, "PySINDy ConstrainedSR3 must not fit an intercept"
     optimizer.fit(np.ascontiguousarray(X, dtype=np.float64), np.ascontiguousarray(y, dtype=np.float64))
     coefficients = np.asarray(optimizer.coef_, dtype=np.float64).reshape(-1)
     assert coefficients.shape == (X.shape[1],), "PySINDy returned an unexpected coefficient shape"
     return coefficients
+
+
+def _constraint_indices(names: tuple[str, ...], constrained_names: tuple[str, ...]) -> tuple[int, ...]:
+    constrained = set(constrained_names)
+    return tuple(index for index, name in enumerate(names) if name in constrained)
+
+
+class _ConstrainedSR3(ps.ConstrainedSR3):
+    def _update_coef_cvxpy(self, xi, cost, var_len, coef_prev, tol):  # type: ignore[no-untyped-def]
+        import cvxpy as cp
+
+        if self.use_constraints:
+            assert self.constraint_lhs is not None
+            assert self.constraint_rhs is not None
+            assert self.constraint_separation_index is not None
+            constraints = []
+            if self.equality_constraints:
+                constraints.append(
+                    self.constraint_lhs[self.constraint_separation_index :, :] @ xi
+                    == self.constraint_rhs[self.constraint_separation_index :],
+                )
+            if self.inequality_constraints:
+                constraints.append(
+                    self.constraint_lhs[: self.constraint_separation_index, :] @ xi
+                    <= self.constraint_rhs[: self.constraint_separation_index]
+                )
+            problem = cp.Problem(cp.Minimize(cost), constraints)
+        else:
+            problem = cp.Problem(cp.Minimize(cost))
+
+        solvers = tuple(solver for solver in ("CLARABEL", "SCS") if solver in cp.installed_solvers())
+        for solver in solvers:
+            try:
+                problem.solve(
+                    solver=solver,
+                    verbose=self.verbose_cvxpy,
+                    **_cvxpy_solver_options(solver, self.max_iter, tol),
+                )
+                if xi.value is not None:
+                    return np.asarray(xi.value, dtype=np.float64).reshape(coef_prev.shape)
+            except cp.error.SolverError:
+                continue
+        warnings.warn(
+            "ConstrainedSR3 CVXPY solve failed or was infeasible; setting coefs to zeros",
+            ConvergenceWarning,
+        )
+        return np.zeros((var_len,), dtype=np.float64).reshape(coef_prev.shape)
+
+
+def _cvxpy_solver_options(solver: str, max_iter: int, tol: float) -> dict[str, float | int]:
+    if solver == "CLARABEL":
+        return {
+            "max_iter": int(max_iter),
+            "tol_gap_abs": float(tol),
+            "tol_gap_rel": float(tol),
+            "tol_feas": float(tol),
+        }
+    if solver == "SCS":
+        return {
+            "max_iters": int(max_iter),
+            "eps_abs": float(tol),
+            "eps_rel": float(tol),
+        }
+    return {}
+
+
+def _non_positive_constraint_lhs(
+    n_features: int,
+    n_targets: int,
+    constrained_indices: tuple[int, ...],
+) -> np.ndarray | None:
+    if not constrained_indices:
+        return None
+    constraint_lhs = np.zeros((1, n_features * n_targets), dtype=np.float64)
+    for index in constrained_indices:
+        offset = index * n_targets
+        constraint_lhs[0, offset : offset + n_targets] = 1.0
+    return constraint_lhs
 
 
 def _coefficient_importance(coefficients: np.ndarray) -> np.ndarray:

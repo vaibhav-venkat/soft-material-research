@@ -519,6 +519,7 @@ def _fit_divergence_primary_target(
         evaluation_y=y_div,
         auxiliary_X=X_flux,
         auxiliary_y=y_flux,
+        non_positive_names=("grad_rho", "grad_P", "grad_Q"),
     )
     return fit, rows, row_index
 

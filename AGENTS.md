@@ -1,5 +1,5 @@
 # Repository Guidelines
-
+**All tests have been removed. No more tests**
 ## Current Goal
 
 The active work is `hexatic/rho_fitting`: fit and validate mechanical moment closures for the radius `15D` cylinder data. The current focus is not the HOOMD simulation itself; it is the cached/coarse-grained fields, regression libraries, divergence-aware fitting, and PDE validation rollouts.
