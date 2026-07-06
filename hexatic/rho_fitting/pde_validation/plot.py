@@ -57,7 +57,7 @@ def write_p_animation(
         inputs,
         result.times,
         fields,
-        title="P_fit vs P on the unwrapped cylinder surface",
+        title="P_fit vs P projected over radius",
         overwrite=overwrite,
         stride=stride,
     )
@@ -87,7 +87,7 @@ def write_q_animation(
         inputs,
         result.times,
         fields,
-        title="Q_fit vs Q on the unwrapped cylinder surface",
+        title="Q_fit vs Q projected over radius",
         overwrite=overwrite,
         stride=stride,
     )
@@ -109,8 +109,9 @@ def write_component_animation(
         raise FileExistsError(path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
+    fields = [(name, radial_projection(fit_values), radial_projection(true_values)) for name, fit_values, true_values in fields]
     frame_indices = np.arange(0, times.size, stride, dtype=int)
-    x, y = surface_axes(inputs.lx, inputs.ly, fields[0][1].shape[1:])
+    x, y = surface_axes(inputs.lx, inputs.theta_period, fields[0][1].shape[1:])
     rows = len(fields)
 
     def heatmaps(index: int) -> list[go.Heatmap]:
@@ -170,9 +171,9 @@ def write_component_animation(
         left_axis = "" if row == 1 else str(2 * row - 1)
         right_axis = str(2 * row)
         layout[f"xaxis{left_axis}"] = {"title": "x"}
-        layout[f"yaxis{left_axis}"] = {"title": f"{name} fit, R theta"}
+        layout[f"yaxis{left_axis}"] = {"title": f"{name} fit, theta"}
         layout[f"xaxis{right_axis}"] = {"title": "x"}
-        layout[f"yaxis{right_axis}"] = {"title": f"{name}, R theta"}
+        layout[f"yaxis{right_axis}"] = {"title": f"{name}, theta"}
     fig.update_layout(**layout)
     fig.write_html(path)
 
@@ -195,8 +196,10 @@ def write_scalar_animation(
         raise FileExistsError(path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
+    fit_values = radial_projection(fit_values)
+    true_values = radial_projection(true_values)
     frame_indices = np.arange(0, times.size, stride, dtype=int)
-    x, y = surface_axes(inputs.lx, inputs.ly, fit_values.shape[1:])
+    x, y = surface_axes(inputs.lx, inputs.theta_period, fit_values.shape[1:])
     cmin = float(np.nanmin([np.nanmin(fit_values), np.nanmin(true_values)]))
     cmax = float(np.nanmax([np.nanmax(fit_values), np.nanmax(true_values)]))
 
@@ -236,12 +239,12 @@ def write_scalar_animation(
     ]
     first_frame = str(int(frame_indices[0]))
     fig.update_layout(
-        title=f"{fit_label} vs {true_label} on the unwrapped cylinder surface",
+        title=f"{fit_label} vs {true_label} projected over radius",
         grid={"rows": 1, "columns": 2, "pattern": "independent"},
         xaxis={"title": "x", "domain": [0.0, 0.47]},
-        yaxis={"title": "R theta"},
+        yaxis={"title": "theta"},
         xaxis2={"title": "x", "domain": [0.53, 1.0]},
-        yaxis2={"title": "R theta", "anchor": "x2"},
+        yaxis2={"title": "theta", "anchor": "x2"},
         annotations=[
             {"text": fit_label, "x": 0.235, "y": 1.08, "xref": "paper", "yref": "paper", "showarrow": False},
             {"text": true_label, "x": 0.765, "y": 1.08, "xref": "paper", "yref": "paper", "showarrow": False},
@@ -276,8 +279,15 @@ def animation_buttons(first_frame: str) -> list[dict[str, Any]]:
     ]
 
 
-def surface_axes(lx: float, ly: float, shape: tuple[int, int]) -> tuple[Array, Array]:
+def radial_projection(values: Array) -> Array:
+    """Project time-indexed 3D scalar/component fields to `(T,Nx,Ntheta)` for plots."""
+    if values.ndim >= 4:
+        return np.nanmean(values, axis=3)
+    return values
+
+
+def surface_axes(lx: float, theta_period: float, shape: tuple[int, int]) -> tuple[Array, Array]:
     nx, ny = shape
     x = np.linspace(0.0, lx, nx, endpoint=False)
-    y = np.linspace(0.0, ly, ny, endpoint=False)
+    y = np.linspace(0.0, theta_period, ny, endpoint=False)
     return x, y

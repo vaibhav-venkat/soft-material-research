@@ -63,6 +63,8 @@ class NumericalSettings:
     mechanical_flux_weight: float = 1.0
     gamma: float = float(cylinder.SIMULATION.gamma)
     u0: float = float(cylinder.SIMULATION.u0)
+    radial_bins: int = 16
+    radial_range: tuple[float, float] | None = None
 
 
 @dataclass(frozen=True)
@@ -88,6 +90,10 @@ class RhoFittingConfig:
         assert settings.mechanical_flux_weight >= 0.0, "mechanical_flux_weight must be non-negative"
         assert settings.timestep > 0.0, "timestep must be positive"
         assert settings.u0 != 0.0, "u0 must be nonzero"
+        assert settings.radial_bins > 0, "radial_bins must be positive"
+        if settings.radial_range is not None:
+            r_min, r_max = settings.radial_range
+            assert r_min < r_max, "radial_range must be ordered"
         object.__setattr__(self, "settings", settings)
 
     @property

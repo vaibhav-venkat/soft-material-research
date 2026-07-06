@@ -1,7 +1,7 @@
 use burn::prelude::*;
 use burn::tensor::TensorData;
 use burn_wgpu::{graphics, init_setup, Metal, WgpuDevice};
-use ndarray::{Array3, Array4, Array5, Array6, ArrayView1, ArrayView2, ArrayView3};
+use ndarray::{Array3, Array4, Array5, Array6, ArrayD, ArrayView1, ArrayView2, ArrayView3, IxDyn};
 use std::panic::{catch_unwind, set_hook, take_hook, AssertUnwindSafe};
 
 use crate::coarse_grain;
@@ -31,10 +31,10 @@ struct MechanicalInputs<'a> {
     psi6_abs: ArrayView2<'a, f64>,
     mask: ArrayView2<'a, bool>,
     x_centers: ArrayView1<'a, f64>,
-    y_centers: ArrayView1<'a, f64>,
+    theta_centers: ArrayView1<'a, f64>,
+    r_centers: ArrayView1<'a, f64>,
     lx: f64,
-    ly: f64,
-    radius: f64,
+    theta_period: f64,
     sigma: f64,
 }
 
@@ -93,9 +93,9 @@ pub fn coarse_grain_fields(
 /// Build mechanical moment fields and current tensors on the Metal backend.
 ///
 /// Particle arrays use `(T,N,component)` axes, output moments use 3D
-/// orientation components, and fluxes use two surface directions.
+/// orientation components, and fluxes use 3D cylindrical directions.
 ///
-/// Example: `build_mechanical_fields(coords, directions, velocities, psi6, mask, xs, ys, lx, ly, radius, sigma, gamma, u0)`.
+/// Example: `build_mechanical_fields(coords, directions, velocities, psi6, mask, xs, thetas, rs, lx, 2*pi, sigma, gamma, u0)`.
 ///
 /// Edge cases: this path validates shapes locally, computes in `f32`, and leaves
 /// `psi6_sq` as `NaN` where coarse-grained density is zero.
@@ -107,10 +107,10 @@ pub fn build_mechanical_fields(
     psi6_abs: ArrayView2<'_, f64>,
     mask: ArrayView2<'_, bool>,
     x_centers: ArrayView1<'_, f64>,
-    y_centers: ArrayView1<'_, f64>,
+    theta_centers: ArrayView1<'_, f64>,
+    r_centers: ArrayView1<'_, f64>,
     lx: f64,
-    ly: f64,
-    radius: f64,
+    theta_period: f64,
     sigma: f64,
     gamma: f64,
     u0: f64,
@@ -134,17 +134,15 @@ pub fn build_mechanical_fields(
     if mask.dim() != (frames, particles) {
         return Err(CoreError::Shape("mask must have shape (T,N)".to_string()));
     }
-    if x_centers.is_empty() || y_centers.is_empty() {
+    if x_centers.is_empty() || theta_centers.is_empty() || r_centers.is_empty() {
         return Err(CoreError::InvalidInput(
             "grid centers must be non-empty".to_string(),
         ));
     }
     if !(lx.is_finite()
         && lx > 0.0
-        && ly.is_finite()
-        && ly > 0.0
-        && radius.is_finite()
-        && radius > 0.0
+        && theta_period.is_finite()
+        && theta_period > 0.0
         && sigma.is_finite()
         && sigma > 0.0)
     {
@@ -155,6 +153,11 @@ pub fn build_mechanical_fields(
     if !(gamma.is_finite() && u0.is_finite() && u0 != 0.0) {
         return Err(CoreError::InvalidInput(
             "gamma must be finite and u0 must be nonzero".to_string(),
+        ));
+    }
+    if !r_centers.iter().all(|value| value.is_finite() && *value > 0.0) {
+        return Err(CoreError::InvalidInput(
+            "radial centers must be finite and positive".to_string(),
         ));
     }
 
@@ -168,10 +171,10 @@ pub fn build_mechanical_fields(
             psi6_abs,
             mask,
             x_centers,
-            y_centers,
+            theta_centers,
+            r_centers,
             lx,
-            ly,
-            radius,
+            theta_period,
             sigma,
         };
         mechanical_burn_device(inputs, &device)
@@ -288,7 +291,6 @@ fn mechanical_burn_device(
     inputs: MechanicalInputs<'_>,
     device: &WgpuDevice,
 ) -> CoreResult<MechanicalFields> {
-    // Execute mechanical moment coarse-graining on an already-initialized Burn device.
     let MechanicalInputs {
         coords,
         directions,
@@ -296,27 +298,28 @@ fn mechanical_burn_device(
         psi6_abs,
         mask,
         x_centers,
-        y_centers,
+        theta_centers,
+        r_centers,
         lx,
-        ly,
-        radius,
+        theta_period,
         sigma,
     } = inputs;
     let (frames, particles, _) = coords.dim();
     let nx = x_centers.len();
-    let ny = y_centers.len();
-    let grid = nx * ny;
-    let mut rho = Array3::<f64>::zeros((frames, nx, ny));
-    let mut psi6 = Array3::<f64>::zeros((frames, nx, ny));
-    let mut p = Array4::<f64>::zeros((frames, nx, ny, 3));
-    let mut q = Array5::<f64>::zeros((frames, nx, ny, 3, 3));
-    let mut a = Array5::<f64>::zeros((frames, nx, ny, 3, 3));
-    let mut j_rho = Array4::<f64>::zeros((frames, nx, ny, 3));
-    let mut j_p = Array5::<f64>::zeros((frames, nx, ny, 2, 3));
-    let mut j_q = Array6::<f64>::zeros((frames, nx, ny, 2, 3, 3));
-    let x_grid = repeated_grid_values(x_centers, ny);
-    let y_grid = tiled_grid_values(y_centers, nx);
-    let norm = (1.0 / (2.0 * std::f64::consts::PI * sigma * sigma)) as f32;
+    let ntheta = theta_centers.len();
+    let nr = r_centers.len();
+    let grid = nx * ntheta * nr;
+    let mut rho = ndarray::Array4::<f64>::zeros((frames, nx, ntheta, nr));
+    let mut psi6 = ndarray::Array4::<f64>::zeros((frames, nx, ntheta, nr));
+    let mut p = Array5::<f64>::zeros((frames, nx, ntheta, nr, 3));
+    let mut q = Array6::<f64>::zeros((frames, nx, ntheta, nr, 3, 3));
+    let mut j_rho = Array5::<f64>::zeros((frames, nx, ntheta, nr, 3));
+    let mut j_p = Array6::<f64>::zeros((frames, nx, ntheta, nr, 3, 3));
+    let mut j_q = ArrayD::<f64>::zeros(IxDyn(&[frames, nx, ntheta, nr, 3, 3, 3]));
+    let x_grid = repeated_3d_x_values(x_centers, ntheta, nr);
+    let theta_grid = repeated_3d_theta_values(theta_centers, nx, nr);
+    let r_grid = tiled_3d_r_values(r_centers, nx, ntheta);
+    let norm = (1.0 / ((2.0 * std::f64::consts::PI).powf(1.5) * sigma * sigma * sigma)) as f32;
     let sigma2 = (sigma * sigma) as f32;
     let cutoff2 = (16.0 * sigma * sigma) as f32;
 
@@ -326,19 +329,21 @@ fn mechanical_burn_device(
             t + 1,
             frames
         );
-        let particle_x = frame_component(coords, t, particles, 0, 1.0);
-        let particle_y = frame_component(coords, t, particles, 1, radius);
+        let valid = mechanical_frame_mask(coords, directions, velocities, psi6_abs, mask, t, particles);
+        let particle_x = sanitized_frame_component(coords, t, particles, 0);
+        let particle_theta = sanitized_frame_component(coords, t, particles, 1);
+        let particle_r = sanitized_frame_component(coords, t, particles, 2);
         let dir = [
-            frame_component(directions, t, particles, 0, 1.0),
-            frame_component(directions, t, particles, 1, 1.0),
-            frame_component(directions, t, particles, 2, 1.0),
+            sanitized_frame_component(directions, t, particles, 0),
+            sanitized_frame_component(directions, t, particles, 1),
+            sanitized_frame_component(directions, t, particles, 2),
         ];
         let vel = [
-            frame_component(velocities, t, particles, 0, 1.0),
-            frame_component(velocities, t, particles, 1, 1.0),
-            frame_component(velocities, t, particles, 2, 1.0),
+            sanitized_frame_component(velocities, t, particles, 0),
+            sanitized_frame_component(velocities, t, particles, 1),
+            sanitized_frame_component(velocities, t, particles, 2),
         ];
-        let psi6_particle = frame_scalar(psi6_abs, t, particles);
+        let psi6_particle = sanitized_frame_scalar(psi6_abs, t, particles);
         let q_particle = [
             combine_particle_components(&dir[0], &dir[0], -1.0 / 3.0),
             combine_particle_components(&dir[0], &dir[1], 0.0),
@@ -350,9 +355,10 @@ fn mechanical_burn_device(
             combine_particle_components(&dir[2], &dir[1], 0.0),
             combine_particle_components(&dir[2], &dir[2], -1.0 / 3.0),
         ];
-        let mask_tensor = tensor2(frame_mask(mask, t, particles), [1, particles], device);
+        let mask_tensor = tensor2(valid, [1, particles], device);
         let x_particles = tensor2(particle_x, [1, particles], device);
-        let y_particles = tensor2(particle_y, [1, particles], device);
+        let theta_particles = tensor2(particle_theta, [1, particles], device);
+        let r_particles = tensor2(particle_r, [1, particles], device);
         let psi6_tensor = tensor2(psi6_particle, [1, particles], device);
         let dir_tensors = [
             tensor2(dir[0].clone(), [1, particles], device),
@@ -380,42 +386,48 @@ fn mechanical_burn_device(
             let end = (start + GRID_CHUNK).min(grid);
             let chunk = end - start;
             let x_chunk = tensor2(x_grid[start..end].to_vec(), [chunk, 1], device);
-            let y_chunk = tensor2(y_grid[start..end].to_vec(), [chunk, 1], device);
+            let theta_chunk = tensor2(theta_grid[start..end].to_vec(), [chunk, 1], device);
+            let r_chunk = tensor2(r_grid[start..end].to_vec(), [chunk, 1], device);
             let dx = minimum_image_tensor(x_chunk - x_particles.clone(), lx as f32);
-            let dy = minimum_image_tensor(y_chunk - y_particles.clone(), ly as f32);
-            let dist2: Tensor<BurnBackend, 2> = dx.clone() * dx + dy.clone() * dy;
+            let dtheta = minimum_image_tensor(theta_chunk - theta_particles.clone(), theta_period as f32);
+            let dy = r_chunk.clone() * dtheta;
+            let dr = r_chunk - r_particles.clone();
+            let dist2: Tensor<BurnBackend, 2> =
+                dx.clone() * dx + dy.clone() * dy + dr.clone() * dr;
             let weights = (dist2.clone() * (-0.5 / sigma2)).exp() * norm;
             let weights = weights.mask_fill(dist2.greater_elem(cutoff2), 0.0) * mask_tensor.clone();
 
-            write_chunk3(
+            write_chunk4_grid(
                 &mut rho,
                 t,
-                ny,
+                ntheta,
+                nr,
                 start,
                 &tensor_vec(weights.clone().sum_dim(1).reshape([chunk]))?,
             );
-            write_chunk3(
+            write_chunk4_grid(
                 &mut psi6,
                 t,
-                ny,
+                ntheta,
+                nr,
                 start,
                 &weighted_sum(&weights, &psi6_tensor, chunk)?,
             );
             for component in 0..3 {
-                write_chunk4(
+                write_chunk5_grid(
                     &mut p,
                     t,
-                    ny,
+                    ntheta,
+                    nr,
                     start,
                     component,
                     &weighted_sum(&weights, &dir_tensors[component], chunk)?,
                 );
-            }
-            for component in 0..3 {
-                write_chunk4(
+                write_chunk5_grid(
                     &mut j_rho,
                     t,
-                    ny,
+                    ntheta,
+                    nr,
                     start,
                     component,
                     &weighted_sum(&weights, &vel_tensors[component], chunk)?,
@@ -425,43 +437,47 @@ fn mechanical_burn_device(
                 for j in 0..3 {
                     let q_index = i * 3 + j;
                     let q_values = weighted_sum(&weights, &q_tensors[q_index], chunk)?;
-                    write_chunk5(&mut q, t, ny, start, i, j, &q_values);
-                    for k in 0..2 {
+                    write_chunk6_grid(&mut q, t, ntheta, nr, start, i, j, &q_values);
+                    for k in 0..3 {
                         let jp_values = weighted_sum_product(
                             &weights,
                             &vel_tensors[k],
                             &dir_tensors[i],
                             chunk,
                         )?;
-                        write_chunk5(&mut j_p, t, ny, start, k, i, &jp_values);
+                        write_chunk6_grid(&mut j_p, t, ntheta, nr, start, k, i, &jp_values);
                         let jq_values = weighted_sum_product(
                             &weights,
                             &vel_tensors[k],
                             &q_tensors[q_index],
                             chunk,
                         )?;
-                        write_chunk6(&mut j_q, t, ny, start, k, i, j, &jq_values);
+                        write_chunk7_grid(&mut j_q, t, ntheta, nr, start, k, i, j, &jq_values);
                     }
                 }
             }
         }
     }
 
-    a.assign(&q);
-    let mut psi6_sq = Array3::<f64>::from_elem((frames, nx, ny), f64::NAN);
+    let mut a = q.clone();
+    let mut psi6_sq = ndarray::Array4::<f64>::from_elem((frames, nx, ntheta, nr), f64::NAN);
     for t in 0..frames {
         for ix in 0..nx {
-            for iy in 0..ny {
-                if rho[[t, ix, iy]].is_finite() && rho[[t, ix, iy]] > 0.0 {
-                    let value = psi6[[t, ix, iy]] / rho[[t, ix, iy]];
-                    psi6_sq[[t, ix, iy]] = value * value;
-                }
-                for component in 0..3 {
-                    a[[t, ix, iy, component, component]] += rho[[t, ix, iy]] / 3.0;
+            for itheta in 0..ntheta {
+                for ir in 0..nr {
+                    if rho[[t, ix, itheta, ir]].is_finite() && rho[[t, ix, itheta, ir]] > 0.0 {
+                        let value = psi6[[t, ix, itheta, ir]] / rho[[t, ix, itheta, ir]];
+                        psi6_sq[[t, ix, itheta, ir]] = value * value;
+                    }
+                    for component in 0..3 {
+                        a[[t, ix, itheta, ir, component, component]] +=
+                            rho[[t, ix, itheta, ir]] / 3.0;
+                    }
                 }
             }
         }
     }
+
     Ok(MechanicalFields {
         rho,
         p,
@@ -479,7 +495,6 @@ fn weighted_sum(
     values: &Tensor<BurnBackend, 2>,
     chunk: usize,
 ) -> CoreResult<Vec<f32>> {
-    // Sum `weights * values` over particles for each grid point in a chunk.
     tensor_vec(
         (weights.clone() * values.clone())
             .sum_dim(1)
@@ -493,7 +508,6 @@ fn weighted_sum_product(
     right: &Tensor<BurnBackend, 2>,
     chunk: usize,
 ) -> CoreResult<Vec<f32>> {
-    // Sum `weights * left * right` over particles for each grid point in a chunk.
     tensor_vec(
         (weights.clone() * left.clone() * right.clone())
             .sum_dim(1)
@@ -502,67 +516,10 @@ fn weighted_sum_product(
 }
 
 fn combine_particle_components(left: &[f32], right: &[f32], diagonal_shift: f32) -> Vec<f32> {
-    // Build per-particle products, optionally subtracting the traceless diagonal shift.
     left.iter()
         .zip(right.iter())
         .map(|(a, b)| a * b + diagonal_shift)
         .collect()
-}
-
-fn write_chunk3(out: &mut Array3<f64>, t: usize, ny: usize, start: usize, values: &[f32]) {
-    // Write a flattened grid chunk into a `(T,Nx,Ny)` host array.
-    for (local, value) in values.iter().enumerate() {
-        let flat = start + local;
-        out[[t, flat / ny, flat % ny]] = *value as f64;
-    }
-}
-
-fn write_chunk4(
-    out: &mut Array4<f64>,
-    t: usize,
-    ny: usize,
-    start: usize,
-    component: usize,
-    values: &[f32],
-) {
-    // Write a flattened grid chunk into one component of a rank-1 host field.
-    for (local, value) in values.iter().enumerate() {
-        let flat = start + local;
-        out[[t, flat / ny, flat % ny, component]] = *value as f64;
-    }
-}
-
-fn write_chunk5(
-    out: &mut Array5<f64>,
-    t: usize,
-    ny: usize,
-    start: usize,
-    i: usize,
-    j: usize,
-    values: &[f32],
-) {
-    // Write a flattened grid chunk into one component pair of a rank-2 host field.
-    for (local, value) in values.iter().enumerate() {
-        let flat = start + local;
-        out[[t, flat / ny, flat % ny, i, j]] = *value as f64;
-    }
-}
-
-fn write_chunk6(
-    out: &mut Array6<f64>,
-    t: usize,
-    ny: usize,
-    start: usize,
-    k: usize,
-    i: usize,
-    j: usize,
-    values: &[f32],
-) {
-    // Write a flattened grid chunk into one flux/tensor component of a rank-3 host field.
-    for (local, value) in values.iter().enumerate() {
-        let flat = start + local;
-        out[[t, flat / ny, flat % ny, k, i, j]] = *value as f64;
-    }
 }
 
 fn repeated_grid_values(values: ArrayView1<'_, f64>, repeat: usize) -> Vec<f32> {
@@ -585,6 +542,36 @@ fn tiled_grid_values(values: ArrayView1<'_, f64>, tiles: usize) -> Vec<f32> {
     out
 }
 
+fn repeated_3d_x_values(values: ArrayView1<'_, f64>, ntheta: usize, nr: usize) -> Vec<f32> {
+    let mut out = Vec::with_capacity(values.len() * ntheta * nr);
+    for value in values {
+        for _ in 0..ntheta * nr {
+            out.push(*value as f32);
+        }
+    }
+    out
+}
+
+fn repeated_3d_theta_values(values: ArrayView1<'_, f64>, nx: usize, nr: usize) -> Vec<f32> {
+    let mut out = Vec::with_capacity(nx * values.len() * nr);
+    for _ in 0..nx {
+        for value in values {
+            for _ in 0..nr {
+                out.push(*value as f32);
+            }
+        }
+    }
+    out
+}
+
+fn tiled_3d_r_values(values: ArrayView1<'_, f64>, nx: usize, ntheta: usize) -> Vec<f32> {
+    let mut out = Vec::with_capacity(nx * ntheta * values.len());
+    for _ in 0..nx * ntheta {
+        out.extend(values.iter().map(|value| *value as f32));
+    }
+    out
+}
+
 fn frame_component(
     values: ArrayView3<'_, f64>,
     frame: usize,
@@ -598,10 +585,34 @@ fn frame_component(
         .collect()
 }
 
-fn frame_scalar(values: ArrayView2<'_, f64>, frame: usize, particles: usize) -> Vec<f32> {
-    // Extract one frame from a scalar particle array as f32 values.
+fn sanitized_frame_component(
+    values: ArrayView3<'_, f64>,
+    frame: usize,
+    particles: usize,
+    component: usize,
+) -> Vec<f32> {
     (0..particles)
-        .map(|particle| values[[frame, particle]] as f32)
+        .map(|particle| {
+            let value = values[[frame, particle, component]];
+            if value.is_finite() {
+                value as f32
+            } else {
+                0.0
+            }
+        })
+        .collect()
+}
+
+fn sanitized_frame_scalar(values: ArrayView2<'_, f64>, frame: usize, particles: usize) -> Vec<f32> {
+    (0..particles)
+        .map(|particle| {
+            let value = values[[frame, particle]];
+            if value.is_finite() {
+                value as f32
+            } else {
+                0.0
+            }
+        })
         .collect()
 }
 
@@ -610,4 +621,97 @@ fn frame_mask(mask: ArrayView2<'_, bool>, frame: usize, particles: usize) -> Vec
     (0..particles)
         .map(|particle| if mask[[frame, particle]] { 1.0 } else { 0.0 })
         .collect()
+}
+
+fn mechanical_frame_mask(
+    coords: ArrayView3<'_, f64>,
+    directions: ArrayView3<'_, f64>,
+    velocities: ArrayView3<'_, f64>,
+    psi6_abs: ArrayView2<'_, f64>,
+    mask: ArrayView2<'_, bool>,
+    frame: usize,
+    particles: usize,
+) -> Vec<f32> {
+    (0..particles)
+        .map(|particle| {
+            let valid = mask[[frame, particle]]
+                && (0..3).all(|component| coords[[frame, particle, component]].is_finite())
+                && (0..3).all(|component| directions[[frame, particle, component]].is_finite())
+                && (0..3).all(|component| velocities[[frame, particle, component]].is_finite())
+                && psi6_abs[[frame, particle]].is_finite();
+            if valid {
+                1.0
+            } else {
+                0.0
+            }
+        })
+        .collect()
+}
+
+fn grid_indices(flat: usize, ntheta: usize, nr: usize) -> (usize, usize, usize) {
+    let ix = flat / (ntheta * nr);
+    let rem = flat % (ntheta * nr);
+    (ix, rem / nr, rem % nr)
+}
+
+fn write_chunk4_grid(
+    out: &mut ndarray::Array4<f64>,
+    t: usize,
+    ntheta: usize,
+    nr: usize,
+    start: usize,
+    values: &[f32],
+) {
+    for (local, value) in values.iter().enumerate() {
+        let (ix, itheta, ir) = grid_indices(start + local, ntheta, nr);
+        out[[t, ix, itheta, ir]] = *value as f64;
+    }
+}
+
+fn write_chunk5_grid(
+    out: &mut Array5<f64>,
+    t: usize,
+    ntheta: usize,
+    nr: usize,
+    start: usize,
+    component: usize,
+    values: &[f32],
+) {
+    for (local, value) in values.iter().enumerate() {
+        let (ix, itheta, ir) = grid_indices(start + local, ntheta, nr);
+        out[[t, ix, itheta, ir, component]] = *value as f64;
+    }
+}
+
+fn write_chunk6_grid(
+    out: &mut Array6<f64>,
+    t: usize,
+    ntheta: usize,
+    nr: usize,
+    start: usize,
+    i: usize,
+    j: usize,
+    values: &[f32],
+) {
+    for (local, value) in values.iter().enumerate() {
+        let (ix, itheta, ir) = grid_indices(start + local, ntheta, nr);
+        out[[t, ix, itheta, ir, i, j]] = *value as f64;
+    }
+}
+
+fn write_chunk7_grid(
+    out: &mut ArrayD<f64>,
+    t: usize,
+    ntheta: usize,
+    nr: usize,
+    start: usize,
+    k: usize,
+    i: usize,
+    j: usize,
+    values: &[f32],
+) {
+    for (local, value) in values.iter().enumerate() {
+        let (ix, itheta, ir) = grid_indices(start + local, ntheta, nr);
+        out[IxDyn(&[t, ix, itheta, ir, k, i, j])] = *value as f64;
+    }
 }

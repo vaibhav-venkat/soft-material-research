@@ -56,7 +56,7 @@ class RhoFitPDE(PDEBase):
         super().__init__()
         self.inputs = inputs
         self.dx = inputs.lx / inputs.rho.shape[1]
-        self.dy = inputs.ly / inputs.rho.shape[2]
+        self.dtheta = inputs.theta_period / inputs.rho.shape[2]
         self.psi6_sq_fixed = np.asarray(inputs.psi6_sq[0], dtype=np.float64)
         self.filter_sigma = filter_sigma
         self.rho_min, self.rho_max = _scalar_bounds(inputs.rho)
@@ -79,15 +79,16 @@ class RhoFitPDE(PDEBase):
             self.inputs.y_p_coefficients,
             self.inputs.y_q_coefficients,
             self.dx,
-            self.dy,
+            self.dtheta,
+            self.inputs.r_centers,
             ubar_override=ubar,
         )
 
         rho_flux = self.inputs.u0 * p_eval + closures.f_rho / self.inputs.gamma
-        d_rho = -divergence_vector(rho_flux, self.dx, self.dy)
-        d_p = -self.inputs.u0 * divergence_surface_flux(closures.f_p[..., :, :, None], self.dx, self.dy)[..., 0]
+        d_rho = -divergence_vector(rho_flux, self.dx, self.dtheta, self.inputs.r_centers)
+        d_p = -self.inputs.u0 * divergence_surface_flux(closures.f_p, self.dx, self.dtheta, self.inputs.r_centers)
         d_p += RELAXATION_COEFFICIENT * p
-        d_q = -divergence_surface_flux(closures.f_q, self.dx, self.dy)
+        d_q = -divergence_surface_flux(closures.f_q, self.dx, self.dtheta, self.inputs.r_centers)
         d_q += RELAXATION_COEFFICIENT * q
         return pack_state(state.grid, d_rho, d_p, d_q)
 
@@ -121,14 +122,15 @@ class RhoFitPDE(PDEBase):
         return out
 
     def filtered_fields(self, rho: Array, p: Array, q: Array) -> tuple[Array, Array, Array]:
-        """Optionally smooth fields with periodic Gaussian filtering on surface axes."""
+        """Optionally smooth fields with periodic x/theta filtering and nonperiodic radial filtering."""
         if self.filter_sigma is None or self.filter_sigma <= 0.0:
             return rho, p, q
         sx = self.filter_sigma / self.dx
-        sy = self.filter_sigma / self.dy
-        rho_out = gaussian_filter(rho, sigma=(sx, sy), mode="wrap")
-        p_out = gaussian_filter(p, sigma=(sx, sy, 0.0), mode=("wrap", "wrap", "nearest"))
-        q_out = gaussian_filter(q, sigma=(sx, sy, 0.0, 0.0), mode=("wrap", "wrap", "nearest", "nearest"))
+        stheta = self.filter_sigma / (float(np.mean(self.inputs.r_centers)) * self.dtheta)
+        sr = self.filter_sigma / float(np.mean(np.diff(self.inputs.r_centers)))
+        rho_out = gaussian_filter(rho, sigma=(sx, stheta, sr), mode=("wrap", "wrap", "nearest"))
+        p_out = gaussian_filter(p, sigma=(sx, stheta, sr, 0.0), mode=("wrap", "wrap", "nearest", "nearest"))
+        q_out = gaussian_filter(q, sigma=(sx, stheta, sr, 0.0, 0.0), mode=("wrap", "wrap", "nearest", "nearest", "nearest"))
         return rho_out, p_out, q_out
 
     def fit_time_ubar(self, t: float) -> Array:
@@ -138,8 +140,18 @@ class RhoFitPDE(PDEBase):
 
 
 def make_grid(inputs: ValidationInputs) -> CartesianGrid:
-    """Create the periodic two-dimensional py-pde grid for validation fields."""
-    return CartesianGrid([(0.0, inputs.lx), (0.0, inputs.ly)], inputs.rho.shape[1:], periodic=True)
+    """Create a 3D storage grid for validation fields."""
+    r_min = float(inputs.r_centers[0])
+    r_max = float(inputs.r_centers[-1])
+    if inputs.r_centers.size > 1:
+        padding = 0.5 * float(np.mean(np.diff(inputs.r_centers)))
+        r_min -= padding
+        r_max += padding
+    return CartesianGrid(
+        [(0.0, inputs.lx), (0.0, inputs.theta_period), (r_min, r_max)],
+        inputs.rho.shape[1:],
+        periodic=[True, True, False],
+    )
 
 
 def pack_state(grid: Any, rho: Array, p: Array, q: Array) -> FieldCollection:
@@ -262,11 +274,11 @@ def validation_metric_arrays(
 ) -> tuple[Array, Array, tuple[int, ...]]:
     """Select fitted/reference arrays and reduction axes for a validation mode."""
     if mode in {"full", "rho-only"}:
-        return rho_fit, rho_true, (1, 2)
+        return rho_fit, rho_true, (1, 2, 3)
     if mode == "p-only":
-        return p_fit, p_true, (1, 2, 3)
+        return p_fit, p_true, (1, 2, 3, 4)
     if mode == "q-only":
-        return q_fit, q_true, (1, 2, 3, 4)
+        return q_fit, q_true, (1, 2, 3, 4, 5)
     raise AssertionError(f"unknown validation mode: {mode}")
 
 
@@ -277,8 +289,9 @@ def _validation_filter_sigma(inputs: ValidationInputs, options: ValidationOption
     if options.filter_sigma is not None:
         return options.filter_sigma
     dx = inputs.lx / inputs.rho.shape[1]
-    dy = inputs.ly / inputs.rho.shape[2]
-    return float(inputs.metadata.get("sigma", min(dx, dy)))
+    dtheta_length = float(np.mean(inputs.r_centers)) * inputs.theta_period / inputs.rho.shape[2]
+    dr = float(np.mean(np.diff(inputs.r_centers)))
+    return float(inputs.metadata.get("sigma", min(dx, dtheta_length, dr)))
 
 
 def _run_solver(

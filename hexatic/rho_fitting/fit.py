@@ -13,7 +13,7 @@ from numpy.typing import NDArray
 from . import _rho_fitting_core
 from .basis import ChebyshevTimeResult, chebyshev_filter_and_derivative, temporal_power_spectrum
 from .config import NumericalSettings, RhoFittingConfig, radius_from_case_id
-from .geometry import surface_lengths, theta_to_y
+from .geometry import surface_lengths
 from .io import ActiveMatterArrays, load_active_matter_npz
 from .library import mechanical_labels
 from .outputs import mechanical_report_lines, write_mechanical_outputs
@@ -33,6 +33,17 @@ class MechanicalLibraries(TypedDict):
     Y_rho_names: tuple[str, ...]
     Y_P_names: tuple[str, ...]
     Y_Q_names: tuple[str, ...]
+
+
+Y_RHO_NAMES = ("grad_rho", "grad_lap_rho", "Q_dot_grad_rho")
+Y_P_NAMES = ("A", "rho_A", "psi6sq_A", "grad_P", "rho_grad_P", "grad_lap_P")
+Y_Q_NAMES = (
+    "Ubar_P_dot_alpha_traceless",
+    "grad_P_symmetric_traceless",
+    "grad_Q",
+    "rho_grad_Q",
+    "grad_lap_Q",
+)
 
 
 class MechanicalFitPayload(TypedDict):
@@ -66,7 +77,7 @@ class RhoFittingResult:
     nd: int
     frames: int
     particles: int
-    grid_shape: tuple[int, int]
+    grid_shape: tuple[int, int, int]
     sample_count: int
     active_terms: tuple[str, ...]
     cache_path: Path
@@ -103,9 +114,10 @@ def run(config: RhoFittingConfig) -> RhoFittingResult:
     settings = _settings(config)
     config.output_dir.mkdir(parents=True, exist_ok=True)
     active = load_active_matter_npz(config.paths.active_fields_path, radius_from_case_id(config.case_id))
+    r_edges, r_centers = radial_grid(active, settings)
     _log(
         f"loaded frames={active.coords.shape[0]} particles={active.coords.shape[1]} "
-        f"grid=({active.x_centers.size}, {active.theta_centers.size})"
+        f"grid=({active.x_centers.size}, {active.theta_centers.size}, {r_centers.size})"
     )
 
     if config.fit_only:
@@ -132,7 +144,7 @@ def run(config: RhoFittingConfig) -> RhoFittingResult:
             nd=settings.nd,
             frames=active.coords.shape[0],
             particles=active.coords.shape[1],
-            grid_shape=(active.x_centers.size, active.theta_centers.size),
+            grid_shape=(active.x_centers.size, active.theta_centers.size, r_centers.size),
             sample_count=sample_indices.shape[0],
             active_terms=(),
             cache_path=_mechanical_cache_path(config) if config.fit_only else config.output_dir,
@@ -159,7 +171,7 @@ def run(config: RhoFittingConfig) -> RhoFittingResult:
         nd=settings.nd,
         frames=active.coords.shape[0],
         particles=active.coords.shape[1],
-        grid_shape=(active.x_centers.size, active.theta_centers.size),
+        grid_shape=(active.x_centers.size, active.theta_centers.size, r_centers.size),
         sample_count=fit_payload["sample_indices"].shape[0],
         active_terms=active_terms,
         cache_path=cache_path,
@@ -189,6 +201,27 @@ def _overwrite_config(config: RhoFittingConfig) -> RhoFittingConfig:
 def _mechanical_cache_path(config: RhoFittingConfig) -> Path:
     """Return the standard mechanical fit NPZ cache path for a case."""
     return config.output_dir / f"{config.case_id}_fit_result.npz"
+
+
+def radial_grid(active: ActiveMatterArrays, settings: NumericalSettings) -> tuple[Array, Array]:
+    """Return global radial bin edges and centers for cylindrical 3D fitting."""
+    if settings.radial_range is None:
+        radii = np.asarray(active.coords[..., 2], dtype=np.float64)
+        finite = radii[np.isfinite(radii)]
+        assert finite.size > 0, "cannot infer radial grid from non-finite coordinates"
+        r_min = float(np.min(finite))
+        r_max = float(np.max(finite))
+        if r_min == r_max:
+            padding = max(abs(r_min), 1.0) * 1.0e-6
+            r_min -= padding
+            r_max += padding
+    else:
+        r_min, r_max = settings.radial_range
+    assert r_min >= 0.0 and r_min < r_max, "radial grid must be non-negative and ordered"
+    edges = np.linspace(r_min, r_max, settings.radial_bins + 1, dtype=np.float64)
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    assert np.all(centers > 0.0), "radial centers must be positive for cylindrical derivatives"
+    return edges, centers
 
 
 def _load_mechanical_fit_cache(
@@ -221,6 +254,8 @@ def _load_mechanical_fit_cache(
             "raw_J_rho",
             "raw_J_P",
             "raw_J_Q",
+            "r_edges",
+            "r_centers",
             "rho",
             "P",
             "Q",
@@ -249,6 +284,8 @@ def _load_mechanical_fit_cache(
             "J_rho": np.asarray(cache["raw_J_rho"]),
             "J_P": np.asarray(cache["raw_J_P"]),
             "J_Q": np.asarray(cache["raw_J_Q"]),
+            "r_edges": np.asarray(cache["r_edges"]),
+            "r_centers": np.asarray(cache["r_centers"]),
         }
         coarse["J_density"] = coarse["J_rho"]
         spectral = {name: np.asarray(cache[name]) for name in required if not name.startswith("raw_")}
@@ -264,19 +301,21 @@ def _validate_cached_fields(
 ) -> None:
     """Validate cached mechanical field shapes against the active input grid."""
     settings = _settings(config)
-    grid_shape = (active.coords.shape[0], active.x_centers.size, active.theta_centers.size)
+    _, r_centers = radial_grid(active, settings)
+    grid_shape = (active.coords.shape[0], active.x_centers.size, active.theta_centers.size, r_centers.size)
+    assert np.allclose(coarse["r_centers"], r_centers), "cached radial centers do not match current settings"
     assert coarse["rho"].shape == grid_shape, "cached raw rho shape does not match active grid"
     assert spectral["rho"].shape == grid_shape, "cached rho shape does not match active grid"
     assert spectral["P"].shape == grid_shape + (3,), "cached P must use 3D orientation axes"
     assert spectral["Q"].shape == grid_shape + (3, 3), "cached Q must use 3D orientation axes"
     assert spectral["A"].shape == grid_shape + (3, 3), "cached A must use 3D orientation axes"
     assert spectral["J_rho"].shape == grid_shape + (3,), "cached J_rho must use 3D cylinder-basis flux axes"
-    assert spectral["J_P"].shape == grid_shape + (2, 3), "cached J_P must use 2D flux and 3D moment axes"
-    assert spectral["J_Q"].shape == grid_shape + (2, 3, 3), "cached J_Q must use 2D flux and 3D moment axes"
+    assert spectral["J_P"].shape == grid_shape + (3, 3), "cached J_P must use 3D flux and 3D moment axes"
+    assert spectral["J_Q"].shape == grid_shape + (3, 3, 3), "cached J_Q must use 3D flux and 3D moment axes"
     assert spectral["psi6_sq"].shape == grid_shape, "cached psi6_sq shape does not match active grid"
     assert spectral["Y_rho"].shape == grid_shape + (3,), "cached Y_rho shape is invalid"
-    assert spectral["Y_P"].shape == grid_shape + (2, 3), "cached Y_P shape is invalid"
-    assert spectral["Y_Q"].shape == grid_shape + (2, 3, 3), "cached Y_Q shape is invalid"
+    assert spectral["Y_P"].shape == grid_shape + (3, 3), "cached Y_P shape is invalid"
+    assert spectral["Y_Q"].shape == grid_shape + (3, 3, 3), "cached Y_Q shape is invalid"
     assert int(np.asarray(spectral["cheb_times"]).shape[0]) == active.steps.size, "cached time axis length is invalid"
     assert settings.cheb_cutoff > 0, "cheb_cutoff must be positive"
 
@@ -310,9 +349,10 @@ def coarse_grain_active_fields(
     """
     core = _core()
     settings = _settings(config)
-    lx, ly = surface_lengths(active.x_edges, active.theta_edges, active.radius)
+    lx, _ly = surface_lengths(active.x_edges, active.theta_edges, active.radius)
+    theta_period = float(active.theta_edges[-1] - active.theta_edges[0])
+    r_edges, r_centers = radial_grid(active, settings)
     coords = np.ascontiguousarray(active.coords, dtype=np.float64)
-    y_centers = np.ascontiguousarray(theta_to_y(active.theta_centers, active.radius), dtype=np.float64)
     all_particles = np.ones_like(active.shell_mask, dtype=bool)
     directions = particle_tangent_directions(active, config)
     velocities = particle_surface_velocities(active, config)
@@ -324,16 +364,18 @@ def coarse_grain_active_fields(
         np.ascontiguousarray(psi6_abs, dtype=np.float64),
         all_particles,
         np.ascontiguousarray(active.x_centers, dtype=np.float64),
-        y_centers,
+        np.ascontiguousarray(active.theta_centers, dtype=np.float64),
+        np.ascontiguousarray(r_centers, dtype=np.float64),
         lx,
-        ly,
-        active.radius,
+        theta_period,
         float(settings.sigma),
         float(settings.gamma),
         float(settings.u0),
     )
     out = {name: np.asarray(value) for name, value in fields.items()}
     out["J_density"] = out["J_rho"]
+    out["r_edges"] = r_edges
+    out["r_centers"] = r_centers
     return out
 
 def spectral_active_fields(
@@ -457,12 +499,10 @@ def fit_mechanical(
         may be weighted into the fit without becoming the reported PDE metric.
     """
     sample_indices = _mechanical_sample_indices(spectral, config)
-    lx, ly = surface_lengths(active.x_edges, active.theta_edges, active.radius)
-    libraries = _mechanical_libraries(spectral, lx, ly)
-    y_rho_fit, y_rho_rows, y_rho_index = _fit_divergence_primary_target("Y_rho", spectral["Y_rho"], libraries["Y_rho"], libraries["Y_rho_names"], sample_indices, config, lx, ly)
-    f_rho_pred = np.tensordot(y_rho_fit.coefficients, libraries["Y_rho"], axes=(0, 0))
-    y_p_fit, y_p_rows, y_p_index = _fit_divergence_primary_target("Y_P", spectral["Y_P"], libraries["Y_P"], libraries["Y_P_names"], sample_indices, config, lx, ly)
-    y_q_fit, y_q_rows, y_q_index = _fit_divergence_primary_target("Y_Q", spectral["Y_Q"], libraries["Y_Q"], libraries["Y_Q_names"], sample_indices, config, lx, ly)
+    geometry = _cylindrical_geometry(active, config)
+    y_rho_fit, y_rho_rows, y_rho_index = _fit_divergence_primary_target("Y_rho", spectral, sample_indices, config, geometry)
+    y_p_fit, y_p_rows, y_p_index = _fit_divergence_primary_target("Y_P", spectral, sample_indices, config, geometry)
+    y_q_fit, y_q_rows, y_q_index = _fit_divergence_primary_target("Y_Q", spectral, sample_indices, config, geometry)
     return {
         "sample_indices": sample_indices,
         "Y_rho_fit": y_rho_fit,
@@ -474,13 +514,13 @@ def fit_mechanical(
         "Y_rho_row_index": y_rho_index,
         "Y_P_row_index": y_p_index,
         "Y_Q_row_index": y_q_index,
-        "Y_rho_library": libraries["Y_rho"],
-        "Y_P_library": libraries["Y_P"],
-        "Y_Q_library": libraries["Y_Q"],
-        "Y_rho_names": np.asarray(libraries["Y_rho_names"]),
-        "Y_P_names": np.asarray(libraries["Y_P_names"]),
-        "Y_Q_names": np.asarray(libraries["Y_Q_names"]),
-        "F_rho_prediction": f_rho_pred,
+        "Y_rho_library": np.empty((0,), dtype=np.float64),
+        "Y_P_library": np.empty((0,), dtype=np.float64),
+        "Y_Q_library": np.empty((0,), dtype=np.float64),
+        "Y_rho_names": np.asarray(Y_RHO_NAMES),
+        "Y_P_names": np.asarray(Y_P_NAMES),
+        "Y_Q_names": np.asarray(Y_Q_NAMES),
+        "F_rho_prediction": np.empty((0,), dtype=np.float64),
     }
 
 
@@ -491,42 +531,48 @@ def print_mechanical_correlations(
 ) -> Array:
     """Print raw target-feature correlations for each mechanical library."""
     sample_indices = _mechanical_sample_indices(spectral, config)
-    lx, ly = surface_lengths(active.x_edges, active.theta_edges, active.radius)
-    libraries = _mechanical_libraries(spectral, lx, ly)
-    for target_name, target, library, names in (
-        ("Y_rho", spectral["Y_rho"], libraries["Y_rho"], libraries["Y_rho_names"]),
-        ("Y_P", spectral["Y_P"], libraries["Y_P"], libraries["Y_P_names"]),
-        ("Y_Q", spectral["Y_Q"], libraries["Y_Q"], libraries["Y_Q_names"]),
+    geometry = _cylindrical_geometry(active, config)
+    for target_name, names in (
+        ("Y_rho", Y_RHO_NAMES),
+        ("Y_P", Y_P_NAMES),
+        ("Y_Q", Y_Q_NAMES),
     ):
-        rows, _row_index, y, X = _sample_component_matrix(
-            target,
-            library,
-            sample_indices,
-        )
+        y, X, _row_index = _sample_divergence_design(target_name, spectral, sample_indices, geometry)
         labels = mechanical_labels(names)
         _log(f"{target_name} correlation rows={X.shape[0]} terms={', '.join(names)}")
         _log("raw feature correlations with target")
         for label, correlation in zip(labels, _raw_feature_correlations(X, y), strict=True):
             _log(f"  {label}: {_format_correlation(correlation)}")
-        assert rows.shape[0] == y.shape[0], "sampled row payload is inconsistent"
     return sample_indices
 
 
 def _mechanical_sample_indices(spectral: dict[str, Array], config: RhoFittingConfig) -> Array:
-    """Sample valid ``(time, x, y)`` grid indices for mechanical regression."""
-    core = _core()
+    """Sample valid ``(time, x, theta, r)`` grid indices for mechanical regression."""
     settings = _settings(config)
     valid_mask = _mechanical_valid_mask(spectral)
-    sample_indices = np.asarray(
-        core.sample_rows(
-            np.ascontiguousarray(valid_mask),
-            settings.nd,
-            settings.seed,
-            settings.replace,
-        )
-    )
+    flat_valid = np.flatnonzero(valid_mask.reshape(-1))
+    assert flat_valid.size > 0, "no valid rows to sample"
+    rng = np.random.default_rng(settings.seed)
+    if settings.replace:
+        chosen = rng.choice(flat_valid, size=settings.nd, replace=True)
+    else:
+        chosen = rng.choice(flat_valid, size=min(settings.nd, flat_valid.size), replace=False)
+    unraveled = np.unravel_index(chosen, valid_mask.shape)
+    sample_indices = np.stack(unraveled, axis=1).astype(np.int64, copy=False)
     _validate_sample_count(settings.nd, sample_indices.shape[0], settings.replace)
     return sample_indices
+
+
+def _cylindrical_geometry(
+    active: ActiveMatterArrays,
+    config: RhoFittingConfig,
+) -> tuple[float, float, Array]:
+    """Return ``(lx, theta_period, r_centers)`` for 3D cylindrical operators."""
+    settings = _settings(config)
+    lx, _ly = surface_lengths(active.x_edges, active.theta_edges, active.radius)
+    theta_period = float(active.theta_edges[-1] - active.theta_edges[0])
+    _r_edges, r_centers = radial_grid(active, settings)
+    return lx, theta_period, r_centers
 
 
 def _mechanical_libraries(
@@ -558,25 +604,19 @@ def _mechanical_libraries(
 
 def _fit_divergence_primary_target(
     target_name: str,
-    target: Array,
-    library: Array,
-    names: tuple[str, ...],
+    spectral: dict[str, Array],
     sample_indices: Array,
     config: RhoFittingConfig,
-    lx: float,
-    ly: float,
+    geometry: tuple[float, float, Array],
 ) -> tuple[StabilityResult, Array, Array]:
     """Fit one mechanical target with divergence rows as the primary evaluation target.
 
     Parameters:
         target_name: Report label for progress logging.
-        target: Flux target with shape ``(T, Nx, Ny, components, ...)``.
-        library: Candidate fluxes with shape ``(terms, T, Nx, Ny, components, ...)``.
-        names: Candidate names aligned with ``library`` axis 0.
-        sample_indices: Sampled ``(T, Nx, Ny)`` locations.
+        spectral: Filtered fields and target fluxes.
+        sample_indices: Sampled ``(T, Nx, Ntheta, Nr)`` locations.
         config: Regression settings including optional flux-row weight.
-        lx: Axial period.
-        ly: Unwrapped angular period.
+        geometry: Cylindrical grid geometry.
 
     Returns:
         ``(fit, rows, row_index)`` where ``fit`` is evaluated on divergence rows and
@@ -587,23 +627,17 @@ def _fit_divergence_primary_target(
         finite filtering is applied separately to flux and divergence rows.
     """
     settings = _settings(config)
-    rows, row_index, y_flux, X_flux = _sample_component_matrix(target, library, sample_indices)
-    y_div, X_div = _sample_divergence_matrix(target, library, sample_indices, lx, ly)
+    names = _target_names(target_name)
+    y_div, X_div, row_index = _sample_divergence_design(target_name, spectral, sample_indices, geometry)
+    rows = np.column_stack((y_div, X_div))
     labels = mechanical_labels(names)
-    weight = float(settings.mechanical_flux_weight)
     _log(
-        f"{target_name} divergence fit rows={X_div.shape[0]} flux_rows={X_flux.shape[0]} "
-        f"flux_weight={weight:.6g} terms={', '.join(names)}"
+        f"{target_name} divergence fit rows={X_div.shape[0]} flux_rows=0 "
+        f"flux_weight=0 terms={', '.join(names)}"
     )
-    if weight > 0.0:
-        X_fit = np.vstack((X_div, weight * X_flux))
-        y_fit = np.concatenate((y_div, weight * y_flux))
-    else:
-        X_fit = X_div
-        y_fit = y_div
     fit = stability_selection(
-        X_fit,
-        y_fit,
+        X_div,
+        y_div,
         names,
         labels,
         seed=settings.seed,
@@ -615,11 +649,222 @@ def _fit_divergence_primary_target(
         max_iter=settings.stlsq_max_iter,
         evaluation_X=X_div,
         evaluation_y=y_div,
-        auxiliary_X=X_flux,
-        auxiliary_y=y_flux,
         non_positive_names=("grad_rho", "grad_P", "grad_Q"),
     )
     return fit, rows, row_index
+
+
+def _target_names(target_name: str) -> tuple[str, ...]:
+    """Return coefficient names for one mechanical target."""
+    if target_name == "Y_rho":
+        return Y_RHO_NAMES
+    if target_name == "Y_P":
+        return Y_P_NAMES
+    if target_name == "Y_Q":
+        return Y_Q_NAMES
+    raise AssertionError(f"unknown mechanical target: {target_name}")
+
+
+def _sample_divergence_design(
+    target_name: str,
+    spectral: dict[str, Array],
+    sample_indices: Array,
+    geometry: tuple[float, float, Array],
+) -> tuple[Array, Array, Array]:
+    """Sample divergence target rows and candidate divergence columns."""
+    lx, theta_period, r_centers = geometry
+    target_div = _divergence_cylindrical_flux(spectral[target_name], lx, theta_period, r_centers)
+    y = _sample_field_components(target_div, sample_indices)
+    row_index = _component_row_index(sample_indices, target_div.shape[4:])
+    columns = [
+        _sample_field_components(term, sample_indices)
+        for term in _divergence_candidate_terms(target_name, spectral, lx, theta_period, r_centers)
+    ]
+    X = np.stack(columns, axis=1)
+    finite = np.isfinite(y) & np.all(np.isfinite(X), axis=1)
+    return y[finite], X[finite], row_index[finite]
+
+
+def _divergence_candidate_terms(
+    target_name: str,
+    spectral: dict[str, Array],
+    lx: float,
+    theta_period: float,
+    r_centers: Array,
+) -> list[Array]:
+    """Return divergence-space candidate fields for one target."""
+    rho = spectral["rho"]
+    p = spectral["P"]
+    q = spectral["Q"]
+    a = spectral["A"]
+    psi6_sq = spectral["psi6_sq"]
+    if target_name == "Y_rho":
+        grad_rho = _gradient_cylindrical_scalar(rho, lx, theta_period, r_centers)
+        lap_rho = _laplacian_cylindrical_scalar(rho, lx, theta_period, r_centers)
+        grad_lap_rho = _gradient_cylindrical_scalar(lap_rho, lx, theta_period, r_centers)
+        q_grad_rho = np.einsum("...ka,...a->...k", q, grad_rho)
+        return [
+            _divergence_cylindrical_flux(grad_rho, lx, theta_period, r_centers),
+            _divergence_cylindrical_flux(grad_lap_rho, lx, theta_period, r_centers),
+            _divergence_cylindrical_flux(q_grad_rho, lx, theta_period, r_centers),
+        ]
+    if target_name == "Y_P":
+        grad_p = _gradient_cylindrical_vector(p, lx, theta_period, r_centers)
+        lap_p = _laplacian_cylindrical_vector(p, lx, theta_period, r_centers)
+        grad_lap_p = _gradient_cylindrical_vector(lap_p, lx, theta_period, r_centers)
+        return [
+            _divergence_cylindrical_flux(a, lx, theta_period, r_centers),
+            _divergence_cylindrical_flux(rho[..., None, None] * a, lx, theta_period, r_centers),
+            _divergence_cylindrical_flux(psi6_sq[..., None, None] * a, lx, theta_period, r_centers),
+            _divergence_cylindrical_flux(grad_p, lx, theta_period, r_centers),
+            _divergence_cylindrical_flux(rho[..., None, None] * grad_p, lx, theta_period, r_centers),
+            _divergence_cylindrical_flux(grad_lap_p, lx, theta_period, r_centers),
+        ]
+    if target_name == "Y_Q":
+        grad_q = _gradient_cylindrical_rank2(q, lx, theta_period, r_centers)
+        lap_q = _laplacian_cylindrical_rank2(q, lx, theta_period, r_centers)
+        grad_lap_q = _gradient_cylindrical_rank2(lap_q, lx, theta_period, r_centers)
+        ubar = _estimate_ubar(spectral["Y_P"], a)
+        return [
+            _divergence_cylindrical_flux(ubar[..., None, None, None] * _p_dot_alpha_traceless(p), lx, theta_period, r_centers),
+            _divergence_cylindrical_flux(_grad_p_symmetric_traceless(p, lx, theta_period, r_centers), lx, theta_period, r_centers),
+            _divergence_cylindrical_flux(grad_q, lx, theta_period, r_centers),
+            _divergence_cylindrical_flux(rho[..., None, None, None] * grad_q, lx, theta_period, r_centers),
+            _divergence_cylindrical_flux(grad_lap_q, lx, theta_period, r_centers),
+        ]
+    raise AssertionError(f"unknown mechanical target: {target_name}")
+
+
+def _gradient_cylindrical_scalar(values: Array, lx: float, theta_period: float, r_centers: Array) -> Array:
+    """Return cylindrical gradient components `(x, theta, r)` for a scalar field."""
+    values = np.asarray(values, dtype=np.float64)
+    dx = lx / values.shape[1]
+    dtheta = theta_period / values.shape[2]
+    dr = _radial_spacing(r_centers)
+    out = np.empty(values.shape + (3,), dtype=np.float64)
+    out[..., 0] = (np.roll(values, -1, axis=1) - np.roll(values, 1, axis=1)) / (2.0 * dx)
+    theta_derivative = (np.roll(values, -1, axis=2) - np.roll(values, 1, axis=2)) / (2.0 * dtheta)
+    out[..., 1] = theta_derivative / r_centers[None, None, None, :]
+    out[..., 2] = np.gradient(values, dr, axis=3, edge_order=1)
+    return out
+
+
+def _divergence_cylindrical_flux(values: Array, lx: float, theta_period: float, r_centers: Array) -> Array:
+    """Return cylindrical divergence of a flux field whose axis 4 stores `(x, theta, r)`."""
+    values = np.asarray(values, dtype=np.float64)
+    assert values.ndim >= 5 and values.shape[4] == 3, "flux must be (T,Nx,Ntheta,Nr,3,...)"
+    dx = lx / values.shape[1]
+    dtheta = theta_period / values.shape[2]
+    dr = _radial_spacing(r_centers)
+    flux_x = np.take(values, 0, axis=4)
+    flux_theta = np.take(values, 1, axis=4)
+    flux_r = np.take(values, 2, axis=4)
+    div_x = (np.roll(flux_x, -1, axis=1) - np.roll(flux_x, 1, axis=1)) / (2.0 * dx)
+    div_theta = (
+        (np.roll(flux_theta, -1, axis=2) - np.roll(flux_theta, 1, axis=2))
+        / (2.0 * dtheta)
+    ) / r_centers[(None,) * 3 + (slice(None),) + (None,) * (values.ndim - 5)]
+    weighted = r_centers[(None,) * 3 + (slice(None),) + (None,) * (values.ndim - 5)] * flux_r
+    faces = np.zeros(weighted.shape[:3] + (weighted.shape[3] + 1,) + weighted.shape[4:], dtype=np.float64)
+    faces[:, :, :, 1:-1, ...] = 0.5 * (weighted[:, :, :, :-1, ...] + weighted[:, :, :, 1:, ...])
+    div_r = (faces[:, :, :, 1:, ...] - faces[:, :, :, :-1, ...]) / dr
+    div_r = div_r / r_centers[(None,) * 3 + (slice(None),) + (None,) * (values.ndim - 5)]
+    return div_x + div_theta + div_r
+
+
+def _laplacian_cylindrical_scalar(values: Array, lx: float, theta_period: float, r_centers: Array) -> Array:
+    """Return scalar cylindrical Laplacian using divergence of gradient."""
+    return _divergence_cylindrical_flux(_gradient_cylindrical_scalar(values, lx, theta_period, r_centers), lx, theta_period, r_centers)
+
+
+def _gradient_cylindrical_vector(values: Array, lx: float, theta_period: float, r_centers: Array) -> Array:
+    """Differentiate every vector component over the 3D cylindrical grid."""
+    out = np.empty(values.shape[:-1] + (3, values.shape[-1]), dtype=np.float64)
+    for component in range(values.shape[-1]):
+        out[..., :, component] = _gradient_cylindrical_scalar(values[..., component], lx, theta_period, r_centers)
+    return out
+
+
+def _gradient_cylindrical_rank2(values: Array, lx: float, theta_period: float, r_centers: Array) -> Array:
+    """Differentiate every rank-2 tensor component over the 3D cylindrical grid."""
+    out = np.empty(values.shape[:-2] + (3, values.shape[-2], values.shape[-1]), dtype=np.float64)
+    for row in range(values.shape[-2]):
+        for col in range(values.shape[-1]):
+            out[..., :, row, col] = _gradient_cylindrical_scalar(values[..., row, col], lx, theta_period, r_centers)
+    return out
+
+
+def _laplacian_cylindrical_vector(values: Array, lx: float, theta_period: float, r_centers: Array) -> Array:
+    """Apply the cylindrical scalar Laplacian to every vector component."""
+    out = np.empty_like(values, dtype=np.float64)
+    for component in range(values.shape[-1]):
+        out[..., component] = _laplacian_cylindrical_scalar(values[..., component], lx, theta_period, r_centers)
+    return out
+
+
+def _laplacian_cylindrical_rank2(values: Array, lx: float, theta_period: float, r_centers: Array) -> Array:
+    """Apply the cylindrical scalar Laplacian to every rank-2 component."""
+    out = np.empty_like(values, dtype=np.float64)
+    for row in range(values.shape[-2]):
+        for col in range(values.shape[-1]):
+            out[..., row, col] = _laplacian_cylindrical_scalar(values[..., row, col], lx, theta_period, r_centers)
+    return out
+
+
+def _estimate_ubar(y_p: Array, a: Array) -> Array:
+    """Project measured/fitted P flux onto all three rows of A."""
+    denominator = np.sum(a * a, axis=(-2, -1))
+    numerator = np.sum(y_p * a, axis=(-2, -1))
+    return np.divide(numerator, denominator, out=np.zeros_like(numerator), where=denominator > 0.0)
+
+
+def _p_dot_alpha_traceless(p: Array) -> Array:
+    """Build symmetric traceless P-alignment flux tensor over all 3 directions."""
+    out = np.zeros(p.shape[:-1] + (3, 3, 3), dtype=np.float64)
+    identity = np.eye(3, dtype=np.float64)
+    for k in range(3):
+        for a in range(3):
+            for b in range(3):
+                out[..., k, a, b] = p[..., a] * float(k == b) + p[..., b] * float(k == a) - (2.0 / 3.0) * p[..., k] * identity[a, b]
+    return out
+
+
+def _grad_p_symmetric_traceless(p: Array, lx: float, theta_period: float, r_centers: Array) -> Array:
+    """Build symmetric traceless gradient-of-P tensor over all 3 directions."""
+    grad_p = _gradient_cylindrical_vector(p, lx, theta_period, r_centers)
+    out = np.zeros(p.shape[:-1] + (3, 3, 3), dtype=np.float64)
+    identity = np.eye(3, dtype=np.float64)
+    for k in range(3):
+        trace_part = (2.0 / 3.0) * grad_p[..., k, k]
+        for a in range(3):
+            for b in range(3):
+                out[..., k, a, b] = grad_p[..., k, a] * float(k == b) + grad_p[..., k, b] * float(k == a) - trace_part * identity[a, b]
+    return out
+
+
+def _radial_spacing(r_centers: Array) -> float:
+    """Return the uniform radial spacing."""
+    assert r_centers.size >= 2, "at least two radial bins are required for 3D derivatives"
+    spacing = np.diff(r_centers)
+    assert np.allclose(spacing, spacing[0]), "radial centers must be uniformly spaced"
+    return float(spacing[0])
+
+
+def _sample_field_components(field: Array, sample_indices: Array) -> Array:
+    """Sample all non-grid components at sampled `(T,Nx,Ntheta,Nr)` rows."""
+    values = field[sample_indices[:, 0], sample_indices[:, 1], sample_indices[:, 2], sample_indices[:, 3]]
+    return np.asarray(values, dtype=np.float64).reshape(-1)
+
+
+def _component_row_index(sample_indices: Array, component_shape: tuple[int, ...]) -> Array:
+    """Build row metadata matching `_sample_field_components` flattening order."""
+    component_count = int(np.prod(component_shape, dtype=np.int64)) if component_shape else 1
+    rows = np.repeat(sample_indices, component_count, axis=0)
+    if not component_shape:
+        return rows
+    component_indices = np.array(np.unravel_index(np.arange(component_count), component_shape)).T
+    tiled = np.tile(component_indices, (sample_indices.shape[0], 1))
+    return np.hstack((rows, tiled.astype(np.int64, copy=False)))
 
 
 def _sample_component_matrix(
@@ -699,7 +944,7 @@ def _mechanical_valid_mask(spectral: dict[str, Array]) -> Array:
     """Return grid points where all mechanical target and candidate inputs are finite."""
     valid = np.isfinite(spectral["rho"])
     for name in ("P", "A", "J_rho", "J_P", "J_Q", "Y_rho", "Y_P", "Y_Q"):
-        axes = tuple(range(3, spectral[name].ndim))
+        axes = tuple(range(4, spectral[name].ndim))
         valid &= np.all(np.isfinite(spectral[name]), axis=axes)
     valid &= np.isfinite(spectral["psi6_sq"])
     return valid
@@ -739,14 +984,14 @@ def _validate_temporal_alignment(
 ) -> None:
     """Assert that a filtered field uses the same time coordinates as rho."""
     assert rho_time.filtered.shape == rho_time.derivative.shape
-    assert j_time.filtered.shape[:3] == rho_time.filtered.shape
+    assert j_time.filtered.shape[:4] == rho_time.filtered.shape
     assert np.array_equal(rho_time.times, j_time.times)
     assert np.array_equal(rho_time.scaled_times, j_time.scaled_times)
 
 
 def _sample_scalar(field: Array, sample_indices: Array) -> Array:
-    """Sample scalar field values at ``(time, x, y)`` integer indices."""
-    return field[sample_indices[:, 0], sample_indices[:, 1], sample_indices[:, 2]]
+    """Sample scalar field values at ``(time, x, theta, r)`` integer indices."""
+    return field[sample_indices[:, 0], sample_indices[:, 1], sample_indices[:, 2], sample_indices[:, 3]]
 
 
 def _validate_sample_count(requested: int, actual: int, replace: bool) -> None:

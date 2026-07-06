@@ -44,14 +44,14 @@ def particle_surface_velocities(
     active: ActiveMatterArrays,
     config: RhoFittingConfig,
 ) -> np.ndarray:
-    """Estimate particle velocities in the surface-oriented cylinder basis.
+    """Estimate particle velocities in the cylindrical basis.
 
     Parameters:
         active: Particle coordinates whose last axis stores ``x`` and ``theta``.
         config: Run configuration providing the simulation timestep.
 
     Returns:
-        ``(frames, particles, 3)`` velocities in axial, ``R*theta``, and radial directions.
+        ``(frames, particles, 3)`` velocities in axial, azimuthal, and radial directions.
 
     Edge cases:
         End frames use one-sided two-frame differences; all angular and axial
@@ -70,8 +70,7 @@ def particle_surface_velocities(
         dt = times[right] - times[left]
         assert dt > 0.0, "steps must increase over time"
         velocities[frame, :, 0] = minimum_image(coords[right, :, 0] - coords[left, :, 0], lx) / dt
-        velocities[frame, :, 1] = (
-            active.radius * minimum_image(coords[right, :, 1] - coords[left, :, 1], 2.0 * np.pi) / dt
-        )
+        local_radius = 0.5 * (coords[right, :, 2] + coords[left, :, 2])
+        velocities[frame, :, 1] = local_radius * minimum_image(coords[right, :, 1] - coords[left, :, 1], 2.0 * np.pi) / dt
         velocities[frame, :, 2] = (coords[right, :, 2] - coords[left, :, 2]) / dt
     return np.ascontiguousarray(velocities)

@@ -46,6 +46,8 @@ def write_mechanical_outputs(
         raw_J_rho=coarse["J_rho"],
         raw_J_P=coarse["J_P"],
         raw_J_Q=coarse["J_Q"],
+        r_edges=coarse["r_edges"],
+        r_centers=coarse["r_centers"],
         rho=spectral["rho"],
         P=spectral["P"],
         Q=spectral["Q"],
@@ -113,7 +115,7 @@ def write_mechanical_outputs(
             case_id=config.case_id,
             nd=arrays["sample_indices"].shape[0],
             frames=active.coords.shape[0],
-            grid_shape=(active.x_centers.size, active.theta_centers.size),
+            grid_shape=(active.x_centers.size, active.theta_centers.size, coarse["r_centers"].size),
             sigma=config.settings.sigma,
             cheb_cutoff=config.settings.cheb_cutoff,
             fits={"Y_rho": y_rho_fit, "Y_P": y_p_fit, "Y_Q": y_q_fit},
@@ -128,7 +130,7 @@ def mechanical_report_lines(
     case_id: str,
     nd: int,
     frames: int,
-    grid_shape: tuple[int, int],
+    grid_shape: tuple[int, int, int],
     sigma: float,
     cheb_cutoff: int,
     fits: dict[str, StabilityResult],
@@ -139,11 +141,11 @@ def mechanical_report_lines(
         "",
         "## Settings",
         f"- frames: {frames}",
-        f"- grid: {grid_shape[0]} x {grid_shape[1]}",
+        f"- grid: {grid_shape[0]} x {grid_shape[1]} x {grid_shape[2]}",
         f"- samples: {nd}",
         f"- sigma: {sigma:.8g}",
         f"- cheb_cutoff: {cheb_cutoff}",
-        "- analysis: divergence-first mechanical moment fits with y = R theta",
+        "- analysis: divergence-first global cylindrical 3D mechanical moment fits",
         "",
     ]
     for target, fit in fits.items():
@@ -193,15 +195,28 @@ def cache_metadata(active: ActiveMatterArrays, config: RhoFittingConfig) -> dict
     """Collect run metadata stored alongside rho-fitting NPZ outputs."""
     assert config.settings is not None, "rho fitting settings were not initialized"
     lx, ly = surface_lengths(active.x_edges, active.theta_edges, active.radius)
+    if config.settings.radial_range is None:
+        finite_r = active.coords[..., 2][np.isfinite(active.coords[..., 2])]
+        r_min = float(np.min(finite_r))
+        r_max = float(np.max(finite_r))
+    else:
+        r_min, r_max = config.settings.radial_range
+    r_edges = np.linspace(r_min, r_max, config.settings.radial_bins + 1, dtype=float)
+    r_centers = 0.5 * (r_edges[:-1] + r_edges[1:])
     return {
         "case_id": config.case_id,
+        "coordinate_system": "cylindrical_3d",
         "active_fields_path": str(config.paths.active_fields_path),
         "active_fields_mtime": config.paths.active_fields_path.stat().st_mtime,
         "Nx": int(active.x_centers.size),
-        "Ny": int(active.theta_centers.size),
+        "Ntheta": int(active.theta_centers.size),
+        "Nr": int(r_centers.size),
         "sigma": float(config.settings.sigma),
         "lx": float(lx),
         "ly": float(ly),
+        "theta_period": float(active.theta_edges[-1] - active.theta_edges[0]),
+        "r_edges": [float(value) for value in r_edges],
+        "r_centers": [float(value) for value in r_centers],
         "radius": float(active.radius),
         "cheb_cutoff": int(config.settings.cheb_cutoff),
         "nd": int(config.settings.nd),

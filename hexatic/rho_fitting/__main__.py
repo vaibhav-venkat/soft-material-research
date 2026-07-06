@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 
 from .config import NumericalSettings, RhoFittingConfig
 from .fit import run
@@ -12,6 +13,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Fit rho mechanical dynamics.")
     parser.add_argument("--case", default="radius_15D")
     parser.add_argument("--nd", type=int, default=None)
+    parser.add_argument("--radial-bins", type=int, default=None)
+    parser.add_argument("--radial-range", type=float, nargs=2, default=None, metavar=("R_MIN", "R_MAX"))
     parser.add_argument("--mechanical-flux-weight", type=float, default=None)
     parser.add_argument(
         "--rho-divergence-weight",
@@ -30,13 +33,23 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     settings = None
-    if args.nd is not None or args.mechanical_flux_weight is not None:
+    if (
+        args.nd is not None
+        or args.mechanical_flux_weight is not None
+        or args.radial_bins is not None
+        or args.radial_range is not None
+    ):
+        base = NumericalSettings()
         kwargs = {}
         if args.nd is not None:
             kwargs["nd"] = args.nd
         if args.mechanical_flux_weight is not None:
             kwargs["mechanical_flux_weight"] = args.mechanical_flux_weight
-        settings = NumericalSettings(**kwargs)
+        if args.radial_bins is not None:
+            kwargs["radial_bins"] = args.radial_bins
+        if args.radial_range is not None:
+            kwargs["radial_range"] = tuple(args.radial_range)
+        settings = replace(base, **kwargs)
     config = RhoFittingConfig(
         case_id=args.case,
         overwrite=args.overwrite,
