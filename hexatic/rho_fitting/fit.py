@@ -15,8 +15,8 @@ from .basis import ChebyshevTimeResult, chebyshev_filter_and_derivative, tempora
 from .config import NumericalSettings, RhoFittingConfig, radius_from_case_id
 from .geometry import surface_lengths, theta_to_y
 from .io import ActiveMatterArrays, load_active_matter_npz
-from .library import flux_names, mechanical_labels, term_labels, term_names
-from .outputs import mechanical_report_lines, write_density_outputs, write_mechanical_outputs
+from .library import mechanical_labels
+from .outputs import mechanical_report_lines, write_mechanical_outputs
 from .particles import particle_surface_velocities, particle_tangent_directions
 from .plots import write_temporal_power_plots
 from .regression import StabilityResult, stability_selection
@@ -55,18 +55,6 @@ class MechanicalFitPayload(TypedDict):
     Y_P_names: Array
     Y_Q_names: Array
     F_rho_prediction: Array
-
-
-class DensityFitPayload(TypedDict):
-    """Density fit matrix, sampled target, candidate metadata, and fitted model result."""
-
-    X_density: Array
-    y_density: Array
-    sample_indices: Array
-    term_names: Array
-    term_labels: Array
-    term_fluxes: Array
-    fit: StabilityResult
 
 
 @dataclass(frozen=True)
@@ -396,11 +384,6 @@ def spectral_active_fields(
         )
     )
     lx, ly = surface_lengths(active.x_edges, active.theta_edges, active.radius)
-    fluxes = core.build_density_fluxes(
-        np.ascontiguousarray(rho_time.filtered, dtype=np.float64),
-        lx,
-        ly,
-    )
     targets = core.build_mechanical_targets(
         np.ascontiguousarray(p_time.filtered, dtype=np.float64),
         np.ascontiguousarray(j_rho_time.filtered, dtype=np.float64),
@@ -425,10 +408,6 @@ def spectral_active_fields(
         "Y_rho": np.asarray(targets["Y_rho"]),
         "Y_P": np.asarray(targets["Y_P"]),
         "Y_Q": np.asarray(targets["Y_Q"]),
-        "J_grad_rho": np.asarray(fluxes["grad_rho"]),
-        "J_grad_lap_rho": np.asarray(fluxes["grad_lap_rho"]),
-        "J_lap_rho_grad_rho": np.asarray(fluxes["lap_rho_grad_rho"]),
-        "J_grad_rho_cubed": np.asarray(fluxes["grad_rho_cubed"]),
         "partial_t_rho": rho_time.derivative,
         "temporal_power": temporal_power_spectrum(*coefficients),
         "cheb_times": rho_time.times,
@@ -752,79 +731,6 @@ def _load_hexatic_abs_frames(path: Path, active: ActiveMatterArrays) -> Array:
     values[frame_indices, particle_indices] = table[:, 5]
     assert np.all(np.isfinite(values)), "hexatic order table is incomplete"
     return values
-
-
-def fit_density(
-    active: ActiveMatterArrays,
-    spectral: dict[str, Array],
-    config: RhoFittingConfig,
-) -> DensityFitPayload:
-    """Fit the older scalar density continuity library against ``partial_t_rho``.
-
-    Parameters:
-        active: Input grid metadata used to build periodic derivative terms.
-        spectral: Filtered density fields and density time derivative.
-        config: Sampling and sparse-regression settings.
-
-    Returns:
-        Sampled density design matrix, target vector, term metadata, flux keys, and fit.
-
-    Edge cases:
-        This fits scalar continuity terms only and is separate from the mechanical
-        divergence-aware ``Y_rho``, ``Y_P``, and ``Y_Q`` closures.
-    """
-    core = _core()
-    settings = _settings(config)
-    names = term_names()
-    labels = term_labels()
-    valid_mask = np.isfinite(spectral["rho"]) & np.isfinite(spectral["partial_t_rho"])
-    sample_indices = np.asarray(
-        core.sample_rows(
-            np.ascontiguousarray(valid_mask),
-            settings.nd,
-            settings.seed,
-            settings.replace,
-        )
-    )
-    _validate_sample_count(settings.nd, sample_indices.shape[0], settings.replace)
-    lx, ly = surface_lengths(active.x_edges, active.theta_edges, active.radius)
-    X = np.asarray(
-        core.build_density_library(
-            np.ascontiguousarray(spectral["rho"], dtype=np.float64),
-            np.ascontiguousarray(sample_indices, dtype=np.int64),
-            list(names),
-            lx,
-            ly,
-        )
-    )
-    y = _sample_scalar(spectral["partial_t_rho"], sample_indices)
-    finite_rows = np.isfinite(y) & np.all(np.isfinite(X), axis=1)
-    X = X[finite_rows]
-    y = y[finite_rows]
-    sample_indices = sample_indices[finite_rows]
-    _log(f"fit rows={X.shape[0]} terms={', '.join(names)}")
-    fit = stability_selection(
-        X,
-        y,
-        names,
-        labels,
-        seed=settings.seed,
-        tau_count=settings.tau_count,
-        tau_eps=settings.tau_eps,
-        subsamples=settings.subsamples,
-        importance_threshold=settings.importance_threshold,
-        alpha=settings.alpha,
-        max_iter=settings.stlsq_max_iter,
-    )
-    return {
-        "X_density": X,
-        "y_density": y,
-        "sample_indices": sample_indices,
-        "term_names": np.asarray(names),
-        "term_labels": np.asarray(labels),
-        "term_fluxes": np.asarray(flux_names()),
-        "fit": fit,
-    }
 
 
 def _validate_temporal_alignment(

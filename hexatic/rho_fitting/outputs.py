@@ -12,9 +12,8 @@ from .cache import write_npz_atomic
 from .config import RhoFittingConfig
 from .geometry import surface_lengths
 from .io import ActiveMatterArrays
-from .plots import write_density_plots
 from .regression import StabilityResult
-from .report import density_report_lines, write_report
+from .report import write_report
 
 
 def write_mechanical_outputs(
@@ -188,83 +187,6 @@ def mechanical_report_lines(
                 lines.append(f"| {tau_index} | {tau:.6g} | {values} |")
             lines.append("")
     return lines
-
-
-def write_density_outputs(
-    active: ActiveMatterArrays,
-    coarse: dict[str, np.ndarray],
-    spectral: dict[str, np.ndarray],
-    fit_payload: Mapping[str, np.ndarray | StabilityResult],
-    config: RhoFittingConfig,
-) -> tuple[Path, Path]:
-    """Write density fit cache arrays, report text, and optional plots."""
-    fit = fit_payload["fit"]
-    assert isinstance(fit, StabilityResult), "fit payload is missing StabilityResult"
-    arrays = cast(Mapping[str, np.ndarray], fit_payload)
-    assert config.settings is not None, "rho fitting settings were not initialized"
-    cache_path = config.output_dir / f"{config.case_id}_fit_result.npz"
-    report_path = config.output_dir / f"{config.case_id}_rho_fitting_report.md"
-    write_npz_atomic(
-        cache_path,
-        overwrite=config.overwrite,
-        metadata=cache_metadata(active, config),
-        raw_rho=coarse["rho"],
-        raw_J_density=coarse["J_density"],
-        rho=spectral["rho"],
-        J_density=spectral["J_density"],
-        J_grad_rho=spectral["J_grad_rho"],
-        J_grad_lap_rho=spectral["J_grad_lap_rho"],
-        J_lap_rho_grad_rho=spectral["J_lap_rho_grad_rho"],
-        J_grad_rho_cubed=spectral["J_grad_rho_cubed"],
-        partial_t_rho=spectral["partial_t_rho"],
-        temporal_power=spectral["temporal_power"],
-        cheb_times=spectral["cheb_times"],
-        cheb_scaled_times=spectral["cheb_scaled_times"],
-        sample_indices=arrays["sample_indices"],
-        X_density=arrays["X_density"],
-        y_density=arrays["y_density"],
-        y_pred=fit.y_pred,
-        term_names=arrays["term_names"],
-        term_labels=arrays["term_labels"],
-        term_fluxes=arrays["term_fluxes"],
-        coefficients=fit.coefficients,
-        importance=fit.importance,
-        importance_path=fit.importance_path,
-        tau_values=fit.tau_values,
-        tau_index=np.asarray(-1 if fit.tau_index is None else fit.tau_index),
-        active=fit.active,
-        raw_correlations=fit.raw_correlations,
-        rmse=np.asarray(fit.rmse),
-        r2=np.asarray(fit.r2),
-    )
-    write_report(
-        report_path,
-        density_report_lines(
-            case_id=config.case_id,
-            nd=arrays["sample_indices"].shape[0],
-            frames=active.coords.shape[0],
-            grid_shape=(active.x_centers.size, active.theta_centers.size),
-            sigma=config.settings.sigma,
-            cheb_cutoff=config.settings.cheb_cutoff,
-            fit=fit,
-        ),
-        overwrite=config.overwrite,
-    )
-    if config.make_plots:
-        lx, ly = surface_lengths(active.x_edges, active.theta_edges, active.radius)
-        write_density_plots(
-            config.output_dir,
-            config.case_id,
-            fit,
-            arrays["y_density"],
-            spectral["rho"],
-            spectral["partial_t_rho"],
-            spectral["temporal_power"],
-            config.settings.cheb_cutoff,
-            lx,
-            ly,
-        )
-    return cache_path, report_path
 
 
 def cache_metadata(active: ActiveMatterArrays, config: RhoFittingConfig) -> dict[str, object]:

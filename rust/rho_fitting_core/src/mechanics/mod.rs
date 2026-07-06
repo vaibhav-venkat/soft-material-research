@@ -17,6 +17,9 @@ pub use sampling::sample_component_rows;
 use math::delta;
 use validation::{validate_particle_fields, ParticleFieldInputs};
 
+const SURFACE_DIMS: usize = 2;
+const ORIENTATION_DIMS: usize = 3;
+
 #[non_exhaustive]
 pub struct MechanicalFields {
     /// Coarse-grained scalar density and mechanical moments/currents on the surface grid.
@@ -220,14 +223,27 @@ pub fn build_targets(
             "P must have shape (T,Nx,Ny,3)".to_string(),
         ));
     }
-    let expected_j_rho = [p.shape()[0], p.shape()[1], p.shape()[2], 2];
+    let expected_j_rho = [p.shape()[0], p.shape()[1], p.shape()[2], SURFACE_DIMS];
     if j_rho.shape() != expected_j_rho {
         return Err(CoreError::Shape(
             "J_rho must have shape (T,Nx,Ny,2)".to_string(),
         ));
     }
-    let expected_j_p = [p.shape()[0], p.shape()[1], p.shape()[2], 2, 3];
-    let expected_j_q = [p.shape()[0], p.shape()[1], p.shape()[2], 2, 3, 3];
+    let expected_j_p = [
+        p.shape()[0],
+        p.shape()[1],
+        p.shape()[2],
+        SURFACE_DIMS,
+        ORIENTATION_DIMS,
+    ];
+    let expected_j_q = [
+        p.shape()[0],
+        p.shape()[1],
+        p.shape()[2],
+        SURFACE_DIMS,
+        ORIENTATION_DIMS,
+        ORIENTATION_DIMS,
+    ];
     if j_p.shape() != expected_j_p {
         return Err(CoreError::Shape(
             "J_P must have shape (T,Nx,Ny,2,3)".to_string(),
@@ -247,7 +263,7 @@ pub fn build_targets(
     for t in 0..p.shape()[0] {
         for ix in 0..p.shape()[1] {
             for iy in 0..p.shape()[2] {
-                for k in 0..2 {
+                for k in 0..SURFACE_DIMS {
                     p_surface[IxDyn(&[t, ix, iy, k])] = p[IxDyn(&[t, ix, iy, k])];
                 }
             }

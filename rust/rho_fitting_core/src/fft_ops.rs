@@ -1,3 +1,11 @@
+//! Spectral finite-domain operators on the periodic cylinder surface grid.
+//!
+//! Fields are represented on a two-dimensional periodic domain with axes
+//! `(x, y)` where `y = R * theta`. The leading axis is time/frame, so scalar
+//! fields have shape `(T, Nx, Ny)` and surface vector fields have shape
+//! `(T, Nx, Ny, 2)`. All derivatives are computed frame-by-frame with 2D FFTs
+//! and physical domain lengths `lx` and `ly`.
+
 use std::f64::consts::PI;
 use std::sync::Arc;
 
@@ -7,11 +15,11 @@ use rustfft::{Fft, FftPlanner};
 
 use crate::{CoreError, CoreResult};
 
-/// Compute spectral periodic gradients of a scalar field as `(T, Nx, Ny, 2)`.
+/// Return the surface gradient of a scalar field.
 ///
-/// `field` is shaped `(T, Nx, Ny)`, while `lx` and `ly` are the periodic
-/// lengths of the two surface axes. The returned last axis stores derivatives
-/// along `x` and unwrapped `R theta`.
+/// Input shape is `(T, Nx, Ny)`. Output shape is `(T, Nx, Ny, 2)`, where the
+/// final axis stores derivatives with respect to `x` and physical surface
+/// coordinate `y = R * theta`.
 ///
 /// Edge cases: this assumes both spatial axes are periodic and non-empty; it
 /// does not window or pad non-periodic data.
@@ -34,17 +42,25 @@ pub fn gradient_scalar(field: ArrayView3<'_, f64>, lx: f64, ly: f64) -> CoreResu
     Ok(out)
 }
 
-/// Compute the spectral periodic scalar Laplacian.
+/// Return the scalar Laplacian of a periodic scalar field.
+///
+/// This applies the spectral multiplier `-(kx^2 + ky^2)` independently to each
+/// frame.
 pub fn laplacian_scalar(field: ArrayView3<'_, f64>, lx: f64, ly: f64) -> CoreResult<Array3<f64>> {
     repeated_laplacian_scalar(field, lx, ly, 1)
 }
 
-/// Compute the spectral periodic scalar bi-Laplacian.
+/// Return the scalar bilaplacian of a periodic scalar field.
+///
+/// This is equivalent to applying the Laplacian twice.
 pub fn bilaplacian_scalar(field: ArrayView3<'_, f64>, lx: f64, ly: f64) -> CoreResult<Array3<f64>> {
     repeated_laplacian_scalar(field, lx, ly, 2)
 }
 
-/// Apply the scalar Laplacian `order` times in spectral space.
+/// Return a scalar field after applying `order` Laplacians.
+///
+/// `order == 0` returns a copy of the input. Higher orders use the spectral
+/// multiplier `[-(kx^2 + ky^2)]^order`.
 pub fn repeated_laplacian_scalar(
     field: ArrayView3<'_, f64>,
     lx: f64,
@@ -58,10 +74,12 @@ pub fn repeated_laplacian_scalar(
     scalar_k_power(field, lx, ly, order)
 }
 
-/// Compute the spectral periodic divergence of a two-component surface vector.
+/// Return the surface divergence of a two-component vector field.
 ///
-/// `field` must be shaped `(T, Nx, Ny, 2)`. The last axis is interpreted as
-/// surface flux direction, not a 3D orientation component.
+/// Input shape is `(T, Nx, Ny, 2)`, with vector components ordered as
+/// `(x, y)`. Output shape is `(T, Nx, Ny)`.
+/// The last axis is interpreted as surface flux direction, not a 3D orientation
+/// component.
 pub fn divergence_vector(field: ArrayView4<'_, f64>, lx: f64, ly: f64) -> CoreResult<Array3<f64>> {
     let (frames, nx, ny) = validate_vector(field, lx, ly)?;
     let kx = wavenumbers(nx, lx);
@@ -88,22 +106,23 @@ pub fn divergence_vector(field: ArrayView4<'_, f64>, lx: f64, ly: f64) -> CoreRe
     Ok(out)
 }
 
-/// Apply the spectral scalar Laplacian to each component of a surface vector.
+/// Return the componentwise Laplacian of a two-component vector field.
 pub fn laplacian_vector(field: ArrayView4<'_, f64>, lx: f64, ly: f64) -> CoreResult<Array4<f64>> {
     vector_k_power(field, lx, ly, 1)
 }
 
-/// Apply the spectral scalar bi-Laplacian to each surface-vector component.
+/// Return the componentwise bilaplacian of a two-component vector field.
 pub fn bilaplacian_vector(field: ArrayView4<'_, f64>, lx: f64, ly: f64) -> CoreResult<Array4<f64>> {
     vector_k_power(field, lx, ly, 2)
 }
 
-/// Compute the gradient of the divergence of a surface vector field.
+/// Return `grad(div(field))` for a two-component surface vector field.
 pub fn grad_div_vector(field: ArrayView4<'_, f64>, lx: f64, ly: f64) -> CoreResult<Array4<f64>> {
     let div = divergence_vector(field, lx, ly)?;
     gradient_scalar(div.view(), lx, ly)
 }
 
+/// Apply the scalar spectral multiplier `[-(kx^2 + ky^2)]^order`.
 fn scalar_k_power(
     field: ArrayView3<'_, f64>,
     lx: f64,
@@ -130,6 +149,7 @@ fn scalar_k_power(
     Ok(out)
 }
 
+/// Apply either the vector Laplacian or bilaplacian componentwise.
 fn vector_k_power(
     field: ArrayView4<'_, f64>,
     lx: f64,
@@ -161,6 +181,7 @@ fn vector_k_power(
     Ok(out)
 }
 
+/// Validate scalar field shape and physical domain lengths.
 fn validate_scalar(
     field: ArrayView3<'_, f64>,
     lx: f64,
@@ -180,6 +201,7 @@ fn validate_scalar(
     Ok((frames, nx, ny))
 }
 
+/// Validate surface vector field shape and physical domain lengths.
 fn validate_vector(
     field: ArrayView4<'_, f64>,
     lx: f64,
@@ -195,6 +217,10 @@ fn validate_vector(
     Ok((frames, nx, ny))
 }
 
+/// Return FFT wavenumbers in rustfft order for a periodic domain.
+///
+/// The output ordering matches the unshifted discrete Fourier transform:
+/// non-negative modes first, then wrapped negative modes.
 fn wavenumbers(n: usize, length: f64) -> Vec<f64> {
     let cutoff = (n - 1) / 2;
     (0..n)
@@ -209,6 +235,7 @@ fn wavenumbers(n: usize, length: f64) -> Vec<f64> {
         .collect()
 }
 
+/// Compute the 2D forward FFT of one scalar frame.
 fn fft2_real(field: ArrayView3<'_, f64>, t: usize, nx: usize, ny: usize) -> Vec<Complex64> {
     let mut data = vec![Complex64::new(0.0, 0.0); nx * ny];
     for ix in 0..nx {
@@ -220,6 +247,7 @@ fn fft2_real(field: ArrayView3<'_, f64>, t: usize, nx: usize, ny: usize) -> Vec<
     data
 }
 
+/// Compute the 2D forward FFT of one component of one vector-field frame.
 fn fft2_vector_component(
     field: ArrayView4<'_, f64>,
     t: usize,
@@ -237,6 +265,7 @@ fn fft2_vector_component(
     data
 }
 
+/// Multiply a spectrum by an index-dependent spectral factor and invert it.
 fn inverse_with_multiplier<F>(
     spectrum: &[Complex64],
     nx: usize,
@@ -256,6 +285,7 @@ where
     inverse_complex(&data, nx, ny)
 }
 
+/// Compute the inverse 2D FFT and return normalized real values.
 fn inverse_complex(spectrum: &[Complex64], nx: usize, ny: usize) -> Vec<f64> {
     let mut data = spectrum.to_vec();
     fft2_in_place(&mut data, nx, ny, true);
@@ -263,6 +293,7 @@ fn inverse_complex(spectrum: &[Complex64], nx: usize, ny: usize) -> Vec<f64> {
     data.into_iter().map(|value| value.re / norm).collect()
 }
 
+/// Run an in-place separable 2D FFT over row-major `(Nx, Ny)` data.
 fn fft2_in_place(data: &mut [Complex64], nx: usize, ny: usize, inverse: bool) {
     let mut planner = FftPlanner::<f64>::new();
     let fft_y = plan_fft(&mut planner, ny, inverse);
@@ -285,6 +316,7 @@ fn fft2_in_place(data: &mut [Complex64], nx: usize, ny: usize, inverse: bool) {
     }
 }
 
+/// Create a forward or inverse FFT plan.
 fn plan_fft(planner: &mut FftPlanner<f64>, len: usize, inverse: bool) -> Arc<dyn Fft<f64>> {
     if inverse {
         planner.plan_fft_inverse(len)

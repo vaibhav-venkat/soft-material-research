@@ -5,7 +5,6 @@ pub mod coarse_grain_burn;
 pub mod errors;
 pub mod fft_ops;
 pub mod geometry;
-pub mod library;
 pub mod mechanics;
 pub mod python;
 pub mod sampling;

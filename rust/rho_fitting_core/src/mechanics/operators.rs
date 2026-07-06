@@ -24,7 +24,7 @@ pub(super) fn q_dot_grad_rho(
     q: ndarray::ArrayView5<'_, f64>,
     grad: ndarray::ArrayView4<'_, f64>,
 ) -> Array4<f64> {
-    // Contract the surface block of Q against the two-component rho gradient.
+    // Contract the surface block of Q against grad rho: einsum("...ka,...a->...k").
     let (frames, nx, ny, _, _) = q.dim();
     let mut out = Array4::<f64>::zeros((frames, nx, ny, 2));
     for t in 0..frames {

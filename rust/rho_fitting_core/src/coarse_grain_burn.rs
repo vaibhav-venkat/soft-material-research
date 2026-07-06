@@ -381,7 +381,7 @@ fn mechanical_burn_device(
             let y_chunk = tensor2(y_grid[start..end].to_vec(), [chunk, 1], device);
             let dx = minimum_image_tensor(x_chunk - x_particles.clone(), lx as f32);
             let dy = minimum_image_tensor(y_chunk - y_particles.clone(), ly as f32);
-            let dist2 = dx.clone() * dx + dy.clone() * dy;
+            let dist2: Tensor<BurnBackend, 2> = dx.clone() * dx + dy.clone() * dy;
             let weights = (dist2.clone() * (-0.5 / sigma2)).exp() * norm;
             let weights = weights.mask_fill(dist2.greater_elem(cutoff2), 0.0) * mask_tensor.clone();
 

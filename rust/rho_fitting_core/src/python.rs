@@ -9,7 +9,6 @@ use crate::coarse_grain;
 #[cfg(feature = "gpu-metal")]
 use crate::coarse_grain_burn;
 use crate::fft_ops;
-use crate::library;
 use crate::mechanics;
 use crate::sampling;
 use crate::CoreError;
@@ -169,53 +168,6 @@ fn sample_rows(
     let rows =
         sampling::sample_rows(valid_mask.as_array(), nd, seed, replace).map_err(to_py_err)?;
     Ok(rows.into_pyarray(py).into_any().unbind())
-}
-
-#[pyfunction]
-#[pyo3(signature = (rho, lx, ly))]
-/// Build density candidate flux fields for Python-side fitting and plotting.
-fn build_density_fluxes(
-    py: Python<'_>,
-    rho: PyReadonlyArray3<'_, f64>,
-    lx: f64,
-    ly: f64,
-) -> PyResult<Py<PyDict>> {
-    let fluxes = library::build_density_fluxes(rho.as_array(), lx, ly).map_err(to_py_err)?;
-    let out = PyDict::new(py);
-    out.set_item("grad_rho", fluxes.grad_rho.into_pyarray(py))?;
-    out.set_item("grad_lap_rho", fluxes.grad_lap_rho.into_pyarray(py))?;
-    out.set_item("lap_rho_grad_rho", fluxes.lap_rho_grad_rho.into_pyarray(py))?;
-    out.set_item("grad_rho_cubed", fluxes.grad_rho_cubed.into_pyarray(py))?;
-    Ok(out.unbind())
-}
-
-#[pyfunction]
-#[pyo3(signature = (rho, sample_indices, term_names, lx, ly))]
-/// Build sampled scalar density-library columns for the requested term names.
-fn build_density_library(
-    py: Python<'_>,
-    rho: PyReadonlyArray3<'_, f64>,
-    sample_indices: PyReadonlyArray2<'_, i64>,
-    term_names: Vec<String>,
-    lx: f64,
-    ly: f64,
-) -> PyResult<Py<PyAny>> {
-    for name in &term_names {
-        if !library::known_density_term(name) {
-            return Err(PyValueError::new_err(format!(
-                "unknown density term: {name}"
-            )));
-        }
-    }
-    let values = library::build_density_library(
-        rho.as_array(),
-        sample_indices.as_array(),
-        &term_names,
-        lx,
-        ly,
-    )
-    .map_err(to_py_err)?;
-    Ok(values.into_pyarray(py).into_any().unbind())
 }
 
 #[pyfunction]
@@ -423,8 +375,6 @@ fn _rho_fitting_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(coarse_grain_fields, m)?)?;
     m.add_function(wrap_pyfunction!(spatial_derivatives, m)?)?;
     m.add_function(wrap_pyfunction!(sample_rows, m)?)?;
-    m.add_function(wrap_pyfunction!(build_density_fluxes, m)?)?;
-    m.add_function(wrap_pyfunction!(build_density_library, m)?)?;
     m.add_function(wrap_pyfunction!(build_mechanical_fields, m)?)?;
     m.add_function(wrap_pyfunction!(build_mechanical_targets, m)?)?;
     m.add_function(wrap_pyfunction!(build_mechanical_libraries, m)?)?;
