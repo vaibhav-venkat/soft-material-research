@@ -7,11 +7,13 @@
 //! and physical domain lengths `lx` and `ly`.
 
 use std::f64::consts::PI;
-use std::sync::Arc;
 
 use ndarray::{Array3, Array4, ArrayView3, ArrayView4};
 use num_complex::Complex64;
-use rustfft::{Fft, FftPlanner};
+use phastft::{
+    fft_f64_dit_with_planner,
+    planner::{Direction, PlannerDit64},
+};
 
 use crate::{CoreError, CoreResult};
 
@@ -193,6 +195,11 @@ fn validate_scalar(
             "field axes must be non-empty".to_string(),
         ));
     }
+    if !(nx.is_power_of_two() && ny.is_power_of_two()) {
+        return Err(CoreError::InvalidInput(
+            "PhastFT spectral operators require power-of-two spatial axes".to_string(),
+        ));
+    }
     if !(lx.is_finite() && lx > 0.0 && ly.is_finite() && ly > 0.0) {
         return Err(CoreError::InvalidInput(
             "domain lengths must be positive".to_string(),
@@ -217,7 +224,7 @@ fn validate_vector(
     Ok((frames, nx, ny))
 }
 
-/// Return FFT wavenumbers in rustfft order for a periodic domain.
+/// Return FFT wavenumbers in unshifted DFT order for a periodic domain.
 ///
 /// The output ordering matches the unshifted discrete Fourier transform:
 /// non-negative modes first, then wrapped negative modes.
@@ -289,19 +296,22 @@ where
 fn inverse_complex(spectrum: &[Complex64], nx: usize, ny: usize) -> Vec<f64> {
     let mut data = spectrum.to_vec();
     fft2_in_place(&mut data, nx, ny, true);
-    let norm = (nx * ny) as f64;
-    data.into_iter().map(|value| value.re / norm).collect()
+    data.into_iter().map(|value| value.re).collect()
 }
 
 /// Run an in-place separable 2D FFT over row-major `(Nx, Ny)` data.
 fn fft2_in_place(data: &mut [Complex64], nx: usize, ny: usize, inverse: bool) {
-    let mut planner = FftPlanner::<f64>::new();
-    let fft_y = plan_fft(&mut planner, ny, inverse);
-    let fft_x = plan_fft(&mut planner, nx, inverse);
+    let direction = if inverse {
+        Direction::Inverse
+    } else {
+        Direction::Forward
+    };
+    let planner_y = PlannerDit64::new(ny);
+    let planner_x = PlannerDit64::new(nx);
 
     for ix in 0..nx {
         let start = ix * ny;
-        fft_y.process(&mut data[start..start + ny]);
+        fft1_in_place(&mut data[start..start + ny], direction, &planner_y);
     }
 
     let mut column = vec![Complex64::new(0.0, 0.0); nx];
@@ -309,18 +319,23 @@ fn fft2_in_place(data: &mut [Complex64], nx: usize, ny: usize, inverse: bool) {
         for ix in 0..nx {
             column[ix] = data[ix * ny + iy];
         }
-        fft_x.process(&mut column);
+        fft1_in_place(&mut column, direction, &planner_x);
         for ix in 0..nx {
             data[ix * ny + iy] = column[ix];
         }
     }
 }
 
-/// Create a forward or inverse FFT plan.
-fn plan_fft(planner: &mut FftPlanner<f64>, len: usize, inverse: bool) -> Arc<dyn Fft<f64>> {
-    if inverse {
-        planner.plan_fft_inverse(len)
-    } else {
-        planner.plan_fft_forward(len)
+/// Run one PhastFT transform on a complex slice.
+fn fft1_in_place(data: &mut [Complex64], direction: Direction, planner: &PlannerDit64) {
+    let mut reals = Vec::with_capacity(data.len());
+    let mut imags = Vec::with_capacity(data.len());
+    for value in data.iter() {
+        reals.push(value.re);
+        imags.push(value.im);
+    }
+    fft_f64_dit_with_planner(&mut reals, &mut imags, direction, planner);
+    for (value, (real, imag)) in data.iter_mut().zip(reals.into_iter().zip(imags)) {
+        *value = Complex64::new(real, imag);
     }
 }
