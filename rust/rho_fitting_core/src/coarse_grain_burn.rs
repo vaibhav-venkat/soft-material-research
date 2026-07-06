@@ -1,5 +1,8 @@
 use burn::prelude::*;
 use burn::tensor::TensorData;
+#[cfg(feature = "gpu-cuda")]
+use burn_cuda::{Cuda, CudaDevice};
+#[cfg(feature = "gpu-metal")]
 use burn_wgpu::{graphics, init_setup, Metal, WgpuDevice};
 use ndarray::{Array3, Array4, Array5, Array6, ArrayD, ArrayView1, ArrayView2, ArrayView3, IxDyn};
 use std::panic::{catch_unwind, set_hook, take_hook, AssertUnwindSafe};
@@ -8,7 +11,10 @@ use crate::coarse_grain;
 use crate::mechanics::MechanicalFields;
 use crate::{CoreError, CoreResult};
 
-type BurnBackend = Metal<f32, i32, u8>;
+#[cfg(feature = "gpu-cuda")]
+type CudaBackend = Cuda<f32, i32>;
+#[cfg(feature = "gpu-metal")]
+type MetalBackend = Metal<f32, i32, u8>;
 
 const GRID_CHUNK: usize = 512;
 
@@ -38,7 +44,7 @@ struct MechanicalInputs<'a> {
     sigma: f64,
 }
 
-/// Coarse-grain density and two-component polarization density on the Metal backend.
+/// Coarse-grain density and two-component polarization density on a Burn GPU backend.
 ///
 /// `coords` is `(T,N,3)`, `p_particles` is `(T,N,2)`, and `shell_mask` is
 /// `(T,N)`. Returns `rho` shaped `(T,Nx,Ny)` and `P_density` shaped
@@ -72,25 +78,21 @@ pub fn coarse_grain_fields(
         sigma,
     )?;
 
-    catch_burn_panic(|| {
-        let device = WgpuDevice::DefaultDevice;
-        init_setup::<graphics::Metal>(&device, Default::default());
-        let inputs = CoarseGrainInputs {
-            coords,
-            p_particles,
-            shell_mask,
-            x_centers,
-            y_centers,
-            lx,
-            ly,
-            radius,
-            sigma,
-        };
-        coarse_grain_burn_device(inputs, &device)
-    })
+    let inputs = CoarseGrainInputs {
+        coords,
+        p_particles,
+        shell_mask,
+        x_centers,
+        y_centers,
+        lx,
+        ly,
+        radius,
+        sigma,
+    };
+    run_coarse_grain(inputs)
 }
 
-/// Build mechanical moment fields and current tensors on the Metal backend.
+/// Build mechanical moment fields and current tensors on a Burn GPU backend.
 ///
 /// Particle arrays use `(T,N,component)` axes, output moments use 3D
 /// orientation components, and fluxes use 3D cylindrical directions.
@@ -155,46 +157,99 @@ pub fn build_mechanical_fields(
             "gamma must be finite and u0 must be nonzero".to_string(),
         ));
     }
-    if !r_centers.iter().all(|value| value.is_finite() && *value > 0.0) {
+    if !r_centers
+        .iter()
+        .all(|value| value.is_finite() && *value > 0.0)
+    {
         return Err(CoreError::InvalidInput(
             "radial centers must be finite and positive".to_string(),
         ));
     }
 
-    catch_burn_panic(|| {
-        let device = WgpuDevice::DefaultDevice;
-        init_setup::<graphics::Metal>(&device, Default::default());
-        let inputs = MechanicalInputs {
-            coords,
-            directions,
-            velocities,
-            psi6_abs,
-            mask,
-            x_centers,
-            theta_centers,
-            r_centers,
-            lx,
-            theta_period,
-            sigma,
-        };
-        mechanical_burn_device(inputs, &device)
-    })
+    let inputs = MechanicalInputs {
+        coords,
+        directions,
+        velocities,
+        psi6_abs,
+        mask,
+        x_centers,
+        theta_centers,
+        r_centers,
+        lx,
+        theta_period,
+        sigma,
+    };
+    run_mechanical(inputs)
 }
 
-fn catch_burn_panic<T>(func: impl FnOnce() -> CoreResult<T>) -> CoreResult<T> {
+fn catch_burn_panic<T>(backend: &str, func: impl FnOnce() -> CoreResult<T>) -> CoreResult<T> {
     // Suppress Burn's panic hook and report initialization panics as recoverable errors.
     let hook = take_hook();
     set_hook(Box::new(|_| {}));
     let result = catch_unwind(AssertUnwindSafe(func));
     set_hook(hook);
     result.map_err(|_| {
-        CoreError::InvalidInput("Burn Metal coarse-grain initialization panicked".to_string())
+        CoreError::InvalidInput(format!(
+            "Burn {backend} coarse-grain initialization panicked"
+        ))
     })?
 }
 
-fn coarse_grain_burn_device(
+fn run_coarse_grain(inputs: CoarseGrainInputs<'_>) -> CoreResult<(Array3<f64>, Array4<f64>)> {
+    #[cfg(feature = "gpu-cuda")]
+    if <CudaBackend as Backend>::device_count(0) > 0 {
+        let device = CudaDevice::new(0);
+        println!("[rho_fitting] using Burn CUDA backend");
+        return catch_burn_panic("CUDA", || {
+            coarse_grain_burn_device::<CudaBackend>(inputs, &device)
+        });
+    }
+
+    #[cfg(feature = "gpu-metal")]
+    {
+        let device = WgpuDevice::DefaultDevice;
+        println!("[rho_fitting] using Burn Metal/WGPU backend");
+        return catch_burn_panic("Metal/WGPU", || {
+            init_setup::<graphics::Metal>(&device, Default::default());
+            coarse_grain_burn_device::<MetalBackend>(inputs, &device)
+        });
+    }
+
+    #[allow(unreachable_code)]
+    Err(CoreError::InvalidInput(
+        "extension was built without a supported Burn GPU backend".to_string(),
+    ))
+}
+
+fn run_mechanical(inputs: MechanicalInputs<'_>) -> CoreResult<MechanicalFields> {
+    #[cfg(feature = "gpu-cuda")]
+    if <CudaBackend as Backend>::device_count(0) > 0 {
+        let device = CudaDevice::new(0);
+        println!("[rho_fitting] using Burn CUDA backend for mechanical fields");
+        return catch_burn_panic("CUDA", || {
+            mechanical_burn_device::<CudaBackend>(inputs, &device)
+        });
+    }
+
+    #[cfg(feature = "gpu-metal")]
+    {
+        let device = WgpuDevice::DefaultDevice;
+        println!("[rho_fitting] using Burn Metal/WGPU backend for mechanical fields");
+        return catch_burn_panic("Metal/WGPU", || {
+            init_setup::<graphics::Metal>(&device, Default::default());
+            mechanical_burn_device::<MetalBackend>(inputs, &device)
+        });
+    }
+
+    #[allow(unreachable_code)]
+    Err(CoreError::InvalidInput(
+        "extension was built without a supported Burn GPU backend".to_string(),
+    ))
+}
+
+fn coarse_grain_burn_device<B: Backend>(
     inputs: CoarseGrainInputs<'_>,
-    device: &WgpuDevice,
+    device: &B::Device,
 ) -> CoreResult<(Array3<f64>, Array4<f64>)> {
     // Execute legacy coarse-graining on an already-initialized Burn device.
     let CoarseGrainInputs {
@@ -239,8 +294,8 @@ fn coarse_grain_burn_device(
             let chunk = end - start;
             let x_chunk = tensor2(x_grid[start..end].to_vec(), [chunk, 1], device);
             let y_chunk = tensor2(y_grid[start..end].to_vec(), [chunk, 1], device);
-            let dx = minimum_image_tensor(x_chunk - x_particles.clone(), lx as f32);
-            let dy = minimum_image_tensor(y_chunk - y_particles.clone(), ly as f32);
+            let dx = minimum_image_tensor::<B>(x_chunk - x_particles.clone(), lx as f32);
+            let dy = minimum_image_tensor::<B>(y_chunk - y_particles.clone(), ly as f32);
             let dist2 = dx.clone() * dx + dy.clone() * dy;
             let weights = (dist2.clone() * (-0.5 / sigma2)).exp() * norm;
             let weights = weights.mask_fill(dist2.greater_elem(cutoff2), 0.0);
@@ -268,17 +323,17 @@ fn coarse_grain_burn_device(
     Ok((rho, p_density))
 }
 
-fn minimum_image_tensor(tensor: Tensor<BurnBackend, 2>, period: f32) -> Tensor<BurnBackend, 2> {
+fn minimum_image_tensor<B: Backend>(tensor: Tensor<B, 2>, period: f32) -> Tensor<B, 2> {
     // Wrap tensor displacements into the centered periodic minimum-image interval.
     tensor.clone() - (tensor / period).round() * period
 }
 
-fn tensor2(values: Vec<f32>, shape: [usize; 2], device: &WgpuDevice) -> Tensor<BurnBackend, 2> {
+fn tensor2<B: Backend>(values: Vec<f32>, shape: [usize; 2], device: &B::Device) -> Tensor<B, 2> {
     // Move a row/column matrix of f32 values onto the Burn device.
-    Tensor::<BurnBackend, 2>::from_data(TensorData::new(values, shape), device)
+    Tensor::<B, 2>::from_data(TensorData::new(values, shape), device)
 }
 
-fn tensor_vec(tensor: Tensor<BurnBackend, 1>) -> CoreResult<Vec<f32>> {
+fn tensor_vec<B: Backend>(tensor: Tensor<B, 1>) -> CoreResult<Vec<f32>> {
     // Read a one-dimensional Burn tensor back to host memory as f32 values.
     tensor
         .try_into_data()
@@ -287,9 +342,9 @@ fn tensor_vec(tensor: Tensor<BurnBackend, 1>) -> CoreResult<Vec<f32>> {
         .map_err(|error| CoreError::InvalidInput(format!("Burn data conversion failed: {error}")))
 }
 
-fn mechanical_burn_device(
+fn mechanical_burn_device<B: Backend>(
     inputs: MechanicalInputs<'_>,
-    device: &WgpuDevice,
+    device: &B::Device,
 ) -> CoreResult<MechanicalFields> {
     let MechanicalInputs {
         coords,
@@ -329,7 +384,8 @@ fn mechanical_burn_device(
             t + 1,
             frames
         );
-        let valid = mechanical_frame_mask(coords, directions, velocities, psi6_abs, mask, t, particles);
+        let valid =
+            mechanical_frame_mask(coords, directions, velocities, psi6_abs, mask, t, particles);
         let particle_x = sanitized_frame_component(coords, t, particles, 0);
         let particle_theta = sanitized_frame_component(coords, t, particles, 1);
         let particle_r = sanitized_frame_component(coords, t, particles, 2);
@@ -388,12 +444,14 @@ fn mechanical_burn_device(
             let x_chunk = tensor2(x_grid[start..end].to_vec(), [chunk, 1], device);
             let theta_chunk = tensor2(theta_grid[start..end].to_vec(), [chunk, 1], device);
             let r_chunk = tensor2(r_grid[start..end].to_vec(), [chunk, 1], device);
-            let dx = minimum_image_tensor(x_chunk - x_particles.clone(), lx as f32);
-            let dtheta = minimum_image_tensor(theta_chunk - theta_particles.clone(), theta_period as f32);
+            let dx = minimum_image_tensor::<B>(x_chunk - x_particles.clone(), lx as f32);
+            let dtheta = minimum_image_tensor::<B>(
+                theta_chunk - theta_particles.clone(),
+                theta_period as f32,
+            );
             let dy = r_chunk.clone() * dtheta;
             let dr = r_chunk - r_particles.clone();
-            let dist2: Tensor<BurnBackend, 2> =
-                dx.clone() * dx + dy.clone() * dy + dr.clone() * dr;
+            let dist2: Tensor<B, 2> = dx.clone() * dx + dy.clone() * dy + dr.clone() * dr;
             let weights = (dist2.clone() * (-0.5 / sigma2)).exp() * norm;
             let weights = weights.mask_fill(dist2.greater_elem(cutoff2), 0.0) * mask_tensor.clone();
 
@@ -490,9 +548,9 @@ fn mechanical_burn_device(
     })
 }
 
-fn weighted_sum(
-    weights: &Tensor<BurnBackend, 2>,
-    values: &Tensor<BurnBackend, 2>,
+fn weighted_sum<B: Backend>(
+    weights: &Tensor<B, 2>,
+    values: &Tensor<B, 2>,
     chunk: usize,
 ) -> CoreResult<Vec<f32>> {
     tensor_vec(
@@ -502,10 +560,10 @@ fn weighted_sum(
     )
 }
 
-fn weighted_sum_product(
-    weights: &Tensor<BurnBackend, 2>,
-    left: &Tensor<BurnBackend, 2>,
-    right: &Tensor<BurnBackend, 2>,
+fn weighted_sum_product<B: Backend>(
+    weights: &Tensor<B, 2>,
+    left: &Tensor<B, 2>,
+    right: &Tensor<B, 2>,
     chunk: usize,
 ) -> CoreResult<Vec<f32>> {
     tensor_vec(

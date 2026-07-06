@@ -3886,6 +3886,7 @@ name = "rho_fitting_core"
 version = "0.1.0"
 dependencies = [
  "burn",
+ "burn-cuda",
  "burn-wgpu",
  "ndarray 0.17.2",
  "num-complex",

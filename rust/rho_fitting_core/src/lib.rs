@@ -1,6 +1,6 @@
 pub mod arrays;
 pub mod coarse_grain;
-#[cfg(feature = "gpu-metal")]
+#[cfg(any(feature = "gpu-metal", feature = "gpu-cuda"))]
 pub mod coarse_grain_burn;
 pub mod errors;
 pub mod fft_ops;

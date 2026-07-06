@@ -6,7 +6,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use crate::coarse_grain;
-#[cfg(feature = "gpu-metal")]
+#[cfg(any(feature = "gpu-metal", feature = "gpu-cuda"))]
 use crate::coarse_grain_burn;
 use crate::fft_ops;
 use crate::mechanics;
@@ -39,14 +39,14 @@ fn coarse_grain_fields(
     radius: f64,
     sigma: f64,
 ) -> PyResult<Py<PyDict>> {
-    #[cfg(feature = "gpu-metal")]
+    #[cfg(any(feature = "gpu-metal", feature = "gpu-cuda"))]
     let gpu_requested = std::env::var("RHO_FITTING_GPU").is_ok_and(|value| value == "1");
-    #[cfg(not(feature = "gpu-metal"))]
+    #[cfg(not(any(feature = "gpu-metal", feature = "gpu-cuda")))]
     let gpu_requested = false;
 
-    #[cfg(feature = "gpu-metal")]
+    #[cfg(any(feature = "gpu-metal", feature = "gpu-cuda"))]
     let result = if gpu_requested {
-        println!("[rho_fitting] Burn GPU requested: RHO_FITTING_GPU=1, gpu-metal feature enabled");
+        println!("[rho_fitting] Burn GPU requested: RHO_FITTING_GPU=1, GPU feature enabled");
         coarse_grain_burn::coarse_grain_fields(
             coords.as_array(),
             p_particles.as_array(),
@@ -87,13 +87,15 @@ fn coarse_grain_fields(
         )
     };
 
-    #[cfg(not(feature = "gpu-metal"))]
+    #[cfg(not(any(feature = "gpu-metal", feature = "gpu-cuda")))]
     if gpu_requested {
-        eprintln!("[rho_fitting] RHO_FITTING_GPU=1 ignored; extension was built without gpu-metal");
+        eprintln!(
+            "[rho_fitting] RHO_FITTING_GPU=1 ignored; extension was built without a GPU feature"
+        );
     } else {
         println!("[rho_fitting] GPU not requested; using CPU coarse-grain");
     }
-    #[cfg(not(feature = "gpu-metal"))]
+    #[cfg(not(any(feature = "gpu-metal", feature = "gpu-cuda")))]
     let result = coarse_grain::coarse_grain_fields(
         coords.as_array(),
         p_particles.as_array(),
@@ -189,12 +191,12 @@ fn build_mechanical_fields(
     gamma: f64,
     u0: f64,
 ) -> PyResult<Py<PyDict>> {
-    #[cfg(feature = "gpu-metal")]
+    #[cfg(any(feature = "gpu-metal", feature = "gpu-cuda"))]
     let gpu_requested = std::env::var("RHO_FITTING_GPU").is_ok_and(|value| value == "1");
-    #[cfg(not(feature = "gpu-metal"))]
+    #[cfg(not(any(feature = "gpu-metal", feature = "gpu-cuda")))]
     let gpu_requested = false;
 
-    #[cfg(feature = "gpu-metal")]
+    #[cfg(any(feature = "gpu-metal", feature = "gpu-cuda"))]
     let result = if gpu_requested {
         println!("[rho_fitting] Burn GPU requested for mechanical fields");
         coarse_grain_burn::build_mechanical_fields(
@@ -250,11 +252,13 @@ fn build_mechanical_fields(
         )
     };
 
-    #[cfg(not(feature = "gpu-metal"))]
+    #[cfg(not(any(feature = "gpu-metal", feature = "gpu-cuda")))]
     if gpu_requested {
-        eprintln!("[rho_fitting] RHO_FITTING_GPU=1 ignored; extension was built without gpu-metal");
+        eprintln!(
+            "[rho_fitting] RHO_FITTING_GPU=1 ignored; extension was built without a GPU feature"
+        );
     }
-    #[cfg(not(feature = "gpu-metal"))]
+    #[cfg(not(any(feature = "gpu-metal", feature = "gpu-cuda")))]
     let result = mechanics::build_mechanical_fields(
         coords.as_array(),
         directions.as_array(),
