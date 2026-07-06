@@ -154,6 +154,7 @@ def write_component_animation(
         go.Frame(data=heatmaps(int(index)), name=str(int(index)))
         for index in frame_indices
     ]
+    first_frame = str(int(frame_indices[0]))
     layout: dict[str, Any] = {
         "title": title,
         "height": max(360, rows * 260),
@@ -161,18 +162,7 @@ def write_component_animation(
         "updatemenus": [
             {
                 "type": "buttons",
-                "buttons": [
-                    {
-                        "label": "Play",
-                        "method": "animate",
-                        "args": [None, {"frame": {"duration": 80, "redraw": True}, "fromcurrent": True}],
-                    },
-                    {
-                        "label": "Pause",
-                        "method": "animate",
-                        "args": [[None], {"frame": {"duration": 0, "redraw": False}, "mode": "immediate"}],
-                    },
-                ],
+                "buttons": animation_buttons(first_frame),
             }
         ],
     }
@@ -244,6 +234,7 @@ def write_scalar_animation(
         go.Frame(data=heatmap_pair(int(index)), name=str(int(index)))
         for index in frame_indices
     ]
+    first_frame = str(int(frame_indices[0]))
     fig.update_layout(
         title=f"{fit_label} vs {true_label} on the unwrapped cylinder surface",
         grid={"rows": 1, "columns": 2, "pattern": "independent"},
@@ -258,22 +249,31 @@ def write_scalar_animation(
         updatemenus=[
             {
                 "type": "buttons",
-                "buttons": [
-                    {
-                        "label": "Play",
-                        "method": "animate",
-                        "args": [None, {"frame": {"duration": 80, "redraw": True}, "fromcurrent": True}],
-                    },
-                    {
-                        "label": "Pause",
-                        "method": "animate",
-                        "args": [[None], {"frame": {"duration": 0, "redraw": False}, "mode": "immediate"}],
-                    },
-                ],
+                "buttons": animation_buttons(first_frame),
             }
         ],
     )
     fig.write_html(path)
+
+
+def animation_buttons(first_frame: str) -> list[dict[str, Any]]:
+    return [
+        {
+            "label": "Play",
+            "method": "animate",
+            "args": [None, {"frame": {"duration": 80, "redraw": True}, "fromcurrent": True}],
+        },
+        {
+            "label": "Pause",
+            "method": "animate",
+            "args": [[None], {"frame": {"duration": 0, "redraw": False}, "mode": "immediate"}],
+        },
+        {
+            "label": "Reset",
+            "method": "animate",
+            "args": [[first_frame], {"frame": {"duration": 0, "redraw": True}, "mode": "immediate"}],
+        },
+    ]
 
 
 def surface_axes(lx: float, ly: float, shape: tuple[int, int]) -> tuple[Array, Array]:

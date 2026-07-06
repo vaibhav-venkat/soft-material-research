@@ -18,8 +18,7 @@ from .operators import closure_fields, divergence_surface_flux, divergence_vecto
 Array = NDArray[Any]
 D = 3
 COMPONENTS = 13
-P_RELAXATION_RATE = 0.2
-Q_RELAXATION_RATE = 0.5
+RELAXATION_COEFFICIENT = -0.01
 VALIDATION_BOUND_SCALE = 10.0
 
 
@@ -87,9 +86,9 @@ class RhoFitPDE(PDEBase):
         rho_flux = self.inputs.u0 * p_eval[..., :2] + closures.f_rho / self.inputs.gamma
         d_rho = -divergence_vector(rho_flux, self.dx, self.dy)
         d_p = -self.inputs.u0 * divergence_surface_flux(closures.f_p[..., :, :, None], self.dx, self.dy)[..., 0]
-        d_p += -P_RELAXATION_RATE * p
+        d_p += RELAXATION_COEFFICIENT * p
         d_q = -divergence_surface_flux(closures.f_q, self.dx, self.dy)
-        d_q += -Q_RELAXATION_RATE * q
+        d_q += RELAXATION_COEFFICIENT * q
         return pack_state(state.grid, d_rho, d_p, d_q)
 
     def project_fields(self, rho: Array, p: Array, q: Array) -> tuple[Array, Array, Array]:
