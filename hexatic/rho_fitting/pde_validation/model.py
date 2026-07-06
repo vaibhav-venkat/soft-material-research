@@ -83,7 +83,7 @@ class RhoFitPDE(PDEBase):
             ubar_override=ubar,
         )
 
-        rho_flux = self.inputs.u0 * p_eval[..., :2] + closures.f_rho / self.inputs.gamma
+        rho_flux = self.inputs.u0 * p_eval + closures.f_rho / self.inputs.gamma
         d_rho = -divergence_vector(rho_flux, self.dx, self.dy)
         d_p = -self.inputs.u0 * divergence_surface_flux(closures.f_p[..., :, :, None], self.dx, self.dy)[..., 0]
         d_p += RELAXATION_COEFFICIENT * p

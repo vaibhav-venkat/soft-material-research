@@ -24,13 +24,13 @@ pub(super) fn q_dot_grad_rho(
     q: ndarray::ArrayView5<'_, f64>,
     grad: ndarray::ArrayView4<'_, f64>,
 ) -> Array4<f64> {
-    // Contract the surface block of Q against grad rho: einsum("...ka,...a->...k").
+    // Contract all Q rows against the surface gradient: einsum("...ka,...a->...k").
     let (frames, nx, ny, _, _) = q.dim();
-    let mut out = Array4::<f64>::zeros((frames, nx, ny, 2));
+    let mut out = Array4::<f64>::zeros((frames, nx, ny, 3));
     for t in 0..frames {
         for ix in 0..nx {
             for iy in 0..ny {
-                for k in 0..2 {
+                for k in 0..3 {
                     out[[t, ix, iy, k]] = q[[t, ix, iy, k, 0]] * grad[[t, ix, iy, 0]]
                         + q[[t, ix, iy, k, 1]] * grad[[t, ix, iy, 1]];
                 }

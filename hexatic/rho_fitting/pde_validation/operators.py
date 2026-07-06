@@ -74,7 +74,7 @@ def laplacian_rank2(values: Array, dx: float, dy: float) -> Array:
 
 
 def divergence_vector(values: Array, dx: float, dy: float) -> Array:
-    """Return the periodic divergence of a surface vector field with last axis length 2."""
+    """Return the periodic divergence of the first two surface components."""
     return (
         (np.roll(values[..., 0], -1, axis=0) - np.roll(values[..., 0], 1, axis=0)) / (2.0 * dx)
         + (np.roll(values[..., 1], -1, axis=1) - np.roll(values[..., 1], 1, axis=1)) / (2.0 * dy)
@@ -104,8 +104,15 @@ def divergence_surface_flux(values: Array, dx: float, dy: float) -> Array:
 
 
 def q_dot_grad_rho(q: Array, grad_rho: Array) -> Array:
-    """Contract the in-surface block of ``Q`` against ``grad(rho)``."""
-    return np.einsum("...ka,...a->...k", q[..., :2, :2], grad_rho)
+    """Contract all Q rows against the surface gradient of ``rho``."""
+    return np.einsum("...ka,...a->...k", q[..., :, :2], grad_rho)
+
+
+def embed_surface_vector3(values: Array) -> Array:
+    """Embed a two-component surface vector into the 3D cylinder basis."""
+    out = np.zeros(values.shape[:-1] + (3,), dtype=np.float64)
+    out[..., :2] = values[..., :2]
+    return out
 
 
 def closure_fields(
@@ -136,8 +143,8 @@ def closure_fields(
             transport separately from the fitted ``F_P`` projection.
 
     Returns:
-        ``ClosureFields`` with density flux, P flux, Q flux, estimated speed, and the
-        surface block of ``A = Q + rho I / 3``.
+        ``ClosureFields`` with 3D density flux, P flux, Q flux, estimated speed,
+        and the surface block of ``A = Q + rho I / 3``.
 
     Examples:
         ``fields = closure_fields(rho, p, q, psi6_sq, c_rho, c_p, c_q, dx, dy)``
@@ -153,8 +160,8 @@ def closure_fields(
     grad_rho = gradient_scalar(rho, dx, dy)
     grad_lap_rho = gradient_scalar(laplacian_scalar(rho, dx, dy), dx, dy)
     f_rho = (
-        y_rho_coefficients[0] * grad_rho
-        + y_rho_coefficients[1] * grad_lap_rho
+        y_rho_coefficients[0] * embed_surface_vector3(grad_rho)
+        + y_rho_coefficients[1] * embed_surface_vector3(grad_lap_rho)
         + y_rho_coefficients[2] * q_dot_grad_rho(q, grad_rho)
     )
 

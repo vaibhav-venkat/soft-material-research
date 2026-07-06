@@ -48,7 +48,8 @@ pub struct MechanicalLibraries {
 ///
 /// Particle arrays use `(T, N, component)` axes, grid centers define the
 /// unwrapped periodic cylinder surface, and the returned fields use 3D moment
-/// components with 2D surface flux directions.
+/// components with 2D surface flux directions, except density currents which
+/// retain all 3 components of the cylinder-oriented velocity basis.
 ///
 /// Example: `build_mechanical_fields(coords, dirs, vels, psi6, mask, xs, ys, lx, ly, radius, sigma, gamma, u0)`.
 ///
@@ -93,7 +94,7 @@ pub fn build_mechanical_fields(
     let mut psi6 = Array3::<f64>::zeros((frames, nx, ny));
     let mut p = Array4::<f64>::zeros((frames, nx, ny, 3));
     let mut q = Array5::<f64>::zeros((frames, nx, ny, 3, 3));
-    let mut j_rho = Array4::<f64>::zeros((frames, nx, ny, 2));
+    let mut j_rho = Array4::<f64>::zeros((frames, nx, ny, 3));
     let mut j_p = Array5::<f64>::zeros((frames, nx, ny, 2, 3));
     let mut j_q = Array6::<f64>::zeros((frames, nx, ny, 2, 3, 3));
     let cutoff = 4.0 * sigma;
@@ -116,6 +117,7 @@ pub fn build_mechanical_fields(
             let pz = directions[[t, particle, 2]];
             let vx = velocities[[t, particle, 0]];
             let vy = velocities[[t, particle, 1]];
+            let vz = velocities[[t, particle, 2]];
             let psi6_value = psi6_abs[[t, particle]];
             if !(particle_x.is_finite()
                 && particle_y.is_finite()
@@ -124,12 +126,13 @@ pub fn build_mechanical_fields(
                 && pz.is_finite()
                 && vx.is_finite()
                 && vy.is_finite()
+                && vz.is_finite()
                 && psi6_value.is_finite())
             {
                 continue;
             }
             let dir = [px, py, pz];
-            let vel = [vx, vy];
+            let vel = [vx, vy, vz];
             let mut q_particle = [[0.0; 3]; 3];
             for i in 0..3 {
                 for j in 0..3 {
@@ -152,7 +155,7 @@ pub fn build_mechanical_fields(
                     for component in 0..3 {
                         p[[t, ix, iy, component]] += weight * dir[component];
                     }
-                    for component in 0..2 {
+                    for component in 0..3 {
                         j_rho[[t, ix, iy, component]] += weight * vel[component];
                     }
                     for k in 0..2 {
@@ -204,7 +207,7 @@ pub fn build_mechanical_fields(
 
 /// Convert measured current tensors into mechanical closure targets.
 ///
-/// `P` must be `(T,Nx,Ny,3)`, `J_rho` `(T,Nx,Ny,2)`, `J_P`
+/// `P` must be `(T,Nx,Ny,3)`, `J_rho` `(T,Nx,Ny,3)`, `J_P`
 /// `(T,Nx,Ny,2,3)`, and `J_Q` `(T,Nx,Ny,2,3,3)`. Returns `(Y_rho,
 /// Y_P, Y_Q)` with the same target shapes.
 ///
@@ -223,10 +226,15 @@ pub fn build_targets(
             "P must have shape (T,Nx,Ny,3)".to_string(),
         ));
     }
-    let expected_j_rho = [p.shape()[0], p.shape()[1], p.shape()[2], SURFACE_DIMS];
+    let expected_j_rho = [
+        p.shape()[0],
+        p.shape()[1],
+        p.shape()[2],
+        ORIENTATION_DIMS,
+    ];
     if j_rho.shape() != expected_j_rho {
         return Err(CoreError::Shape(
-            "J_rho must have shape (T,Nx,Ny,2)".to_string(),
+            "J_rho must have shape (T,Nx,Ny,3)".to_string(),
         ));
     }
     let expected_j_p = [
@@ -259,17 +267,17 @@ pub fn build_targets(
             "gamma must be finite and u0 must be nonzero".to_string(),
         ));
     }
-    let mut p_surface = ArrayD::<f64>::zeros(IxDyn(&expected_j_rho));
+    let mut p_full = ArrayD::<f64>::zeros(IxDyn(&expected_j_rho));
     for t in 0..p.shape()[0] {
         for ix in 0..p.shape()[1] {
             for iy in 0..p.shape()[2] {
-                for k in 0..SURFACE_DIMS {
-                    p_surface[IxDyn(&[t, ix, iy, k])] = p[IxDyn(&[t, ix, iy, k])];
+                for k in 0..ORIENTATION_DIMS {
+                    p_full[IxDyn(&[t, ix, iy, k])] = p[IxDyn(&[t, ix, iy, k])];
                 }
             }
         }
     }
-    let y_rho = (&j_rho - &(p_surface * u0)) * gamma;
+    let y_rho = (&j_rho - &(p_full * u0)) * gamma;
     let y_p = j_p.to_owned() / u0;
     let y_q = j_q.to_owned();
     Ok((y_rho, y_p, y_q))

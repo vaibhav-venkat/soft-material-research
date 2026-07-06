@@ -107,7 +107,26 @@ fn build_y_rho_terms(
     let grad_rho = fft_ops::gradient_scalar(rho, lx, ly)?;
     let grad_lap_rho = fft_ops::gradient_scalar(lap_rho.view(), lx, ly)?;
     let q_grad_rho = q_dot_grad_rho(q, grad_rho.view());
-    Ok(vec![grad_rho, grad_lap_rho, q_grad_rho])
+    Ok(vec![
+        embed_surface_vector3(grad_rho.view()),
+        embed_surface_vector3(grad_lap_rho.view()),
+        q_grad_rho,
+    ])
+}
+
+fn embed_surface_vector3(values: ndarray::ArrayView4<'_, f64>) -> Array4<f64> {
+    let (frames, nx, ny, surface_components) = values.dim();
+    let mut out = Array4::<f64>::zeros((frames, nx, ny, 3));
+    for t in 0..frames {
+        for ix in 0..nx {
+            for iy in 0..ny {
+                for k in 0..surface_components.min(2) {
+                    out[[t, ix, iy, k]] = values[[t, ix, iy, k]];
+                }
+            }
+        }
+    }
+    out
 }
 
 fn build_y_p_terms(

@@ -58,9 +58,9 @@ pub(super) fn validate_particle_fields(inputs: ParticleFieldInputs<'_>) -> CoreR
             "coords must have shape (T,N,3)".to_string(),
         ));
     }
-    if directions.dim() != (frames, particles, 3) || velocities.dim() != (frames, particles, 2) {
+    if directions.dim() != (frames, particles, 3) || velocities.dim() != (frames, particles, 3) {
         return Err(CoreError::Shape(
-            "directions must have shape (T,N,3) and velocities must have shape (T,N,2)".to_string(),
+            "directions and velocities must have shape (T,N,3)".to_string(),
         ));
     }
     if psi6_abs.dim() != (frames, particles) {

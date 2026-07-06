@@ -44,14 +44,14 @@ def particle_surface_velocities(
     active: ActiveMatterArrays,
     config: RhoFittingConfig,
 ) -> np.ndarray:
-    """Estimate particle velocities on the unwrapped periodic cylinder surface.
+    """Estimate particle velocities in the surface-oriented cylinder basis.
 
     Parameters:
         active: Particle coordinates whose last axis stores ``x`` and ``theta``.
         config: Run configuration providing the simulation timestep.
 
     Returns:
-        ``(frames, particles, 2)`` velocities in axial and ``R*theta`` directions.
+        ``(frames, particles, 3)`` velocities in axial, ``R*theta``, and radial directions.
 
     Edge cases:
         End frames use one-sided two-frame differences; all angular and axial
@@ -59,7 +59,8 @@ def particle_surface_velocities(
     """
     coords = np.asarray(active.coords, dtype=np.float64)
     assert coords.shape[0] >= 2, "at least two frames are required for surface velocities"
-    velocities = np.zeros((*coords.shape[:2], 2), dtype=np.float64)
+    assert config.settings is not None, "rho fitting settings were not initialized"
+    velocities = np.zeros((*coords.shape[:2], 3), dtype=np.float64)
 
     lx, _ = surface_lengths(active.x_edges, active.theta_edges, active.radius)
     times = (np.asarray(active.steps, dtype=np.float64) - float(active.steps[0])) * config.settings.timestep
@@ -72,4 +73,5 @@ def particle_surface_velocities(
         velocities[frame, :, 1] = (
             active.radius * minimum_image(coords[right, :, 1] - coords[left, :, 1], 2.0 * np.pi) / dt
         )
+        velocities[frame, :, 2] = (coords[right, :, 2] - coords[left, :, 2]) / dt
     return np.ascontiguousarray(velocities)

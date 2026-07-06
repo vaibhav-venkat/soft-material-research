@@ -121,9 +121,9 @@ pub fn build_mechanical_fields(
             "coords must have shape (T,N,3)".to_string(),
         ));
     }
-    if directions.dim() != (frames, particles, 3) || velocities.dim() != (frames, particles, 2) {
+    if directions.dim() != (frames, particles, 3) || velocities.dim() != (frames, particles, 3) {
         return Err(CoreError::Shape(
-            "directions must have shape (T,N,3) and velocities must have shape (T,N,2)".to_string(),
+            "directions and velocities must have shape (T,N,3)".to_string(),
         ));
     }
     if psi6_abs.dim() != (frames, particles) {
@@ -311,7 +311,7 @@ fn mechanical_burn_device(
     let mut p = Array4::<f64>::zeros((frames, nx, ny, 3));
     let mut q = Array5::<f64>::zeros((frames, nx, ny, 3, 3));
     let mut a = Array5::<f64>::zeros((frames, nx, ny, 3, 3));
-    let mut j_rho = Array4::<f64>::zeros((frames, nx, ny, 2));
+    let mut j_rho = Array4::<f64>::zeros((frames, nx, ny, 3));
     let mut j_p = Array5::<f64>::zeros((frames, nx, ny, 2, 3));
     let mut j_q = Array6::<f64>::zeros((frames, nx, ny, 2, 3, 3));
     let x_grid = repeated_grid_values(x_centers, ny);
@@ -336,6 +336,7 @@ fn mechanical_burn_device(
         let vel = [
             frame_component(velocities, t, particles, 0, 1.0),
             frame_component(velocities, t, particles, 1, 1.0),
+            frame_component(velocities, t, particles, 2, 1.0),
         ];
         let psi6_particle = frame_scalar(psi6_abs, t, particles);
         let q_particle = [
@@ -361,6 +362,7 @@ fn mechanical_burn_device(
         let vel_tensors = [
             tensor2(vel[0].clone(), [1, particles], device),
             tensor2(vel[1].clone(), [1, particles], device),
+            tensor2(vel[2].clone(), [1, particles], device),
         ];
         let q_tensors = [
             tensor2(q_particle[0].clone(), [1, particles], device),
@@ -409,7 +411,7 @@ fn mechanical_burn_device(
                     &weighted_sum(&weights, &dir_tensors[component], chunk)?,
                 );
             }
-            for component in 0..2 {
+            for component in 0..3 {
                 write_chunk4(
                     &mut j_rho,
                     t,

@@ -270,11 +270,11 @@ def _validate_cached_fields(
     assert spectral["P"].shape == grid_shape + (3,), "cached P must use 3D orientation axes"
     assert spectral["Q"].shape == grid_shape + (3, 3), "cached Q must use 3D orientation axes"
     assert spectral["A"].shape == grid_shape + (3, 3), "cached A must use 3D orientation axes"
-    assert spectral["J_rho"].shape == grid_shape + (2,), "cached J_rho must use 2D surface flux axes"
+    assert spectral["J_rho"].shape == grid_shape + (3,), "cached J_rho must use 3D cylinder-basis flux axes"
     assert spectral["J_P"].shape == grid_shape + (2, 3), "cached J_P must use 2D flux and 3D moment axes"
     assert spectral["J_Q"].shape == grid_shape + (2, 3, 3), "cached J_Q must use 2D flux and 3D moment axes"
     assert spectral["psi6_sq"].shape == grid_shape, "cached psi6_sq shape does not match active grid"
-    assert spectral["Y_rho"].shape == grid_shape + (2,), "cached Y_rho shape is invalid"
+    assert spectral["Y_rho"].shape == grid_shape + (3,), "cached Y_rho shape is invalid"
     assert spectral["Y_P"].shape == grid_shape + (2, 3), "cached Y_P shape is invalid"
     assert spectral["Y_Q"].shape == grid_shape + (2, 3, 3), "cached Y_Q shape is invalid"
     assert int(np.asarray(spectral["cheb_times"]).shape[0]) == active.steps.size, "cached time axis length is invalid"
@@ -570,8 +570,8 @@ def _fit_divergence_primary_target(
 
     Parameters:
         target_name: Report label for progress logging.
-        target: Flux target with shape ``(T, Nx, Ny, 2, ...)``.
-        library: Candidate fluxes with shape ``(terms, T, Nx, Ny, 2, ...)``.
+        target: Flux target with shape ``(T, Nx, Ny, components, ...)``.
+        library: Candidate fluxes with shape ``(terms, T, Nx, Ny, components, ...)``.
         names: Candidate names aligned with ``library`` axis 0.
         sample_indices: Sampled ``(T, Nx, Ny)`` locations.
         config: Regression settings including optional flux-row weight.
@@ -662,9 +662,9 @@ def _sample_divergence_matrix(
 
 
 def _divergence_surface_flux_field(field: Array, lx: float, ly: float) -> Array:
-    """Compute centered periodic divergence for ``(T, Nx, Ny, 2, ...)`` flux fields."""
+    """Compute centered periodic divergence from the first two surface flux components."""
     field = np.asarray(field, dtype=np.float64)
-    assert field.ndim >= 4 and field.shape[3] == 2, "surface flux field must have shape (T,Nx,Ny,2,...)"
+    assert field.ndim >= 4 and field.shape[3] >= 2, "flux field must have shape (T,Nx,Ny,>=2,...)"
     nx = field.shape[1]
     ny = field.shape[2]
     dx = lx / nx
