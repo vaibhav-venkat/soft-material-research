@@ -1,0 +1,6 @@
+outs:
+- md5: bb0eb2fc968e31c1b3da52f3e3f9df24.dir
+  size: 289305552
+  nfiles: 3
+  hash: md5
+  path: hexatic_output

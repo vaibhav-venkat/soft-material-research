@@ -1,0 +1,6 @@
+outs:
+- md5: 136f0856bf6c812a3d39fdd65cf80b06.dir
+  size: 170185643
+  nfiles: 1
+  hash: md5
+  path: gsd
