@@ -89,6 +89,7 @@ class RhoFitPDE(PDEBase):
         d_p = -self.inputs.u0 * divergence_surface_flux(closures.f_p, self.dx, self.dtheta, self.inputs.r_centers)
         d_p += RELAXATION_COEFFICIENT * p
         d_q = -divergence_surface_flux(closures.f_q, self.dx, self.dtheta, self.inputs.r_centers)
+        d_q += closures.s_q
         d_q += RELAXATION_COEFFICIENT * q
         return pack_state(state.grid, d_rho, d_p, d_q)
 

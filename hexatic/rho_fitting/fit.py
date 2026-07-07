@@ -40,17 +40,15 @@ Y_RHO_NAMES = (
     "grad_lap_rho",
     "Q_dot_grad_rho",
     "P",
-    "rho_P",
-    "radial_projected_P",
-    "rho_radial_projected_P",
 )
 Y_P_NAMES = ("A", "rho_A", "psi6sq_A", "grad_P", "rho_grad_P", "grad_lap_P")
 Y_Q_NAMES = (
-    "Ubar_P_dot_alpha_traceless",
-    "grad_P_symmetric_traceless",
-    "grad_Q",
-    "rho_grad_Q",
-    "grad_lap_Q",
+    "tangential_projected_Ubar_P_alpha",
+    "radial_projected_Ubar_P_alpha",
+    "tangential_grad_Q",
+    "radial_grad_Q",
+    "Q",
+    "psi6sq_Q",
 )
 
 
@@ -677,7 +675,7 @@ def _fit_divergence_primary_target(
         evaluation_y=y_div,
         auxiliary_X=X_flux,
         auxiliary_y=y_flux,
-        non_positive_names=("grad_rho", "grad_P", "grad_Q"),
+        non_positive_names=("grad_rho", "grad_P", "tangential_grad_Q", "radial_grad_Q"),
     )
     return fit, rows, row_index
 
@@ -705,11 +703,8 @@ def _sample_divergence_design(
     y = _sample_field_components(target_div, sample_indices)
     row_index = _component_row_index(sample_indices, target_div.shape[4:])
     columns = [
-        _sample_field_components(
-            _divergence_cylindrical_flux(term, lx, theta_period, r_centers),
-            sample_indices,
-        )
-        for term in _candidate_flux_terms(target_name, spectral, lx, theta_period, r_centers)
+        _sample_field_components(term, sample_indices)
+        for term in _candidate_divergence_terms(target_name, spectral, lx, theta_period, r_centers)
     ]
     X = np.stack(columns, axis=1)
     finite = np.isfinite(y) & np.all(np.isfinite(X), axis=1)
@@ -734,6 +729,22 @@ def _sample_flux_design(
     return y[finite], X[finite]
 
 
+def _candidate_divergence_terms(
+    target_name: str,
+    spectral: dict[str, Array],
+    lx: float,
+    theta_period: float,
+    r_centers: Array,
+) -> list[Array]:
+    """Return candidate columns in the divergence/source space used for fitting."""
+    if target_name == "Y_Q":
+        return _candidate_q_divergence_terms(spectral, lx, theta_period, r_centers)
+    return [
+        _divergence_cylindrical_flux(term, lx, theta_period, r_centers)
+        for term in _candidate_flux_terms(target_name, spectral, lx, theta_period, r_centers)
+    ]
+
+
 def _candidate_flux_terms(
     target_name: str,
     spectral: dict[str, Array],
@@ -752,15 +763,11 @@ def _candidate_flux_terms(
         lap_rho = _laplacian_cylindrical_scalar(rho, lx, theta_period, r_centers)
         grad_lap_rho = _gradient_cylindrical_scalar(lap_rho, lx, theta_period, r_centers)
         q_grad_rho = np.einsum("...ka,...a->...k", q, grad_rho)
-        radial_p = _radial_projected_vector(p)
         return [
             grad_rho,
             grad_lap_rho,
             q_grad_rho,
             p,
-            rho[..., None] * p,
-            radial_p,
-            rho[..., None] * radial_p,
         ]
     if target_name == "Y_P":
         grad_p = _gradient_cylindrical_vector(p, lx, theta_period, r_centers)
@@ -776,17 +783,51 @@ def _candidate_flux_terms(
         ]
     if target_name == "Y_Q":
         grad_q = _gradient_cylindrical_rank2(q, lx, theta_period, r_centers)
-        lap_q = _laplacian_cylindrical_rank2(q, lx, theta_period, r_centers)
-        grad_lap_q = _gradient_cylindrical_rank2(lap_q, lx, theta_period, r_centers)
         ubar = _estimate_ubar(spectral["Y_P"], a)
+        ubar_p_alpha = ubar[..., None, None, None] * _p_dot_alpha_traceless(p)
+        zeros = np.zeros_like(ubar_p_alpha, dtype=np.float64)
         return [
-            ubar[..., None, None, None] * _p_dot_alpha_traceless(p),
-            _grad_p_symmetric_traceless(p, lx, theta_period, r_centers),
-            grad_q,
-            rho[..., None, None, None] * grad_q,
-            grad_lap_q,
+            _project_flux_directions(ubar_p_alpha, "tangential"),
+            _project_flux_directions(ubar_p_alpha, "radial"),
+            _project_flux_directions(grad_q, "tangential"),
+            _project_flux_directions(grad_q, "radial"),
+            zeros,
+            zeros,
         ]
     raise AssertionError(f"unknown mechanical target: {target_name}")
+
+
+def _candidate_q_divergence_terms(
+    spectral: dict[str, Array],
+    lx: float,
+    theta_period: float,
+    r_centers: Array,
+) -> list[Array]:
+    """Return Q candidates after applying divergence to flux terms and keeping source terms."""
+    q = spectral["Q"]
+    psi6_sq = spectral["psi6_sq"]
+    flux_terms = _candidate_flux_terms("Y_Q", spectral, lx, theta_period, r_centers)
+    return [
+        _divergence_cylindrical_flux(flux_terms[0], lx, theta_period, r_centers),
+        _divergence_cylindrical_flux(flux_terms[1], lx, theta_period, r_centers),
+        _divergence_cylindrical_flux(flux_terms[2], lx, theta_period, r_centers),
+        _divergence_cylindrical_flux(flux_terms[3], lx, theta_period, r_centers),
+        q,
+        psi6_sq[..., None, None] * q,
+    ]
+
+
+def _project_flux_directions(values: Array, mode: str) -> Array:
+    """Project a cylindrical flux tensor onto tangential or radial flux directions."""
+    out = np.zeros_like(values, dtype=np.float64)
+    if mode == "tangential":
+        out[..., 0, :, :] = values[..., 0, :, :]
+        out[..., 1, :, :] = values[..., 1, :, :]
+    elif mode == "radial":
+        out[..., 2, :, :] = values[..., 2, :, :]
+    else:
+        raise AssertionError(f"unknown flux projection mode: {mode}")
+    return out
 
 
 def _gradient_cylindrical_scalar(values: Array, lx: float, theta_period: float, r_centers: Array) -> Array:
@@ -870,13 +911,6 @@ def _estimate_ubar(y_p: Array, a: Array) -> Array:
     denominator = np.sum(a * a, axis=(-2, -1))
     numerator = np.sum(y_p * a, axis=(-2, -1))
     return np.divide(numerator, denominator, out=np.zeros_like(numerator), where=denominator > 0.0)
-
-
-def _radial_projected_vector(values: Array) -> Array:
-    """Return the radial projection of a cylindrical vector flux."""
-    out = np.zeros_like(values, dtype=np.float64)
-    out[..., 2] = values[..., 2]
-    return out
 
 
 def _p_dot_alpha_traceless(p: Array) -> Array:

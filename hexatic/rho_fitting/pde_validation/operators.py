@@ -19,6 +19,7 @@ class ClosureFields:
     f_rho: Array
     f_p: Array
     f_q: Array
+    s_q: Array
     ubar: Array
     a_surface: Array
 
@@ -149,15 +150,11 @@ def closure_fields(
 
     grad_rho = gradient_scalar(rho, dx, dtheta, r_centers)
     grad_lap_rho = gradient_scalar(laplacian_scalar(rho, dx, dtheta, r_centers), dx, dtheta, r_centers)
-    radial_p = radial_projected_vector(p)
     f_rho = (
         y_rho_coefficients[0] * grad_rho
         + y_rho_coefficients[1] * grad_lap_rho
         + y_rho_coefficients[2] * q_dot_grad_rho(q, grad_rho)
         + y_rho_coefficients[3] * p
-        + y_rho_coefficients[4] * rho[..., None] * p
-        + y_rho_coefficients[5] * radial_p
-        + y_rho_coefficients[6] * rho[..., None] * radial_p
     )
 
     grad_p = gradient_vector(p, dx, dtheta, r_centers)
@@ -173,15 +170,15 @@ def closure_fields(
 
     ubar = estimate_ubar(f_p, a_surface) if ubar_override is None else ubar_override
     grad_q = gradient_rank2(q, dx, dtheta, r_centers)
-    grad_lap_q = gradient_rank2(laplacian_rank2(q, dx, dtheta, r_centers), dx, dtheta, r_centers)
+    ubar_p_alpha = ubar[..., None, None, None] * p_dot_alpha_traceless(p)
     f_q = (
-        y_q_coefficients[0] * ubar[..., None, None, None] * p_dot_alpha_traceless(p)
-        + y_q_coefficients[1] * grad_p_symmetric_traceless(p, dx, dtheta, r_centers)
-        + y_q_coefficients[2] * grad_q
-        + y_q_coefficients[3] * rho[..., None, None, None] * grad_q
-        + y_q_coefficients[4] * grad_lap_q
+        y_q_coefficients[0] * project_flux_directions(ubar_p_alpha, "tangential")
+        + y_q_coefficients[1] * project_flux_directions(ubar_p_alpha, "radial")
+        + y_q_coefficients[2] * project_flux_directions(grad_q, "tangential")
+        + y_q_coefficients[3] * project_flux_directions(grad_q, "radial")
     )
-    return ClosureFields(f_rho=f_rho, f_p=f_p, f_q=f_q, ubar=ubar, a_surface=a_surface)
+    s_q = y_q_coefficients[4] * q + y_q_coefficients[5] * psi6_sq_fixed[..., None, None] * q
+    return ClosureFields(f_rho=f_rho, f_p=f_p, f_q=f_q, s_q=s_q, ubar=ubar, a_surface=a_surface)
 
 
 def estimate_ubar(y_p: Array, a: Array) -> Array:
@@ -191,10 +188,16 @@ def estimate_ubar(y_p: Array, a: Array) -> Array:
     return np.divide(numerator, denominator, out=np.zeros_like(numerator), where=denominator > 0.0)
 
 
-def radial_projected_vector(values: Array) -> Array:
-    """Return a vector field containing only the radial cylindrical component."""
+def project_flux_directions(values: Array, mode: str) -> Array:
+    """Project a cylindrical Q flux tensor onto tangential or radial flux directions."""
     out = np.zeros_like(values, dtype=np.float64)
-    out[..., 2] = values[..., 2]
+    if mode == "tangential":
+        out[..., 0, :, :] = values[..., 0, :, :]
+        out[..., 1, :, :] = values[..., 1, :, :]
+    elif mode == "radial":
+        out[..., 2, :, :] = values[..., 2, :, :]
+    else:
+        raise AssertionError(f"unknown flux projection mode: {mode}")
     return out
 
 
