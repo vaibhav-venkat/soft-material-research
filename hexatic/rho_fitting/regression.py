@@ -48,6 +48,7 @@ def stability_selection(
     auxiliary_X: np.ndarray | None = None,
     auxiliary_y: np.ndarray | None = None,
     non_positive_names: tuple[str, ...] = (),
+    non_negative_names: tuple[str, ...] = (),
 ) -> StabilityResult:
     """Fit a constrained SR3 path and select active terms by relative coefficient size.
 
@@ -68,6 +69,7 @@ def stability_selection(
         auxiliary_X: Optional secondary matrix for extra metrics, usually flux rows.
         auxiliary_y: Optional secondary target for ``auxiliary_X``.
         non_positive_names: Term names constrained to have non-positive coefficients.
+        non_negative_names: Term names constrained to have non-negative coefficients.
 
     Returns:
         ``StabilityResult`` containing selected coefficients, path diagnostics, predictions,
@@ -97,13 +99,21 @@ def stability_selection(
         f"running PySINDy ConstrainedSR3 L1 regression rows={X.shape[0]} terms={X.shape[1]} "
         f"tau={selected_tau:.6g} original_tau_index={selected_tau_index}"
     )
-    constrained_indices = _constraint_indices(names, non_positive_names)
+    non_positive_indices = _constraint_indices(names, non_positive_names)
+    non_negative_indices = _constraint_indices(names, non_negative_names)
+    if non_positive_indices or non_negative_indices:
+        _progress(
+            "coefficient sign constraints: "
+            f"non_positive={_constraint_labels(names, non_positive_indices)} "
+            f"non_negative={_constraint_labels(names, non_negative_indices)}"
+        )
     coefficients_path, importance_path = _fit_single_tau(
         X,
         y,
         selected_tau,
         max_iter,
-        constrained_indices,
+        non_positive_indices,
+        non_negative_indices,
     )
     coefficients = coefficients_path[tau_index]
 
@@ -196,7 +206,8 @@ def _fit_single_tau(
     y: np.ndarray,
     tau: float,
     max_iter: int,
-    constrained_indices: tuple[int, ...],
+    non_positive_indices: tuple[int, ...],
+    non_negative_indices: tuple[int, ...],
 ) -> tuple[np.ndarray, np.ndarray]:
     """Fit constrained SR3 coefficients at one selected tau value."""
     coefficients_path = np.zeros((1, X.shape[1]), dtype=np.float64)
@@ -207,7 +218,8 @@ def _fit_single_tau(
         y,
         reg_weight_lam=float(tau),
         max_iter=max_iter,
-        constrained_indices=constrained_indices,
+        non_positive_indices=non_positive_indices,
+        non_negative_indices=non_negative_indices,
     )
     importance_path[0] = _coefficient_importance(coefficients_path[0])
     return coefficients_path, importance_path
@@ -270,11 +282,12 @@ def _constrained_sr3_coefficients(
     *,
     reg_weight_lam: float,
     max_iter: int,
-    constrained_indices: tuple[int, ...],
+    non_positive_indices: tuple[int, ...],
+    non_negative_indices: tuple[int, ...],
 ) -> np.ndarray:
     """Fit one PySINDy ConstrainedSR3 model and return a flat coefficient vector."""
-    constraint_lhs = _non_positive_constraint_lhs(X.shape[1], 1, constrained_indices)
-    constraint_rhs = np.zeros(1, dtype=np.float64) if constraint_lhs is not None else None
+    constraint_lhs = _sign_constraint_lhs(X.shape[1], 1, non_positive_indices, non_negative_indices)
+    constraint_rhs = np.zeros(constraint_lhs.shape[0], dtype=np.float64) if constraint_lhs is not None else None
     optimizer = _ConstrainedSR3(
         reg_weight_lam=float(reg_weight_lam),
         regularizer="L1",
@@ -298,6 +311,13 @@ def _constraint_indices(names: tuple[str, ...], constrained_names: tuple[str, ..
     """Return coefficient indices whose names should receive inequality constraints."""
     constrained = set(constrained_names)
     return tuple(index for index, name in enumerate(names) if name in constrained)
+
+
+def _constraint_labels(names: tuple[str, ...], indices: tuple[int, ...]) -> str:
+    """Format constrained coefficient names for progress logs."""
+    if not indices:
+        return "none"
+    return ",".join(names[index] for index in indices)
 
 
 class _ConstrainedSR3(ps.ConstrainedSR3):
@@ -363,19 +383,38 @@ def _cvxpy_solver_options(solver: str, max_iter: int, tol: float) -> dict[str, f
     return {}
 
 
-def _non_positive_constraint_lhs(
+def _sign_constraint_lhs(
     n_features: int,
     n_targets: int,
-    constrained_indices: tuple[int, ...],
+    non_positive_indices: tuple[int, ...],
+    non_negative_indices: tuple[int, ...],
 ) -> np.ndarray | None:
-    """Build a linear inequality matrix enforcing selected coefficients to be <= 0."""
-    if not constrained_indices:
+    """Build inequality rows enforcing selected coefficient signs independently."""
+    rows: list[np.ndarray] = []
+    for index in non_positive_indices:
+        rows.extend(_constraint_rows(n_features, n_targets, index, sign=1.0))
+    for index in non_negative_indices:
+        rows.extend(_constraint_rows(n_features, n_targets, index, sign=-1.0))
+    if not rows:
         return None
-    constraint_lhs = np.zeros((1, n_features * n_targets), dtype=np.float64)
-    for index in constrained_indices:
-        offset = index * n_targets
-        constraint_lhs[0, offset : offset + n_targets] = 1.0
-    return constraint_lhs
+    return np.vstack(rows)
+
+
+def _constraint_rows(
+    n_features: int,
+    n_targets: int,
+    index: int,
+    *,
+    sign: float,
+) -> list[np.ndarray]:
+    """Return one sign-constraint row per target component for a feature."""
+    rows = []
+    offset = index * n_targets
+    for target in range(n_targets):
+        row = np.zeros(n_features * n_targets, dtype=np.float64)
+        row[offset + target] = float(sign)
+        rows.append(row)
+    return rows
 
 
 def _coefficient_importance(coefficients: np.ndarray) -> np.ndarray:
