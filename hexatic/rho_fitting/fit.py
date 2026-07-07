@@ -37,8 +37,7 @@ class MechanicalLibraries(TypedDict):
 
 Y_RHO_NAMES = (
     "grad_rho",
-    "grad_lap_rho",
-    "Q_dot_grad_rho",
+    "A_dot_grad_rho",
     "P",
 )
 Y_P_NAMES = ("A", "rho_A", "psi6sq_A", "grad_P", "rho_grad_P", "grad_lap_P")
@@ -675,8 +674,8 @@ def _fit_divergence_primary_target(
         evaluation_y=y_div,
         auxiliary_X=X_flux,
         auxiliary_y=y_flux,
-        non_positive_names=("grad_rho", "grad_P", "tangential_grad_Q", "radial_grad_Q"),
-        non_negative_names=("grad_lap_rho", "grad_lap_P"),
+        non_positive_names=("grad_rho", "A_dot_grad_rho", "grad_P", "tangential_grad_Q", "radial_grad_Q"),
+        non_negative_names=("grad_lap_P",),
     )
     return fit, rows, row_index
 
@@ -761,13 +760,10 @@ def _candidate_flux_terms(
     psi6_sq = spectral["psi6_sq"]
     if target_name == "Y_rho":
         grad_rho = _gradient_cylindrical_scalar(rho, lx, theta_period, r_centers)
-        lap_rho = _laplacian_cylindrical_scalar(rho, lx, theta_period, r_centers)
-        grad_lap_rho = _gradient_cylindrical_scalar(lap_rho, lx, theta_period, r_centers)
-        q_grad_rho = np.einsum("...ka,...a->...k", q, grad_rho)
+        a_grad_rho = np.einsum("...ka,...a->...k", a, grad_rho)
         return [
             grad_rho,
-            grad_lap_rho,
-            q_grad_rho,
+            a_grad_rho,
             p,
         ]
     if target_name == "Y_P":

@@ -99,9 +99,9 @@ def divergence_surface_flux(values: Array, dx: float, dtheta: float, r_centers: 
     return divergence_vector(values, dx, dtheta, r_centers)
 
 
-def q_dot_grad_rho(q: Array, grad_rho: Array) -> Array:
-    """Contract all Q rows against the cylindrical gradient of ``rho``."""
-    return np.einsum("...ka,...a->...k", q, grad_rho)
+def a_dot_grad_rho(a: Array, grad_rho: Array) -> Array:
+    """Contract the full second orientation moment against the cylindrical density gradient."""
+    return np.einsum("...ka,...a->...k", a, grad_rho)
 
 
 def closure_fields(
@@ -124,7 +124,7 @@ def closure_fields(
         p: Polarization field with shape ``(Nx, Ny, 3)``.
         q: Nematic moment field with shape ``(Nx, Ny, 3, 3)``.
         psi6_sq_fixed: Fixed hexatic-amplitude field sampled at the validation time.
-        y_rho_coefficients: Coefficients for the three density-flux library terms.
+        y_rho_coefficients: Coefficients for the density-flux library terms.
         y_p_coefficients: Coefficients for the six polarization-flux library terms.
         y_q_coefficients: Coefficients for the five nematic-flux library terms.
         dx: Axial grid spacing.
@@ -149,12 +149,10 @@ def closure_fields(
     a_surface = a
 
     grad_rho = gradient_scalar(rho, dx, dtheta, r_centers)
-    grad_lap_rho = gradient_scalar(laplacian_scalar(rho, dx, dtheta, r_centers), dx, dtheta, r_centers)
     f_rho = (
         y_rho_coefficients[0] * grad_rho
-        + y_rho_coefficients[1] * grad_lap_rho
-        + y_rho_coefficients[2] * q_dot_grad_rho(q, grad_rho)
-        + y_rho_coefficients[3] * p
+        + y_rho_coefficients[1] * a_dot_grad_rho(a_surface, grad_rho)
+        + y_rho_coefficients[2] * p
     )
 
     grad_p = gradient_vector(p, dx, dtheta, r_centers)

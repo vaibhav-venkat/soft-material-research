@@ -6,6 +6,7 @@ MECHANICAL_LABELS = {
     "grad_rho": "grad rho",
     "grad_lap_rho": "grad lap rho",
     "Q_dot_grad_rho": "Q dot grad rho",
+    "A_dot_grad_rho": "A dot grad rho",
     "P": "P",
     "A": "A",
     "rho_A": "rho A",

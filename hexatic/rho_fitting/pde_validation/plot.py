@@ -14,6 +14,7 @@ from .model import ValidationResult
 
 
 Array = NDArray[Any]
+SHELL_SLICE_OFFSET = 0
 
 
 def write_rho_animation(
@@ -57,7 +58,7 @@ def write_p_animation(
         inputs,
         result.times,
         fields,
-        title="P_fit vs P projected over radius",
+        title="P_fit vs P near outer shell",
         overwrite=overwrite,
         stride=stride,
     )
@@ -87,7 +88,7 @@ def write_q_animation(
         inputs,
         result.times,
         fields,
-        title="Q_fit vs Q projected over radius",
+        title="Q_fit vs Q near outer shell",
         overwrite=overwrite,
         stride=stride,
     )
@@ -109,7 +110,15 @@ def write_component_animation(
         raise FileExistsError(path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    fields = [(name, radial_projection(fit_values), radial_projection(true_values)) for name, fit_values, true_values in fields]
+    radial_index = near_shell_radial_index(inputs.r_centers)
+    fields = [
+        (
+            name,
+            radial_slice_projection(fit_values, radial_index),
+            radial_slice_projection(true_values, radial_index),
+        )
+        for name, fit_values, true_values in fields
+    ]
     frame_indices = np.arange(0, times.size, stride, dtype=int)
     x, y = surface_axes(inputs.lx, inputs.theta_period, fields[0][1].shape[1:])
     rows = len(fields)
@@ -129,7 +138,7 @@ def write_component_animation(
                     colorscale="Viridis",
                     name=f"{name} fit",
                     showscale=True,
-                    colorbar={"title": name},
+                    colorbar={"title": name, "x": 1.02, "len": min(0.9, 0.75 / max(rows, 1))},
                     xaxis=f"x{2 * row - 1 if row > 1 else ''}",
                     yaxis=f"y{2 * row - 1 if row > 1 else ''}",
                 )
@@ -158,7 +167,9 @@ def write_component_animation(
     first_frame = str(int(frame_indices[0]))
     layout: dict[str, Any] = {
         "title": title,
-        "height": max(360, rows * 260),
+        "width": 1500,
+        "height": max(520, rows * 320),
+        "margin": {"l": 70, "r": 180, "t": 95, "b": 70},
         "grid": {"rows": rows, "columns": 2, "pattern": "independent"},
         "updatemenus": [
             {
@@ -200,12 +211,10 @@ def write_scalar_animation(
     true_values, _, _, _, _ = scalar_plot_values(inputs, true_values)
     error_values = fit_values - true_values
     frame_indices = np.arange(0, times.size, stride, dtype=int)
-    global_cmin = float(np.nanmin([np.nanmin(fit_values), np.nanmin(true_values)]))
-    global_cmax = float(np.nanmax([np.nanmax(fit_values), np.nanmax(true_values)]))
-    error_abs = float(np.nanmax(np.abs(error_values)))
+    error_abs = padded_error_range(error_values, padding_fraction=0.50)
 
     def heatmap_pair(index: int) -> list[go.Heatmap]:
-        cmin, cmax = robust_frame_range(fit_values[index], true_values[index], global_cmin, global_cmax)
+        cmin, cmax = padded_frame_range(fit_values[index], true_values[index], padding_fraction=0.20)
         err_max = max(error_abs, 1.0e-12)
         return [
             go.Heatmap(
@@ -218,7 +227,7 @@ def write_scalar_animation(
                 zsmooth="best",
                 name=fit_label,
                 showscale=True,
-                colorbar={"title": colorbar_title},
+                colorbar={"title": colorbar_title, "x": 1.01, "len": 0.82, "y": 0.50},
                 xaxis="x",
                 yaxis="y",
             ),
@@ -246,7 +255,7 @@ def write_scalar_animation(
                 zsmooth="best",
                 name=f"{fit_label} - {true_label}",
                 showscale=True,
-                colorbar={"title": "error", "x": 1.03},
+                colorbar={"title": "error", "x": 1.10, "len": 0.82, "y": 0.50},
                 xaxis="x3",
                 yaxis="y3",
             ),
@@ -261,11 +270,14 @@ def write_scalar_animation(
     fig.update_layout(
         title=f"{fit_label} vs {true_label} {scalar_title}",
         grid={"rows": 1, "columns": 3, "pattern": "independent"},
-        xaxis={"title": "x", "domain": [0.0, 0.30]},
+        width=1900,
+        height=980,
+        margin={"l": 70, "r": 260, "t": 95, "b": 70},
+        xaxis={"title": "x", "domain": [0.00, 0.285]},
         yaxis={"title": y_title},
-        xaxis2={"title": "x", "domain": [0.35, 0.65]},
+        xaxis2={"title": "x", "domain": [0.335, 0.620]},
         yaxis2={"title": y_title, "anchor": "x2"},
-        xaxis3={"title": "x", "domain": [0.70, 1.0]},
+        xaxis3={"title": "x", "domain": [0.670, 0.955]},
         yaxis3={"title": y_title, "anchor": "x3"},
         annotations=[
             {"text": fit_label, "x": 0.15, "y": 1.08, "xref": "paper", "yref": "paper", "showarrow": False},
@@ -284,25 +296,37 @@ def write_scalar_animation(
 
 def scalar_plot_values(inputs: ValidationInputs, values: Array) -> tuple[Array, Array, Array, str, str]:
     """Return scalar values and axes for the rho validation plot."""
-    projected = radial_projection(values)
+    radial_index = near_shell_radial_index(inputs.r_centers)
+    projected = radial_slice_projection(values, radial_index)
     x, theta = surface_axes(inputs.lx, inputs.theta_period, projected.shape[1:])
-    r_ref = float(np.mean(inputs.r_centers))
-    return projected, x, r_ref * theta, f"projected over radius as (x, {r_ref:.3g} theta)", "r_ref theta"
+    radius = float(inputs.r_centers[radial_index])
+    return projected, x, theta, f"outer-shell slice r={radius:.3g} as (x, theta)", "theta"
 
 
-def robust_frame_range(fit_frame: Array, true_frame: Array, global_cmin: float, global_cmax: float) -> tuple[float, float]:
-    """Return a shared per-frame color range that keeps small rho variations visible."""
+def padded_frame_range(fit_frame: Array, true_frame: Array, *, padding_fraction: float) -> tuple[float, float]:
+    """Return a widened color range shared by fit and true fields for one frame."""
     values = np.concatenate((np.ravel(fit_frame), np.ravel(true_frame)))
     finite = values[np.isfinite(values)]
     if finite.size == 0:
-        return global_cmin, global_cmax
-    cmin, cmax = np.percentile(finite, [1.0, 99.0])
+        return 0.0, 1.0
+    cmin, cmax = np.percentile(finite, [0.5, 99.5])
     if not np.isfinite(cmin) or not np.isfinite(cmax) or cmax <= cmin:
         center = float(np.nanmean(finite))
-        span = max(global_cmax - global_cmin, abs(center), 1.0) * 1.0e-6
+        span = max(abs(center), 1.0) * 1.0e-6
         return center - span, center + span
-    padding = 0.02 * (cmax - cmin)
+    padding = float(padding_fraction) * (cmax - cmin)
     return float(cmin - padding), float(cmax + padding)
+
+
+def padded_error_range(error_values: Array, *, padding_fraction: float) -> float:
+    """Return one widened symmetric error range shared across all animation frames."""
+    finite = np.asarray(error_values[np.isfinite(error_values)], dtype=np.float64)
+    if finite.size == 0:
+        return 1.0
+    high = float(np.percentile(np.abs(finite), 99.5))
+    if not np.isfinite(high) or high <= 0.0:
+        high = float(np.nanmax(np.abs(finite)))
+    return max((1.0 + float(padding_fraction)) * high, 1.0e-12)
 
 
 def animation_buttons(first_frame: str) -> list[dict[str, Any]]:
@@ -310,7 +334,7 @@ def animation_buttons(first_frame: str) -> list[dict[str, Any]]:
         {
             "label": "Play",
             "method": "animate",
-            "args": [None, {"frame": {"duration": 80, "redraw": True}, "fromcurrent": True}],
+            "args": [None, {"frame": {"duration": 250, "redraw": True}, "fromcurrent": True}],
         },
         {
             "label": "Pause",
@@ -330,6 +354,20 @@ def radial_projection(values: Array) -> Array:
     if values.ndim >= 4:
         return np.nanmean(values, axis=3)
     return values
+
+
+def radial_slice_projection(values: Array, radial_index: int) -> Array:
+    """Select one radial slice from time-indexed 3D scalar/component fields."""
+    if values.ndim >= 4:
+        return np.take(values, radial_index, axis=3)
+    return values
+
+
+def near_shell_radial_index(r_centers: Array) -> int:
+    """Return the default near-shell radial bin index used by validation plots."""
+    if r_centers.size <= 1:
+        return 0
+    return max(0, int(r_centers.size) - 1 - SHELL_SLICE_OFFSET)
 
 
 def surface_axes(lx: float, theta_period: float, shape: tuple[int, int]) -> tuple[Array, Array]:

@@ -13,7 +13,8 @@ from .types import (
     BILATERAL_RADIUS_CELLS,
     BILATERAL_RANGE_SCALE,
     BILATERAL_SPATIAL_SIGMA_CELLS,
-    RELAXATION_COEFFICIENT,
+    P_RELAXATION_COEFFICIENT,
+    Q_RELAXATION_COEFFICIENT,
 )
 
 
@@ -29,7 +30,8 @@ def make_jax_evolution_rate(pde: Any, state: Any, backend: Any) -> Any:
     dtheta = f32(pde.dtheta)
     u0 = f32(pde.inputs.u0)
     gamma = f32(pde.inputs.gamma)
-    relaxation = f32(RELAXATION_COEFFICIENT)
+    p_relaxation = f32(P_RELAXATION_COEFFICIENT)
+    q_relaxation = f32(Q_RELAXATION_COEFFICIENT)
     rho_min = f32(pde.rho_min)
     rho_max = f32(pde.rho_max)
     p_limit = f32(pde.p_limit)
@@ -101,8 +103,8 @@ def make_jax_evolution_rate(pde: Any, state: Any, backend: Any) -> Any:
             return out.at[..., 0, :, :].set(values[..., 0, :, :]).at[..., 1, :, :].set(values[..., 1, :, :])
         return out.at[..., 2, :, :].set(values[..., 2, :, :])
 
-    def q_dot_grad_rho(q: Any, grad_rho: Any) -> Any:
-        return jnp.einsum("...ka,...a->...k", q, grad_rho)
+    def a_dot_grad_rho(a: Any, grad_rho: Any) -> Any:
+        return jnp.einsum("...ka,...a->...k", a, grad_rho)
 
     def p_dot_alpha_traceless(p: Any) -> Any:
         out = jnp.zeros(p.shape[:-1] + (3, 3, 3), dtype=f32)
@@ -163,12 +165,10 @@ def make_jax_evolution_rate(pde: Any, state: Any, backend: Any) -> Any:
     def closure_fields_jax(rho: Any, p: Any, q: Any, psi6_sq: Any, ubar: Any) -> tuple[Any, Any, Any, Any]:
         a = q + rho[..., None, None] * identity / f32(3.0)
         grad_rho = gradient_scalar(rho)
-        grad_lap_rho = gradient_scalar(laplacian_scalar(rho))
         f_rho = (
             c_rho[0] * grad_rho
-            + c_rho[1] * grad_lap_rho
-            + c_rho[2] * q_dot_grad_rho(q, grad_rho)
-            + c_rho[3] * p
+            + c_rho[1] * a_dot_grad_rho(a, grad_rho)
+            + c_rho[2] * p
         )
 
         grad_p = gradient_vector(p)
@@ -220,8 +220,8 @@ def make_jax_evolution_rate(pde: Any, state: Any, backend: Any) -> Any:
         f_rho, f_p, f_q, s_q = closure_fields_jax(rho_eval, p_eval, q_eval, psi6_sq_fixed, ubar)
         rho_flux = u0 * p_eval + f_rho / gamma
         d_rho = -divergence_vector(rho_flux)
-        d_p = -u0 * divergence_vector(f_p) + relaxation * p
-        d_q = -divergence_vector(f_q) + s_q + relaxation * q
+        d_p = -u0 * divergence_vector(f_p) + p_relaxation * p
+        d_q = -divergence_vector(f_q) + s_q + q_relaxation * q
         return stable_rate_data(pack_data(d_rho, d_p, d_q))
 
     return rhs

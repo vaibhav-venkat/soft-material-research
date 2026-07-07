@@ -19,7 +19,9 @@ from .types import (
     BILATERAL_RADIUS_CELLS,
     BILATERAL_RANGE_SCALE,
     BILATERAL_SPATIAL_SIGMA_CELLS,
-    RELAXATION_COEFFICIENT,
+    FILTERED_EULER_SIGMA_SCALE,
+    P_RELAXATION_COEFFICIENT,
+    Q_RELAXATION_COEFFICIENT,
     ValidationOptions,
     ValidationResult,
 )
@@ -71,10 +73,10 @@ class RhoFitPDE(PDEBase):
         rho_flux = self.inputs.u0 * p_eval + closures.f_rho / self.inputs.gamma
         d_rho = -divergence_vector(rho_flux, self.dx, self.dtheta, self.inputs.r_centers)
         d_p = -self.inputs.u0 * divergence_surface_flux(closures.f_p, self.dx, self.dtheta, self.inputs.r_centers)
-        d_p += RELAXATION_COEFFICIENT * p
+        d_p += P_RELAXATION_COEFFICIENT * p
         d_q = -divergence_surface_flux(closures.f_q, self.dx, self.dtheta, self.inputs.r_centers)
         d_q += closures.s_q
-        d_q += RELAXATION_COEFFICIENT * q
+        d_q += Q_RELAXATION_COEFFICIENT * q
         return pack_state(state.grid, d_rho, d_p, d_q)
 
     def make_evolution_rate(self, state: FieldCollection, backend: Any) -> Any:
@@ -228,7 +230,8 @@ def _validation_filter_sigma(inputs: ValidationInputs, options: ValidationOption
     dx = inputs.lx / inputs.rho.shape[1]
     dtheta_length = float(np.mean(inputs.r_centers)) * inputs.theta_period / inputs.rho.shape[2]
     dr = float(np.mean(np.diff(inputs.r_centers)))
-    return float(inputs.metadata.get("sigma", min(dx, dtheta_length, dr)))
+    base_sigma = float(inputs.metadata.get("sigma", min(dx, dtheta_length, dr)))
+    return FILTERED_EULER_SIGMA_SCALE * base_sigma
 
 
 def _run_solver(
