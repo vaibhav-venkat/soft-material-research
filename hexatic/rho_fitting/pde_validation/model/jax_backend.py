@@ -8,7 +8,13 @@ from typing import Any
 import numpy as np
 from pde.backends import get_backend
 
-from .types import Array, RELAXATION_COEFFICIENT
+from .types import (
+    Array,
+    BILATERAL_RADIUS_CELLS,
+    BILATERAL_RANGE_SCALE,
+    BILATERAL_SPATIAL_SIGMA_CELLS,
+    RELAXATION_COEFFICIENT,
+)
 
 
 def make_jax_evolution_rate(pde: Any, state: Any, backend: Any) -> Any:
@@ -242,7 +248,7 @@ def run_jax_py_pde_euler(
         rho_cache = backend.numpy_to_native(np.asarray(pde.inputs.rho, dtype=np.float32))
         p_cache = backend.numpy_to_native(np.asarray(pde.inputs.p, dtype=np.float32))
         q_cache = backend.numpy_to_native(np.asarray(pde.inputs.q, dtype=np.float32))
-        post_filter_kernels = jax_filter_kernels(pde, backend)
+        use_post_bilateral = pde.filter_sigma is not None and pde.filter_sigma > 0.0
     except RuntimeError as err:
         raise_clear_jax_mps_error(err)
 
@@ -272,14 +278,20 @@ def run_jax_py_pde_euler(
         rho, p, q = jax_project_fields(rho, p, q, pde.rho_min, pde.rho_max, pde.p_limit, pde.q_limit)
         return pack_data(rho, p, q)
 
-    def filter_project_data(native_data: Any) -> Any:
-        if post_filter_kernels is None:
+    def filter_project_data(native_data: Any, run_mode: str) -> Any:
+        if not use_post_bilateral:
             return project_data(native_data)
         rho, p, q = unpack_data(native_data)
-        kernel_x, kernel_theta, kernel_r = post_filter_kernels
-        rho = jax_gaussian_filter(rho, kernel_x, kernel_theta, kernel_r)
-        p = jax_gaussian_filter(p, kernel_x, kernel_theta, kernel_r)
-        q = jax_gaussian_filter(q, kernel_x, kernel_theta, kernel_r)
+        if run_mode == "full":
+            rho = jax_bilateral_filter(rho)
+            p = jax_bilateral_filter(p)
+            q = jax_bilateral_filter(q)
+        elif run_mode == "rho-only":
+            rho = jax_bilateral_filter(rho)
+        elif run_mode == "p-only":
+            p = jax_bilateral_filter(p)
+        else:
+            q = jax_bilateral_filter(q)
         rho, p, q = jax_project_fields(rho, p, q, pde.rho_min, pde.rho_max, pde.p_limit, pde.q_limit)
         return pack_data(rho, p, q)
 
@@ -307,27 +319,27 @@ def run_jax_py_pde_euler(
 
     @jax.jit
     def full_step(native_data: Any, t: Any, step_dt: Any) -> Any:
-        return filter_project_data(native_data + step_dt * rhs(native_data, t))
+        return filter_project_data(native_data + step_dt * rhs(native_data, t), "full")
 
     @jax.jit
     def rho_step(native_data: Any, t: Any, step_dt: Any) -> Any:
         hard_data = reference_data(native_data, t, "rho-only")
         rate = rhs(hard_data, t)
         out = hard_data.at[0].set(native_data[0] + step_dt * rate[0])
-        return filter_project_data(out)
+        return filter_project_data(out, "rho-only")
 
     @jax.jit
     def p_step(native_data: Any, t: Any, step_dt: Any) -> Any:
         hard_data = reference_data(native_data, t, "p-only")
         out = hard_data.at[1:4].set(native_data[1:4] + step_dt * rhs(hard_data, t)[1:4])
-        return filter_project_data(out)
+        return filter_project_data(out, "p-only")
 
     @jax.jit
     def q_step(native_data: Any, t: Any, step_dt: Any) -> Any:
         hard_data = reference_data(native_data, t, "q-only")
         out = hard_data.at[:4].set(hard_data[:4])
         out = out.at[4:].set(native_data[4:] + step_dt * rhs(hard_data, t)[4:])
-        return filter_project_data(out)
+        return filter_project_data(out, "q-only")
 
     stepper = {
         "full": full_step,
@@ -430,13 +442,16 @@ def jax_project_fields(
     )
 
 
-def jax_filter_kernels(pde: Any, backend: Any) -> tuple[Any, Any, Any] | None:
+def jax_filter_kernels(pde: Any, backend: Any, *, scale: float = 1.0) -> tuple[Any, Any, Any] | None:
     """Build float32 JAX Gaussian kernels for the filtered Euler RHS."""
     if pde.filter_sigma is None or pde.filter_sigma <= 0.0:
         return None
-    sx = pde.filter_sigma / pde.dx
-    stheta = pde.filter_sigma / (float(np.mean(pde.inputs.r_centers)) * pde.dtheta)
-    sr = pde.filter_sigma / float(np.mean(np.diff(pde.inputs.r_centers)))
+    sigma = scale * pde.filter_sigma
+    if sigma <= 0.0:
+        return None
+    sx = sigma / pde.dx
+    stheta = sigma / (float(np.mean(pde.inputs.r_centers)) * pde.dtheta)
+    sr = sigma / float(np.mean(np.diff(pde.inputs.r_centers)))
     return (
         backend.numpy_to_native(gaussian_kernel_1d(sx)),
         backend.numpy_to_native(gaussian_kernel_1d(stheta)),
@@ -460,6 +475,38 @@ def jax_gaussian_filter(values: Any, kernel_x: Any, kernel_theta: Any, kernel_r:
     out = jax_filter_axis(values, kernel_x, axis=0, periodic=True)
     out = jax_filter_axis(out, kernel_theta, axis=1, periodic=True)
     return jax_filter_axis(out, kernel_r, axis=2, periodic=False)
+
+
+def jax_bilateral_filter(values: Any) -> Any:
+    """Apply a small contrast-preserving bilateral filter over the JAX grid axes."""
+    import jax.numpy as jnp
+
+    spatial_sigma = np.float32(BILATERAL_SPATIAL_SIGMA_CELLS)
+    range_sigma = jnp.maximum(np.float32(BILATERAL_RANGE_SCALE) * jnp.std(values), np.float32(1.0e-6))
+    radius = BILATERAL_RADIUS_CELLS
+    weighted_sum = jnp.zeros_like(values)
+    weight_sum = jnp.zeros_like(values)
+    for ox in range(-radius, radius + 1):
+        for ot in range(-radius, radius + 1):
+            for orad in range(-radius, radius + 1):
+                spatial_distance_sq = np.float32(ox * ox + ot * ot + orad * orad)
+                spatial_weight = jnp.exp(-np.float32(0.5) * spatial_distance_sq / (spatial_sigma * spatial_sigma))
+                shifted = jax_shift_grid_nearest_r(values, ox, ot, orad)
+                range_weight = jnp.exp(-np.float32(0.5) * ((shifted - values) / range_sigma) ** 2)
+                weight = spatial_weight * range_weight
+                weighted_sum = weighted_sum + weight * shifted
+                weight_sum = weight_sum + weight
+    return jnp.where(weight_sum > np.float32(0.0), weighted_sum / weight_sum, values)
+
+
+def jax_shift_grid_nearest_r(values: Any, ox: int, ot: int, orad: int) -> Any:
+    """Shift grid axes with periodic x/theta and nearest radial extension."""
+    import jax.numpy as jnp
+
+    shifted = jnp.roll(values, ox, axis=0)
+    shifted = jnp.roll(shifted, ot, axis=1)
+    indices = jnp.clip(jnp.arange(values.shape[2]) - orad, 0, values.shape[2] - 1)
+    return jnp.take(shifted, indices, axis=2)
 
 
 def jax_filter_axis(values: Any, kernel: Any, *, axis: int, periodic: bool) -> Any:

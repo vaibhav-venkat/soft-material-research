@@ -10,7 +10,8 @@ import numpy as np
 from hexatic.rho_fitting.cache import write_npz_atomic
 from hexatic.rho_fitting.config import DEFAULT_OUTPUT_DIR
 
-from .model import ValidationOptions, run_validation_from_cache
+from .cache import load_validation_inputs
+from .model import ValidationOptions, ValidationResult, run_validation_from_cache
 from .plot import write_p_animation, write_q_animation, write_rho_animation
 from .report import write_pde_validation_report
 
@@ -29,6 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mode", choices=("all", "full", "rho-only", "p-only", "q-only"), default="all")
     parser.add_argument("--rho-only", action="store_true", help="evolve rho while using cached P and Q fields")
     parser.add_argument("--plot-stride", type=int, default=1)
+    parser.add_argument("--plot-only", action="store_true", help="regenerate HTML plots from saved validation NPZs")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--no-plot", action="store_true")
     return parser
@@ -40,6 +42,18 @@ def main(argv: list[str] | None = None) -> int:
     mode = "rho-only" if args.rho_only else args.mode
     modes = ("full", "rho-only", "p-only", "q-only") if mode == "all" else (mode,)
     html_dir = args.output_dir / "html"
+    if args.plot_only:
+        inputs = load_validation_inputs(cache_path)
+        for run_mode in modes:
+            result = load_saved_validation_result(args.output_dir / f"{args.case}_pde_validation_{run_mode}.npz")
+            write_mode_outputs(html_dir, args.case, run_mode, inputs, result, args.plot_stride, args.overwrite)
+            print(
+                "[rho_fitting.pde_validation] "
+                f"mode={run_mode} frames={result.times.size} plot_only=true",
+                flush=True,
+            )
+        return 0
+
     output_paths = []
     report_results = {}
     for run_mode in modes:
@@ -118,6 +132,22 @@ def write_mode_outputs(
         write_q_animation(html_dir / f"{case}_Q_Q_only.html", inputs, result, stride=stride, overwrite=overwrite)
     else:
         raise AssertionError(f"unknown output mode: {mode}")
+
+
+def load_saved_validation_result(path: Path) -> ValidationResult:
+    """Load a saved validation NPZ without rerunning the PDE."""
+    with np.load(path, allow_pickle=False) as cache:
+        return ValidationResult(
+            rho_fit=np.asarray(cache["rho_fit"]),
+            p_fit=np.asarray(cache["P_fit"]),
+            q_fit=np.asarray(cache["Q_fit"]),
+            rho_true=np.asarray(cache["rho_true"]),
+            p_true=np.asarray(cache["P_true"]),
+            q_true=np.asarray(cache["Q_true"]),
+            times=np.asarray(cache["times"]),
+            rmse_t=np.asarray(cache["rmse_t"]),
+            r2_t=np.asarray(cache["r2_t"]),
+        )
 
 
 if __name__ == "__main__":

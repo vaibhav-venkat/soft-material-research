@@ -14,7 +14,15 @@ from ..operators import closure_fields, divergence_surface_flux, divergence_vect
 from .interpolation import interpolated_cached_fields, interpolated_fields
 from .jax_backend import make_jax_evolution_rate, run_jax_py_pde_euler
 from .state import make_grid, pack_state, scalar_bounds, symmetric_bound, unpack_state
-from .types import Array, RELAXATION_COEFFICIENT, ValidationOptions, ValidationResult
+from .types import (
+    Array,
+    BILATERAL_RADIUS_CELLS,
+    BILATERAL_RANGE_SCALE,
+    BILATERAL_SPATIAL_SIGMA_CELLS,
+    RELAXATION_COEFFICIENT,
+    ValidationOptions,
+    ValidationResult,
+)
 
 
 class RhoFitPDE(PDEBase):
@@ -104,11 +112,25 @@ class RhoFitPDE(PDEBase):
 
     def filtered_fields(self, rho: Array, p: Array, q: Array) -> tuple[Array, Array, Array]:
         """Optionally smooth fields with periodic x/theta filtering and nonperiodic radial filtering."""
+        return self.filter_fields_with_sigma(rho, p, q, self.filter_sigma)
+
+    def post_step_filtered_fields(self, rho: Array, p: Array, q: Array) -> tuple[Array, Array, Array]:
+        """Apply contrast-preserving bilateral smoothing to stabilize live Euler states."""
         if self.filter_sigma is None or self.filter_sigma <= 0.0:
             return rho, p, q
-        sx = self.filter_sigma / self.dx
-        stheta = self.filter_sigma / (float(np.mean(self.inputs.r_centers)) * self.dtheta)
-        sr = self.filter_sigma / float(np.mean(np.diff(self.inputs.r_centers)))
+        return (
+            bilateral_filter(rho),
+            bilateral_filter(p),
+            bilateral_filter(q),
+        )
+
+    def filter_fields_with_sigma(self, rho: Array, p: Array, q: Array, sigma: float | None) -> tuple[Array, Array, Array]:
+        """Smooth fields with a supplied physical Gaussian width."""
+        if sigma is None or sigma <= 0.0:
+            return rho, p, q
+        sx = sigma / self.dx
+        stheta = sigma / (float(np.mean(self.inputs.r_centers)) * self.dtheta)
+        sr = sigma / float(np.mean(np.diff(self.inputs.r_centers)))
         rho_out = gaussian_filter(rho, sigma=(sx, stheta, sr), mode=("wrap", "wrap", "nearest"))
         p_out = gaussian_filter(p, sigma=(sx, stheta, sr, 0.0), mode=("wrap", "wrap", "nearest", "nearest"))
         q_out = gaussian_filter(q, sigma=(sx, stheta, sr, 0.0, 0.0), mode=("wrap", "wrap", "nearest", "nearest", "nearest"))
@@ -277,7 +299,7 @@ def _run_euler(
             else:
                 _step_single_field_state(pde, state, t, step_dt, mode)
             if pde.filter_sigma is not None and pde.filter_sigma > 0.0:
-                _filter_project_state(pde, state)
+                _filter_project_state(pde, state, mode)
             assert np.all(np.isfinite(state.data)), "validation state became non-finite"
         rho_fit[index + 1], p_fit[index + 1], q_fit[index + 1] = unpack_state(state)
     return rho_fit, p_fit, q_fit
@@ -319,12 +341,51 @@ def _step_single_field_state(
     pde.project_state(state)
 
 
-def _filter_project_state(pde: RhoFitPDE, state: FieldCollection) -> None:
+def _filter_project_state(pde: RhoFitPDE, state: FieldCollection, mode: str) -> None:
     """Apply the filtered-Euler smoothing step to the live validation state."""
     rho, p, q = unpack_state(state)
-    rho, p, q = pde.filtered_fields(rho, p, q)
+    if mode == "full":
+        rho, p, q = pde.post_step_filtered_fields(rho, p, q)
+    elif mode == "rho-only":
+        rho = bilateral_filter(rho)
+    elif mode == "p-only":
+        p = bilateral_filter(p)
+    elif mode == "q-only":
+        q = bilateral_filter(q)
+    else:
+        raise AssertionError(f"unknown validation mode: {mode}")
     rho, p, q = pde.project_fields(rho, p, q)
     state.data[...] = pack_state(state.grid, rho, p, q).data
+
+
+def bilateral_filter(values: Array) -> Array:
+    """Apply a small periodic-x/theta, nearest-r bilateral filter over grid axes."""
+    values = np.asarray(values, dtype=np.float64)
+    spatial_sigma = BILATERAL_SPATIAL_SIGMA_CELLS
+    range_sigma = max(BILATERAL_RANGE_SCALE * float(np.nanstd(values)), 1.0e-6)
+    radius = BILATERAL_RADIUS_CELLS
+    weighted_sum = np.zeros_like(values, dtype=np.float64)
+    weight_sum = np.zeros_like(values, dtype=np.float64)
+    center = values
+    for ox in range(-radius, radius + 1):
+        for ot in range(-radius, radius + 1):
+            for orad in range(-radius, radius + 1):
+                spatial_distance_sq = float(ox * ox + ot * ot + orad * orad)
+                spatial_weight = np.exp(-0.5 * spatial_distance_sq / (spatial_sigma * spatial_sigma))
+                shifted = _shift_grid_nearest_r(values, ox, ot, orad)
+                range_weight = np.exp(-0.5 * ((shifted - center) / range_sigma) ** 2)
+                weight = spatial_weight * range_weight
+                weighted_sum += weight * shifted
+                weight_sum += weight
+    return np.divide(weighted_sum, weight_sum, out=center.copy(), where=weight_sum > 0.0)
+
+
+def _shift_grid_nearest_r(values: Array, ox: int, ot: int, orad: int) -> Array:
+    """Shift grid axes with periodic x/theta and nearest radial extension."""
+    shifted = np.roll(values, ox, axis=0)
+    shifted = np.roll(shifted, ot, axis=1)
+    indices = np.clip(np.arange(values.shape[2]) - orad, 0, values.shape[2] - 1)
+    return np.take(shifted, indices, axis=2)
 
 
 def _single_field_reference_state(

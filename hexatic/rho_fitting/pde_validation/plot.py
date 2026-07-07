@@ -196,14 +196,17 @@ def write_scalar_animation(
         raise FileExistsError(path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    fit_values = radial_projection(fit_values)
-    true_values = radial_projection(true_values)
+    fit_values, x, y, scalar_title, y_title = scalar_plot_values(inputs, fit_values)
+    true_values, _, _, _, _ = scalar_plot_values(inputs, true_values)
+    error_values = fit_values - true_values
     frame_indices = np.arange(0, times.size, stride, dtype=int)
-    x, y = surface_axes(inputs.lx, inputs.theta_period, fit_values.shape[1:])
-    cmin = float(np.nanmin([np.nanmin(fit_values), np.nanmin(true_values)]))
-    cmax = float(np.nanmax([np.nanmax(fit_values), np.nanmax(true_values)]))
+    global_cmin = float(np.nanmin([np.nanmin(fit_values), np.nanmin(true_values)]))
+    global_cmax = float(np.nanmax([np.nanmax(fit_values), np.nanmax(true_values)]))
+    error_abs = float(np.nanmax(np.abs(error_values)))
 
     def heatmap_pair(index: int) -> list[go.Heatmap]:
+        cmin, cmax = robust_frame_range(fit_values[index], true_values[index], global_cmin, global_cmax)
+        err_max = max(error_abs, 1.0e-12)
         return [
             go.Heatmap(
                 x=x,
@@ -212,6 +215,7 @@ def write_scalar_animation(
                 zmin=cmin,
                 zmax=cmax,
                 colorscale="Viridis",
+                zsmooth="best",
                 name=fit_label,
                 showscale=True,
                 colorbar={"title": colorbar_title},
@@ -225,10 +229,26 @@ def write_scalar_animation(
                 zmin=cmin,
                 zmax=cmax,
                 colorscale="Viridis",
+                zsmooth="best",
                 name=true_label,
                 showscale=False,
                 xaxis="x2",
                 yaxis="y2",
+            ),
+            go.Heatmap(
+                x=x,
+                y=y,
+                z=error_values[index].T,
+                zmin=-err_max,
+                zmax=err_max,
+                colorscale="RdBu",
+                reversescale=True,
+                zsmooth="best",
+                name=f"{fit_label} - {true_label}",
+                showscale=True,
+                colorbar={"title": "error", "x": 1.03},
+                xaxis="x3",
+                yaxis="y3",
             ),
         ]
 
@@ -239,15 +259,18 @@ def write_scalar_animation(
     ]
     first_frame = str(int(frame_indices[0]))
     fig.update_layout(
-        title=f"{fit_label} vs {true_label} projected over radius",
-        grid={"rows": 1, "columns": 2, "pattern": "independent"},
-        xaxis={"title": "x", "domain": [0.0, 0.47]},
-        yaxis={"title": "theta"},
-        xaxis2={"title": "x", "domain": [0.53, 1.0]},
-        yaxis2={"title": "theta", "anchor": "x2"},
+        title=f"{fit_label} vs {true_label} {scalar_title}",
+        grid={"rows": 1, "columns": 3, "pattern": "independent"},
+        xaxis={"title": "x", "domain": [0.0, 0.30]},
+        yaxis={"title": y_title},
+        xaxis2={"title": "x", "domain": [0.35, 0.65]},
+        yaxis2={"title": y_title, "anchor": "x2"},
+        xaxis3={"title": "x", "domain": [0.70, 1.0]},
+        yaxis3={"title": y_title, "anchor": "x3"},
         annotations=[
-            {"text": fit_label, "x": 0.235, "y": 1.08, "xref": "paper", "yref": "paper", "showarrow": False},
-            {"text": true_label, "x": 0.765, "y": 1.08, "xref": "paper", "yref": "paper", "showarrow": False},
+            {"text": fit_label, "x": 0.15, "y": 1.08, "xref": "paper", "yref": "paper", "showarrow": False},
+            {"text": true_label, "x": 0.50, "y": 1.08, "xref": "paper", "yref": "paper", "showarrow": False},
+            {"text": f"{fit_label} - {true_label}", "x": 0.85, "y": 1.08, "xref": "paper", "yref": "paper", "showarrow": False},
         ],
         updatemenus=[
             {
@@ -257,6 +280,29 @@ def write_scalar_animation(
         ],
     )
     fig.write_html(path)
+
+
+def scalar_plot_values(inputs: ValidationInputs, values: Array) -> tuple[Array, Array, Array, str, str]:
+    """Return scalar values and axes for the rho validation plot."""
+    projected = radial_projection(values)
+    x, theta = surface_axes(inputs.lx, inputs.theta_period, projected.shape[1:])
+    r_ref = float(np.mean(inputs.r_centers))
+    return projected, x, r_ref * theta, f"projected over radius as (x, {r_ref:.3g} theta)", "r_ref theta"
+
+
+def robust_frame_range(fit_frame: Array, true_frame: Array, global_cmin: float, global_cmax: float) -> tuple[float, float]:
+    """Return a shared per-frame color range that keeps small rho variations visible."""
+    values = np.concatenate((np.ravel(fit_frame), np.ravel(true_frame)))
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return global_cmin, global_cmax
+    cmin, cmax = np.percentile(finite, [1.0, 99.0])
+    if not np.isfinite(cmin) or not np.isfinite(cmax) or cmax <= cmin:
+        center = float(np.nanmean(finite))
+        span = max(global_cmax - global_cmin, abs(center), 1.0) * 1.0e-6
+        return center - span, center + span
+    padding = 0.02 * (cmax - cmin)
+    return float(cmin - padding), float(cmax + padding)
 
 
 def animation_buttons(first_frame: str) -> list[dict[str, Any]]:

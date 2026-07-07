@@ -16,6 +16,7 @@ rho-fitting-regression= "RHO_FITTING_GPU=1 python -um hexatic.rho_fitting --over
 rho-fitting-corr = "RHO_FITTING_GPU=1 python -um hexatic.rho_fitting --overwrite --correlations-only --no-plot --nd 10000"
 rho-plot = "python -um hexatic.rho_fitting"
 pde-validate="JAX_MPS_ASYNC_DISPATCH=1 python -um hexatic.rho_fitting.pde_validation --case radius_15D --mode all --overwrite --backend jax --jax-device mps"
+pde-plot="python -um hexatic.rho_fitting.pde_validation --case radius_15D --mode all --plot-only --overwrite"
 
 [dependencies]
 python = "3.13.*"
