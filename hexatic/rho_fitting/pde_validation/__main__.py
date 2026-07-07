@@ -21,6 +21,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cache", type=Path, default=None)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--max-frames", type=int, default=None)
+    parser.add_argument("--backend", choices=("jax", "py-pde"), default="jax")
+    parser.add_argument("--jax-device", default="mps", help="JAX device passed to py-pde, e.g. mps, cpu, gpu:0")
     parser.add_argument("--solver", choices=("filtered-euler", "euler", "scipy"), default="filtered-euler")
     parser.add_argument("--dt", type=float, default=None, help="maximum solver step; also Euler substep size")
     parser.add_argument("--filter-sigma", type=float, default=None, help="physical Gaussian filter width for filtered Euler")
@@ -45,6 +47,8 @@ def main(argv: list[str] | None = None) -> int:
             cache_path,
             ValidationOptions(
                 max_frames=args.max_frames,
+                backend=args.backend,
+                jax_device=args.jax_device,
                 solver=args.solver,
                 dt=args.dt,
                 filter_sigma=args.filter_sigma,

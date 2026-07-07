@@ -15,10 +15,10 @@ rho-fitting-lite = "RHO_FITTING_GPU=1 python -um hexatic.rho_fitting --overwrite
 rho-fitting-regression= "RHO_FITTING_GPU=1 python -um hexatic.rho_fitting --overwrite --nd 20000 --fit-only"
 rho-fitting-corr = "RHO_FITTING_GPU=1 python -um hexatic.rho_fitting --overwrite --correlations-only --no-plot --nd 10000"
 rho-plot = "python -um hexatic.rho_fitting"
-pde-validate="python -um hexatic.rho_fitting.pde_validation --case radius_15D --mode all --overwrite"
+pde-validate="JAX_MPS_ASYNC_DISPATCH=1 python -um hexatic.rho_fitting.pde_validation --case radius_15D --mode all --overwrite --backend jax --jax-device mps"
 
 [dependencies]
-python = "3.14.*"
+python = "3.13.*"
 hoomd = "7.0.1.*"
 gsd = "4.2.0.*"
 numpy = "2.4.2.*"
@@ -36,7 +36,9 @@ maturin = "*"
 rust-analyzer = "*"
 ty = ">=0.0.56,<0.0.57"
 py-pde = ">=0.57.0,<0.58"
+jax = ">=0.10.2,<0.11"
 
 [pypi-dependencies]
+jax-mps = ">=0.10.8,<0.11"
 pysindy = { version = ">=2.1.0, <3", extras = ["miosr", "sbr", "cvxpy"] }
 desloppify = ">=1.0, <2"
