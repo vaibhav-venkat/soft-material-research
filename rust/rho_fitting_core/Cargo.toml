@@ -20,7 +20,7 @@ burn = { version = "0.21", default-features = false, features = ["std"], optiona
 burn-cuda = { version = "0.21", default-features = false, features = ["std"], optional = true }
 burn-wgpu = { version = "0.21", default-features = false, features = ["std", "metal"], optional = true }
 rayon = { version = "1", optional = true }
-phastft = "0.4.0"
+phastft = {version = "0.4.0", features = ["parallel"]}
 
 [features]
 default = []

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import replace
+from pathlib import Path
 
-from .config import NumericalSettings, RhoFittingConfig
+from .config import DEFAULT_OUTPUT_DIR, NumericalSettings, RhoFittingConfig
 from .fit import run
 
 
@@ -23,6 +24,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=argparse.SUPPRESS,
     )
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--no-plots", action="store_true")
     parser.add_argument("--no-plot", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--correlations-only", action="store_true")
@@ -56,6 +58,7 @@ def main(argv: list[str] | None = None) -> int:
         make_plots=not (args.no_plots or args.no_plot),
         correlations_only=args.correlations_only,
         fit_only=args.fit_only,
+        output_dir=args.output_dir,
         settings=settings,
     )
     result = run(config)

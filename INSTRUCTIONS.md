@@ -1,168 +1,347 @@
-# Additional instructions after converting to 3d
+# Improve performance + Accuracy instructions
 
-Move the actual STLSQ and subsequent looping algorithms for the regression to Rust. 
+## Generic performance boosts
+*Completely boot the non-GPU version of the coarse-graining, even as a fallback.*
 
-You will use `burn` for storing all the tensors, but install `faer` in Rust for the actual solver. The core loop of STLSQ is:
+First, do not use `burn-wgpu` with metal, instead use the new `burn-mlx` burn backend (will require maybe an installation) which has support for native metal, lowering the overhead. This will require changes to the device initialization.
+
+Still keep the logic for the CUDA that checks if the system is CUDA or metal. If it isn't possible to have the same API with extremely minor changes because of the difference between `burn-cuda` and `burn-mlx` (i.e not much more than what is currently there), they just boot `burn-cuda` and stick to mlx.
+
+Try to eliminate as much copying done within the script, so it is near zero-copy
+
+## For the guassian stuff
+We wills witch to 
+particles → finite-volume cylindrical grid → TSC deposition → local normalization → density grid → optional conservative smoothing
+
+
+1. Define the cylindrical grid
+
+Use grid cells in:
+
 [
-\Xi^{(0)} = \arg\min_{\Xi} |\Theta \Xi - Y|_2
+(x,r,\theta)
 ]
-Where `\Xi` is the coefficient matrix. An AI-recommended implementation of this is 
 
-```rust
-use burn::tensor::{backend::Backend, Tensor, TensorData};
-use faer::prelude::*;
-use faer::Mat;
+Each cell is:
 
-#[derive(Debug, Clone)]
-pub struct StlsqConfig {
-    pub lambda: f64,
-    pub max_iter: usize,
-}
+[
+[x_i,x_{i+1}]
+\times
+[r_j,r_{j+1}]
+\times
+[\theta_k,\theta_{k+1}]
+]
 
-pub fn stlsq_sindy<B>(
-    y: Tensor<B, 2>,
-    f: Tensor<B, 2>,
-    config: StlsqConfig,
-    device: &B::Device,
-) -> Tensor<B, 2>
-where
-    B: Backend,
-{
-    let [n_samples, n_features] = y.dims();
-    let [f_rows, n_targets] = f.dims();
+The physical volume of each cell is:
 
-    assert_eq!(
-        n_samples, f_rows,
-        "Y and F must have the same number of rows"
-    );
+[
+V_{ijk}
+=======
 
-    let y_vec: Vec<f64> = y
-        .to_data()
-        .convert::<f64>()
-        .into_vec::<f64>()
-        .expect("failed to convert Y tensor to Vec<f64>");
+\Delta x_i
+\Delta \theta_k
+\frac{r_{j+1}^2-r_j^2}{2}
+]
 
-    let f_vec: Vec<f64> = f
-        .to_data()
-        .convert::<f64>()
-        .into_vec::<f64>()
-        .expect("failed to convert F tensor to Vec<f64>");
+This is important because cylindrical cells do **not** all have the same volume.
 
-    let y_mat = row_major_to_faer(&y_vec, n_samples, n_features);
-    let f_mat = row_major_to_faer(&f_vec, n_samples, n_targets);
+2. For each particle, find nearby TSC cells
 
-    let xi = stlsq_faer(&y_mat, &f_mat, config.lambda, config.max_iter);
+For particle (p) at:
 
-    let xi_vec = faer_to_row_major(&xi);
+[
+(x_p,r_p,\theta_p)
+]
 
-    Tensor::<B, 2>::from_data(
-        TensorData::new(xi_vec, [n_features, n_targets]),
-        device,
-    )
-}
+find the nearby TSC stencil:
 
-fn stlsq_faer(
-    y: &Mat<f64>,
-    f: &Mat<f64>,
-    lambda: f64,
-    max_iter: usize,
-) -> Mat<f64> {
-    let n_samples = y.nrows();
-    let n_features = y.ncols();
-    let n_targets = f.ncols();
-
-    assert_eq!(f.nrows(), n_samples);
-
-    // Initial dense least-squares solve: Y Xi ≈ F
-    let mut xi = y.qr().solve_lstsq(f);
-
-    let mut prev_support = vec![true; n_features * n_targets];
-
-    for _ in 0..max_iter {
-        let mut support_changed = false;
-
-        // Threshold small coefficients.
-        let mut support = vec![false; n_features * n_targets];
-
-        for j in 0..n_targets {
-            for i in 0..n_features {
-                let keep = xi[(i, j)].abs() >= lambda;
-                support[i * n_targets + j] = keep;
-
-                if !keep {
-                    xi[(i, j)] = 0.0;
-                }
-
-                if keep != prev_support[i * n_targets + j] {
-                    support_changed = true;
-                }
-            }
-        }
-
-        if !support_changed {
-            break;
-        }
-
-        prev_support = support.clone();
-
-        // Refit each target column on its active feature subset.
-        for j in 0..n_targets {
-            let active: Vec<usize> = (0..n_features)
-                .filter(|&i| support[i * n_targets + j])
-                .collect();
-
-            // If everything was thresholded out, leave this target as all zeros.
-            if active.is_empty() {
-                for i in 0..n_features {
-                    xi[(i, j)] = 0.0;
-                }
-                continue;
-            }
-
-            let y_active = Mat::from_fn(n_samples, active.len(), |r, c| {
-                y[(r, active[c])]
-            });
-
-            let f_col = Mat::from_fn(n_samples, 1, |r, _| f[(r, j)]);
-
-            let xi_active = y_active.qr().solve_lstsq(&f_col);
-
-            // Clear old column, then write active coefficients.
-            for i in 0..n_features {
-                xi[(i, j)] = 0.0;
-            }
-
-            for (local_i, &global_i) in active.iter().enumerate() {
-                xi[(global_i, j)] = xi_active[(local_i, 0)];
-            }
-        }
-    }
-
-    xi
-}
-
-fn row_major_to_faer(data: &[f64], rows: usize, cols: usize) -> Mat<f64> {
-    assert_eq!(data.len(), rows * cols);
-
-    Mat::from_fn(rows, cols, |r, c| {
-        data[r * cols + c]
-    })
-}
-
-fn faer_to_row_major(mat: &Mat<f64>) -> Vec<f64> {
-    let rows = mat.nrows();
-    let cols = mat.ncols();
-
-    let mut out = Vec::with_capacity(rows * cols);
-
-    for r in 0..rows {
-        for c in 0..cols {
-            out.push(mat[(r, c)]);
-        }
-    }
-
-    out
-}
+```text
+3 neighboring cells in x
+3 neighboring cells in r
+3 neighboring cells in theta
 ```
 
-But do not follow it strictly, make it simpler and check more for validity. It may not apply in our case
+So each particle touches at most:
+
+[
+3 \times 3 \times 3 = 27
+]
+
+cells.
+
+3. Compute raw TSC weights
+
+Compute separate 1D TSC weights:
+
+[
+w_x(i)
+]
+
+[
+w_r(j)
+]
+
+[
+w_\theta(k)
+]
+
+Then combine them:
+
+[
+W_{p\to ijk}
+============
+
+w_x(i)w_r(j)w_\theta(k)
+]
+
+Only the local (3\times3\times3) cells get nonzero weight.
+
+---
+
+## 4. Remove invalid cells
+
+Some cells may be outside the physical domain, for example outside the shell.
+
+Only keep valid cells:
+
+```text
+valid_cells = cells inside the physical domain
+```
+
+So now you have:
+
+[
+W_{p\to ijk}
+]
+
+only for valid cells.
+
+Near boundaries, the raw weights may no longer sum to one:
+
+[
+\sum_{\text{valid cells}} W_{p\to ijk} < 1
+]
+
+This is the same type of problem you had with the cutoff Gaussian.
+
+5. Locally normalize the particle weights
+
+Normalize the valid weights for each particle:
+
+[
+\tilde W_{p\to ijk}
+===================
+
+\frac{
+W_{p\to ijk}
+}{
+\sum_{\text{valid cells}} W_{p\to ijk}
+}
+]
+
+[
+\sum_{\text{valid cells}}
+\tilde W_{p\to ijk}
+===================
+
+1
+]
+
+6. Deposit particle mass
+
+For density only, each particle contributes one unit of mass/number.
+
+For every valid cell in the particle stencil:
+
+[
+m_{ijk}
+\mathrel{+}=
+\tilde W_{p\to ijk}
+]
+
+After this step:
+
+[
+\sum_{ijk} m_{ijk} = N
+]
+
+where (N) is the number of particles.
+
+7. Convert mass to density
+
+Density is mass per cell volume:
+
+[
+\rho_{ijk}
+==========
+
+\frac{m_{ijk}}{V_{ijk}}
+]
+
+---
+
+# Optional conservative smoothing
+
+TSC gives a conservative field, but it may be less smooth than your Gaussian field.
+
+Instead of smoothing particle-by-particle, smooth the gridded mass field:
+
+```text
+mass → smoothed_mass → density
+```
+
+Do **not** smooth density directly unless the grid cells all have equal volume.
+
+Because your grid is cylindrical, smooth:
+
+[
+m_{ijk}
+]
+
+not:
+
+[
+\rho_{ijk}
+]
+
+Then convert back:
+
+[
+\rho^{\text{smooth}}_{ijk}
+==========================
+
+\frac{
+m^{\text{smooth}}*{ijk}
+}{
+V*{ijk}
+}
+]
+
+Conservative smoothing method
+
+For each source cell (a), redistribute its mass to nearby target cells (b) using a smoothing kernel:
+
+[
+m_b^{\text{smooth}}
+\mathrel{+}=
+m_a
+\frac{
+G_{a\to b}
+}{
+\sum_{\text{valid } b} G_{a\to b}
+}
+]
+
+This is the same idea as per-particle normalization, but applied to grid cells.
+
+The source cell’s mass is spread to nearby cells, but the spread weights are normalized so that:
+
+[
+\sum_{\text{valid } b}
+\frac{
+G_{a\to b}
+}{
+\sum_{\text{valid } b} G_{a\to b}
+}
+=
+
+1
+]
+
+Therefore, each source cell conserves its mass during smoothing.
+
+So:
+
+[
+\sum_{ijk} m^{\text{smooth}}_{ijk}
+==================================
+
+# \sum_{ijk} m_{ijk}
+
+N
+]
+
+Then:
+
+[
+\rho^{\text{smooth}}_{ijk}
+==========================
+
+\frac{
+m^{\text{smooth}}*{ijk}
+}{
+V*{ijk}
+}
+]
+
+and:
+
+[
+\sum_{ijk}
+\rho^{\text{smooth}}*{ijk}V*{ijk}
+=================================
+
+N
+]
+
+## Simple smoothing stencil example
+
+A simple 1D smoothing kernel is:
+
+[
+[1,2,1]/4
+]
+
+In 3D, you can apply this separably in (x), (r), and (\theta). Use this for onw
+
+
+For tensors, do **not** smooth or average tensor values alone.
+
+For a particle tensor (T_p), deposit a density-weighted numerator:
+
+[
+M_{ijk}
+\mathrel{+}=
+\tilde W_{p\to ijk} T_p
+]
+
+while also depositing mass:
+
+[
+m_{ijk}
+\mathrel{+}=
+\tilde W_{p\to ijk}
+]
+
+Then the cell-average tensor is:
+
+[
+\langle T\rangle_{ijk}
+======================
+
+\frac{M_{ijk}}{m_{ijk}}
+]
+
+Smooth both (M) and (m) conservatively:
+
+[
+M \to M^{\text{smooth}}
+]
+
+[
+m \to m^{\text{smooth}}
+]
+
+Then divide:
+
+[
+\langle T\rangle^{\text{smooth}}_{ijk}
+======================================
+
+\frac{
+M^{\text{smooth}}*{ijk}
+}{
+m^{\text{smooth}}*{ijk}
+}
+]
+```

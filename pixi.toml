@@ -7,6 +7,8 @@ version = "0.1.0"
 
 [tasks]
 rho-fitting-build = "maturin develop --manifest-path rust/rho_fitting_core/Cargo.toml --features gpu-metal"
+rho-fitting-build-cuda = "maturin develop --manifest-path rust/rho_fitting_core/Cargo.toml --release --features gpu-cuda"
+rho-fitting-build-gpu = "maturin develop --manifest-path rust/rho_fitting_core/Cargo.toml --release --features gpu"
 rho-fitting-smoke = "python -um hexatic.rho_fitting --case radius_15D --nd 1000 --no-plot"
 rho-fitting = "RHO_FITTING_GPU=1 python -um hexatic.rho_fitting --overwrite --nd 100000"
 rho-fitting-lite = "RHO_FITTING_GPU=1 python -um hexatic.rho_fitting --overwrite --nd 20000"

@@ -3370,6 +3370,7 @@ checksum = "59aae924086efd377c3328e9405fb7636b3203771a0fb160d5776b6745875f80"
 dependencies = [
  "fearless_simd",
  "num-traits",
+ "rayon",
 ]
 
 [[package]]
