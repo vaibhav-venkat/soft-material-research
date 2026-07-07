@@ -82,6 +82,7 @@ def chebyshev_filter_and_derivative(
     cutoff = validate_cheb_cutoff(cutoff, frame_count)
     times = physical_times(steps, timestep)
     assert times.size == frame_count, "steps length must match values time axis"
+    values = _fill_nonfinite_time_values(values, times)
 
     scaled, half_span = _scaled_times(times)
     fit_coeffs = _fit_coefficients(values, scaled, cutoff - 1)
@@ -123,6 +124,26 @@ def _fit_coefficients(values: np.ndarray, scaled_times: np.ndarray, degree: int)
     vandermonde = cheb.chebvander(scaled_times, degree)
     coeffs, *_ = np.linalg.lstsq(vandermonde, flat, rcond=None)
     return coeffs.reshape((degree + 1, *values.shape[1:]))
+
+
+def _fill_nonfinite_time_values(values: np.ndarray, times: np.ndarray) -> np.ndarray:
+    """Replace non-finite samples by temporal interpolation before spectral fitting."""
+    if np.all(np.isfinite(values)):
+        return values
+    frame_count = values.shape[0]
+    flat = values.reshape((frame_count, -1)).copy()
+    for column in range(flat.shape[1]):
+        series = flat[:, column]
+        finite = np.isfinite(series)
+        if finite.all():
+            continue
+        if not finite.any():
+            series[:] = 0.0
+        elif finite.sum() == 1:
+            series[~finite] = series[finite][0]
+        else:
+            series[~finite] = np.interp(times[~finite], times[finite], series[finite])
+    return flat.reshape(values.shape)
 
 
 def _diagnostic_coefficients(values: np.ndarray, scaled_times: np.ndarray) -> np.ndarray:

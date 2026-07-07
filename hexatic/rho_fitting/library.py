@@ -6,6 +6,7 @@ MECHANICAL_LABELS = {
     "grad_rho": "grad rho",
     "grad_lap_rho": "grad lap rho",
     "Q_dot_grad_rho": "Q dot grad rho",
+    "P": "P",
     "A": "A",
     "rho_A": "rho A",
     "psi6sq_A": "psi6^2 A",
@@ -13,11 +14,12 @@ MECHANICAL_LABELS = {
     "grad_P": "grad P",
     "rho_grad_P": "rho grad P",
     "grad_lap_P": "grad lap P",
-    "Ubar_P_dot_alpha_traceless": "Ubar P dot alpha",
-    "grad_P_symmetric_traceless": "grad P sym traceless",
-    "grad_Q": "grad Q",
-    "rho_grad_Q": "rho grad Q",
-    "grad_lap_Q": "grad lap Q",
+    "tangential_projected_Ubar_P_alpha": "tangential Ubar P alpha",
+    "radial_projected_Ubar_P_alpha": "radial Ubar P alpha",
+    "tangential_grad_Q": "tangential grad Q",
+    "radial_grad_Q": "radial grad Q",
+    "Q": "Q",
+    "psi6sq_Q": "psi6^2 Q",
 }
 
 

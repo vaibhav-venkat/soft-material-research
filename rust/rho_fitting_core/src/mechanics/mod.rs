@@ -146,7 +146,8 @@ pub fn build_mechanical_fields(
                     continue;
                 }
                 for itheta in 0..ntheta {
-                    let dtheta = minimum_image(theta_centers[itheta] - particle_theta, theta_period);
+                    let dtheta =
+                        minimum_image(theta_centers[itheta] - particle_theta, theta_period);
                     for ir in 0..nr {
                         let r_value = r_centers[ir];
                         let dy = r_value * dtheta;
@@ -289,8 +290,7 @@ pub fn build_targets(
             for itheta in 0..p.shape()[2] {
                 for ir in 0..p.shape()[3] {
                     for k in 0..ORIENTATION_DIMS {
-                        p_full[IxDyn(&[t, ix, itheta, ir, k])] =
-                            p[IxDyn(&[t, ix, itheta, ir, k])];
+                        p_full[IxDyn(&[t, ix, itheta, ir, k])] = p[IxDyn(&[t, ix, itheta, ir, k])];
                     }
                 }
             }
