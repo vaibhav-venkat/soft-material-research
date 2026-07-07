@@ -5,7 +5,6 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use crate::coarse_grain;
 #[cfg(any(feature = "gpu-metal", feature = "gpu-cuda"))]
 use crate::coarse_grain_burn;
 use crate::fft_ops;
@@ -26,7 +25,8 @@ fn version() -> &'static str {
 
 #[pyfunction]
 #[pyo3(signature = (coords, p_particles, shell_mask, x_centers, y_centers, lx, ly, radius, sigma))]
-/// Python wrapper for legacy density and polarization coarse-graining.
+/// Python wrapper for GPU TSC density and polarization coarse-graining.
+#[allow(unused_variables)]
 fn coarse_grain_fields(
     py: Python<'_>,
     coords: PyReadonlyArray3<'_, f64>,
@@ -40,14 +40,8 @@ fn coarse_grain_fields(
     sigma: f64,
 ) -> PyResult<Py<PyDict>> {
     #[cfg(any(feature = "gpu-metal", feature = "gpu-cuda"))]
-    let gpu_requested = std::env::var("RHO_FITTING_GPU").is_ok_and(|value| value == "1");
-    #[cfg(not(any(feature = "gpu-metal", feature = "gpu-cuda")))]
-    let gpu_requested = false;
-
-    #[cfg(any(feature = "gpu-metal", feature = "gpu-cuda"))]
-    let result = if gpu_requested {
-        println!("[rho_fitting] Burn GPU requested: RHO_FITTING_GPU=1, GPU feature enabled");
-        coarse_grain_burn::coarse_grain_fields(
+    {
+        let result = coarse_grain_burn::coarse_grain_fields(
             coords.as_array(),
             p_particles.as_array(),
             shell_mask.as_array(),
@@ -57,62 +51,20 @@ fn coarse_grain_fields(
             ly,
             radius,
             sigma,
-        )
-        .or_else(|error| {
-            eprintln!("[rho_fitting] Burn GPU coarse-grain failed, falling back to CPU: {error}");
-            coarse_grain::coarse_grain_fields(
-                coords.as_array(),
-                p_particles.as_array(),
-                shell_mask.as_array(),
-                x_centers.as_array(),
-                y_centers.as_array(),
-                lx,
-                ly,
-                radius,
-                sigma,
-            )
-        })
-    } else {
-        println!("[rho_fitting] Burn GPU not requested; using CPU coarse-grain");
-        coarse_grain::coarse_grain_fields(
-            coords.as_array(),
-            p_particles.as_array(),
-            shell_mask.as_array(),
-            x_centers.as_array(),
-            y_centers.as_array(),
-            lx,
-            ly,
-            radius,
-            sigma,
-        )
-    };
-
-    #[cfg(not(any(feature = "gpu-metal", feature = "gpu-cuda")))]
-    if gpu_requested {
-        eprintln!(
-            "[rho_fitting] RHO_FITTING_GPU=1 ignored; extension was built without a GPU feature"
         );
-    } else {
-        println!("[rho_fitting] GPU not requested; using CPU coarse-grain");
+        let (rho, p_density) = result.map_err(to_py_err)?;
+        let out = PyDict::new(py);
+        out.set_item("rho", rho.into_pyarray(py))?;
+        out.set_item("P_density", p_density.into_pyarray(py))?;
+        return Ok(out.unbind());
     }
-    #[cfg(not(any(feature = "gpu-metal", feature = "gpu-cuda")))]
-    let result = coarse_grain::coarse_grain_fields(
-        coords.as_array(),
-        p_particles.as_array(),
-        shell_mask.as_array(),
-        x_centers.as_array(),
-        y_centers.as_array(),
-        lx,
-        ly,
-        radius,
-        sigma,
-    );
 
-    let (rho, p_density) = result.map_err(to_py_err)?;
-    let out = PyDict::new(py);
-    out.set_item("rho", rho.into_pyarray(py))?;
-    out.set_item("P_density", p_density.into_pyarray(py))?;
-    Ok(out.unbind())
+    #[cfg(not(any(feature = "gpu-metal", feature = "gpu-cuda")))]
+    {
+        Err(PyValueError::new_err(
+            "rho-fitting coarse-graining requires a GPU feature; build with gpu-metal, gpu-cuda, or gpu",
+        ))
+    }
 }
 
 #[pyfunction]
@@ -174,7 +126,8 @@ fn sample_rows(
 
 #[pyfunction]
 #[pyo3(signature = (coords, directions, velocities, psi6_abs, mask, x_centers, theta_centers, r_centers, lx, theta_period, sigma, gamma, u0))]
-/// Python wrapper for mechanical coarse-grained fields and current tensors.
+/// Python wrapper for GPU TSC mechanical coarse-grained fields and current tensors.
+#[allow(unused_variables)]
 fn build_mechanical_fields(
     py: Python<'_>,
     coords: PyReadonlyArray3<'_, f64>,
@@ -192,14 +145,8 @@ fn build_mechanical_fields(
     u0: f64,
 ) -> PyResult<Py<PyDict>> {
     #[cfg(any(feature = "gpu-metal", feature = "gpu-cuda"))]
-    let gpu_requested = std::env::var("RHO_FITTING_GPU").is_ok_and(|value| value == "1");
-    #[cfg(not(any(feature = "gpu-metal", feature = "gpu-cuda")))]
-    let gpu_requested = false;
-
-    #[cfg(any(feature = "gpu-metal", feature = "gpu-cuda"))]
-    let result = if gpu_requested {
-        println!("[rho_fitting] Burn GPU requested for mechanical fields");
-        coarse_grain_burn::build_mechanical_fields(
+    {
+        let result = coarse_grain_burn::build_mechanical_fields(
             coords.as_array(),
             directions.as_array(),
             velocities.as_array(),
@@ -213,79 +160,26 @@ fn build_mechanical_fields(
             sigma,
             gamma,
             u0,
-        )
-        .or_else(|error| {
-            eprintln!(
-                "[rho_fitting] Burn mechanical coarse-grain failed, falling back to CPU: {error}"
-            );
-            mechanics::build_mechanical_fields(
-                coords.as_array(),
-                directions.as_array(),
-                velocities.as_array(),
-                psi6_abs.as_array(),
-                mask.as_array(),
-                x_centers.as_array(),
-                theta_centers.as_array(),
-                r_centers.as_array(),
-                lx,
-                theta_period,
-                sigma,
-                gamma,
-                u0,
-            )
-        })
-    } else {
-        mechanics::build_mechanical_fields(
-            coords.as_array(),
-            directions.as_array(),
-            velocities.as_array(),
-            psi6_abs.as_array(),
-            mask.as_array(),
-            x_centers.as_array(),
-            theta_centers.as_array(),
-            r_centers.as_array(),
-            lx,
-            theta_period,
-            sigma,
-            gamma,
-            u0,
-        )
-    };
-
-    #[cfg(not(any(feature = "gpu-metal", feature = "gpu-cuda")))]
-    if gpu_requested {
-        eprintln!(
-            "[rho_fitting] RHO_FITTING_GPU=1 ignored; extension was built without a GPU feature"
         );
+        let fields = result.map_err(to_py_err)?;
+        let out = PyDict::new(py);
+        out.set_item("rho", fields.rho.into_pyarray(py))?;
+        out.set_item("P", fields.p.into_pyarray(py))?;
+        out.set_item("Q", fields.q.into_pyarray(py))?;
+        out.set_item("A", fields.a.into_pyarray(py))?;
+        out.set_item("psi6_sq", fields.psi6_sq.into_pyarray(py))?;
+        out.set_item("J_rho", fields.j_rho.into_pyarray(py))?;
+        out.set_item("J_P", fields.j_p.into_pyarray(py))?;
+        out.set_item("J_Q", fields.j_q.into_pyarray(py))?;
+        return Ok(out.unbind());
     }
-    #[cfg(not(any(feature = "gpu-metal", feature = "gpu-cuda")))]
-    let result = mechanics::build_mechanical_fields(
-        coords.as_array(),
-        directions.as_array(),
-        velocities.as_array(),
-        psi6_abs.as_array(),
-        mask.as_array(),
-        x_centers.as_array(),
-        theta_centers.as_array(),
-        r_centers.as_array(),
-        lx,
-        theta_period,
-        sigma,
-        gamma,
-        u0,
-    );
 
-    let fields = result.map_err(to_py_err)?;
-    let out = PyDict::new(py);
-    out.set_item("rho", fields.rho.into_pyarray(py))?;
-    out.set_item("P", fields.p.into_pyarray(py))?;
-    out.set_item("Q", fields.q.into_pyarray(py))?;
-    out.set_item("A", fields.a.into_pyarray(py))?;
-    out.set_item("psi6_sq", fields.psi6_sq.into_pyarray(py))?;
-    out.set_item("J_rho", fields.j_rho.into_pyarray(py))?;
-    out.set_item("J_P", fields.j_p.into_pyarray(py))?;
-    out.set_item("J_Q", fields.j_q.into_pyarray(py))?;
-    Ok(out.unbind())
+    #[cfg(not(any(feature = "gpu-metal", feature = "gpu-cuda")))]
+    {
+        Err(PyValueError::new_err(
+            "mechanical coarse-graining requires a GPU feature; build with gpu-metal, gpu-cuda, or gpu",
+        ))
+    }
 }
 
 #[pyfunction]
