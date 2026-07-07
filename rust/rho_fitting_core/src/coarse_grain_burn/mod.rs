@@ -4,6 +4,7 @@ mod grid;
 mod smooth;
 
 use burn::prelude::*;
+use burn::tensor::TensorData;
 #[cfg(feature = "gpu-cuda")]
 use burn_cuda::{Cuda, CudaDevice};
 #[cfg(feature = "gpu-metal")]
@@ -11,7 +12,7 @@ use burn_wgpu::{graphics, init_setup, Metal, WgpuDevice};
 use ndarray::{Array3, Array4, Array5, Array6, ArrayD, ArrayView1, ArrayView2, ArrayView3, IxDyn};
 use std::panic::{catch_unwind, set_hook, take_hook, AssertUnwindSafe};
 
-use deposit::{collapse_surface_shell, deposit_mechanical_components, deposit_surface_shell_frame};
+use deposit::{collapse_surface_shell, deposit_surface_shell_frame};
 use frame::{
     combine_particle_components, frame_component, mechanical_frame_mask, print_conservation,
     sanitized_frame_component, sanitized_frame_component2, sanitized_frame_scalar,
@@ -21,7 +22,7 @@ use grid::{
     cylindrical_cell_volumes, radial_spacing, single_radial_width, surface_shell_radial_centers,
     Grid3,
 };
-use smooth::{smooth_fields_2d, smooth_frame_fields};
+use smooth::smooth_fields_2d;
 
 use crate::coarse_grain;
 use crate::mechanics::MechanicalFields;
@@ -36,6 +37,7 @@ const SMOOTHING_PASSES: usize = 1;
 const SMOOTHING_STENCIL: [f32; 3] = [1.0, 2.0, 1.0];
 const EPS: f32 = 1.0e-12;
 const SINGLE_RADIAL_WIDTH_FRACTION: f32 = 0.1;
+const GAUSSIAN_GRID_CHUNK: usize = 256;
 
 pub(super) struct CoarseGrainInputs<'a> {
     coords: ArrayView3<'a, f64>,
@@ -59,6 +61,7 @@ pub(super) struct MechanicalInputs<'a> {
     r_centers: ArrayView1<'a, f64>,
     lx: f64,
     theta_period: f64,
+    sigma: f64,
 }
 
 /// Coarse-grain density and two-component polarization density with conservative GPU TSC deposition.
@@ -98,7 +101,7 @@ pub fn coarse_grain_fields(
     run_coarse_grain(inputs)
 }
 
-/// Build mechanical moment fields and current tensors with conservative GPU TSC deposition.
+/// Build mechanical moment fields and current tensors with renormalized GPU Gaussian deposition.
 #[allow(clippy::too_many_arguments)]
 pub fn build_mechanical_fields(
     coords: ArrayView3<'_, f64>,
@@ -141,6 +144,7 @@ pub fn build_mechanical_fields(
         r_centers,
         lx,
         theta_period,
+        sigma,
     };
     run_mechanical(inputs)
 }
@@ -155,7 +159,7 @@ fn catch_burn_panic<T>(backend: &str, func: impl FnOnce() -> CoreResult<T>) -> C
     set_hook(hook);
     result.map_err(|_| {
         CoreError::InvalidInput(format!(
-            "Burn {backend} TSC coarse-grain initialization panicked"
+            "Burn {backend} coarse-grain initialization panicked"
         ))
     })?
 }
@@ -190,19 +194,21 @@ fn run_mechanical(inputs: MechanicalInputs<'_>) -> CoreResult<MechanicalFields> 
     #[cfg(feature = "gpu-cuda")]
     if <CudaBackend as Backend>::device_count(0) > 0 {
         let device = CudaDevice::new(0);
-        println!("[rho_fitting] using Burn CUDA backend for mechanical TSC fields");
+        println!(
+            "[rho_fitting] using Burn CUDA backend for renormalized mechanical Gaussian fields"
+        );
         return catch_burn_panic("CUDA", || {
-            mechanical_tsc_device::<CudaBackend>(inputs, &device)
+            mechanical_gaussian_device::<CudaBackend>(inputs, &device)
         });
     }
 
     #[cfg(feature = "gpu-metal")]
     {
         let device = WgpuDevice::DefaultDevice;
-        println!("[rho_fitting] using Burn Metal/WGPU backend for mechanical TSC fields");
+        println!("[rho_fitting] using Burn Metal/WGPU backend for renormalized mechanical Gaussian fields");
         return catch_burn_panic("Metal/WGPU", || {
             init_setup::<graphics::Metal>(&device, Default::default());
-            mechanical_tsc_device::<MetalBackend>(inputs, &device)
+            mechanical_gaussian_device::<MetalBackend>(inputs, &device)
         });
     }
 
@@ -292,7 +298,7 @@ fn tsc_coarse_grain_device<B: Backend>(
     Ok((rho, p_density))
 }
 
-fn mechanical_tsc_device<B: Backend>(
+fn mechanical_gaussian_device<B: Backend>(
     inputs: MechanicalInputs<'_>,
     device: &B::Device,
 ) -> CoreResult<MechanicalFields> {
@@ -307,6 +313,7 @@ fn mechanical_tsc_device<B: Backend>(
         r_centers,
         lx,
         theta_period,
+        sigma,
     } = inputs;
     let (frames, particles, _) = coords.dim();
     let grid = Grid3::new(x_centers, theta_centers, r_centers, lx, theta_period)?;
@@ -322,7 +329,7 @@ fn mechanical_tsc_device<B: Backend>(
 
     for t in 0..frames {
         println!(
-            "[rho_fitting] GPU TSC mechanical coarse-grain frame {}/{}",
+            "[rho_fitting] GPU Gaussian mechanical coarse-grain frame {}/{}",
             t + 1,
             frames
         );
@@ -354,19 +361,23 @@ fn mechanical_tsc_device<B: Backend>(
             combine_particle_components(&dir[2], &dir[2], -1.0 / 3.0),
         ];
         let mut fields = FrameFields::new(grid.len());
-        let deposited = deposit_mechanical_components(
-            &particle_x,
-            &particle_theta,
-            &particle_r,
-            &valid,
-            &dir,
-            &vel,
-            &psi6,
-            &q_particle,
+        let deposited = valid.iter().filter(|value| **value > 0.0).count();
+        deposit_gaussian_mechanical_frame::<B>(
+            GaussianFrameInputs {
+                particle_x: &particle_x,
+                particle_theta: &particle_theta,
+                particle_r: &particle_r,
+                valid: &valid,
+                dir: &dir,
+                vel: &vel,
+                psi6: &psi6,
+                q_particle: &q_particle,
+                sigma: sigma as f32,
+            },
             &grid,
             &mut fields,
-        );
-        smooth_frame_fields::<B>(&mut fields, &grid, device)?;
+            device,
+        )?;
         write_mechanical_frame(
             t,
             &grid,
@@ -459,4 +470,230 @@ fn validate_mechanical_inputs(
     }
     radial_spacing(r_centers)?;
     Ok(())
+}
+
+struct GaussianFrameInputs<'a> {
+    particle_x: &'a [f32],
+    particle_theta: &'a [f32],
+    particle_r: &'a [f32],
+    valid: &'a [f32],
+    dir: &'a [Vec<f32>; 3],
+    vel: &'a [Vec<f32>; 3],
+    psi6: &'a [f32],
+    q_particle: &'a [Vec<f32>; 9],
+    sigma: f32,
+}
+
+fn deposit_gaussian_mechanical_frame<B: Backend>(
+    inputs: GaussianFrameInputs<'_>,
+    grid: &Grid3,
+    fields: &mut FrameFields,
+    device: &B::Device,
+) -> CoreResult<()> {
+    let particles = inputs.particle_x.len();
+    let valid = tensor2::<B>(inputs.valid.to_vec(), [1, particles], device);
+    let particle_x = tensor2::<B>(inputs.particle_x.to_vec(), [1, particles], device);
+    let particle_theta = tensor2::<B>(inputs.particle_theta.to_vec(), [1, particles], device);
+    let particle_r = tensor2::<B>(inputs.particle_r.to_vec(), [1, particles], device);
+    let dir_tensors = [
+        tensor2::<B>(inputs.dir[0].clone(), [1, particles], device),
+        tensor2::<B>(inputs.dir[1].clone(), [1, particles], device),
+        tensor2::<B>(inputs.dir[2].clone(), [1, particles], device),
+    ];
+    let vel_tensors = [
+        tensor2::<B>(inputs.vel[0].clone(), [1, particles], device),
+        tensor2::<B>(inputs.vel[1].clone(), [1, particles], device),
+        tensor2::<B>(inputs.vel[2].clone(), [1, particles], device),
+    ];
+    let psi6 = tensor2::<B>(inputs.psi6.to_vec(), [1, particles], device);
+    let q_tensors: Vec<Tensor<B, 2>> = inputs
+        .q_particle
+        .iter()
+        .map(|values| tensor2::<B>(values.clone(), [1, particles], device))
+        .collect();
+    let mut norm = Tensor::<B, 1>::zeros([particles], device);
+    for start in (0..grid.len()).step_by(GAUSSIAN_GRID_CHUNK) {
+        let chunk = (grid.len() - start).min(GAUSSIAN_GRID_CHUNK);
+        let (_, _, _, volumes) = grid_chunk(grid, start, chunk);
+        let weights = gaussian_weights::<B>(
+            grid,
+            start,
+            chunk,
+            &particle_x,
+            &particle_theta,
+            &particle_r,
+            &valid,
+            inputs.sigma,
+            device,
+        );
+        let volume_tensor = tensor2::<B>(volumes, [chunk, 1], device);
+        norm = norm + (weights * volume_tensor).sum_dim(0).reshape([particles]);
+    }
+    let norm = norm + EPS;
+    for start in (0..grid.len()).step_by(GAUSSIAN_GRID_CHUNK) {
+        let chunk = (grid.len() - start).min(GAUSSIAN_GRID_CHUNK);
+        let (_, _, _, volumes) = grid_chunk(grid, start, chunk);
+        let weights = gaussian_weights::<B>(
+            grid,
+            start,
+            chunk,
+            &particle_x,
+            &particle_theta,
+            &particle_r,
+            &valid,
+            inputs.sigma,
+            device,
+        );
+        let volume_tensor = tensor2::<B>(volumes, [chunk, 1], device);
+        let mass_weights = weights * volume_tensor / norm.clone().reshape([1, particles]);
+        write_chunk(
+            &mut fields.mass,
+            start,
+            tensor_vec(mass_weights.clone().sum_dim(1).reshape([chunk]))?,
+        );
+        write_chunk(
+            &mut fields.psi6_num,
+            start,
+            weighted_sum(&mass_weights, &psi6, chunk)?,
+        );
+        for component in 0..3 {
+            write_chunk(
+                &mut fields.p_num[component],
+                start,
+                weighted_sum(&mass_weights, &dir_tensors[component], chunk)?,
+            );
+            write_chunk(
+                &mut fields.j_rho_num[component],
+                start,
+                weighted_sum(&mass_weights, &vel_tensors[component], chunk)?,
+            );
+        }
+        for flux in 0..3 {
+            for component in 0..3 {
+                write_chunk(
+                    &mut fields.j_p_num[flux * 3 + component],
+                    start,
+                    weighted_sum_product(
+                        &mass_weights,
+                        &vel_tensors[flux],
+                        &dir_tensors[component],
+                        chunk,
+                    )?,
+                );
+            }
+            for q_index in 0..9 {
+                write_chunk(
+                    &mut fields.j_q_num[flux * 9 + q_index],
+                    start,
+                    weighted_sum_product(
+                        &mass_weights,
+                        &vel_tensors[flux],
+                        &q_tensors[q_index],
+                        chunk,
+                    )?,
+                );
+            }
+        }
+        for q_index in 0..9 {
+            write_chunk(
+                &mut fields.q_num[q_index],
+                start,
+                weighted_sum(&mass_weights, &q_tensors[q_index], chunk)?,
+            );
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn gaussian_weights<B: Backend>(
+    grid: &Grid3,
+    start: usize,
+    chunk: usize,
+    particle_x: &Tensor<B, 2>,
+    particle_theta: &Tensor<B, 2>,
+    particle_r: &Tensor<B, 2>,
+    valid: &Tensor<B, 2>,
+    sigma: f32,
+    device: &B::Device,
+) -> Tensor<B, 2> {
+    let (xs, thetas, rs, _) = grid_chunk(grid, start, chunk);
+    let grid_x = tensor2::<B>(xs, [chunk, 1], device);
+    let grid_theta = tensor2::<B>(thetas, [chunk, 1], device);
+    let grid_r = tensor2::<B>(rs, [chunk, 1], device);
+    let dx_raw = grid_x - particle_x.clone();
+    let dx = dx_raw.clone() - (dx_raw / grid.lx).round() * grid.lx;
+    let dtheta_raw = grid_theta - particle_theta.clone();
+    let dtheta = dtheta_raw.clone() - (dtheta_raw / grid.theta_period).round() * grid.theta_period;
+    let dy = grid_r.clone() * dtheta;
+    let dr = grid_r - particle_r.clone();
+    let dist2 = dx.clone() * dx + dy.clone() * dy + dr.clone() * dr;
+    let cutoff2 = (4.0 * sigma) * (4.0 * sigma);
+    let weights = (dist2.clone() * (-0.5 / (sigma * sigma))).exp();
+    weights.mask_fill(dist2.greater_elem(cutoff2), 0.0) * valid.clone()
+}
+
+fn weighted_sum<B: Backend>(
+    weights: &Tensor<B, 2>,
+    values: &Tensor<B, 2>,
+    chunk: usize,
+) -> CoreResult<Vec<f32>> {
+    tensor_vec(
+        (weights.clone() * values.clone())
+            .sum_dim(1)
+            .reshape([chunk]),
+    )
+}
+
+fn weighted_sum_product<B: Backend>(
+    weights: &Tensor<B, 2>,
+    left: &Tensor<B, 2>,
+    right: &Tensor<B, 2>,
+    chunk: usize,
+) -> CoreResult<Vec<f32>> {
+    tensor_vec(
+        (weights.clone() * left.clone() * right.clone())
+            .sum_dim(1)
+            .reshape([chunk]),
+    )
+}
+
+fn write_chunk(target: &mut [f32], start: usize, values: Vec<f32>) {
+    for (offset, value) in values.into_iter().enumerate() {
+        target[start + offset] = value;
+    }
+}
+
+fn tensor2<B: Backend>(values: Vec<f32>, shape: [usize; 2], device: &B::Device) -> Tensor<B, 2> {
+    Tensor::<B, 2>::from_data(TensorData::new(values, shape), device)
+}
+
+fn tensor_vec<B: Backend>(tensor: Tensor<B, 1>) -> CoreResult<Vec<f32>> {
+    tensor
+        .try_into_data()
+        .map_err(|error| CoreError::InvalidInput(format!("Burn readback failed: {error}")))?
+        .to_vec::<f32>()
+        .map_err(|error| CoreError::InvalidInput(format!("Burn data conversion failed: {error}")))
+}
+
+fn grid_chunk(
+    grid: &Grid3,
+    start: usize,
+    chunk: usize,
+) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
+    let mut xs = Vec::with_capacity(chunk);
+    let mut thetas = Vec::with_capacity(chunk);
+    let mut rs = Vec::with_capacity(chunk);
+    let mut volumes = Vec::with_capacity(chunk);
+    for flat in start..start + chunk {
+        let ix = flat / (grid.ntheta * grid.nr);
+        let rem = flat % (grid.ntheta * grid.nr);
+        let itheta = rem / grid.nr;
+        let ir = rem % grid.nr;
+        xs.push(grid.x_centers[ix]);
+        thetas.push(grid.theta_centers[itheta]);
+        rs.push(grid.r_centers[ir]);
+        volumes.push(grid.volumes[flat]);
+    }
+    (xs, thetas, rs, volumes)
 }

@@ -46,28 +46,34 @@ pub(super) fn write_mechanical_frame(
             for ir in 0..grid.nr {
                 let flat = flat_index(ix, itheta, ir, grid.ntheta, grid.nr);
                 let mass = fields.mass[flat];
-                rho[[t, ix, itheta, ir]] = (mass / grid.volumes[flat]) as f64;
+                let volume = grid.volumes[flat];
+                let density = mass / volume;
+                rho[[t, ix, itheta, ir]] = density as f64;
                 if mass > EPS {
                     let psi = fields.psi6_num[flat] / mass;
                     psi6_sq[[t, ix, itheta, ir]] = (psi * psi) as f64;
                     for component in 0..3 {
                         p[[t, ix, itheta, ir, component]] =
-                            (fields.p_num[component][flat] / mass) as f64;
+                            (fields.p_num[component][flat] / volume) as f64;
                         j_rho[[t, ix, itheta, ir, component]] =
-                            (fields.j_rho_num[component][flat] / mass) as f64;
+                            (fields.j_rho_num[component][flat] / volume) as f64;
                     }
                     for row in 0..3 {
                         for col in 0..3 {
                             let q_index = row * 3 + col;
                             q[[t, ix, itheta, ir, row, col]] =
-                                (fields.q_num[q_index][flat] / mass) as f64;
+                                (fields.q_num[q_index][flat] / volume) as f64;
                             a[[t, ix, itheta, ir, row, col]] = q[[t, ix, itheta, ir, row, col]]
-                                + if row == col { 1.0 / 3.0 } else { 0.0 };
+                                + if row == col {
+                                    density as f64 / 3.0
+                                } else {
+                                    0.0
+                                };
                             for flux in 0..3 {
                                 j_p[[t, ix, itheta, ir, flux, row]] =
-                                    (fields.j_p_num[flux * 3 + row][flat] / mass) as f64;
+                                    (fields.j_p_num[flux * 3 + row][flat] / volume) as f64;
                                 j_q[IxDyn(&[t, ix, itheta, ir, flux, row, col])] =
-                                    (fields.j_q_num[flux * 9 + q_index][flat] / mass) as f64;
+                                    (fields.j_q_num[flux * 9 + q_index][flat] / volume) as f64;
                             }
                         }
                     }
@@ -85,7 +91,7 @@ pub(super) fn print_conservation(label: &str, mass: &[f32], expected: usize) {
         0.0
     };
     println!(
-        "[rho_fitting] GPU TSC {label} mass conservation: total={:.6} expected={} rel_error={:.3e}",
+        "[rho_fitting] GPU {label} mass conservation: total={:.6} expected={} rel_error={:.3e}",
         total, expected, rel_error
     );
 }

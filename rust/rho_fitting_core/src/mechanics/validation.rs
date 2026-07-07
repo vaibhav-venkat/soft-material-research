@@ -90,7 +90,10 @@ pub(super) fn validate_particle_fields(inputs: ParticleFieldInputs<'_>) -> CoreR
             "geometry values must be positive".to_string(),
         ));
     }
-    if !r_centers.iter().all(|value| value.is_finite() && *value > 0.0) {
+    if !r_centers
+        .iter()
+        .all(|value| value.is_finite() && *value > 0.0)
+    {
         return Err(CoreError::InvalidInput(
             "radial centers must be finite and positive".to_string(),
         ));

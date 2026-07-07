@@ -434,7 +434,6 @@ def spectral_active_fields(
             psi6_sq_time.coefficients,
         )
     )
-    lx, ly = surface_lengths(active.x_edges, active.theta_edges, active.radius)
     targets = core.build_mechanical_targets(
         np.ascontiguousarray(p_time.filtered, dtype=np.float64),
         np.ascontiguousarray(j_rho_time.filtered, dtype=np.float64),

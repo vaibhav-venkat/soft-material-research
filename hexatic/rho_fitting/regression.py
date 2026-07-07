@@ -88,14 +88,23 @@ def stability_selection(
 
     del seed, subsamples
 
-    tau_values = tau_path(float(alpha), int(tau_count), float(tau_eps))
-    tau_index = max(0, tau_values.size - 10)
+    full_tau_values = tau_path(float(alpha), int(tau_count), float(tau_eps))
+    selected_tau_index = max(0, full_tau_values.size - 10)
+    selected_tau = float(full_tau_values[selected_tau_index])
+    tau_values = np.asarray([selected_tau], dtype=np.float64)
+    tau_index = 0
     _progress(
         f"running PySINDy ConstrainedSR3 L1 regression rows={X.shape[0]} terms={X.shape[1]} "
-        f"tau_count={tau_values.size}"
+        f"tau={selected_tau:.6g} original_tau_index={selected_tau_index}"
     )
     constrained_indices = _constraint_indices(names, non_positive_names)
-    coefficients_path, importance_path = _fit_tau_path(X, y, tau_values, max_iter, constrained_indices)
+    coefficients_path, importance_path = _fit_single_tau(
+        X,
+        y,
+        selected_tau,
+        max_iter,
+        constrained_indices,
+    )
     coefficients = coefficients_path[tau_index]
 
     raw_correlations = _raw_feature_correlations(evaluation_X, evaluation_y)
@@ -182,26 +191,25 @@ def _auxiliary_rows(
     return auxiliary_X, auxiliary_y
 
 
-def _fit_tau_path(
+def _fit_single_tau(
     X: np.ndarray,
     y: np.ndarray,
-    tau_values: np.ndarray,
+    tau: float,
     max_iter: int,
     constrained_indices: tuple[int, ...],
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Fit constrained SR3 coefficients across a supplied tau path."""
-    coefficients_path = np.zeros((tau_values.size, X.shape[1]), dtype=np.float64)
+    """Fit constrained SR3 coefficients at one selected tau value."""
+    coefficients_path = np.zeros((1, X.shape[1]), dtype=np.float64)
     importance_path = np.zeros_like(coefficients_path)
-    for index, tau in enumerate(tau_values):
-        _progress(f"  tau {index + 1}/{tau_values.size}: {tau:.6g}")
-        coefficients_path[index] = _constrained_sr3_coefficients(
-            X,
-            y,
-            reg_weight_lam=float(tau),
-            max_iter=max_iter,
-            constrained_indices=constrained_indices,
-        )
-        importance_path[index] = _coefficient_importance(coefficients_path[index])
+    _progress(f"  tau 1/1: {tau:.6g}")
+    coefficients_path[0] = _constrained_sr3_coefficients(
+        X,
+        y,
+        reg_weight_lam=float(tau),
+        max_iter=max_iter,
+        constrained_indices=constrained_indices,
+    )
+    importance_path[0] = _coefficient_importance(coefficients_path[0])
     return coefficients_path, importance_path
 
 
