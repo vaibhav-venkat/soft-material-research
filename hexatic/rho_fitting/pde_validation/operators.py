@@ -149,10 +149,15 @@ def closure_fields(
 
     grad_rho = gradient_scalar(rho, dx, dtheta, r_centers)
     grad_lap_rho = gradient_scalar(laplacian_scalar(rho, dx, dtheta, r_centers), dx, dtheta, r_centers)
+    radial_p = radial_projected_vector(p)
     f_rho = (
         y_rho_coefficients[0] * grad_rho
         + y_rho_coefficients[1] * grad_lap_rho
         + y_rho_coefficients[2] * q_dot_grad_rho(q, grad_rho)
+        + y_rho_coefficients[3] * p
+        + y_rho_coefficients[4] * rho[..., None] * p
+        + y_rho_coefficients[5] * radial_p
+        + y_rho_coefficients[6] * rho[..., None] * radial_p
     )
 
     grad_p = gradient_vector(p, dx, dtheta, r_centers)
@@ -184,6 +189,13 @@ def estimate_ubar(y_p: Array, a: Array) -> Array:
     denominator = np.sum(a * a, axis=(-2, -1))
     numerator = np.sum(y_p * a, axis=(-2, -1))
     return np.divide(numerator, denominator, out=np.zeros_like(numerator), where=denominator > 0.0)
+
+
+def radial_projected_vector(values: Array) -> Array:
+    """Return a vector field containing only the radial cylindrical component."""
+    out = np.zeros_like(values, dtype=np.float64)
+    out[..., 2] = values[..., 2]
+    return out
 
 
 def p_dot_alpha_traceless(p: Array) -> Array:

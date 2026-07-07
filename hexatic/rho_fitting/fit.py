@@ -35,7 +35,15 @@ class MechanicalLibraries(TypedDict):
     Y_Q_names: tuple[str, ...]
 
 
-Y_RHO_NAMES = ("grad_rho", "grad_lap_rho", "Q_dot_grad_rho")
+Y_RHO_NAMES = (
+    "grad_rho",
+    "grad_lap_rho",
+    "Q_dot_grad_rho",
+    "P",
+    "rho_P",
+    "radial_projected_P",
+    "rho_radial_projected_P",
+)
 Y_P_NAMES = ("A", "rho_A", "psi6sq_A", "grad_P", "rho_grad_P", "grad_lap_P")
 Y_Q_NAMES = (
     "Ubar_P_dot_alpha_traceless",
@@ -744,7 +752,16 @@ def _candidate_flux_terms(
         lap_rho = _laplacian_cylindrical_scalar(rho, lx, theta_period, r_centers)
         grad_lap_rho = _gradient_cylindrical_scalar(lap_rho, lx, theta_period, r_centers)
         q_grad_rho = np.einsum("...ka,...a->...k", q, grad_rho)
-        return [grad_rho, grad_lap_rho, q_grad_rho]
+        radial_p = _radial_projected_vector(p)
+        return [
+            grad_rho,
+            grad_lap_rho,
+            q_grad_rho,
+            p,
+            rho[..., None] * p,
+            radial_p,
+            rho[..., None] * radial_p,
+        ]
     if target_name == "Y_P":
         grad_p = _gradient_cylindrical_vector(p, lx, theta_period, r_centers)
         lap_p = _laplacian_cylindrical_vector(p, lx, theta_period, r_centers)
@@ -853,6 +870,13 @@ def _estimate_ubar(y_p: Array, a: Array) -> Array:
     denominator = np.sum(a * a, axis=(-2, -1))
     numerator = np.sum(y_p * a, axis=(-2, -1))
     return np.divide(numerator, denominator, out=np.zeros_like(numerator), where=denominator > 0.0)
+
+
+def _radial_projected_vector(values: Array) -> Array:
+    """Return the radial projection of a cylindrical vector flux."""
+    out = np.zeros_like(values, dtype=np.float64)
+    out[..., 2] = values[..., 2]
+    return out
 
 
 def _p_dot_alpha_traceless(p: Array) -> Array:

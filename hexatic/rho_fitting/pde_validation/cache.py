@@ -16,7 +16,15 @@ from hexatic.constants import cylinder
 Array = NDArray[Any]
 
 
-Y_RHO_NAMES = ("grad_rho", "grad_lap_rho", "Q_dot_grad_rho")
+Y_RHO_NAMES = (
+    "grad_rho",
+    "grad_lap_rho",
+    "Q_dot_grad_rho",
+    "P",
+    "rho_P",
+    "radial_projected_P",
+    "rho_radial_projected_P",
+)
 Y_P_NAMES = ("A", "rho_A", "psi6sq_A", "grad_P", "rho_grad_P", "grad_lap_P")
 Y_Q_NAMES = (
     "Ubar_P_dot_alpha_traceless",
@@ -133,7 +141,7 @@ def _validate_shapes(
     assert psi6_sq.shape == rho.shape, "psi6_sq must be (T,Nx,Ntheta,Nr)"
     assert y_p.shape == rho.shape + (3, 3), "Y_P must be (T,Nx,Ntheta,Nr,3,3)"
     assert times.shape == (rho.shape[0],), "cheb_times must match rho time axis"
-    assert y_rho_coefficients.shape == (3,), "Y_rho coefficients must match current library"
+    assert y_rho_coefficients.shape == (7,), "Y_rho coefficients must match current library"
     assert y_p_coefficients.shape == (6,), "Y_P coefficients must match current library"
     assert y_q_coefficients.shape == (5,), "Y_Q coefficients must match current library"
 
