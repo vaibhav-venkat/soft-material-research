@@ -14,7 +14,7 @@ NPZ_FIELDS_DIR = ANALYSIS_DIR / "npz_fields"
 LOG_DIR = ANALYSIS_DIR / "logs"
 METADATA_DIR = ANALYSIS_DIR / "metadata"
 
-RUN_STEPS = int(1e7)
+RUN_STEPS = int(1e8)
 TRAJECTORY_WRITE_PERIOD = int(1e5)
 
 
