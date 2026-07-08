@@ -11,6 +11,7 @@ from plotly.subplots import make_subplots
 CASE_ID = "circ_60_0D"
 ANALYSIS_DIR = Path(__file__).resolve().parent
 CASE_LABEL = "C = 60.0D"
+DEFAULT_MAX_LAG = 30
 
 
 def _mean_polarization(path: Path) -> tuple[np.ndarray, np.ndarray]:
@@ -171,15 +172,162 @@ def plot_case(output: Path) -> Path:
     return output
 
 
+def _lag_pair(a: np.ndarray, b: np.ndarray, lag: int) -> tuple[np.ndarray, np.ndarray]:
+    if lag < 0:
+        return a[-lag:], b[:lag]
+    if lag > 0:
+        return a[:-lag], b[lag:]
+    return a, b
+
+
+def _pearson_lag_curve(
+    a: np.ndarray,
+    b: np.ndarray,
+    lags: np.ndarray,
+) -> np.ndarray:
+    values = np.empty(len(lags), dtype=float)
+    for idx, lag in enumerate(lags):
+        x, y = _lag_pair(a, b, int(lag))
+        values[idx] = float(np.corrcoef(x, y)[0, 1])
+    return values
+
+
+def plot_lag_correlations(output: Path, max_lag: int = DEFAULT_MAX_LAG) -> Path:
+    steps, mean_p = _mean_polarization(
+        ANALYSIS_DIR / "npz_fields" / f"{CASE_ID}_active_matter_fields.npz"
+    )
+    mean_psi6 = _mean_hexatic_order(
+        ANALYSIS_DIR / "hexatic_output" / f"{CASE_ID}_hexatic_order.txt"
+    )
+
+    n = min(len(steps), len(mean_psi6), len(mean_p))
+    max_lag = min(max_lag, n - 2)
+    lags = np.arange(-max_lag, max_lag + 1, dtype=int)
+    lag_time = lags * float(np.median(np.diff(steps[:n]))) / 1_000_000.0
+    sample_counts = n - np.abs(lags)
+
+    px = mean_p[:n, 0]
+    pr = mean_p[:n, 1]
+    mean_psi6 = mean_psi6[:n]
+
+    panels = (
+        (
+            "Pearson correlation: P_x(t0) with mean |psi6|(t0 + lag)",
+            "P_x-H Pearson r",
+            _pearson_lag_curve(px, mean_psi6, lags),
+            "#16a34a",
+        ),
+        (
+            "Pearson correlation: P_R(t0) with mean |psi6|(t0 + lag)",
+            "P_R-H Pearson r",
+            _pearson_lag_curve(pr, mean_psi6, lags),
+            "#ea580c",
+        ),
+    )
+    fig = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        subplot_titles=tuple(title for title, _, _, _ in panels),
+        vertical_spacing=0.12,
+    )
+
+    customdata = np.column_stack((lags, sample_counts))
+    for row, (_, name, values, color) in enumerate(panels, start=1):
+        fig.add_trace(
+            go.Scatter(
+                x=lag_time,
+                y=values,
+                customdata=customdata,
+                mode="lines+markers",
+                name=name,
+                line=dict(color=color, width=2.4),
+                marker=dict(
+                    size=6.5,
+                    color=color,
+                    line=dict(width=0.5, color="white"),
+                ),
+                hovertemplate=(
+                    "lag=%{customdata[0]:.0f} frames<br>"
+                    "paired samples=%{customdata[1]:.0f}<br>"
+                    "lag time=%{x:.3f} x10^6 steps<br>"
+                    "Pearson r=%{y:.6f}<extra></extra>"
+                ),
+            ),
+            row=row,
+            col=1,
+        )
+        fig.add_hline(
+            y=0.0,
+            row=row,
+            col=1,
+            line=dict(color="#64748b", width=1, dash="dash"),
+        )
+        fig.add_vline(
+            x=0.0,
+            row=row,
+            col=1,
+            line=dict(color="#111827", width=1.2),
+        )
+        fig.update_yaxes(
+            title_text="Pearson r",
+            range=[-1.05, 1.05],
+            row=row,
+            col=1,
+        )
+
+    fig.update_xaxes(title_text="lag t (10^6 steps)", row=2, col=1)
+    fig.update_xaxes(showgrid=True, gridcolor="rgba(39,49,61,0.10)", zeroline=False)
+    fig.update_yaxes(showgrid=True, gridcolor="rgba(39,49,61,0.10)", zeroline=False)
+    fig.update_layout(
+        title=dict(
+            text=(
+                f"Pearson lag correlations with mean |psi6|, {CASE_LABEL}, "
+                f"lag -{max_lag}..{max_lag} frames"
+            ),
+            x=0.5,
+            xanchor="center",
+            font=dict(size=21),
+        ),
+        template="plotly_white",
+        width=1080,
+        height=760,
+        hovermode="closest",
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="center",
+            x=0.5,
+        ),
+        margin=dict(l=80, r=40, t=125, b=70),
+    )
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fig.write_html(output, include_plotlyjs="cdn", full_html=True)
+    return output
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
+        "--plot",
+        choices=("timeseries", "lag"),
+        default="timeseries",
+    )
+    parser.add_argument("--max-lag", type=int, default=DEFAULT_MAX_LAG)
+    parser.add_argument(
         "--output",
         type=Path,
-        default=ANALYSIS_DIR / "output" / f"{CASE_ID}_polarization_hexatic.html",
+        default=None,
     )
     args = parser.parse_args()
-    print(plot_case(args.output))
+    if args.plot == "lag":
+        output = args.output or ANALYSIS_DIR / "output" / f"{CASE_ID}_px_pr_hexatic_lag_correlation.html"
+        print(plot_lag_correlations(output, max_lag=args.max_lag))
+        return
+    output = args.output or ANALYSIS_DIR / "output" / f"{CASE_ID}_polarization_hexatic.html"
+    print(plot_case(output))
 
 
 if __name__ == "__main__":
