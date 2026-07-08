@@ -135,24 +135,6 @@ pub(super) fn sanitized_frame_component(
     frame_component(values, frame, particles, component, 1.0)
 }
 
-pub(super) fn sanitized_frame_component2(
-    values: ArrayView3<'_, f64>,
-    frame: usize,
-    particles: usize,
-    component: usize,
-) -> Vec<f32> {
-    (0..particles)
-        .map(|particle| {
-            let value = values[[frame, particle, component]];
-            if value.is_finite() {
-                value as f32
-            } else {
-                0.0
-            }
-        })
-        .collect()
-}
-
 pub(super) fn sanitized_frame_scalar(
     values: ArrayView2<'_, f64>,
     frame: usize,
@@ -163,27 +145,6 @@ pub(super) fn sanitized_frame_scalar(
             let value = values[[frame, particle]];
             if value.is_finite() {
                 value as f32
-            } else {
-                0.0
-            }
-        })
-        .collect()
-}
-
-pub(super) fn surface_frame_mask(
-    coords: ArrayView3<'_, f64>,
-    p_particles: ArrayView3<'_, f64>,
-    mask: ArrayView2<'_, bool>,
-    frame: usize,
-    particles: usize,
-) -> Vec<f32> {
-    (0..particles)
-        .map(|particle| {
-            let valid = mask[[frame, particle]]
-                && (0..3).all(|component| coords[[frame, particle, component]].is_finite())
-                && (0..2).all(|component| p_particles[[frame, particle, component]].is_finite());
-            if valid {
-                1.0
             } else {
                 0.0
             }

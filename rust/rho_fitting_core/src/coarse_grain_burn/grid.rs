@@ -1,6 +1,5 @@
 use ndarray::ArrayView1;
 
-use super::SINGLE_RADIAL_WIDTH_FRACTION;
 use crate::{CoreError, CoreResult};
 
 pub(super) struct Grid3 {
@@ -13,9 +12,6 @@ pub(super) struct Grid3 {
     pub(super) volumes: Vec<f32>,
     pub(super) lx: f32,
     pub(super) theta_period: f32,
-    pub(super) dx: f32,
-    pub(super) dtheta: f32,
-    pub(super) dr: f32,
 }
 
 impl Grid3 {
@@ -65,9 +61,6 @@ impl Grid3 {
             volumes,
             lx: lx as f32,
             theta_period: theta_period as f32,
-            dx,
-            dtheta,
-            dr,
         })
     }
 
@@ -101,52 +94,6 @@ pub(super) fn radial_spacing(r_centers: ArrayView1<'_, f64>) -> CoreResult<f32> 
         }
     }
     Ok(dr as f32)
-}
-
-pub(super) fn single_radial_width(radius: f32) -> CoreResult<f32> {
-    let width = radius * SINGLE_RADIAL_WIDTH_FRACTION;
-    if width.is_finite() && width > 0.0 {
-        Ok(width)
-    } else {
-        Err(CoreError::InvalidInput(
-            "single-shell radial width must be positive".to_string(),
-        ))
-    }
-}
-
-pub(super) fn surface_shell_radial_centers(radius: f32, dr: f32) -> CoreResult<Vec<f32>> {
-    let centers = vec![radius - dr, radius, radius + dr];
-    if centers
-        .iter()
-        .all(|value| value.is_finite() && *value > 0.0)
-    {
-        Ok(centers)
-    } else {
-        Err(CoreError::InvalidInput(
-            "single-shell radial centers must be positive".to_string(),
-        ))
-    }
-}
-
-pub(super) fn cylindrical_cell_volumes(
-    dx: f32,
-    dtheta: f32,
-    r_centers: &[f32],
-    dr: f32,
-) -> CoreResult<Vec<f32>> {
-    let mut volumes = Vec::with_capacity(r_centers.len());
-    for r_center in r_centers {
-        let inner = *r_center - 0.5 * dr;
-        let outer = inner + dr;
-        let volume = dx * dtheta * (outer * outer - inner * inner) * 0.5;
-        if !(volume.is_finite() && volume > 0.0 && inner >= 0.0) {
-            return Err(CoreError::InvalidInput(
-                "single-shell cylindrical volume is invalid".to_string(),
-            ));
-        }
-        volumes.push(volume);
-    }
-    Ok(volumes)
 }
 
 pub(super) fn flat_index(ix: usize, itheta: usize, ir: usize, ntheta: usize, nr: usize) -> usize {

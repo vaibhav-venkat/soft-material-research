@@ -1,6 +1,4 @@
-use numpy::{
-    IntoPyArray, PyReadonlyArray1, PyReadonlyArray2, PyReadonlyArray3, PyReadonlyArrayDyn,
-};
+use numpy::{IntoPyArray, PyReadonlyArray1, PyReadonlyArray2, PyReadonlyArray3, PyReadonlyArrayDyn};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -21,50 +19,6 @@ fn to_py_err(error: CoreError) -> PyErr {
 /// Return the compiled rho-fitting core crate version.
 fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
-}
-
-#[pyfunction]
-#[pyo3(signature = (coords, p_particles, shell_mask, x_centers, y_centers, lx, ly, radius, sigma))]
-/// Python wrapper for GPU TSC density and polarization coarse-graining.
-#[allow(unused_variables)]
-fn coarse_grain_fields(
-    py: Python<'_>,
-    coords: PyReadonlyArray3<'_, f64>,
-    p_particles: PyReadonlyArray3<'_, f64>,
-    shell_mask: PyReadonlyArray2<'_, bool>,
-    x_centers: PyReadonlyArray1<'_, f64>,
-    y_centers: PyReadonlyArray1<'_, f64>,
-    lx: f64,
-    ly: f64,
-    radius: f64,
-    sigma: f64,
-) -> PyResult<Py<PyDict>> {
-    #[cfg(any(feature = "gpu-metal", feature = "gpu-cuda"))]
-    {
-        let result = coarse_grain_burn::coarse_grain_fields(
-            coords.as_array(),
-            p_particles.as_array(),
-            shell_mask.as_array(),
-            x_centers.as_array(),
-            y_centers.as_array(),
-            lx,
-            ly,
-            radius,
-            sigma,
-        );
-        let (rho, p_density) = result.map_err(to_py_err)?;
-        let out = PyDict::new(py);
-        out.set_item("rho", rho.into_pyarray(py))?;
-        out.set_item("P_density", p_density.into_pyarray(py))?;
-        return Ok(out.unbind());
-    }
-
-    #[cfg(not(any(feature = "gpu-metal", feature = "gpu-cuda")))]
-    {
-        Err(PyValueError::new_err(
-            "rho-fitting coarse-graining requires a GPU feature; build with gpu-metal, gpu-cuda, or gpu",
-        ))
-    }
 }
 
 #[pyfunction]
@@ -126,7 +80,7 @@ fn sample_rows(
 
 #[pyfunction]
 #[pyo3(signature = (coords, directions, velocities, psi6_abs, mask, x_centers, theta_centers, r_centers, lx, theta_period, sigma, gamma, u0))]
-/// Python wrapper for GPU TSC mechanical coarse-grained fields and current tensors.
+/// Python wrapper for GPU Gaussian mechanical coarse-grained fields and current tensors.
 #[allow(unused_variables)]
 fn build_mechanical_fields(
     py: Python<'_>,
@@ -270,7 +224,6 @@ fn sample_component_rows(
 /// Register the Python module functions exposed by the compiled extension.
 fn _rho_fitting_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
-    m.add_function(wrap_pyfunction!(coarse_grain_fields, m)?)?;
     m.add_function(wrap_pyfunction!(spatial_derivatives, m)?)?;
     m.add_function(wrap_pyfunction!(sample_rows, m)?)?;
     m.add_function(wrap_pyfunction!(build_mechanical_fields, m)?)?;

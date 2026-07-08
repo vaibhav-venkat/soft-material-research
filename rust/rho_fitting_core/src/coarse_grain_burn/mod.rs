@@ -1,7 +1,5 @@
-mod deposit;
 mod frame;
 mod grid;
-mod smooth;
 
 use burn::prelude::*;
 use burn::tensor::TensorData;
@@ -9,22 +7,15 @@ use burn::tensor::TensorData;
 use burn_cuda::{Cuda, CudaDevice};
 #[cfg(feature = "gpu-metal")]
 use burn_wgpu::{graphics, init_setup, Metal, WgpuDevice};
-use ndarray::{Array3, Array4, Array5, Array6, ArrayD, ArrayView1, ArrayView2, ArrayView3, IxDyn};
+use ndarray::{Array5, Array6, ArrayD, ArrayView1, ArrayView2, ArrayView3, IxDyn};
 use std::panic::{catch_unwind, set_hook, take_hook, AssertUnwindSafe};
 
-use deposit::{collapse_surface_shell, deposit_surface_shell_frame};
 use frame::{
-    combine_particle_components, frame_component, mechanical_frame_mask, print_conservation,
-    sanitized_frame_component, sanitized_frame_component2, sanitized_frame_scalar,
-    surface_frame_mask, write_mechanical_frame, FrameFields,
+    combine_particle_components, mechanical_frame_mask, print_conservation,
+    sanitized_frame_component, sanitized_frame_scalar, write_mechanical_frame, FrameFields,
 };
-use grid::{
-    cylindrical_cell_volumes, radial_spacing, single_radial_width, surface_shell_radial_centers,
-    Grid3,
-};
-use smooth::smooth_fields_2d;
+use grid::{radial_spacing, Grid3};
 
-use crate::coarse_grain;
 use crate::mechanics::MechanicalFields;
 use crate::{CoreError, CoreResult};
 
@@ -33,22 +24,8 @@ type CudaBackend = Cuda<f32, i32>;
 #[cfg(feature = "gpu-metal")]
 type MetalBackend = Metal<f32, i32, u8>;
 
-const SMOOTHING_PASSES: usize = 1;
-const SMOOTHING_STENCIL: [f32; 3] = [1.0, 2.0, 1.0];
 const EPS: f32 = 1.0e-12;
-const SINGLE_RADIAL_WIDTH_FRACTION: f32 = 0.1;
 const GAUSSIAN_GRID_CHUNK: usize = 256;
-
-pub(super) struct CoarseGrainInputs<'a> {
-    coords: ArrayView3<'a, f64>,
-    p_particles: ArrayView3<'a, f64>,
-    shell_mask: ArrayView2<'a, bool>,
-    x_centers: ArrayView1<'a, f64>,
-    y_centers: ArrayView1<'a, f64>,
-    lx: f64,
-    ly: f64,
-    radius: f64,
-}
 
 pub(super) struct MechanicalInputs<'a> {
     coords: ArrayView3<'a, f64>,
@@ -62,43 +39,6 @@ pub(super) struct MechanicalInputs<'a> {
     lx: f64,
     theta_period: f64,
     sigma: f64,
-}
-
-/// Coarse-grain density and two-component polarization density with conservative GPU TSC deposition.
-#[allow(clippy::too_many_arguments)]
-pub fn coarse_grain_fields(
-    coords: ArrayView3<'_, f64>,
-    p_particles: ArrayView3<'_, f64>,
-    shell_mask: ArrayView2<'_, bool>,
-    x_centers: ArrayView1<'_, f64>,
-    y_centers: ArrayView1<'_, f64>,
-    lx: f64,
-    ly: f64,
-    radius: f64,
-    sigma: f64,
-) -> CoreResult<(Array3<f64>, Array4<f64>)> {
-    coarse_grain::validate_inputs(
-        coords,
-        p_particles,
-        shell_mask,
-        x_centers,
-        y_centers,
-        lx,
-        ly,
-        radius,
-        sigma,
-    )?;
-    let inputs = CoarseGrainInputs {
-        coords,
-        p_particles,
-        shell_mask,
-        x_centers,
-        y_centers,
-        lx,
-        ly,
-        radius,
-    };
-    run_coarse_grain(inputs)
 }
 
 /// Build mechanical moment fields and current tensors with renormalized GPU Gaussian deposition.
@@ -164,32 +104,6 @@ fn catch_burn_panic<T>(backend: &str, func: impl FnOnce() -> CoreResult<T>) -> C
     })?
 }
 
-fn run_coarse_grain(inputs: CoarseGrainInputs<'_>) -> CoreResult<(Array3<f64>, Array4<f64>)> {
-    #[cfg(feature = "gpu-cuda")]
-    if <CudaBackend as Backend>::device_count(0) > 0 {
-        let device = CudaDevice::new(0);
-        println!("[rho_fitting] using Burn CUDA backend for TSC coarse-graining");
-        return catch_burn_panic("CUDA", || {
-            tsc_coarse_grain_device::<CudaBackend>(inputs, &device)
-        });
-    }
-
-    #[cfg(feature = "gpu-metal")]
-    {
-        let device = WgpuDevice::DefaultDevice;
-        println!("[rho_fitting] using Burn Metal/WGPU backend for TSC coarse-graining");
-        return catch_burn_panic("Metal/WGPU", || {
-            init_setup::<graphics::Metal>(&device, Default::default());
-            tsc_coarse_grain_device::<MetalBackend>(inputs, &device)
-        });
-    }
-
-    #[allow(unreachable_code)]
-    Err(CoreError::InvalidInput(
-        "extension was built without a supported Burn GPU backend".to_string(),
-    ))
-}
-
 fn run_mechanical(inputs: MechanicalInputs<'_>) -> CoreResult<MechanicalFields> {
     #[cfg(feature = "gpu-cuda")]
     if <CudaBackend as Backend>::device_count(0) > 0 {
@@ -216,86 +130,6 @@ fn run_mechanical(inputs: MechanicalInputs<'_>) -> CoreResult<MechanicalFields> 
     Err(CoreError::InvalidInput(
         "extension was built without a supported Burn GPU backend".to_string(),
     ))
-}
-
-fn tsc_coarse_grain_device<B: Backend>(
-    inputs: CoarseGrainInputs<'_>,
-    device: &B::Device,
-) -> CoreResult<(Array3<f64>, Array4<f64>)> {
-    let CoarseGrainInputs {
-        coords,
-        p_particles,
-        shell_mask,
-        x_centers,
-        y_centers,
-        lx,
-        ly,
-        radius,
-    } = inputs;
-    let (frames, particles, _) = coords.dim();
-    let nx = x_centers.len();
-    let ny = y_centers.len();
-    let grid = nx * ny;
-    let dx = (lx / nx as f64) as f32;
-    let theta_period = (ly / radius) as f32;
-    let dtheta = theta_period / ny as f32;
-    let radial_width = single_radial_width(radius as f32)?;
-    let radial_centers = surface_shell_radial_centers(radius as f32, radial_width)?;
-    let volumes = cylindrical_cell_volumes(dx, dtheta, &radial_centers, radial_width)?;
-    let column_volume: f32 = volumes.iter().sum();
-    let x_values: Vec<f32> = x_centers.iter().map(|value| *value as f32).collect();
-    let theta_values: Vec<f32> = y_centers
-        .iter()
-        .map(|value| (*value / radius) as f32)
-        .collect();
-    let mut rho = Array3::<f64>::zeros((frames, nx, ny));
-    let mut p_density = Array4::<f64>::zeros((frames, nx, ny, 2));
-
-    for t in 0..frames {
-        println!(
-            "[rho_fitting] GPU TSC coarse-grain frame {}/{}",
-            t + 1,
-            frames
-        );
-        let valid = surface_frame_mask(coords, p_particles, shell_mask, t, particles);
-        let particle_x = frame_component(coords, t, particles, 0, 1.0);
-        let particle_theta = frame_component(coords, t, particles, 1, 1.0);
-        let particle_r = frame_component(coords, t, particles, 2, 1.0);
-        let px = sanitized_frame_component2(p_particles, t, particles, 0);
-        let py = sanitized_frame_component2(p_particles, t, particles, 1);
-        let shell_grid = grid * radial_centers.len();
-        let mut shell_mass = vec![0.0f32; shell_grid];
-        let mut shell_p_num = [vec![0.0f32; shell_grid], vec![0.0f32; shell_grid]];
-        let deposited = deposit_surface_shell_frame(
-            &x_values,
-            &theta_values,
-            &radial_centers,
-            &particle_x,
-            &particle_theta,
-            &particle_r,
-            &valid,
-            &[px, py],
-            lx as f32,
-            theta_period,
-            dx,
-            dtheta,
-            radial_width,
-            &mut shell_mass,
-            &mut shell_p_num,
-        );
-        let (mut mass, mut p_num) =
-            collapse_surface_shell(&shell_mass, &shell_p_num, nx, ny, radial_centers.len());
-        smooth_fields_2d::<B>(&mut mass, &mut p_num, nx, ny, device)?;
-        for flat in 0..grid {
-            let ix = flat / ny;
-            let iy = flat % ny;
-            rho[[t, ix, iy]] = (mass[flat] / column_volume) as f64;
-            p_density[[t, ix, iy, 0]] = (p_num[0][flat] / column_volume) as f64;
-            p_density[[t, ix, iy, 1]] = (p_num[1][flat] / column_volume) as f64;
-        }
-        print_conservation("density", &mass, deposited);
-    }
-    Ok((rho, p_density))
 }
 
 fn mechanical_gaussian_device<B: Backend>(
