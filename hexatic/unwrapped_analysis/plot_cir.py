@@ -1,9 +1,11 @@
-"""Plot initial-condition properties vs C/D (circumference/diameter) across all cases.
+"""Plot properties vs C/D (circumference/diameter) across all cases.
 
 Auto-discovers cases from ``hexatic_output/*_hexatic_order.txt`` and plots:
 - Disclination density +1 (first frame)
 - Disclination density -1 (first frame)
 - Mean hexatic order |psi6| (first frame)
+- Average x-velocity over frames 50..100 (finite-difference from npz coords)
+- Average |x-velocity| over frames 50..100
 
 Usage::
 
@@ -94,13 +96,15 @@ def parse_c_over_d(case_id: str) -> float:
 
 
 @dataclasses.dataclass
-class FirstFrameData:
+class CaseData:
     case_id: str
     c_over_d: float
     n_particles: int
     disclination_plus1: float   # fraction of particles
     disclination_minus1: float  # fraction of particles
     mean_psi6: float
+    mean_vx: float              # avg net x-velocity over frames 50..100
+    mean_abs_vx: float          # avg |x-velocity| over frames 50..100
 
 
 def _mean_hexatic_first_frame(hexatic_order_path: Path) -> tuple[float, int]:
@@ -134,13 +138,64 @@ def _disclination_density_first_frame(
     return plus1, minus1, n_total
 
 
-def _gather_first_frame_data(case_id: str, hexatic_dir: Path) -> FirstFrameData | None:
-    """Collect first-frame metrics for a single case.
+def _velocity_from_npz(
+    npz_path: Path,
+    frame_start: int = 50,
+    frame_end: int = 100,
+) -> tuple[float, float]:
+    """Return (mean v_x, mean |v_x|) averaged over frames [frame_start, frame_end).
+
+    v_x computed via central finite difference of ``coords[:, :, 0]``.
+    Returns (nan, nan) when the file is missing or too few frames.
+    """
+    try:
+        with np.load(npz_path) as data:
+            coords = np.asarray(data["coords"], dtype=float)  # (T, N, 3)
+            steps = np.asarray(data["steps"], dtype=float)
+    except (FileNotFoundError, KeyError):
+        return float("nan"), float("nan")
+
+    n_frames = coords.shape[0]
+    if n_frames < 3:
+        return float("nan"), float("nan")
+
+    f0 = max(0, frame_start)
+    f1 = min(n_frames - 1, frame_end)
+    if f1 <= f0:
+        return float("nan"), float("nan")
+
+    # central finite difference for interior frames, forward/backward at edges
+    vx = np.empty((n_frames, coords.shape[1]), dtype=float)
+    dt_forward = steps[1] - steps[0]
+    dt_backward = steps[-1] - steps[-2]
+
+    # forward difference for frame 0
+    vx[0] = (coords[1, :, 0] - coords[0, :, 0]) / max(dt_forward, 1.0)
+    # central difference for interior
+    for f in range(1, n_frames - 1):
+        dt = max(steps[f + 1] - steps[f - 1], 1.0)
+        vx[f] = (coords[f + 1, :, 0] - coords[f - 1, :, 0]) / dt
+    # backward difference for last frame
+    vx[-1] = (coords[-1, :, 0] - coords[-2, :, 0]) / max(dt_backward, 1.0)
+
+    window = vx[f0:f1]  # shape (W, N)
+    mean_vx = float(np.nanmean(window))
+    mean_abs_vx = float(np.nanmean(np.abs(window)))
+    return mean_vx, mean_abs_vx
+
+
+def _gather_case_data(
+    case_id: str,
+    hexatic_dir: Path,
+    npz_dir: Path,
+) -> CaseData | None:
+    """Collect metrics for a single case.
 
     Returns ``None`` when required files are missing or empty.
     """
     hexatic_path = hexatic_dir / f"{case_id}_hexatic_order.txt"
     neighbor_path = hexatic_dir / f"{case_id}_neighbor_counts.txt"
+    npz_path = npz_dir / f"{case_id}_active_matter_fields.npz"
 
     if not hexatic_path.exists():
         print(f"  [skip] missing {hexatic_path.name}")
@@ -151,17 +206,19 @@ def _gather_first_frame_data(case_id: str, hexatic_dir: Path) -> FirstFrameData 
 
     mean_psi6, n_hex = _mean_hexatic_first_frame(hexatic_path)
     plus1, minus1, n_nbr = _disclination_density_first_frame(neighbor_path)
+    mean_vx, mean_abs_vx = _velocity_from_npz(npz_path)
 
-    # Sanity: both files should report the same particle count for frame 0
     n_particles = max(n_hex, n_nbr)
 
-    return FirstFrameData(
+    return CaseData(
         case_id=case_id,
         c_over_d=parse_c_over_d(case_id),
         n_particles=n_particles,
         disclination_plus1=plus1,
         disclination_minus1=minus1,
         mean_psi6=mean_psi6,
+        mean_vx=mean_vx,
+        mean_abs_vx=mean_abs_vx,
     )
 
 
@@ -207,8 +264,8 @@ def _add_scatter(
     )
 
 
-def build_figure(rows_data: list[FirstFrameData]) -> go.Figure:
-    """Build a three-panel Plotly figure from collected first-frame data."""
+def build_figure(rows_data: list[CaseData]) -> go.Figure:
+    """Build a five-panel Plotly figure from collected case data."""
     rows_data.sort(key=lambda d: d.c_over_d)
 
     cd = np.array([d.c_over_d for d in rows_data])
@@ -217,33 +274,39 @@ def build_figure(rows_data: list[FirstFrameData]) -> go.Figure:
     plus1 = np.array([d.disclination_plus1 for d in rows_data])
     minus1 = np.array([d.disclination_minus1 for d in rows_data])
     psi6 = np.array([d.mean_psi6 for d in rows_data])
+    vx = np.array([d.mean_vx for d in rows_data])
+    abs_vx = np.array([d.mean_abs_vx for d in rows_data])
 
     fig = make_subplots(
-        rows=3,
+        rows=5,
         cols=1,
         shared_xaxes=True,
         subplot_titles=(
             "Disclination density +1  (first frame)",
             "Disclination density −1  (first frame)",
             "Mean |ψ₆|  (first frame)",
+            "⟨v_x⟩  avg net x-velocity over frames 50–100",
+            "⟨|v_x|⟩  avg |x-velocity| over frames 50–100",
         ),
-        vertical_spacing=0.10,
+        vertical_spacing=0.07,
     )
 
     _add_scatter(fig, 1, cd, plus1, labels, "+1 disclinations", "#dc2626", "triangle-up")
     _add_scatter(fig, 2, cd, minus1, labels, "−1 disclinations", "#2563eb", "triangle-down")
     _add_scatter(fig, 3, cd, psi6, labels, "mean |ψ₆|", "#7c3aed", "circle")
+    _add_scatter(fig, 4, cd, vx, labels, "⟨v_x⟩", "#0891b2", "diamond")
+    _add_scatter(fig, 5, cd, abs_vx, labels, "⟨|v_x|⟩", "#ea580c", "square")
 
     # Axes formatting
     fig.update_xaxes(
         title_text="C / D  (circumference / particle diameter)",
-        row=3,
+        row=5,
         col=1,
         showgrid=True,
         gridcolor="rgba(39,49,61,0.10)",
         zeroline=False,
     )
-    for row in range(1, 4):
+    for row in range(1, 6):
         fig.update_yaxes(
             showgrid=True,
             gridcolor="rgba(39,49,61,0.10)",
@@ -254,17 +317,22 @@ def build_figure(rows_data: list[FirstFrameData]) -> go.Figure:
     fig.update_yaxes(title_text="fraction of particles", row=1, col=1)
     fig.update_yaxes(title_text="fraction of particles", row=2, col=1)
     fig.update_yaxes(title_text="⟨ |ψ₆| ⟩", row=3, col=1)
+    fig.update_yaxes(title_text="v_x  (sim units)", row=4, col=1)
+    fig.update_yaxes(title_text="|v_x|  (sim units)", row=5, col=1)
+
+    # Zero reference lines for velocity panels
+    fig.add_hline(y=0.0, row=4, col=1, line=dict(color="#9aa3ad", width=1, dash="dot"))
 
     fig.update_layout(
         title=dict(
-            text="Initial-condition properties vs C/D",
+            text="Properties vs C/D",
             x=0.5,
             xanchor="center",
             font=dict(size=22),
         ),
         template="plotly_white",
         width=960,
-        height=900,
+        height=1300,
         hovermode="closest",
         showlegend=False,
         margin=dict(l=85, r=35, t=100, b=75),
@@ -297,9 +365,9 @@ def main() -> None:
 
     print(f"Discovered {len(case_ids)} cases: {', '.join(case_ids)}")
 
-    rows: list[FirstFrameData] = []
+    rows: list[CaseData] = []
     for cid in case_ids:
-        data = _gather_first_frame_data(cid, HEXATIC_OUTPUT_DIR)
+        data = _gather_case_data(cid, HEXATIC_OUTPUT_DIR, NPZ_FIELDS_DIR)
         if data is not None:
             rows.append(data)
 
