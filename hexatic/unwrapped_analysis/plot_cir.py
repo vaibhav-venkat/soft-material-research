@@ -4,14 +4,17 @@ Auto-discovers cases from ``hexatic_output/*_hexatic_order.txt`` and plots:
 - Disclination density +1 (first frame)
 - Disclination density -1 (first frame)
 - Mean hexatic order |psi6| (first frame)
-- Average x-velocity over frames 50..100 (finite-difference from npz coords)
-- Average |x-velocity| over frames 50..100
+- Average net x-velocity over frames [v0..v1)  (finite-difference from npz)
+- Average |x-velocity| over frames [v0..v1)
+
+Velocity is computed as Δx / (Δstep · TIMESTEP) where Δstep is read from
+the npz ``steps`` array and ``TIMESTEP`` comes from ``hexatic.constants.cylinder``.
 
 Usage::
 
     python -m hexatic.unwrapped_analysis.plot_cir --help
     python -m hexatic.unwrapped_analysis.plot_cir
-    python -m hexatic.unwrapped_analysis.plot_cir --output path/to/output.html
+    python -m hexatic.unwrapped_analysis.plot_cir -v0 500 -v1 1000 --output path/to/output.html
 """
 
 from __future__ import annotations
@@ -26,6 +29,8 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
+from hexatic.constants import cylinder as _cyl_constants
+
 
 # ---------------------------------------------------------------------------
 # Directory layout
@@ -35,6 +40,12 @@ ANALYSIS_DIR = Path(__file__).resolve().parent
 HEXATIC_OUTPUT_DIR = ANALYSIS_DIR / "hexatic_output"
 NPZ_FIELDS_DIR = ANALYSIS_DIR / "npz_fields"
 OUTPUT_DIR = ANALYSIS_DIR / "output"
+
+DEFAULT_V0 = 500
+DEFAULT_V1 = 1000
+
+# HOOMD timestep — multiply frame-step delta by this to get physical time.
+_TIMESTEP: float = float(_cyl_constants.TIMESTEP)
 
 
 # ---------------------------------------------------------------------------
@@ -103,8 +114,8 @@ class CaseData:
     disclination_plus1: float   # fraction of particles
     disclination_minus1: float  # fraction of particles
     mean_psi6: float
-    mean_vx: float              # avg net x-velocity over frames 50..100
-    mean_abs_vx: float          # avg |x-velocity| over frames 50..100
+    mean_vx: float              # avg net x-velocity over the velocity frame window
+    mean_abs_vx: float          # avg |x-velocity| over the velocity frame window
 
 
 def _mean_hexatic_first_frame(hexatic_order_path: Path) -> tuple[float, int]:
@@ -140,47 +151,49 @@ def _disclination_density_first_frame(
 
 def _velocity_from_npz(
     npz_path: Path,
-    frame_start: int = 50,
-    frame_end: int = 100,
+    frame_start: int = DEFAULT_V0,
+    frame_end: int = DEFAULT_V1,
 ) -> tuple[float, float]:
-    """Return (mean v_x, mean |v_x|) averaged over frames [frame_start, frame_end).
+    """Return (mean net v_x, mean net |v_x|) over frames [frame_start, frame_end).
 
-    v_x computed via central finite difference of ``coords[:, :, 0]``.
-    Returns (nan, nan) when the file is missing or too few frames.
+    v_x = Δx / (Δstep · TIMESTEP), where Δstep is the difference between
+    consecutive entries in the npz ``steps`` array and TIMESTEP is the
+    HOOMD integration timestep from ``hexatic.constants.cylinder``.
+
+    Returns (nan, nan) when the file is missing or there are too few frames.
     """
     try:
         with np.load(npz_path) as data:
             coords = np.asarray(data["coords"], dtype=float)  # (T, N, 3)
-            steps = np.asarray(data["steps"], dtype=float)
+            steps = np.asarray(data["steps"], dtype=float)    # (T,)
     except (FileNotFoundError, KeyError):
         return float("nan"), float("nan")
 
     n_frames = coords.shape[0]
-    if n_frames < 3:
-        return float("nan"), float("nan")
-
     f0 = max(0, frame_start)
-    f1 = min(n_frames - 1, frame_end)
-    if f1 <= f0:
+    f1 = min(n_frames, frame_end)
+    if f1 <= f0 + 1:
         return float("nan"), float("nan")
 
-    # central finite difference for interior frames, forward/backward at edges
-    vx = np.empty((n_frames, coords.shape[1]), dtype=float)
-    dt_forward = steps[1] - steps[0]
-    dt_backward = steps[-1] - steps[-2]
+    # physical time between trajectory writes:  (steps[1] - steps[0]) * TIMESTEP
+    step_diffs = np.diff(steps)
+    if len(step_diffs) == 0:
+        return float("nan"), float("nan")
+    dt_per_frame = float(np.median(step_diffs)) * _TIMESTEP
+    if dt_per_frame <= 0:
+        return float("nan"), float("nan")
 
-    # forward difference for frame 0
-    vx[0] = (coords[1, :, 0] - coords[0, :, 0]) / max(dt_forward, 1.0)
-    # central difference for interior
-    for f in range(1, n_frames - 1):
-        dt = max(steps[f + 1] - steps[f - 1], 1.0)
-        vx[f] = (coords[f + 1, :, 0] - coords[f - 1, :, 0]) / dt
-    # backward difference for last frame
-    vx[-1] = (coords[-1, :, 0] - coords[-2, :, 0]) / max(dt_backward, 1.0)
+    # forward difference: displacement per frame in the window
+    dx = np.diff(coords[f0:f1, :, 0], axis=0)  # (W-1, N)
+    vx_window = dx / dt_per_frame                # (W-1, N)  actual velocity
 
-    window = vx[f0:f1]  # shape (W, N)
-    mean_vx = float(np.nanmean(window))
-    mean_abs_vx = float(np.nanmean(np.abs(window)))
+    # per-frame net: mean across particles for each frame-to-frame step
+    per_frame_net = np.mean(vx_window, axis=1)          # (W-1,)
+    per_frame_abs = np.mean(np.abs(vx_window), axis=1)  # (W-1,)
+
+    # average those frame-wise nets into a single scalar
+    mean_vx = float(np.mean(per_frame_net))
+    mean_abs_vx = float(np.mean(per_frame_abs))
     return mean_vx, mean_abs_vx
 
 
@@ -188,6 +201,8 @@ def _gather_case_data(
     case_id: str,
     hexatic_dir: Path,
     npz_dir: Path,
+    v0: int = DEFAULT_V0,
+    v1: int = DEFAULT_V1,
 ) -> CaseData | None:
     """Collect metrics for a single case.
 
@@ -206,7 +221,7 @@ def _gather_case_data(
 
     mean_psi6, n_hex = _mean_hexatic_first_frame(hexatic_path)
     plus1, minus1, n_nbr = _disclination_density_first_frame(neighbor_path)
-    mean_vx, mean_abs_vx = _velocity_from_npz(npz_path)
+    mean_vx, mean_abs_vx = _velocity_from_npz(npz_path, v0, v1)
 
     n_particles = max(n_hex, n_nbr)
 
@@ -264,7 +279,7 @@ def _add_scatter(
     )
 
 
-def build_figure(rows_data: list[CaseData]) -> go.Figure:
+def build_figure(rows_data: list[CaseData], v0: int = DEFAULT_V0, v1: int = DEFAULT_V1) -> go.Figure:
     """Build a five-panel Plotly figure from collected case data."""
     rows_data.sort(key=lambda d: d.c_over_d)
 
@@ -285,8 +300,8 @@ def build_figure(rows_data: list[CaseData]) -> go.Figure:
             "Disclination density +1  (first frame)",
             "Disclination density −1  (first frame)",
             "Mean |ψ₆|  (first frame)",
-            "⟨v_x⟩  avg net x-velocity over frames 50–100",
-            "⟨|v_x|⟩  avg |x-velocity| over frames 50–100",
+            f"⟨v_x⟩  avg net x-velocity over frames {v0}–{v1}",
+            f"⟨|v_x|⟩  avg |x-velocity| over frames {v0}–{v1}",
         ),
         vertical_spacing=0.07,
     )
@@ -317,8 +332,8 @@ def build_figure(rows_data: list[CaseData]) -> go.Figure:
     fig.update_yaxes(title_text="fraction of particles", row=1, col=1)
     fig.update_yaxes(title_text="fraction of particles", row=2, col=1)
     fig.update_yaxes(title_text="⟨ |ψ₆| ⟩", row=3, col=1)
-    fig.update_yaxes(title_text="v_x  (sim units)", row=4, col=1)
-    fig.update_yaxes(title_text="|v_x|  (sim units)", row=5, col=1)
+    fig.update_yaxes(title_text="v_x  (σ / τ)", row=4, col=1)
+    fig.update_yaxes(title_text="|v_x|  (σ / τ)", row=5, col=1)
 
     # Zero reference lines for velocity panels
     fig.add_hline(y=0.0, row=4, col=1, line=dict(color="#9aa3ad", width=1, dash="dot"))
@@ -356,6 +371,18 @@ def main() -> None:
         default=None,
         help="Path to output HTML (default: output/initial_vs_c_over_d.html)",
     )
+    parser.add_argument(
+        "-v0", "--v-frame-start",
+        type=int,
+        default=DEFAULT_V0,
+        help=f"First frame index for velocity window (default: {DEFAULT_V0})",
+    )
+    parser.add_argument(
+        "-v1", "--v-frame-end",
+        type=int,
+        default=DEFAULT_V1,
+        help=f"One-past-end frame index for velocity window (default: {DEFAULT_V1})",
+    )
     args = parser.parse_args()
 
     case_ids = _discover_case_ids(HEXATIC_OUTPUT_DIR)
@@ -367,7 +394,7 @@ def main() -> None:
 
     rows: list[CaseData] = []
     for cid in case_ids:
-        data = _gather_case_data(cid, HEXATIC_OUTPUT_DIR, NPZ_FIELDS_DIR)
+        data = _gather_case_data(cid, HEXATIC_OUTPUT_DIR, NPZ_FIELDS_DIR, args.v_frame_start, args.v_frame_end)
         if data is not None:
             rows.append(data)
 
@@ -376,7 +403,7 @@ def main() -> None:
         return
 
     print(f"Plotting {len(rows)} cases.")
-    fig = build_figure(rows)
+    fig = build_figure(rows, args.v_frame_start, args.v_frame_end)
 
     output = args.output or OUTPUT_DIR / "initial_vs_c_over_d.html"
     output.parent.mkdir(parents=True, exist_ok=True)
