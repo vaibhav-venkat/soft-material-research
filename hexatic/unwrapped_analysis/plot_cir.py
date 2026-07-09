@@ -184,6 +184,12 @@ def _polarization_from_npz(
 
     mean_px = float(np.mean(per_frame_net))
     mean_abs_px = float(np.mean(per_frame_abs))
+
+    print(
+        f"  [P_x] {npz_path.name:50s}  "
+        f"shape={p.shape}  window=[{f0}:{f1}]  "
+        f"⟨P_x⟩={mean_px:.6e}  ⟨|P_x|⟩={mean_abs_px:.6e}"
+    )
     return mean_px, mean_abs_px
 
 
@@ -232,6 +238,13 @@ def _velocity_from_npz(
     # average those frame-wise nets into a single scalar
     mean_vx = float(np.mean(per_frame_net))
     mean_abs_vx = float(np.mean(per_frame_abs))
+
+    print(
+        f"  [v_x]  {npz_path.name:50s}  "
+        f"shape={coords.shape}  window=[{f0}:{f1}]  "
+        f"dt/frame={dt_per_frame:.6e}  "
+        f"⟨v_x⟩={mean_vx:.6e}  ⟨|v_x|⟩={mean_abs_vx:.6e}"
+    )
     return mean_vx, mean_abs_vx
 
 
