@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 description = "Rust numerical core for hexatic rho fitting"
 
+[profile.release]
+strip = "none"
+debug = 0
+split-debuginfo = "off"
+
 [lib]
 name = "_rho_fitting_core"
 crate-type = ["cdylib", "rlib"]

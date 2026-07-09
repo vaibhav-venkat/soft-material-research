@@ -1,347 +1,187 @@
-# Improve performance + Accuracy instructions
+# Instructions
 
-## Generic performance boosts
-*Completely boot the non-GPU version of the coarse-graining, even as a fallback.*
+## Changing coarse-graining
+Right now, we use boundary renormalization for all directions (x, r, theta) within the coarse graining. 
 
-First, do not use `burn-wgpu` with metal, instead use the new `burn-mlx` burn backend (will require maybe an installation) which has support for native metal, lowering the overhead. This will require changes to the device initialization.
+But instead, for x and theta which are periodic, do this instead, no renormalizing:
+1. Create ghost particles to calculate and account for the guassian
+That is, these are reflections like `x_i^{(m,n)} = x_i + (mL_x,nL_y),` for ` m,n\in\{-1,0,1\}`
+2. Then use them in the coarse-graining kernel. For example, like
+`\rho(t,x)=\sum_i\sum_{m,n} K\!\left[x-x_i(t)-(mL_x,nL_y)\right].`
 
-Still keep the logic for the CUDA that checks if the system is CUDA or metal. If it isn't possible to have the same API with extremely minor changes because of the difference between `burn-cuda` and `burn-mlx` (i.e not much more than what is currently there), they just boot `burn-cuda` and stick to mlx.
+Keep the direction `r` as closed and renormalized, but for `x` and `theta` use this method instead
 
-Try to eliminate as much copying done within the script, so it is near zero-copy
+Thats the gist for x, y, but here is how to do it with (x, r, theta)
+Use a **mixed-boundary kernel**:
 
-## For the guassian stuff
-We wills witch to 
-particles → finite-volume cylindrical grid → TSC deposition → local normalization → density grid → optional conservative smoothing
+* periodic wrapping / ghost copies in (x) and (\theta)
+* boundary renormalization only in the nonperiodic coordinate (r)
 
+So the kernel should not be treated as “fully missing mass” in all coordinates. The periodic coordinates have no missing mass; only the finite (r)-interval truncates the kernel.
 
-1. Define the cylindrical grid
-
-Use grid cells in:
+Suppose your state space is
 
 [
-(x,r,\theta)
+x \in [0,L_x), \qquad \theta \in [0,2\pi), \qquad r \in [r_{\min},r_{\max}].
 ]
 
-Each cell is:
+Let the base smoothing kernel factor as
 
 [
-[x_i,x_{i+1}]
-\times
-[r_j,r_{j+1}]
-\times
-[\theta_k,\theta_{k+1}]
-]
-
-The physical volume of each cell is:
-
-[
-V_{ijk}
-=======
-
-\Delta x_i
-\Delta \theta_k
-\frac{r_{j+1}^2-r_j^2}{2}
-]
-
-This is important because cylindrical cells do **not** all have the same volume.
-
-2. For each particle, find nearby TSC cells
-
-For particle (p) at:
-
-[
-(x_p,r_p,\theta_p)
-]
-
-find the nearby TSC stencil:
-
-```text
-3 neighboring cells in x
-3 neighboring cells in r
-3 neighboring cells in theta
-```
-
-So each particle touches at most:
-
-[
-3 \times 3 \times 3 = 27
-]
-
-cells.
-
-3. Compute raw TSC weights
-
-Compute separate 1D TSC weights:
-
-[
-w_x(i)
-]
-
-[
-w_r(j)
-]
-
-[
-w_\theta(k)
-]
-
-Then combine them:
-
-[
-W_{p\to ijk}
-============
-
-w_x(i)w_r(j)w_\theta(k)
-]
-
-Only the local (3\times3\times3) cells get nonzero weight.
-
----
-
-## 4. Remove invalid cells
-
-Some cells may be outside the physical domain, for example outside the shell.
-
-Only keep valid cells:
-
-```text
-valid_cells = cells inside the physical domain
-```
-
-So now you have:
-
-[
-W_{p\to ijk}
-]
-
-only for valid cells.
-
-Near boundaries, the raw weights may no longer sum to one:
-
-[
-\sum_{\text{valid cells}} W_{p\to ijk} < 1
-]
-
-This is the same type of problem you had with the cutoff Gaussian.
-
-5. Locally normalize the particle weights
-
-Normalize the valid weights for each particle:
-
-[
-\tilde W_{p\to ijk}
-===================
-
-\frac{
-W_{p\to ijk}
-}{
-\sum_{\text{valid cells}} W_{p\to ijk}
-}
-]
-
-[
-\sum_{\text{valid cells}}
-\tilde W_{p\to ijk}
-===================
-
-1
-]
-
-6. Deposit particle mass
-
-For density only, each particle contributes one unit of mass/number.
-
-For every valid cell in the particle stencil:
-
-[
-m_{ijk}
-\mathrel{+}=
-\tilde W_{p\to ijk}
-]
-
-After this step:
-
-[
-\sum_{ijk} m_{ijk} = N
-]
-
-where (N) is the number of particles.
-
-7. Convert mass to density
-
-Density is mass per cell volume:
-
-[
-\rho_{ijk}
-==========
-
-\frac{m_{ijk}}{V_{ijk}}
-]
-
----
-
-# Optional conservative smoothing
-
-TSC gives a conservative field, but it may be less smooth than your Gaussian field.
-
-Instead of smoothing particle-by-particle, smooth the gridded mass field:
-
-```text
-mass → smoothed_mass → density
-```
-
-Do **not** smooth density directly unless the grid cells all have equal volume.
-
-Because your grid is cylindrical, smooth:
-
-[
-m_{ijk}
-]
-
-not:
-
-[
-\rho_{ijk}
-]
-
-Then convert back:
-
-[
-\rho^{\text{smooth}}_{ijk}
-==========================
-
-\frac{
-m^{\text{smooth}}*{ijk}
-}{
-V*{ijk}
-}
-]
-
-Conservative smoothing method
-
-For each source cell (a), redistribute its mass to nearby target cells (b) using a smoothing kernel:
-
-[
-m_b^{\text{smooth}}
-\mathrel{+}=
-m_a
-\frac{
-G_{a\to b}
-}{
-\sum_{\text{valid } b} G_{a\to b}
-}
-]
-
-This is the same idea as per-particle normalization, but applied to grid cells.
-
-The source cell’s mass is spread to nearby cells, but the spread weights are normalized so that:
-
-[
-\sum_{\text{valid } b}
-\frac{
-G_{a\to b}
-}{
-\sum_{\text{valid } b} G_{a\to b}
-}
-=
-
-1
-]
-
-Therefore, each source cell conserves its mass during smoothing.
-
-So:
-
-[
-\sum_{ijk} m^{\text{smooth}}_{ijk}
+K(\Delta x,\Delta \theta,\Delta r)
 ==================================
 
-# \sum_{ijk} m_{ijk}
-
-N
+K_x(\Delta x)K_\theta(\Delta \theta)K_r(\Delta r),
 ]
 
-Then:
+with each 1D kernel normalized on the infinite line.
+
+For a particle at ((x_i,\theta_i,r_i)), define the **periodic wrapped kernel** in (x) and (\theta):
 
 [
-\rho^{\text{smooth}}_{ijk}
-==========================
+K_x^{\mathrm{per}}(x-x_i)
+=========================
 
-\frac{
-m^{\text{smooth}}*{ijk}
-}{
-V*{ijk}
-}
-]
-
-and:
-
-[
-\sum_{ijk}
-\rho^{\text{smooth}}*{ijk}V*{ijk}
-=================================
-
-N
-]
-
-## Simple smoothing stencil example
-
-A simple 1D smoothing kernel is:
-
-[
-[1,2,1]/4
-]
-
-In 3D, you can apply this separably in (x), (r), and (\theta). Use this for onw
-
-
-For tensors, do **not** smooth or average tensor values alone.
-
-For a particle tensor (T_p), deposit a density-weighted numerator:
-
-[
-M_{ijk}
-\mathrel{+}=
-\tilde W_{p\to ijk} T_p
-]
-
-while also depositing mass:
-
-[
-m_{ijk}
-\mathrel{+}=
-\tilde W_{p\to ijk}
-]
-
-Then the cell-average tensor is:
-
-[
-\langle T\rangle_{ijk}
-======================
-
-\frac{M_{ijk}}{m_{ijk}}
-]
-
-Smooth both (M) and (m) conservatively:
-
-[
-M \to M^{\text{smooth}}
+\sum_{m\in\mathbb{Z}} K_x(x-x_i-mL_x),
 ]
 
 [
-m \to m^{\text{smooth}}
+K_\theta^{\mathrm{per}}(\theta-\theta_i)
+========================================
+
+\sum_{n\in\mathbb{Z}} K_\theta(\theta-\theta_i-2\pi n).
 ]
 
-Then divide:
+Then the only renormalization factor comes from the nonperiodic coordinate:
 
 [
-\langle T\rangle^{\text{smooth}}_{ijk}
-======================================
+Z_r(r_i)
+========
 
-\frac{
-M^{\text{smooth}}*{ijk}
-}{
-m^{\text{smooth}}*{ijk}
-}
+\int_{r_{\min}}^{r_{\max}} K_r(r-r_i),dr.
 ]
-```
+
+The mixed-boundary kernel is
+
+[
+K_{\mathrm{mixed}}
+==================
+
+K_x^{\mathrm{per}}(x-x_i)
+K_\theta^{\mathrm{per}}(\theta-\theta_i)
+\frac{K_r(r-r_i)}{Z_r(r_i)}.
+]
+
+Then
+
+[
+\int_0^{L_x}\int_0^{2\pi}\int_{r_{\min}}^{r_{\max}}
+K_{\mathrm{mixed}},dr,d\theta,dx
+================================
+
+1.
+
+]
+
+That is the key point: **the full kernel still integrates to 1**, but the normalization correction is only for the truncated (r)-direction.
+
+For a Gaussian (K_r),
+
+[
+K_r(r-r_i)
+==========
+
+\frac{1}{\sqrt{2\pi}\sigma_r}
+\exp\left[-\frac{(r-r_i)^2}{2\sigma_r^2}\right],
+]
+
+the renormalization factor is
+
+[
+Z_r(r_i)
+========
+
+## \Phi\left(\frac{r_{\max}-r_i}{\sigma_r}\right)
+
+\Phi\left(\frac{r_{\min}-r_i}{\sigma_r}\right),
+]
+
+where (\Phi) is the standard normal CDF.
+
+So your coarse-grained density would be
+
+[
+\rho(x,\theta,r)
+================
+
+\sum_i
+K_x^{\mathrm{per}}(x-x_i)
+K_\theta^{\mathrm{per}}(\theta-\theta_i)
+\frac{K_r(r-r_i)}{Z_r(r_i)}.
+]
+
+For a vector or orientation-weighted field (a),
+
+[
+A(x,\theta,r)
+=============
+
+\sum_i
+K_x^{\mathrm{per}}(x-x_i)
+K_\theta^{\mathrm{per}}(\theta-\theta_i)
+\frac{K_r(r-r_i)}{Z_r(r_i)}
+a_i.
+]
+
+### Implementation choice
+
+You can implement this without explicitly making ghost particles by using wrapped distances:
+
+[
+\Delta x =
+((x-x_i+L_x/2)\bmod L_x)-L_x/2,
+]
+
+[
+\Delta \theta =
+((\theta-\theta_i+\pi)\bmod 2\pi)-\pi.
+]
+
+Then use the ordinary Gaussian in those wrapped distances, and apply the (r)-renormalization.
+
+This is equivalent to one layer of ghost particles when the kernel width is small compared with the periodic domain size.
+
+### Important caveat
+
+If (r) has a physical volume element, for example cylindrical or polar coordinates with measure
+
+[
+dV = r,dr,d\theta,dx,
+]
+
+then the normalization should respect that measure. In that case,
+
+[
+Z_r(r_i)
+========
+
+\int_{r_{\min}}^{r_{\max}} K_r(r-r_i), r,dr
+]
+
+or whatever the correct measure is for your coordinates.
+
+Then use
+
+[
+K_{\mathrm{mixed}}
+==================
+
+K_x^{\mathrm{per}}K_\theta^{\mathrm{per}}
+\frac{K_r}{Z_r}.
+]
+
+So the rule is:
+
+**periodic directions: wrap or ghost-copy.
+nonperiodic directions: truncate and renormalize.
+full kernel normalization: enforce using only the missing-mass correction from the nonperiodic directions.**
