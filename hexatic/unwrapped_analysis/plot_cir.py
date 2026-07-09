@@ -6,7 +6,7 @@ Auto-discovers cases from ``hexatic_output/*_hexatic_order.txt`` and plots:
 - Mean hexatic order |psi6| (first frame)
 - Average net x-velocity over frames [v0..v1)  (finite-difference from npz)
 - Average |x-velocity| over frames [v0..v1)
-- Average net P_x over frames [v0..v1)  (from ``direction_cylindrical[:, :, 0]``)
+- Average net P_x over frames [v0..v1)  (from ``polar_cylindrical[:, :, 0]``, pocket-averaged)
 - Average |P_x| over frames [v0..v1)
 
 Velocity is computed as Δx / (Δstep · TIMESTEP) where Δstep is read from
@@ -160,14 +160,14 @@ def _polarization_from_npz(
 ) -> tuple[float, float]:
     """Return (mean net P_x, mean |P_x|) over frames [frame_start, frame_end).
 
-    P_x is read from ``direction_cylindrical[:, :, 0]`` (same convention as
-    ``plot.py``: component 0 = x, 1 = R, 2 = θ).
+    P_x is read from ``polar_cylindrical[:, :, 0]`` — the pocket-averaged
+    polarization density, not the raw per-particle orientation.
 
     Returns (nan, nan) when the file is missing or the window is too small.
     """
     try:
         with np.load(npz_path) as data:
-            p = np.asarray(data["direction_cylindrical"], dtype=float)  # (T, N, 3)
+            p = np.asarray(data["polar_cylindrical"], dtype=float)  # (T, N, 3)
     except (FileNotFoundError, KeyError):
         return float("nan"), float("nan")
 
