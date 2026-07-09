@@ -116,10 +116,10 @@ class CaseData:
     disclination_plus1: float   # fraction of particles
     disclination_minus1: float  # fraction of particles
     mean_psi6: float
-    mean_vx: float              # avg net x-velocity over the velocity frame window
-    mean_abs_vx: float          # avg |x-velocity| over the velocity frame window
-    mean_px: float              # avg net P_x over the frame window
-    mean_abs_px: float          # avg |P_x| over the frame window
+    mean_vx: float              # avg |per-frame mean v_x| over the velocity frame window
+    mean_abs_vx: float          # avg per-particle |v_x| over the frame window
+    mean_px: float              # avg |per-frame mean P_x| over the frame window
+    mean_abs_px: float          # avg per-particle |P_x| over the frame window
 
 
 def _mean_hexatic_first_frame(hexatic_order_path: Path) -> tuple[float, int]:
@@ -182,7 +182,8 @@ def _polarization_from_npz(
     per_frame_net = np.mean(px_window, axis=1)          # (W,)
     per_frame_abs = np.mean(np.abs(px_window), axis=1)  # (W,)
 
-    mean_px = float(np.mean(per_frame_net))
+    # avg |per-frame mean| — net polarization magnitude, ignoring sign flips
+    mean_px = float(np.mean(np.abs(per_frame_net)))
     mean_abs_px = float(np.mean(per_frame_abs))
 
     print(
@@ -235,8 +236,8 @@ def _velocity_from_npz(
     per_frame_net = np.mean(vx_window, axis=1)          # (W-1,)
     per_frame_abs = np.mean(np.abs(vx_window), axis=1)  # (W-1,)
 
-    # average those frame-wise nets into a single scalar
-    mean_vx = float(np.mean(per_frame_net))
+    # avg |per-frame mean| — drift magnitude, ignoring sign flips
+    mean_vx = float(np.mean(np.abs(per_frame_net)))
     mean_abs_vx = float(np.mean(per_frame_abs))
 
     print(
@@ -356,10 +357,10 @@ def build_figure(rows_data: list[CaseData], v0: int = DEFAULT_V0, v1: int = DEFA
             "Disclination density +1  (first frame)",
             "Disclination density −1  (first frame)",
             "Mean |ψ₆|  (first frame)",
-            f"⟨v_x⟩  avg net x-velocity over frames {v0}–{v1}",
-            f"⟨|v_x|⟩  avg |x-velocity| over frames {v0}–{v1}",
-            f"⟨P_x⟩  avg net P_x over frames {v0}–{v1}",
-            f"⟨|P_x|⟩  avg |P_x| over frames {v0}–{v1}",
+            f"⟨|v_x|⟩  avg |per-frame mean v_x| over frames {v0}–{v1}",
+            f"⟨|v_x|⟩  avg per-particle |v_x| over frames {v0}–{v1}",
+            f"⟨|P_x|⟩  avg |per-frame mean P_x| over frames {v0}–{v1}",
+            f"⟨|P_x|⟩  avg per-particle |P_x| over frames {v0}–{v1}",
         ),
         vertical_spacing=0.06,
     )
@@ -367,9 +368,9 @@ def build_figure(rows_data: list[CaseData], v0: int = DEFAULT_V0, v1: int = DEFA
     _add_scatter(fig, 1, cd, plus1, labels, "+1 disclinations", "#dc2626", "triangle-up")
     _add_scatter(fig, 2, cd, minus1, labels, "−1 disclinations", "#2563eb", "triangle-down")
     _add_scatter(fig, 3, cd, psi6, labels, "mean |ψ₆|", "#7c3aed", "circle")
-    _add_scatter(fig, 4, cd, vx, labels, "⟨v_x⟩", "#0891b2", "diamond")
+    _add_scatter(fig, 4, cd, vx, labels, "⟨|v_x frame mean|⟩", "#0891b2", "diamond")
     _add_scatter(fig, 5, cd, abs_vx, labels, "⟨|v_x|⟩", "#ea580c", "square")
-    _add_scatter(fig, 6, cd, px, labels, "⟨P_x⟩", "#16a34a", "star")
+    _add_scatter(fig, 6, cd, px, labels, "⟨|P_x frame mean|⟩", "#16a34a", "star")
     _add_scatter(fig, 7, cd, abs_px, labels, "⟨|P_x|⟩", "#d97706", "cross")
 
     # Axes formatting
@@ -392,12 +393,12 @@ def build_figure(rows_data: list[CaseData], v0: int = DEFAULT_V0, v1: int = DEFA
     fig.update_yaxes(title_text="fraction of particles", row=1, col=1)
     fig.update_yaxes(title_text="fraction of particles", row=2, col=1)
     fig.update_yaxes(title_text="⟨ |ψ₆| ⟩", row=3, col=1)
-    fig.update_yaxes(title_text="v_x  (σ / τ)", row=4, col=1)
-    fig.update_yaxes(title_text="|v_x|  (σ / τ)", row=5, col=1)
-    fig.update_yaxes(title_text="P_x", row=6, col=1)
-    fig.update_yaxes(title_text="|P_x|", row=7, col=1)
+    fig.update_yaxes(title_text="|v_x frame mean|  (σ / τ)", row=4, col=1)
+    fig.update_yaxes(title_text="|v_x| per-particle  (σ / τ)", row=5, col=1)
+    fig.update_yaxes(title_text="|P_x frame mean|", row=6, col=1)
+    fig.update_yaxes(title_text="|P_x| per-particle", row=7, col=1)
 
-    # Zero reference lines for velocity and polarization panels
+    # Zero reference lines
     fig.add_hline(y=0.0, row=4, col=1, line=dict(color="#9aa3ad", width=1, dash="dot"))
     fig.add_hline(y=0.0, row=6, col=1, line=dict(color="#9aa3ad", width=1, dash="dot"))
 
