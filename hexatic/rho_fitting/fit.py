@@ -18,7 +18,7 @@ from .io import ActiveMatterArrays, load_active_matter_npz
 from .library import mechanical_labels
 from .outputs import mechanical_report_lines, write_mechanical_outputs
 from .particles import particle_surface_velocities, particle_tangent_directions
-from .spectral import CylindricalSpectralOperators, barycentric_matrix, transfer_radial
+from .spectral import CylindricalSpectralOperators, barycentric_matrix, cached_cylindrical_operators, transfer_radial
 from .plots import write_temporal_power_plots
 from .regression import StabilityResult, stability_selection
 
@@ -795,14 +795,8 @@ def _gradient_cylindrical_scalar(values: Array, lx: float, theta_period: float, 
     values = np.asarray(values, dtype=np.float64)
     operators = _spectral_operators(values, lx, theta_period, r_centers)
     to_spectral, to_cache = _radial_transfer_matrices(r_centers, operators)
-    out = np.empty(values.shape + (3,), dtype=np.float64)
-    for frame in range(values.shape[0]):
-        out[frame] = transfer_radial(
-            operators.gradient_scalar(transfer_radial(values[frame], to_spectral, 2)),
-            to_cache,
-            2,
-        )
-    return out
+    spectral_values = transfer_radial(values, to_spectral, 3)
+    return transfer_radial(operators.gradient_scalar_frames(spectral_values), to_cache, 3)
 
 
 def _divergence_cylindrical_flux(values: Array, lx: float, theta_period: float, r_centers: Array) -> Array:
@@ -811,14 +805,8 @@ def _divergence_cylindrical_flux(values: Array, lx: float, theta_period: float, 
     assert values.ndim >= 5 and values.shape[4] == 3, "flux must be (T,Nx,Ntheta,Nr,3,...)"
     operators = _spectral_operators(values, lx, theta_period, r_centers)
     to_spectral, to_cache = _radial_transfer_matrices(r_centers, operators)
-    out = np.empty(values.shape[:4] + values.shape[5:], dtype=np.float64)
-    for frame in range(values.shape[0]):
-        out[frame] = transfer_radial(
-            operators.divergence(transfer_radial(values[frame], to_spectral, 2)),
-            to_cache,
-            2,
-        )
-    return out
+    spectral_values = transfer_radial(values, to_spectral, 3)
+    return transfer_radial(operators.divergence_frames(spectral_values), to_cache, 3)
 
 
 def _laplacian_cylindrical_scalar(values: Array, lx: float, theta_period: float, r_centers: Array) -> Array:
@@ -902,12 +890,14 @@ def _radial_spacing(r_centers: Array) -> float:
 def _spectral_operators(values: Array, lx: float, theta_period: float, r_centers: Array) -> CylindricalSpectralOperators:
     """Create the shared annular Shenfun operator for a time-indexed grid."""
     dr = _radial_spacing(r_centers)
-    return CylindricalSpectralOperators(
+    return cached_cylindrical_operators(
         lx,
         theta_period,
         float(r_centers[0] - 0.5 * dr),
         float(r_centers[-1] + 0.5 * dr),
-        (int(values.shape[1]), int(values.shape[2]), int(values.shape[3])),
+        int(values.shape[1]),
+        int(values.shape[2]),
+        int(values.shape[3]),
     )
 
 

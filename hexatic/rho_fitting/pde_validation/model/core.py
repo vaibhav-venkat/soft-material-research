@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
-from hexatic.rho_fitting.spectral import CylindricalSpectralOperators, barycentric_matrix, transfer_radial
+from hexatic.rho_fitting.spectral import CylindricalSpectralOperators, barycentric_matrix, cached_cylindrical_operators, transfer_radial
 
 from ..cache import ValidationInputs, load_validation_inputs
 from ..operators import closure_fields, divergence_vector, estimate_ubar
@@ -21,7 +21,13 @@ def run_validation(inputs: ValidationInputs, options: ValidationOptions | None =
     assert frames >= 2
     times = inputs.times[:frames]
     shape = (int(inputs.rho.shape[1]), int(inputs.rho.shape[2]), int(inputs.rho.shape[3]))
-    operators = CylindricalSpectralOperators(inputs.lx, inputs.theta_period, float(inputs.r_edges[0]), float(inputs.r_edges[-1]), shape)
+    operators = cached_cylindrical_operators(
+        inputs.lx,
+        inputs.theta_period,
+        float(inputs.r_edges[0]),
+        float(inputs.r_edges[-1]),
+        *shape,
+    )
     to_spectral = barycentric_matrix(inputs.r_centers, operators.radial_nodes())
     to_cache = barycentric_matrix(operators.radial_nodes(), inputs.r_centers)
     rho = transfer_radial(inputs.rho[0], to_spectral, 2)

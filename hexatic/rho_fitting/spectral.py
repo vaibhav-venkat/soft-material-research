@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 
 import numpy as np
 from scipy.fft import dct, idct
@@ -75,6 +76,14 @@ class CylindricalSpectralOperators:
         out[..., 2] = self.derivative(values, 0)
         return out
 
+    def gradient_scalar_frames(self, values: Array) -> Array:
+        """Differentiate a complete ``(T, Nx, Ntheta, Nr)`` batch with one plan."""
+        assert values.ndim == 4 and values.shape[1:] == self.shape
+        out = np.empty(values.shape + (3,), dtype=np.float64)
+        for frame in range(values.shape[0]):
+            out[frame] = self.gradient_scalar(values[frame])
+        return out
+
     def divergence(self, values: Array) -> Array:
         """Return divergence of a physical-frame flux with direction axis ``-1``."""
         assert values.shape[:3] == self.shape and values.shape[3] == 3
@@ -87,6 +96,14 @@ class CylindricalSpectralOperators:
                 + self.derivative(field[..., 1], 1) / self._r3
                 + self.derivative(self._r3 * field[..., 2], 0) / self._r3
             )
+        return out
+
+    def divergence_frames(self, values: Array) -> Array:
+        """Diverge a complete time batch while reusing the spatial transform plan."""
+        assert values.ndim >= 5 and values.shape[1:4] == self.shape
+        out = np.empty(values.shape[:4] + values.shape[5:], dtype=np.float64)
+        for frame in range(values.shape[0]):
+            out[frame] = self.divergence(values[frame])
         return out
 
     def laplacian_scalar(self, values: Array) -> Array:
@@ -159,3 +176,17 @@ def transfer_radial(values: Array, matrix: Array, axis: int) -> Array:
     moved = np.moveaxis(values, axis, -1)
     assert moved.shape[-1] == matrix.shape[1]
     return np.moveaxis(np.einsum("...j,ij->...i", moved, matrix), -1, axis)
+
+
+@lru_cache(maxsize=8)
+def cached_cylindrical_operators(
+    lx: float,
+    theta_period: float,
+    r_min: float,
+    r_max: float,
+    nx: int,
+    ntheta: int,
+    nr: int,
+) -> CylindricalSpectralOperators:
+    """Return one reusable Shenfun plan per cylindrical grid geometry."""
+    return CylindricalSpectralOperators(lx, theta_period, r_min, r_max, (nx, ntheta, nr))
