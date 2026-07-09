@@ -1,6 +1,4 @@
-mod libraries;
 mod math;
-mod operators;
 mod sampling;
 mod validation;
 
@@ -11,7 +9,6 @@ use ndarray::{
 use crate::geometry::{gaussian_3d, minimum_image};
 use crate::{CoreError, CoreResult};
 
-pub use libraries::build_mechanical_libraries;
 pub use sampling::sample_component_rows;
 
 use math::delta;
@@ -30,17 +27,6 @@ pub struct MechanicalFields {
     pub j_rho: Array5<f64>,
     pub j_p: Array6<f64>,
     pub j_q: ArrayD<f64>,
-}
-
-#[non_exhaustive]
-pub struct MechanicalLibraries {
-    /// Candidate mechanical flux libraries and their coefficient-order names.
-    pub y_rho_names: Vec<String>,
-    pub y_p_names: Vec<String>,
-    pub y_q_names: Vec<String>,
-    pub y_rho: ArrayD<f64>,
-    pub y_p: ArrayD<f64>,
-    pub y_q: ArrayD<f64>,
 }
 
 /// Coarse-grain particle positions, orientations, velocities, and hexatic order into fields.

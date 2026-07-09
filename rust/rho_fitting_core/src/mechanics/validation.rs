@@ -19,25 +19,6 @@ pub(super) struct ParticleFieldInputs<'a> {
     pub u0: f64,
 }
 
-pub(super) fn validate_grid<D: ndarray::Dimension>(
-    rho: ndarray::ArrayView<'_, f64, D>,
-    lx: f64,
-    theta_period: f64,
-) -> CoreResult<()> {
-    // Validate non-empty periodic grid axes and positive domain lengths.
-    if rho.ndim() < 3 || rho.shape().iter().any(|size| *size == 0) {
-        return Err(CoreError::InvalidInput(
-            "rho grid axes must be non-empty".to_string(),
-        ));
-    }
-    if !(lx.is_finite() && lx > 0.0 && theta_period.is_finite() && theta_period > 0.0) {
-        return Err(CoreError::InvalidInput(
-            "periodic domain lengths must be positive".to_string(),
-        ));
-    }
-    Ok(())
-}
-
 pub(super) fn validate_particle_fields(inputs: ParticleFieldInputs<'_>) -> CoreResult<()> {
     // Validate particle field shapes and finite scalar controls before coarse-graining.
     let ParticleFieldInputs {

@@ -11,6 +11,8 @@ from numpy.typing import NDArray
 
 Array = NDArray[Any]
 
+from hexatic.rho_fitting.spectral import CylindricalSpectralOperators
+
 
 @dataclass(frozen=True)
 class ClosureFields:
@@ -24,79 +26,48 @@ class ClosureFields:
     a_surface: Array
 
 
-def gradient_scalar(values: Array, dx: float, dtheta: float, r_centers: Array) -> Array:
+def gradient_scalar(values: Array, operators: CylindricalSpectralOperators) -> Array:
     """Return cylindrical gradients of a scalar grid as ``(..., 3)`` components."""
-    dr = radial_spacing(r_centers)
-    out = np.empty(values.shape + (3,), dtype=np.float64)
-    out[..., 0] = (np.roll(values, -1, axis=0) - np.roll(values, 1, axis=0)) / (2.0 * dx)
-    theta_derivative = (np.roll(values, -1, axis=1) - np.roll(values, 1, axis=1)) / (2.0 * dtheta)
-    out[..., 1] = theta_derivative / r_centers[None, None, :]
-    out[..., 2] = np.gradient(values, dr, axis=2, edge_order=1)
-    return out
+    return operators.gradient_scalar(values)
 
 
-def laplacian_scalar(values: Array, dx: float, dtheta: float, r_centers: Array) -> Array:
+def laplacian_scalar(values: Array, operators: CylindricalSpectralOperators) -> Array:
     """Return the cylindrical scalar Laplacian."""
-    return divergence_vector(gradient_scalar(values, dx, dtheta, r_centers), dx, dtheta, r_centers)
+    return operators.laplacian_scalar(values)
 
 
-def gradient_vector(values: Array, dx: float, dtheta: float, r_centers: Array) -> Array:
+def gradient_vector(values: Array, operators: CylindricalSpectralOperators) -> Array:
     """Differentiate each vector component and insert a three-component derivative axis."""
-    out = np.empty(values.shape[:-1] + (3, values.shape[-1]), dtype=np.float64)
-    for component in range(values.shape[-1]):
-        out[..., :, component] = gradient_scalar(values[..., component], dx, dtheta, r_centers)
-    return out
+    return operators.gradient_vector(values)
 
 
-def laplacian_vector(values: Array, dx: float, dtheta: float, r_centers: Array) -> Array:
+def laplacian_vector(values: Array, operators: CylindricalSpectralOperators) -> Array:
     """Apply the scalar Laplacian independently to every vector component."""
-    out = np.empty_like(values, dtype=np.float64)
-    for component in range(values.shape[-1]):
-        out[..., component] = laplacian_scalar(values[..., component], dx, dtheta, r_centers)
-    return out
+    return operators.laplacian_vector(values)
 
 
-def gradient_rank2(values: Array, dx: float, dtheta: float, r_centers: Array) -> Array:
+def gradient_rank2(values: Array, operators: CylindricalSpectralOperators) -> Array:
     """Differentiate each rank-2 tensor component over the three cylindrical directions."""
-    out = np.empty(values.shape[:-2] + (3, values.shape[-2], values.shape[-1]), dtype=np.float64)
-    for row in range(values.shape[-2]):
-        for col in range(values.shape[-1]):
-            out[..., :, row, col] = gradient_scalar(values[..., row, col], dx, dtheta, r_centers)
-    return out
+    return operators.gradient_rank2(values)
 
 
-def laplacian_rank2(values: Array, dx: float, dtheta: float, r_centers: Array) -> Array:
+def laplacian_rank2(values: Array, operators: CylindricalSpectralOperators) -> Array:
     """Apply the scalar Laplacian independently to every rank-2 tensor component."""
     out = np.empty_like(values, dtype=np.float64)
     for row in range(values.shape[-2]):
         for col in range(values.shape[-1]):
-            out[..., row, col] = laplacian_scalar(values[..., row, col], dx, dtheta, r_centers)
+            out[..., row, col] = laplacian_scalar(values[..., row, col], operators)
     return out
 
-
-def divergence_vector(values: Array, dx: float, dtheta: float, r_centers: Array) -> Array:
+def divergence_vector(values: Array, operators: CylindricalSpectralOperators) -> Array:
     """Return cylindrical divergence of a flux field with direction axis 3."""
     assert values.shape[3] == 3, "flux direction axis must have length 3"
-    dr = radial_spacing(r_centers)
-    flux_x = np.take(values, 0, axis=3)
-    flux_theta = np.take(values, 1, axis=3)
-    flux_r = np.take(values, 2, axis=3)
-    div_x = (np.roll(flux_x, -1, axis=0) - np.roll(flux_x, 1, axis=0)) / (2.0 * dx)
-    div_theta = (
-        (np.roll(flux_theta, -1, axis=1) - np.roll(flux_theta, 1, axis=1))
-        / (2.0 * dtheta)
-    ) / r_centers[(None,) * 2 + (slice(None),) + (None,) * (values.ndim - 4)]
-    weighted = r_centers[(None,) * 2 + (slice(None),) + (None,) * (values.ndim - 4)] * flux_r
-    faces = np.zeros(weighted.shape[:2] + (weighted.shape[2] + 1,) + weighted.shape[3:], dtype=np.float64)
-    faces[:, :, 1:-1, ...] = 0.5 * (weighted[:, :, :-1, ...] + weighted[:, :, 1:, ...])
-    div_r = (faces[:, :, 1:, ...] - faces[:, :, :-1, ...]) / dr
-    div_r = div_r / r_centers[(None,) * 2 + (slice(None),) + (None,) * (values.ndim - 4)]
-    return div_x + div_theta + div_r
+    return operators.divergence(values)
 
 
-def divergence_surface_flux(values: Array, dx: float, dtheta: float, r_centers: Array) -> Array:
+def divergence_surface_flux(values: Array, operators: CylindricalSpectralOperators) -> Array:
     """Compatibility alias for cylindrical flux divergence."""
-    return divergence_vector(values, dx, dtheta, r_centers)
+    return divergence_vector(values, operators)
 
 
 def a_dot_grad_rho(a: Array, grad_rho: Array) -> Array:
@@ -112,9 +83,7 @@ def closure_fields(
     y_rho_coefficients: Array,
     y_p_coefficients: Array,
     y_q_coefficients: Array,
-    dx: float,
-    dtheta: float,
-    r_centers: Array,
+    operators: CylindricalSpectralOperators,
     ubar_override: Array | None = None,
 ) -> ClosureFields:
     """Evaluate fitted mechanical closure fields from rho, P, Q, and coefficient vectors.
@@ -148,15 +117,15 @@ def closure_fields(
     a = q + rho[..., None, None] * identity / 3.0
     a_surface = a
 
-    grad_rho = gradient_scalar(rho, dx, dtheta, r_centers)
+    grad_rho = gradient_scalar(rho, operators)
     f_rho = (
         y_rho_coefficients[0] * grad_rho
         + y_rho_coefficients[1] * a_dot_grad_rho(a_surface, grad_rho)
         + y_rho_coefficients[2] * p
     )
 
-    grad_p = gradient_vector(p, dx, dtheta, r_centers)
-    grad_lap_p = gradient_vector(laplacian_vector(p, dx, dtheta, r_centers), dx, dtheta, r_centers)
+    grad_p = gradient_vector(p, operators)
+    grad_lap_p = gradient_vector(laplacian_vector(p, operators), operators)
     f_p = (
         y_p_coefficients[0] * a_surface
         + y_p_coefficients[1] * rho[..., None, None] * a_surface
@@ -167,7 +136,7 @@ def closure_fields(
     )
 
     ubar = estimate_ubar(f_p, a_surface) if ubar_override is None else ubar_override
-    grad_q = gradient_rank2(q, dx, dtheta, r_centers)
+    grad_q = gradient_rank2(q, operators)
     ubar_p_alpha = ubar[..., None, None, None] * p_dot_alpha_traceless(p)
     f_q = (
         y_q_coefficients[0] * project_flux_directions(ubar_p_alpha, "tangential")
@@ -210,9 +179,9 @@ def p_dot_alpha_traceless(p: Array) -> Array:
     return out
 
 
-def grad_p_symmetric_traceless(p: Array, dx: float, dtheta: float, r_centers: Array) -> Array:
+def grad_p_symmetric_traceless(p: Array, operators: CylindricalSpectralOperators) -> Array:
     """Build the symmetric traceless gradient-of-P tensor used in the Q closure."""
-    grad_p = gradient_vector(p, dx, dtheta, r_centers)
+    grad_p = gradient_vector(p, operators)
     out = np.zeros(p.shape[:-1] + (3, 3, 3), dtype=np.float64)
     identity = np.eye(3, dtype=np.float64)
     for k in range(3):
@@ -225,10 +194,3 @@ def grad_p_symmetric_traceless(p: Array, dx: float, dtheta: float, r_centers: Ar
                     - trace_part * identity[a, b]
                 )
     return out
-
-
-def radial_spacing(r_centers: Array) -> float:
-    """Return uniform radial spacing."""
-    spacing = np.diff(r_centers)
-    assert spacing.size > 0 and np.allclose(spacing, spacing[0]), "radial centers must be uniformly spaced"
-    return float(spacing[0])

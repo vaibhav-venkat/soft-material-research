@@ -51,6 +51,7 @@ class ValidationInputs:
     lx: float
     theta_period: float
     r_centers: Array
+    r_edges: Array
     radius: float
     u0: float
     gamma: float
@@ -92,7 +93,7 @@ def load_validation_inputs(cache_path: Path) -> ValidationInputs:
         y_p_coefficients=y_p_coefficients,
         y_q_coefficients=y_q_coefficients,
     )
-    lx, theta_period, r_centers, radius, u0, gamma, tau_r = _metadata_values(metadata)
+    lx, theta_period, r_centers, r_edges, radius, u0, gamma, tau_r = _metadata_values(metadata)
 
     return ValidationInputs(
         cache_path=cache_path,
@@ -110,6 +111,7 @@ def load_validation_inputs(cache_path: Path) -> ValidationInputs:
         lx=lx,
         theta_period=theta_period,
         r_centers=r_centers,
+        r_edges=r_edges,
         radius=radius,
         u0=u0,
         gamma=gamma,
@@ -143,20 +145,22 @@ def _validate_shapes(
     assert y_q_coefficients.shape == (6,), "Y_Q coefficients must match current library"
 
 
-def _metadata_values(metadata: dict[str, Any]) -> tuple[float, float, Array, float, float, float, float]:
+def _metadata_values(metadata: dict[str, Any]) -> tuple[float, float, Array, Array, float, float, float, float]:
     """Extract positive geometry and simulation constants from cache metadata."""
     assert metadata.get("coordinate_system") == "cylindrical_3d", "validation cache must use cylindrical_3d"
     lx = float(metadata["lx"])
     theta_period = float(metadata["theta_period"])
     r_centers = np.asarray(metadata["r_centers"], dtype=np.float64)
+    r_edges = np.asarray(metadata["r_edges"], dtype=np.float64)
     radius = float(metadata["radius"])
     u0 = float(metadata.get("u0", cylinder.SIMULATION.u0))
     gamma = float(metadata.get("gamma", cylinder.SIMULATION.gamma))
     tau_r = float(metadata.get("tau_r", cylinder.SIMULATION.tau_r))
     assert lx > 0.0 and theta_period > 0.0 and radius > 0.0, "domain metadata must be positive"
     assert r_centers.ndim == 1 and r_centers.size >= 2 and np.all(r_centers > 0.0), "invalid radial centers"
+    assert r_edges.shape == (r_centers.size + 1,) and np.all(np.diff(r_edges) > 0.0) and r_edges[0] > 0.0, "invalid radial edges"
     assert gamma != 0.0 and tau_r > 0.0, "gamma must be nonzero and tau_r positive"
-    return lx, theta_period, r_centers, radius, u0, gamma, tau_r
+    return lx, theta_period, r_centers, r_edges, radius, u0, gamma, tau_r
 
 
 def _validate_library_names(cache: np.lib.npyio.NpzFile) -> None:

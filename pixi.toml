@@ -15,7 +15,8 @@ rho-fitting-lite = "RHO_FITTING_GPU=1 python -um hexatic.rho_fitting --overwrite
 rho-fitting-regression= "RHO_FITTING_GPU=1 python -um hexatic.rho_fitting --overwrite --nd 100000 --fit-only"
 rho-fitting-corr = "RHO_FITTING_GPU=1 python -um hexatic.rho_fitting --overwrite --correlations-only --no-plot --nd 10000"
 rho-plot = "python -um hexatic.rho_fitting"
-pde-validate="JAX_MPS_ASYNC_DISPATCH=1 python -um hexatic.rho_fitting.pde_validation --case radius_15D --mode all --overwrite --backend jax --jax-device mps"
+pde-validate="python -um hexatic.rho_fitting.pde_validation --case radius_15D --mode all --overwrite"
+pde-diagnostic="python -um hexatic.rho_fitting.pde_validation --case radius_15D --mode all --no-plot --overwrite"
 pde-plot="python -um hexatic.rho_fitting.pde_validation --case radius_15D --mode all --plot-only --overwrite"
 unwrapped-sweep = "python -um hexatic.unwrapped_analysis.run_sweep --all"
 
@@ -37,10 +38,11 @@ rust = "*"
 maturin = "*"
 rust-analyzer = "*"
 ty = ">=0.0.56,<0.0.57"
-py-pde = ">=0.57.0,<0.58"
-jax = ">=0.10.2,<0.11"
+shenfun = ">=4.3.0,<4.4"
+mpi4py = ">=4.0,<5"
+mpi4py-fft = ">=2.0,<3"
+sympy = ">=1.14,<2"
 
 [pypi-dependencies]
-jax-mps = ">=0.10.8,<0.11"
 pysindy = { version = ">=2.1.0, <3", extras = ["miosr", "sbr", "cvxpy"] }
 desloppify = ">=1.0, <2"

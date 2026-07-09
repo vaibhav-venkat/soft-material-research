@@ -17,16 +17,14 @@ from .report import write_pde_validation_report
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Validate rho-fitting closures with py-pde.")
+    parser = argparse.ArgumentParser(description="Validate rho-fitting closures with Shenfun spectral rollouts.")
     parser.add_argument("--case", default="radius_15D")
     parser.add_argument("--cache", type=Path, default=None)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--max-frames", type=int, default=None)
-    parser.add_argument("--backend", choices=("jax", "py-pde"), default="jax")
-    parser.add_argument("--jax-device", default="mps", help="JAX device passed to py-pde, e.g. mps, cpu, gpu:0")
-    parser.add_argument("--solver", choices=("filtered-euler", "euler", "scipy"), default="filtered-euler")
+    parser.add_argument("--solver", choices=("imex-rk",), default="imex-rk")
     parser.add_argument("--dt", type=float, default=None, help="maximum solver step; also Euler substep size")
-    parser.add_argument("--filter-sigma", type=float, default=None, help="physical Gaussian filter width for filtered Euler")
+    parser.add_argument("--ubar-source", choices=("cached", "fitted"), default="cached")
     parser.add_argument("--mode", choices=("all", "full", "rho-only", "p-only", "q-only"), default="all")
     parser.add_argument("--rho-only", action="store_true", help="evolve rho while using cached P and Q fields")
     parser.add_argument("--plot-stride", type=int, default=1)
@@ -61,12 +59,10 @@ def main(argv: list[str] | None = None) -> int:
             cache_path,
             ValidationOptions(
                 max_frames=args.max_frames,
-                backend=args.backend,
-                jax_device=args.jax_device,
                 solver=args.solver,
                 dt=args.dt,
-                filter_sigma=args.filter_sigma,
                 mode=run_mode,
+                ubar_source=args.ubar_source,
             ),
         )
         report_results[run_mode] = result
@@ -79,6 +75,12 @@ def main(argv: list[str] | None = None) -> int:
                 "cache_path": str(cache_path),
                 "analysis": "rho_fitting_pde_validation",
                 "mode": run_mode,
+                "solver": args.solver,
+                "basis": "Fourier(x) x Fourier(theta) x Chebyshev(r)",
+                "dealiasing": "two_thirds_modal_cutoff",
+                "radial_boundary": "natural_zero_flux",
+                "ubar_source": args.ubar_source,
+                "radial_transfer": "barycentric_runtime",
             },
             rho_fit=result.rho_fit,
             P_fit=result.p_fit,

@@ -40,9 +40,8 @@ class ValidationOptions:
     """Solver, filtering, frame-count, and validation-mode controls for PDE rollouts."""
 
     max_frames: int | None = None
-    backend: str = "jax"
-    jax_device: str = "mps"
-    solver: str = "filtered-euler"
+    solver: str = "imex-rk"
     dt: float | None = None
     filter_sigma: float | None = None
     mode: str = "full"
+    ubar_source: str = "cached"

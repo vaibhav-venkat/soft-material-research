@@ -18,21 +18,11 @@ from .io import ActiveMatterArrays, load_active_matter_npz
 from .library import mechanical_labels
 from .outputs import mechanical_report_lines, write_mechanical_outputs
 from .particles import particle_surface_velocities, particle_tangent_directions
+from .spectral import CylindricalSpectralOperators, barycentric_matrix, transfer_radial
 from .plots import write_temporal_power_plots
 from .regression import StabilityResult, stability_selection
 
 Array: TypeAlias = NDArray[Any]
-
-
-class MechanicalLibraries(TypedDict):
-    """Mechanical candidate libraries and names returned by the Rust extension."""
-
-    Y_rho: Array
-    Y_P: Array
-    Y_Q: Array
-    Y_rho_names: tuple[str, ...]
-    Y_P_names: tuple[str, ...]
-    Y_Q_names: tuple[str, ...]
 
 
 Y_RHO_NAMES = (
@@ -588,33 +578,6 @@ def _cylindrical_geometry(
     return lx, theta_period, r_centers
 
 
-def _mechanical_libraries(
-    spectral: dict[str, Array],
-    lx: float,
-    ly: float,
-) -> MechanicalLibraries:
-    """Build mechanical candidate libraries from filtered fields using the Rust core."""
-    core = _core()
-    libs = core.build_mechanical_libraries(
-        np.ascontiguousarray(spectral["rho"], dtype=np.float64),
-        np.ascontiguousarray(spectral["P"], dtype=np.float64),
-        np.ascontiguousarray(spectral["Q"], dtype=np.float64),
-        np.ascontiguousarray(spectral["A"], dtype=np.float64),
-        np.ascontiguousarray(spectral["psi6_sq"], dtype=np.float64),
-        np.ascontiguousarray(spectral["Y_P"], dtype=np.float64),
-        lx,
-        ly,
-    )
-    return {
-        "Y_rho": np.asarray(libs["Y_rho"]),
-        "Y_P": np.asarray(libs["Y_P"]),
-        "Y_Q": np.asarray(libs["Y_Q"]),
-        "Y_rho_names": tuple(str(name) for name in libs["Y_rho_names"]),
-        "Y_P_names": tuple(str(name) for name in libs["Y_P_names"]),
-        "Y_Q_names": tuple(str(name) for name in libs["Y_Q_names"]),
-    }
-
-
 def _fit_divergence_primary_target(
     target_name: str,
     spectral: dict[str, Array],
@@ -830,14 +793,15 @@ def _project_flux_directions(values: Array, mode: str) -> Array:
 def _gradient_cylindrical_scalar(values: Array, lx: float, theta_period: float, r_centers: Array) -> Array:
     """Return cylindrical gradient components `(x, theta, r)` for a scalar field."""
     values = np.asarray(values, dtype=np.float64)
-    dx = lx / values.shape[1]
-    dtheta = theta_period / values.shape[2]
-    dr = _radial_spacing(r_centers)
+    operators = _spectral_operators(values, lx, theta_period, r_centers)
+    to_spectral, to_cache = _radial_transfer_matrices(r_centers, operators)
     out = np.empty(values.shape + (3,), dtype=np.float64)
-    out[..., 0] = (np.roll(values, -1, axis=1) - np.roll(values, 1, axis=1)) / (2.0 * dx)
-    theta_derivative = (np.roll(values, -1, axis=2) - np.roll(values, 1, axis=2)) / (2.0 * dtheta)
-    out[..., 1] = theta_derivative / r_centers[None, None, None, :]
-    out[..., 2] = np.gradient(values, dr, axis=3, edge_order=1)
+    for frame in range(values.shape[0]):
+        out[frame] = transfer_radial(
+            operators.gradient_scalar(transfer_radial(values[frame], to_spectral, 2)),
+            to_cache,
+            2,
+        )
     return out
 
 
@@ -845,23 +809,16 @@ def _divergence_cylindrical_flux(values: Array, lx: float, theta_period: float, 
     """Return cylindrical divergence of a flux field whose axis 4 stores `(x, theta, r)`."""
     values = np.asarray(values, dtype=np.float64)
     assert values.ndim >= 5 and values.shape[4] == 3, "flux must be (T,Nx,Ntheta,Nr,3,...)"
-    dx = lx / values.shape[1]
-    dtheta = theta_period / values.shape[2]
-    dr = _radial_spacing(r_centers)
-    flux_x = np.take(values, 0, axis=4)
-    flux_theta = np.take(values, 1, axis=4)
-    flux_r = np.take(values, 2, axis=4)
-    div_x = (np.roll(flux_x, -1, axis=1) - np.roll(flux_x, 1, axis=1)) / (2.0 * dx)
-    div_theta = (
-        (np.roll(flux_theta, -1, axis=2) - np.roll(flux_theta, 1, axis=2))
-        / (2.0 * dtheta)
-    ) / r_centers[(None,) * 3 + (slice(None),) + (None,) * (values.ndim - 5)]
-    weighted = r_centers[(None,) * 3 + (slice(None),) + (None,) * (values.ndim - 5)] * flux_r
-    faces = np.zeros(weighted.shape[:3] + (weighted.shape[3] + 1,) + weighted.shape[4:], dtype=np.float64)
-    faces[:, :, :, 1:-1, ...] = 0.5 * (weighted[:, :, :, :-1, ...] + weighted[:, :, :, 1:, ...])
-    div_r = (faces[:, :, :, 1:, ...] - faces[:, :, :, :-1, ...]) / dr
-    div_r = div_r / r_centers[(None,) * 3 + (slice(None),) + (None,) * (values.ndim - 5)]
-    return div_x + div_theta + div_r
+    operators = _spectral_operators(values, lx, theta_period, r_centers)
+    to_spectral, to_cache = _radial_transfer_matrices(r_centers, operators)
+    out = np.empty(values.shape[:4] + values.shape[5:], dtype=np.float64)
+    for frame in range(values.shape[0]):
+        out[frame] = transfer_radial(
+            operators.divergence(transfer_radial(values[frame], to_spectral, 2)),
+            to_cache,
+            2,
+        )
+    return out
 
 
 def _laplacian_cylindrical_scalar(values: Array, lx: float, theta_period: float, r_centers: Array) -> Array:
@@ -940,6 +897,27 @@ def _radial_spacing(r_centers: Array) -> float:
     spacing = np.diff(r_centers)
     assert np.allclose(spacing, spacing[0]), "radial centers must be uniformly spaced"
     return float(spacing[0])
+
+
+def _spectral_operators(values: Array, lx: float, theta_period: float, r_centers: Array) -> CylindricalSpectralOperators:
+    """Create the shared annular Shenfun operator for a time-indexed grid."""
+    dr = _radial_spacing(r_centers)
+    return CylindricalSpectralOperators(
+        lx,
+        theta_period,
+        float(r_centers[0] - 0.5 * dr),
+        float(r_centers[-1] + 0.5 * dr),
+        (int(values.shape[1]), int(values.shape[2]), int(values.shape[3])),
+    )
+
+
+def _radial_transfer_matrices(
+    r_centers: Array,
+    operators: CylindricalSpectralOperators,
+) -> tuple[Array, Array]:
+    """Return cached-grid to Shenfun-grid and reverse radial interpolation matrices."""
+    nodes = operators.radial_nodes()
+    return barycentric_matrix(r_centers, nodes), barycentric_matrix(nodes, r_centers)
 
 
 def _sample_field_components(field: Array, sample_indices: Array) -> Array:

@@ -5,7 +5,6 @@ use pyo3::types::PyDict;
 
 #[cfg(any(feature = "gpu-metal", feature = "gpu-cuda"))]
 use crate::coarse_grain_burn;
-use crate::fft_ops;
 use crate::mechanics;
 use crate::sampling;
 use crate::CoreError;
@@ -21,47 +20,6 @@ fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-#[pyfunction]
-#[pyo3(signature = (rho, lx, ly, requested))]
-/// Return selected spectral derivative fields for a scalar rho grid.
-fn spatial_derivatives(
-    py: Python<'_>,
-    rho: PyReadonlyArray3<'_, f64>,
-    lx: f64,
-    ly: f64,
-    requested: Vec<String>,
-) -> PyResult<Py<PyDict>> {
-    let out = PyDict::new(py);
-    for name in requested {
-        match name.as_str() {
-            "grad_rho" => {
-                let value = fft_ops::gradient_scalar(rho.as_array(), lx, ly).map_err(to_py_err)?;
-                out.set_item(name, value.into_pyarray(py))?;
-            }
-            "lap_rho" => {
-                let value = fft_ops::laplacian_scalar(rho.as_array(), lx, ly).map_err(to_py_err)?;
-                out.set_item(name, value.into_pyarray(py))?;
-            }
-            "bilap_rho" => {
-                let value =
-                    fft_ops::bilaplacian_scalar(rho.as_array(), lx, ly).map_err(to_py_err)?;
-                out.set_item(name, value.into_pyarray(py))?;
-            }
-            _ if lap_order(&name).is_some() => {
-                let value = fft_ops::repeated_laplacian_scalar(
-                    rho.as_array(),
-                    lx,
-                    ly,
-                    lap_order(&name).unwrap(),
-                )
-                .map_err(to_py_err)?;
-                out.set_item(name, value.into_pyarray(py))?;
-            }
-            _ => return Err(PyValueError::new_err(format!("unknown derivative: {name}"))),
-        }
-    }
-    Ok(out.unbind())
-}
 
 #[pyfunction]
 #[pyo3(signature = (valid_mask, nd, seed, replace))]
@@ -164,40 +122,6 @@ fn build_mechanical_targets(
     Ok(out.unbind())
 }
 
-#[pyfunction]
-#[pyo3(signature = (rho, p, q, a, psi6_sq, y_p, lx, ly))]
-/// Build mechanical candidate flux libraries and coefficient-order names.
-fn build_mechanical_libraries(
-    py: Python<'_>,
-    rho: PyReadonlyArray3<'_, f64>,
-    p: PyReadonlyArrayDyn<'_, f64>,
-    q: PyReadonlyArrayDyn<'_, f64>,
-    a: PyReadonlyArrayDyn<'_, f64>,
-    psi6_sq: PyReadonlyArray3<'_, f64>,
-    y_p: PyReadonlyArrayDyn<'_, f64>,
-    lx: f64,
-    ly: f64,
-) -> PyResult<Py<PyDict>> {
-    let libs = mechanics::build_mechanical_libraries(
-        rho.as_array(),
-        p.as_array(),
-        q.as_array(),
-        a.as_array(),
-        psi6_sq.as_array(),
-        y_p.as_array(),
-        lx,
-        ly,
-    )
-    .map_err(to_py_err)?;
-    let out = PyDict::new(py);
-    out.set_item("Y_rho_names", libs.y_rho_names)?;
-    out.set_item("Y_P_names", libs.y_p_names)?;
-    out.set_item("Y_Q_names", libs.y_q_names)?;
-    out.set_item("Y_rho", libs.y_rho.into_pyarray(py))?;
-    out.set_item("Y_P", libs.y_p.into_pyarray(py))?;
-    out.set_item("Y_Q", libs.y_q.into_pyarray(py))?;
-    Ok(out.unbind())
-}
 
 #[pyfunction]
 #[pyo3(signature = (target, library, sample_indices))]
@@ -224,22 +148,9 @@ fn sample_component_rows(
 /// Register the Python module functions exposed by the compiled extension.
 fn _rho_fitting_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
-    m.add_function(wrap_pyfunction!(spatial_derivatives, m)?)?;
     m.add_function(wrap_pyfunction!(sample_rows, m)?)?;
     m.add_function(wrap_pyfunction!(build_mechanical_fields, m)?)?;
     m.add_function(wrap_pyfunction!(build_mechanical_targets, m)?)?;
-    m.add_function(wrap_pyfunction!(build_mechanical_libraries, m)?)?;
     m.add_function(wrap_pyfunction!(sample_component_rows, m)?)?;
     Ok(())
-}
-
-fn lap_order(name: &str) -> Option<usize> {
-    // Parse derivative names like `lap_rho` and `lap2_rho` into Laplacian order.
-    if name == "lap_rho" {
-        return Some(1);
-    }
-    name.strip_prefix("lap")?
-        .strip_suffix("_rho")?
-        .parse::<usize>()
-        .ok()
 }

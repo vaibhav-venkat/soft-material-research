@@ -1,415 +1,100 @@
-"""Coupled py-pde model and validation rollout orchestration."""
+"""Shenfun IMEX rollout for fitted cylindrical moment closures."""
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import numpy as np
-from pde import FieldCollection, MemoryStorage, PDEBase
-from scipy.ndimage import gaussian_filter
+
+from hexatic.rho_fitting.spectral import CylindricalSpectralOperators, barycentric_matrix, transfer_radial
 
 from ..cache import ValidationInputs, load_validation_inputs
-from ..operators import closure_fields, divergence_surface_flux, divergence_vector, estimate_ubar
+from ..operators import closure_fields, divergence_vector, estimate_ubar
 from .interpolation import interpolated_cached_fields, interpolated_fields
-from .jax_backend import make_jax_evolution_rate, run_jax_py_pde_euler
-from .state import make_grid, pack_state, scalar_bounds, symmetric_bound, unpack_state
-from .types import (
-    Array,
-    BILATERAL_RADIUS_CELLS,
-    BILATERAL_RANGE_SCALE,
-    BILATERAL_SPATIAL_SIGMA_CELLS,
-    FILTERED_EULER_SIGMA_SCALE,
-    P_RELAXATION_COEFFICIENT,
-    Q_RELAXATION_COEFFICIENT,
-    ValidationOptions,
-    ValidationResult,
-)
+from .types import P_RELAXATION_COEFFICIENT, Q_RELAXATION_COEFFICIENT, Array, ValidationOptions, ValidationResult
 
 
-class RhoFitPDE(PDEBase):
-    """py-pde model that advances fitted rho, P, and Q closure equations."""
-
-    def __init__(
-        self,
-        inputs: ValidationInputs,
-        filter_sigma: float | None = None,
-        *,
-        rate_clip_dt: float | None = None,
-    ):
-        """Initialize grid spacing, fixed inputs, filters, and projection bounds."""
-        super().__init__()
-        self.inputs = inputs
-        self.dx = inputs.lx / inputs.rho.shape[1]
-        self.dtheta = inputs.theta_period / inputs.rho.shape[2]
-        self.psi6_sq_fixed = np.asarray(inputs.psi6_sq[0], dtype=np.float64)
-        self.filter_sigma = filter_sigma
-        self.rate_clip_dt = rate_clip_dt
-        self.rho_min, self.rho_max = scalar_bounds(inputs.rho)
-        self.p_limit = symmetric_bound(inputs.p)
-        self.q_limit = symmetric_bound(inputs.q)
-
-    def evolution_rate(self, state: FieldCollection, t: float = 0.0) -> FieldCollection:
-        """Return the coupled PDE time derivative for the current state and time."""
-        rho, p, q = unpack_state(state)
-        rho, p, q = self.project_fields(rho, p, q)
-        rho_eval, p_eval, q_eval = self.filtered_fields(rho, p, q)
-        rho_eval, p_eval, q_eval = self.project_fields(rho_eval, p_eval, q_eval)
-        ubar = self.fit_time_ubar(t)
-        closures = closure_fields(
-            rho_eval,
-            p_eval,
-            q_eval,
-            self.psi6_sq_fixed,
-            self.inputs.y_rho_coefficients,
-            self.inputs.y_p_coefficients,
-            self.inputs.y_q_coefficients,
-            self.dx,
-            self.dtheta,
-            self.inputs.r_centers,
-            ubar_override=ubar,
-        )
-
-        rho_flux = self.inputs.u0 * p_eval + closures.f_rho / self.inputs.gamma
-        d_rho = -divergence_vector(rho_flux, self.dx, self.dtheta, self.inputs.r_centers)
-        d_p = -self.inputs.u0 * divergence_surface_flux(closures.f_p, self.dx, self.dtheta, self.inputs.r_centers)
-        d_p += P_RELAXATION_COEFFICIENT * p
-        d_q = -divergence_surface_flux(closures.f_q, self.dx, self.dtheta, self.inputs.r_centers)
-        d_q += closures.s_q
-        d_q += Q_RELAXATION_COEFFICIENT * q
-        return pack_state(state.grid, d_rho, d_p, d_q)
-
-    def make_evolution_rate(self, state: FieldCollection, backend: Any) -> Any:
-        """Return py-pde's backend-native RHS; currently implemented for JAX."""
-        return make_jax_evolution_rate(self, state, backend)
-
-    def project_fields(self, rho: Array, p: Array, q: Array) -> tuple[Array, Array, Array]:
-        """Clip non-finite and runaway fields back into validation-derived bounds."""
-        rho_out = np.nan_to_num(rho, nan=self.rho_min, posinf=self.rho_max, neginf=self.rho_min)
-        p_out = np.nan_to_num(p, nan=0.0, posinf=self.p_limit, neginf=-self.p_limit)
-        q_out = np.nan_to_num(q, nan=0.0, posinf=self.q_limit, neginf=-self.q_limit)
-        return (
-            np.clip(rho_out, self.rho_min, self.rho_max),
-            np.clip(p_out, -self.p_limit, self.p_limit),
-            np.clip(q_out, -self.q_limit, self.q_limit),
-        )
-
-    def project_state(self, state: FieldCollection) -> None:
-        """Apply field projection in-place to a packed py-pde state."""
-        rho, p, q = self.project_fields(*unpack_state(state))
-        state.data[...] = pack_state(state.grid, rho, p, q).data
-
-    def stable_rate_data(self, rate: FieldCollection, step_dt: float) -> Array:
-        """Clip rate data so one explicit step cannot jump outside projection bounds."""
-        assert step_dt > 0.0, "step_dt must be positive"
-        values = np.nan_to_num(rate.data, nan=0.0, posinf=0.0, neginf=0.0)
-        out = np.empty_like(values, dtype=np.float64)
-        rho_limit = (self.rho_max - self.rho_min) / step_dt
-        out[0] = np.clip(values[0], -rho_limit, rho_limit)
-        p_rate_limit = (2.0 * self.p_limit) / step_dt
-        q_rate_limit = (2.0 * self.q_limit) / step_dt
-        out[1:4] = np.clip(values[1:4], -p_rate_limit, p_rate_limit)
-        out[4:] = np.clip(values[4:], -q_rate_limit, q_rate_limit)
-        return out
-
-    def filtered_fields(self, rho: Array, p: Array, q: Array) -> tuple[Array, Array, Array]:
-        """Optionally smooth fields with periodic x/theta filtering and nonperiodic radial filtering."""
-        return self.filter_fields_with_sigma(rho, p, q, self.filter_sigma)
-
-    def post_step_filtered_fields(self, rho: Array, p: Array, q: Array) -> tuple[Array, Array, Array]:
-        """Apply contrast-preserving bilateral smoothing to stabilize live Euler states."""
-        if self.filter_sigma is None or self.filter_sigma <= 0.0:
-            return rho, p, q
-        return (
-            bilateral_filter(rho),
-            bilateral_filter(p),
-            bilateral_filter(q),
-        )
-
-    def filter_fields_with_sigma(self, rho: Array, p: Array, q: Array, sigma: float | None) -> tuple[Array, Array, Array]:
-        """Smooth fields with a supplied physical Gaussian width."""
-        if sigma is None or sigma <= 0.0:
-            return rho, p, q
-        sx = sigma / self.dx
-        stheta = sigma / (float(np.mean(self.inputs.r_centers)) * self.dtheta)
-        sr = sigma / float(np.mean(np.diff(self.inputs.r_centers)))
-        rho_out = gaussian_filter(rho, sigma=(sx, stheta, sr), mode=("wrap", "wrap", "nearest"))
-        p_out = gaussian_filter(p, sigma=(sx, stheta, sr, 0.0), mode=("wrap", "wrap", "nearest", "nearest"))
-        q_out = gaussian_filter(q, sigma=(sx, stheta, sr, 0.0, 0.0), mode=("wrap", "wrap", "nearest", "nearest", "nearest"))
-        return rho_out, p_out, q_out
-
-    def fit_time_ubar(self, t: float) -> Array:
-        """Estimate cached-time transport speed by interpolating ``A`` and ``Y_P``."""
-        _, _, _, a, y_p = interpolated_cached_fields(self.inputs, t)
-        return estimate_ubar(y_p, a)
-
-
-def run_validation(
-    inputs: ValidationInputs,
-    options: ValidationOptions | None = None,
-) -> ValidationResult:
-    """Run a PDE rollout from cached frame zero and compare against cached fields."""
+def run_validation(inputs: ValidationInputs, options: ValidationOptions | None = None) -> ValidationResult:
+    """Run the dealiased Shenfun IMEX rollout and return cache-grid results."""
     options = ValidationOptions() if options is None else options
-    frame_count = (
-        inputs.rho.shape[0]
-        if options.max_frames is None
-        else min(int(options.max_frames), inputs.rho.shape[0])
-    )
-    assert frame_count >= 2, "validation needs at least two frames"
-    times = inputs.times[:frame_count]
-    grid = make_grid(inputs)
-    dt = 5.0e-3 if options.dt is None else options.dt
-    pde = RhoFitPDE(
-        inputs,
-        filter_sigma=_validation_filter_sigma(inputs, options),
-        rate_clip_dt=dt if options.backend == "jax" and options.solver in {"euler", "filtered-euler"} else None,
-    )
-    state = pack_state(grid, inputs.rho[0], inputs.p[0], inputs.q[0])
-    pde.project_state(state)
-    rho_fit, p_fit, q_fit = _run_solver(pde, state, times, options, dt)
-    assert np.all(np.isfinite(rho_fit)), "rho_fit became non-finite; try a smaller --dt or inspect closure stability"
-    assert np.all(np.isfinite(p_fit)), "P_fit became non-finite; try a smaller --dt or inspect closure stability"
-    assert np.all(np.isfinite(q_fit)), "Q_fit became non-finite; try a smaller --dt or inspect closure stability"
-
-    rho_true = inputs.rho[:frame_count]
-    p_true = inputs.p[:frame_count]
-    q_true = inputs.q[:frame_count]
-    metric_fit, metric_true, metric_axes = validation_metric_arrays(
-        options.mode,
-        rho_fit,
-        p_fit,
-        q_fit,
-        rho_true,
-        p_true,
-        q_true,
-    )
-    residual = metric_fit - metric_true
-    rmse_t = np.sqrt(np.mean(residual * residual, axis=metric_axes))
-    centered = metric_true - np.mean(metric_true, axis=metric_axes, keepdims=True)
-    total = np.sum(centered * centered, axis=metric_axes)
-    error = np.sum(residual * residual, axis=metric_axes)
-    r2_t = 1.0 - np.divide(error, total, out=np.full_like(total, np.nan), where=total > 0.0)
-    return ValidationResult(
-        rho_fit=rho_fit,
-        p_fit=p_fit,
-        q_fit=q_fit,
-        rho_true=rho_true,
-        p_true=p_true,
-        q_true=q_true,
-        times=times,
-        rmse_t=rmse_t,
-        r2_t=r2_t,
-    )
+    frames = inputs.rho.shape[0] if options.max_frames is None else min(inputs.rho.shape[0], options.max_frames)
+    assert frames >= 2
+    times = inputs.times[:frames]
+    shape = (int(inputs.rho.shape[1]), int(inputs.rho.shape[2]), int(inputs.rho.shape[3]))
+    operators = CylindricalSpectralOperators(inputs.lx, inputs.theta_period, float(inputs.r_edges[0]), float(inputs.r_edges[-1]), shape)
+    to_spectral = barycentric_matrix(inputs.r_centers, operators.radial_nodes())
+    to_cache = barycentric_matrix(operators.radial_nodes(), inputs.r_centers)
+    rho = transfer_radial(inputs.rho[0], to_spectral, 2)
+    p = transfer_radial(inputs.p[0], to_spectral, 2)
+    q = transfer_radial(inputs.q[0], to_spectral, 2)
+    psi6 = transfer_radial(inputs.psi6_sq[0], to_spectral, 2)
+    rho_fit = np.empty((frames,) + shape, dtype=np.float64)
+    p_fit = np.empty((frames,) + shape + (3,), dtype=np.float64)
+    q_fit = np.empty((frames,) + shape + (3, 3), dtype=np.float64)
+    rho_fit[0], p_fit[0], q_fit[0] = inputs.rho[0], inputs.p[0], inputs.q[0]
+    dt_max = 5.0e-3 if options.dt is None else float(options.dt)
+    assert dt_max > 0.0
+    for frame in range(frames - 1):
+        interval = float(times[frame + 1] - times[frame])
+        steps = max(1, int(np.ceil(interval / dt_max)))
+        dt = interval / steps
+        for substep in range(steps):
+            time = float(times[frame]) + substep * dt
+            rho, p, q = _imex_step(inputs, operators, rho, p, q, psi6, time, dt, options.mode, options.ubar_source, to_spectral)
+            rho = operators.filter_two_thirds(rho)
+            p = operators.filter_two_thirds(p)
+            q = operators.filter_two_thirds(q)
+            assert np.all(np.isfinite(rho)) and np.all(np.isfinite(p)) and np.all(np.isfinite(q)), "spectral rollout became non-finite"
+        rho_fit[frame + 1] = transfer_radial(rho, to_cache, 2)
+        p_fit[frame + 1] = transfer_radial(p, to_cache, 2)
+        q_fit[frame + 1] = transfer_radial(q, to_cache, 2)
+    return _result(options.mode, rho_fit, p_fit, q_fit, inputs, times)
 
 
-def validation_metric_arrays(
-    mode: str,
-    rho_fit: Array,
-    p_fit: Array,
-    q_fit: Array,
-    rho_true: Array,
-    p_true: Array,
-    q_true: Array,
-) -> tuple[Array, Array, tuple[int, ...]]:
-    """Select fitted/reference arrays and reduction axes for a validation mode."""
+def _imex_step(inputs: ValidationInputs, operators: CylindricalSpectralOperators, rho: Array, p: Array, q: Array, psi6: Array, time: float, dt: float, mode: str, ubar_source: str, to_spectral: Array) -> tuple[Array, Array, Array]:
+    rho_ref, p_ref, q_ref, a_ref, y_p_ref = interpolated_cached_fields(inputs, time)
+    rho_ref, p_ref, q_ref, a_ref, y_p_ref = (transfer_radial(value, to_spectral, 2) for value in (rho_ref, p_ref, q_ref, a_ref, y_p_ref))
+    rho_eval = rho if mode in {"full", "rho-only"} else rho_ref
+    p_eval = p if mode in {"full", "p-only"} else p_ref
+    q_eval = q if mode in {"full", "q-only"} else q_ref
+    assert ubar_source in {"cached", "fitted"}
+    ubar = estimate_ubar(y_p_ref, a_ref) if ubar_source == "cached" else None
+    closures = closure_fields(rho_eval, p_eval, q_eval, psi6, inputs.y_rho_coefficients, inputs.y_p_coefficients, inputs.y_q_coefficients, operators, ubar)
+    d_rho = -divergence_vector(inputs.u0 * p_eval + closures.f_rho / inputs.gamma, operators)
+    d_p = -inputs.u0 * divergence_vector(closures.f_p, operators)
+    d_q = -divergence_vector(closures.f_q, operators) + closures.s_q
     if mode in {"full", "rho-only"}:
-        return rho_fit, rho_true, (1, 2, 3)
-    if mode == "p-only":
-        return p_fit, p_true, (1, 2, 3, 4)
-    if mode == "q-only":
-        return q_fit, q_true, (1, 2, 3, 4, 5)
+        rho = rho + dt * d_rho
+    else:
+        rho = rho_ref
+    if mode in {"full", "p-only"}:
+        p = (p + dt * d_p) / (1.0 - dt * P_RELAXATION_COEFFICIENT)
+    else:
+        p = p_ref
+    if mode in {"full", "q-only"}:
+        q = (q + dt * d_q) / (1.0 - dt * Q_RELAXATION_COEFFICIENT)
+    else:
+        q = q_ref
+    return rho, p, q
+
+
+def _result(mode: str, rho_fit: Array, p_fit: Array, q_fit: Array, inputs: ValidationInputs, times: Array) -> ValidationResult:
+    rho_true, p_true, q_true = inputs.rho[:times.size], inputs.p[:times.size], inputs.q[:times.size]
+    fit, truth, axes = validation_metric_arrays(mode, rho_fit, p_fit, q_fit, rho_true, p_true, q_true)
+    residual = fit - truth
+    rmse = np.sqrt(np.mean(residual * residual, axis=axes))
+    centered = truth - np.mean(truth, axis=axes, keepdims=True)
+    r2 = 1.0 - np.divide(np.sum(residual * residual, axis=axes), np.sum(centered * centered, axis=axes), out=np.full(times.size, np.nan), where=np.sum(centered * centered, axis=axes) > 0.0)
+    return ValidationResult(rho_fit, p_fit, q_fit, rho_true, p_true, q_true, times, rmse, r2)
+
+
+def validation_metric_arrays(mode: str, rho_fit: Array, p_fit: Array, q_fit: Array, rho_true: Array, p_true: Array, q_true: Array) -> tuple[Array, Array, tuple[int, ...]]:
+    if mode in {"full", "rho-only"}: return rho_fit, rho_true, (1, 2, 3)
+    if mode == "p-only": return p_fit, p_true, (1, 2, 3, 4)
+    if mode == "q-only": return q_fit, q_true, (1, 2, 3, 4, 5)
     raise AssertionError(f"unknown validation mode: {mode}")
 
 
-def _validation_filter_sigma(inputs: ValidationInputs, options: ValidationOptions) -> float | None:
-    """Choose the Gaussian filter width used by the filtered explicit Euler solver."""
-    if options.solver != "filtered-euler":
-        return None
-    if options.filter_sigma is not None:
-        return options.filter_sigma
-    dx = inputs.lx / inputs.rho.shape[1]
-    dtheta_length = float(np.mean(inputs.r_centers)) * inputs.theta_period / inputs.rho.shape[2]
-    dr = float(np.mean(np.diff(inputs.r_centers)))
-    base_sigma = float(inputs.metadata.get("sigma", min(dx, dtheta_length, dr)))
-    return FILTERED_EULER_SIGMA_SCALE * base_sigma
-
-
-def _run_solver(
-    pde: RhoFitPDE,
-    state: FieldCollection,
-    times: Array,
-    options: ValidationOptions,
-    dt: float,
-) -> tuple[Array, Array, Array]:
-    """Dispatch validation rollout to the requested solver implementation."""
-    if options.backend == "jax":
-        assert options.solver in {"euler", "filtered-euler"}, "jax backend supports euler and filtered-euler solvers"
-        return run_jax_py_pde_euler(pde, state, times, dt, options.mode, options.jax_device)
-    if options.backend != "py-pde":
-        raise AssertionError(f"unknown validation backend: {options.backend}")
-    if options.solver == "scipy":
-        assert options.mode == "full", "single-equation modes currently support euler and filtered-euler solvers"
-        return _run_scipy(pde, state, times, options.dt)
-    if options.solver in {"euler", "filtered-euler"}:
-        return _run_euler(pde, state, times, dt, options.mode)
-    raise AssertionError(f"unknown validation solver: {options.solver}")
-
-
-def _run_scipy(pde: RhoFitPDE, state: FieldCollection, times: Array, dt: float | None) -> tuple[Array, Array, Array]:
-    """Run the full coupled PDE with py-pde's SciPy BDF solver."""
-    storage = MemoryStorage()
-    kwargs: dict[str, Any] = {"method": "BDF"}
-    if dt is not None:
-        assert dt > 0.0, "dt must be positive"
-        kwargs["max_step"] = float(dt)
-    pde.solve(
-        state,
-        t_range=(float(times[0]), float(times[-1])),
-        tracker=storage.tracker(times),
-        solver="scipy",
-        **kwargs,
-    )
-    assert len(storage.data) == times.size, "py-pde did not store every requested frame"
-    rho_fit = np.asarray([frame[0] for frame in storage.data], dtype=np.float64)
-    p_fit = np.asarray([np.moveaxis(frame[1:4], 0, -1) for frame in storage.data], dtype=np.float64)
-    q_fit = np.asarray([np.moveaxis(frame[4:].reshape(3, 3, *frame.shape[1:]), (0, 1), (-2, -1)) for frame in storage.data], dtype=np.float64)
-    return rho_fit, p_fit, q_fit
-
-
-def _run_euler(
-    pde: RhoFitPDE,
-    state: FieldCollection,
-    times: Array,
-    dt: float,
-    mode: str,
-) -> tuple[Array, Array, Array]:
-    """Run explicit Euler validation with optional single-equation modes."""
-    assert mode in {"full", "rho-only", "p-only", "q-only"}, f"unknown validation mode: {mode}"
-    rho_fit = np.empty((times.size,) + state.grid.shape, dtype=np.float64)
-    p_fit = np.empty((times.size,) + state.grid.shape + (3,), dtype=np.float64)
-    q_fit = np.empty((times.size,) + state.grid.shape + (3, 3), dtype=np.float64)
-    rho_fit[0], p_fit[0], q_fit[0] = unpack_state(state)
-    assert dt > 0.0, "dt must be positive"
-    for index in range(times.size - 1):
-        frame_dt = float(times[index + 1] - times[index])
-        assert frame_dt > 0.0, "validation times must be strictly increasing"
-        substeps = max(1, int(np.ceil(frame_dt / dt)))
-        step_dt = frame_dt / substeps
-        for substep in range(substeps):
-            t = float(times[index]) + substep * step_dt
-            if mode == "full":
-                _step_full_state(pde, state, t, step_dt)
-            else:
-                _step_single_field_state(pde, state, t, step_dt, mode)
-            if pde.filter_sigma is not None and pde.filter_sigma > 0.0:
-                _filter_project_state(pde, state, mode)
-            assert np.all(np.isfinite(state.data)), "validation state became non-finite"
-        rho_fit[index + 1], p_fit[index + 1], q_fit[index + 1] = unpack_state(state)
-    return rho_fit, p_fit, q_fit
-
-
-def _step_full_state(
-    pde: RhoFitPDE,
-    state: FieldCollection,
-    t: float,
-    step_dt: float,
-) -> None:
-    """Advance all packed fields by one projected explicit Euler step."""
-    rate = pde.evolution_rate(state, t)
-    state.data[...] = state.data + step_dt * pde.stable_rate_data(rate, step_dt)
-    pde.project_state(state)
-
-
-def _step_single_field_state(
-    pde: RhoFitPDE,
-    state: FieldCollection,
-    t: float,
-    step_dt: float,
-    mode: str,
-) -> None:
-    """Advance only the selected field while resetting other fields to cached references."""
-    hard_state = _single_field_reference_state(pde, state, t, mode)
-    rate = pde.evolution_rate(hard_state, t)
-    rate_data = pde.stable_rate_data(rate, step_dt)
-    if mode == "rho-only":
-        state.data[0] = state.data[0] + step_dt * rate_data[0]
-        state.data[1:] = hard_state.data[1:]
-    elif mode == "p-only":
-        state.data[0] = hard_state.data[0]
-        state.data[1:4] = state.data[1:4] + step_dt * rate_data[1:4]
-        state.data[4:] = hard_state.data[4:]
-    else:
-        state.data[:4] = hard_state.data[:4]
-        state.data[4:] = state.data[4:] + step_dt * rate_data[4:]
-    pde.project_state(state)
-
-
-def _filter_project_state(pde: RhoFitPDE, state: FieldCollection, mode: str) -> None:
-    """Apply the filtered-Euler smoothing step to the live validation state."""
-    rho, p, q = unpack_state(state)
-    if mode == "full":
-        rho, p, q = pde.post_step_filtered_fields(rho, p, q)
-    elif mode == "rho-only":
-        rho = bilateral_filter(rho)
-    elif mode == "p-only":
-        p = bilateral_filter(p)
-    elif mode == "q-only":
-        q = bilateral_filter(q)
-    else:
-        raise AssertionError(f"unknown validation mode: {mode}")
-    rho, p, q = pde.project_fields(rho, p, q)
-    state.data[...] = pack_state(state.grid, rho, p, q).data
-
-
-def bilateral_filter(values: Array) -> Array:
-    """Apply a small periodic-x/theta, nearest-r bilateral filter over grid axes."""
-    values = np.asarray(values, dtype=np.float64)
-    spatial_sigma = BILATERAL_SPATIAL_SIGMA_CELLS
-    range_sigma = max(BILATERAL_RANGE_SCALE * float(np.nanstd(values)), 1.0e-6)
-    radius = BILATERAL_RADIUS_CELLS
-    weighted_sum = np.zeros_like(values, dtype=np.float64)
-    weight_sum = np.zeros_like(values, dtype=np.float64)
-    center = values
-    for ox in range(-radius, radius + 1):
-        for ot in range(-radius, radius + 1):
-            for orad in range(-radius, radius + 1):
-                spatial_distance_sq = float(ox * ox + ot * ot + orad * orad)
-                spatial_weight = np.exp(-0.5 * spatial_distance_sq / (spatial_sigma * spatial_sigma))
-                shifted = _shift_grid_nearest_r(values, ox, ot, orad)
-                range_weight = np.exp(-0.5 * ((shifted - center) / range_sigma) ** 2)
-                weight = spatial_weight * range_weight
-                weighted_sum += weight * shifted
-                weight_sum += weight
-    return np.divide(weighted_sum, weight_sum, out=center.copy(), where=weight_sum > 0.0)
-
-
-def _shift_grid_nearest_r(values: Array, ox: int, ot: int, orad: int) -> Array:
-    """Shift grid axes with periodic x/theta and nearest radial extension."""
-    shifted = np.roll(values, ox, axis=0)
-    shifted = np.roll(shifted, ot, axis=1)
-    indices = np.clip(np.arange(values.shape[2]) - orad, 0, values.shape[2] - 1)
-    return np.take(shifted, indices, axis=2)
-
-
-def _single_field_reference_state(
-    pde: RhoFitPDE,
-    state: FieldCollection,
-    t: float,
-    mode: str,
-) -> FieldCollection:
-    """Build a state mixing the live selected field with cached reference fields."""
-    rho_data, p_data, q_data = interpolated_fields(pde.inputs, t)
-    rho, p, q = unpack_state(state)
-    rho_eval = rho if mode == "rho-only" else rho_data
-    p_eval = p if mode == "p-only" else p_data
-    q_eval = q if mode == "q-only" else q_data
-    return pack_state(state.grid, rho_eval, p_eval, q_eval)
-
-
-def run_validation_from_cache(
-    cache_path: Path,
-    options: ValidationOptions | None = None,
-) -> tuple[ValidationInputs, ValidationResult]:
-    """Load validation inputs from a cache path and run one validation rollout."""
+def run_validation_from_cache(cache_path: Path, options: ValidationOptions | None = None) -> tuple[ValidationInputs, ValidationResult]:
     inputs = load_validation_inputs(cache_path)
     return inputs, run_validation(inputs, options)

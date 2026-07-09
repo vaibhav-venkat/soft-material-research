@@ -1,1 +1,1 @@
-"""Validate rho-fitting closures with a coupled py-pde model."""
+"""Validate rho-fitting closures with Shenfun spectral rollouts."""
