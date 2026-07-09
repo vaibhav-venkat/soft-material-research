@@ -6,6 +6,8 @@ Auto-discovers cases from ``hexatic_output/*_hexatic_order.txt`` and plots:
 - Mean hexatic order |psi6| (first frame)
 - Average net x-velocity over frames [v0..v1)  (finite-difference from npz)
 - Average |x-velocity| over frames [v0..v1)
+- Average net P_x over frames [v0..v1)  (from ``direction_cylindrical[:, :, 0]``)
+- Average |P_x| over frames [v0..v1)
 
 Velocity is computed as Δx / (Δstep · TIMESTEP) where Δstep is read from
 the npz ``steps`` array and ``TIMESTEP`` comes from ``hexatic.constants.cylinder``.
@@ -116,6 +118,8 @@ class CaseData:
     mean_psi6: float
     mean_vx: float              # avg net x-velocity over the velocity frame window
     mean_abs_vx: float          # avg |x-velocity| over the velocity frame window
+    mean_px: float              # avg net P_x over the frame window
+    mean_abs_px: float          # avg |P_x| over the frame window
 
 
 def _mean_hexatic_first_frame(hexatic_order_path: Path) -> tuple[float, int]:
@@ -147,6 +151,40 @@ def _disclination_density_first_frame(
     plus1 = float(np.sum(counts == 5)) / n_total
     minus1 = float(np.sum(counts == 7)) / n_total
     return plus1, minus1, n_total
+
+
+def _polarization_from_npz(
+    npz_path: Path,
+    frame_start: int = DEFAULT_V0,
+    frame_end: int = DEFAULT_V1,
+) -> tuple[float, float]:
+    """Return (mean net P_x, mean |P_x|) over frames [frame_start, frame_end).
+
+    P_x is read from ``direction_cylindrical[:, :, 0]`` (same convention as
+    ``plot.py``: component 0 = x, 1 = R, 2 = θ).
+
+    Returns (nan, nan) when the file is missing or the window is too small.
+    """
+    try:
+        with np.load(npz_path) as data:
+            p = np.asarray(data["direction_cylindrical"], dtype=float)  # (T, N, 3)
+    except (FileNotFoundError, KeyError):
+        return float("nan"), float("nan")
+
+    n_frames = p.shape[0]
+    f0 = max(0, frame_start)
+    f1 = min(n_frames, frame_end)
+    if f1 <= f0:
+        return float("nan"), float("nan")
+
+    px_window = p[f0:f1, :, 0]  # (W, N)
+
+    per_frame_net = np.mean(px_window, axis=1)          # (W,)
+    per_frame_abs = np.mean(np.abs(px_window), axis=1)  # (W,)
+
+    mean_px = float(np.mean(per_frame_net))
+    mean_abs_px = float(np.mean(per_frame_abs))
+    return mean_px, mean_abs_px
 
 
 def _velocity_from_npz(
@@ -222,6 +260,7 @@ def _gather_case_data(
     mean_psi6, n_hex = _mean_hexatic_first_frame(hexatic_path)
     plus1, minus1, n_nbr = _disclination_density_first_frame(neighbor_path)
     mean_vx, mean_abs_vx = _velocity_from_npz(npz_path, v0, v1)
+    mean_px, mean_abs_px = _polarization_from_npz(npz_path, v0, v1)
 
     n_particles = max(n_hex, n_nbr)
 
@@ -234,6 +273,8 @@ def _gather_case_data(
         mean_psi6=mean_psi6,
         mean_vx=mean_vx,
         mean_abs_vx=mean_abs_vx,
+        mean_px=mean_px,
+        mean_abs_px=mean_abs_px,
     )
 
 
@@ -291,9 +332,11 @@ def build_figure(rows_data: list[CaseData], v0: int = DEFAULT_V0, v1: int = DEFA
     psi6 = np.array([d.mean_psi6 for d in rows_data])
     vx = np.array([d.mean_vx for d in rows_data])
     abs_vx = np.array([d.mean_abs_vx for d in rows_data])
+    px = np.array([d.mean_px for d in rows_data])
+    abs_px = np.array([d.mean_abs_px for d in rows_data])
 
     fig = make_subplots(
-        rows=5,
+        rows=7,
         cols=1,
         shared_xaxes=True,
         subplot_titles=(
@@ -302,8 +345,10 @@ def build_figure(rows_data: list[CaseData], v0: int = DEFAULT_V0, v1: int = DEFA
             "Mean |ψ₆|  (first frame)",
             f"⟨v_x⟩  avg net x-velocity over frames {v0}–{v1}",
             f"⟨|v_x|⟩  avg |x-velocity| over frames {v0}–{v1}",
+            f"⟨P_x⟩  avg net P_x over frames {v0}–{v1}",
+            f"⟨|P_x|⟩  avg |P_x| over frames {v0}–{v1}",
         ),
-        vertical_spacing=0.07,
+        vertical_spacing=0.06,
     )
 
     _add_scatter(fig, 1, cd, plus1, labels, "+1 disclinations", "#dc2626", "triangle-up")
@@ -311,17 +356,19 @@ def build_figure(rows_data: list[CaseData], v0: int = DEFAULT_V0, v1: int = DEFA
     _add_scatter(fig, 3, cd, psi6, labels, "mean |ψ₆|", "#7c3aed", "circle")
     _add_scatter(fig, 4, cd, vx, labels, "⟨v_x⟩", "#0891b2", "diamond")
     _add_scatter(fig, 5, cd, abs_vx, labels, "⟨|v_x|⟩", "#ea580c", "square")
+    _add_scatter(fig, 6, cd, px, labels, "⟨P_x⟩", "#16a34a", "star")
+    _add_scatter(fig, 7, cd, abs_px, labels, "⟨|P_x|⟩", "#d97706", "cross")
 
     # Axes formatting
     fig.update_xaxes(
         title_text="C / D  (circumference / particle diameter)",
-        row=5,
+        row=7,
         col=1,
         showgrid=True,
         gridcolor="rgba(39,49,61,0.10)",
         zeroline=False,
     )
-    for row in range(1, 6):
+    for row in range(1, 8):
         fig.update_yaxes(
             showgrid=True,
             gridcolor="rgba(39,49,61,0.10)",
@@ -334,9 +381,12 @@ def build_figure(rows_data: list[CaseData], v0: int = DEFAULT_V0, v1: int = DEFA
     fig.update_yaxes(title_text="⟨ |ψ₆| ⟩", row=3, col=1)
     fig.update_yaxes(title_text="v_x  (σ / τ)", row=4, col=1)
     fig.update_yaxes(title_text="|v_x|  (σ / τ)", row=5, col=1)
+    fig.update_yaxes(title_text="P_x", row=6, col=1)
+    fig.update_yaxes(title_text="|P_x|", row=7, col=1)
 
-    # Zero reference lines for velocity panels
+    # Zero reference lines for velocity and polarization panels
     fig.add_hline(y=0.0, row=4, col=1, line=dict(color="#9aa3ad", width=1, dash="dot"))
+    fig.add_hline(y=0.0, row=6, col=1, line=dict(color="#9aa3ad", width=1, dash="dot"))
 
     fig.update_layout(
         title=dict(
@@ -347,7 +397,7 @@ def build_figure(rows_data: list[CaseData], v0: int = DEFAULT_V0, v1: int = DEFA
         ),
         template="plotly_white",
         width=960,
-        height=1300,
+        height=1700,
         hovermode="closest",
         showlegend=False,
         margin=dict(l=85, r=35, t=100, b=75),
