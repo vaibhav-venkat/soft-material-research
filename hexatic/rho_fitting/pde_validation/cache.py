@@ -21,14 +21,11 @@ Y_RHO_NAMES = (
     "A_dot_grad_rho",
     "P",
 )
-Y_P_NAMES = ("A", "rho_A", "psi6sq_A", "grad_P", "rho_grad_P", "grad_lap_P")
+Y_P_NAMES = ("A", "psi6sq_A", "grad_P")
 Y_Q_NAMES = (
     "tangential_projected_Ubar_P_alpha",
     "radial_projected_Ubar_P_alpha",
-    "tangential_grad_Q",
     "radial_grad_Q",
-    "Q",
-    "psi6sq_Q",
 )
 
 
@@ -141,8 +138,8 @@ def _validate_shapes(
     assert y_p.shape == rho.shape + (3, 3), "Y_P must be (T,Nx,Ntheta,Nr,3,3)"
     assert times.shape == (rho.shape[0],), "cheb_times must match rho time axis"
     assert y_rho_coefficients.shape == (3,), "Y_rho coefficients must match current library"
-    assert y_p_coefficients.shape == (6,), "Y_P coefficients must match current library"
-    assert y_q_coefficients.shape == (6,), "Y_Q coefficients must match current library"
+    assert y_p_coefficients.shape == (3,), "Y_P coefficients must match current library"
+    assert y_q_coefficients.shape == (3,), "Y_Q coefficients must match current library"
 
 
 def _metadata_values(metadata: dict[str, Any]) -> tuple[float, float, Array, Array, float, float, float, float]:

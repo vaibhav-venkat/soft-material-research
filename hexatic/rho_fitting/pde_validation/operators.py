@@ -94,8 +94,8 @@ def closure_fields(
         q: Nematic moment field with shape ``(Nx, Ny, 3, 3)``.
         psi6_sq_fixed: Fixed hexatic-amplitude field sampled at the validation time.
         y_rho_coefficients: Coefficients for the density-flux library terms.
-        y_p_coefficients: Coefficients for the six polarization-flux library terms.
-        y_q_coefficients: Coefficients for the five nematic-flux library terms.
+        y_p_coefficients: Coefficients for the three polarization-flux library terms.
+        y_q_coefficients: Coefficients for the three nematic-flux library terms.
         dx: Axial grid spacing.
         dtheta: Angular grid spacing.
         r_centers: Radial bin centers.
@@ -125,14 +125,10 @@ def closure_fields(
     )
 
     grad_p = gradient_vector(p, operators)
-    grad_lap_p = gradient_vector(laplacian_vector(p, operators), operators)
     f_p = (
         y_p_coefficients[0] * a_surface
-        + y_p_coefficients[1] * rho[..., None, None] * a_surface
-        + y_p_coefficients[2] * psi6_sq_fixed[..., None, None] * a_surface
-        + y_p_coefficients[3] * grad_p
-        + y_p_coefficients[4] * rho[..., None, None] * grad_p
-        + y_p_coefficients[5] * grad_lap_p
+        + y_p_coefficients[1] * psi6_sq_fixed[..., None, None] * a_surface
+        + y_p_coefficients[2] * grad_p
     )
 
     ubar = estimate_ubar(f_p, a_surface) if ubar_override is None else ubar_override
@@ -141,10 +137,9 @@ def closure_fields(
     f_q = (
         y_q_coefficients[0] * project_flux_directions(ubar_p_alpha, "tangential")
         + y_q_coefficients[1] * project_flux_directions(ubar_p_alpha, "radial")
-        + y_q_coefficients[2] * project_flux_directions(grad_q, "tangential")
-        + y_q_coefficients[3] * project_flux_directions(grad_q, "radial")
+        + y_q_coefficients[2] * project_flux_directions(grad_q, "radial")
     )
-    s_q = y_q_coefficients[4] * q + y_q_coefficients[5] * psi6_sq_fixed[..., None, None] * q
+    s_q = np.zeros_like(q)
     return ClosureFields(f_rho=f_rho, f_p=f_p, f_q=f_q, s_q=s_q, ubar=ubar, a_surface=a_surface)
 
 

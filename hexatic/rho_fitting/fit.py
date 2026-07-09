@@ -30,14 +30,11 @@ Y_RHO_NAMES = (
     "A_dot_grad_rho",
     "P",
 )
-Y_P_NAMES = ("A", "rho_A", "psi6sq_A", "grad_P", "rho_grad_P", "grad_lap_P")
+Y_P_NAMES = ("A", "psi6sq_A", "grad_P")
 Y_Q_NAMES = (
     "tangential_projected_Ubar_P_alpha",
     "radial_projected_Ubar_P_alpha",
-    "tangential_grad_Q",
     "radial_grad_Q",
-    "Q",
-    "psi6sq_Q",
 )
 
 
@@ -61,6 +58,16 @@ class MechanicalFitPayload(TypedDict):
     Y_P_names: Array
     Y_Q_names: Array
     F_rho_prediction: Array
+
+
+@dataclass(frozen=True)
+class TargetDesignFields:
+    """One target's reusable flux and divergence fields."""
+
+    target_flux: Array
+    candidate_fluxes: tuple[Array, ...]
+    target_divergence: Array
+    candidate_divergences: tuple[Array, ...]
 
 
 @dataclass(frozen=True)
@@ -503,8 +510,12 @@ def fit_mechanical(
     """
     sample_indices = _mechanical_sample_indices(spectral, config)
     geometry = _cylindrical_geometry(active, config)
+    _log(f"mechanical fit sampled {sample_indices.shape[0]} grid cells; starting spectral libraries")
+    _log("mechanical fit target=Y_rho")
     y_rho_fit, y_rho_rows, y_rho_index = _fit_divergence_primary_target("Y_rho", spectral, sample_indices, config, geometry)
+    _log("mechanical fit target=Y_P")
     y_p_fit, y_p_rows, y_p_index = _fit_divergence_primary_target("Y_P", spectral, sample_indices, config, geometry)
+    _log("mechanical fit target=Y_Q")
     y_q_fit, y_q_rows, y_q_index = _fit_divergence_primary_target("Y_Q", spectral, sample_indices, config, geometry)
     return {
         "sample_indices": sample_indices,
@@ -540,7 +551,8 @@ def print_mechanical_correlations(
         ("Y_P", Y_P_NAMES),
         ("Y_Q", Y_Q_NAMES),
     ):
-        y, X, _row_index = _sample_divergence_design(target_name, spectral, sample_indices, geometry)
+        fields = _target_design_fields(target_name, spectral, geometry)
+        y, X, _row_index = _sample_divergence_design(fields, sample_indices)
         labels = mechanical_labels(names)
         _log(f"{target_name} correlation rows={X.shape[0]} terms={', '.join(names)}")
         _log("raw feature correlations with target")
@@ -604,14 +616,15 @@ def _fit_divergence_primary_target(
     """
     settings = _settings(config)
     names = _target_names(target_name)
-    y_div, X_div, row_index = _sample_divergence_design(target_name, spectral, sample_indices, geometry)
+    fields = _target_design_fields(target_name, spectral, geometry)
+    y_div, X_div, row_index = _sample_divergence_design(fields, sample_indices)
     y_fit = y_div
     X_fit = X_div
     y_flux: Array | None = None
     X_flux: Array | None = None
     flux_weight = float(settings.mechanical_flux_weight)
     if flux_weight > 0.0:
-        y_flux, X_flux = _sample_flux_design(target_name, spectral, sample_indices, geometry)
+        y_flux, X_flux = _sample_flux_design(fields, sample_indices)
         y_fit = np.concatenate((y_div, flux_weight * y_flux))
         X_fit = np.vstack((X_div, flux_weight * X_flux))
     rows = np.column_stack((y_div, X_div))
@@ -637,8 +650,7 @@ def _fit_divergence_primary_target(
         evaluation_y=y_div,
         auxiliary_X=X_flux,
         auxiliary_y=y_flux,
-        non_positive_names=("grad_rho", "A_dot_grad_rho", "grad_P", "tangential_grad_Q", "radial_grad_Q"),
-        non_negative_names=("grad_lap_P",),
+        non_positive_names=("grad_rho", "A_dot_grad_rho", "grad_P", "radial_grad_Q"),
     )
     return fit, rows, row_index
 
@@ -654,58 +666,47 @@ def _target_names(target_name: str) -> tuple[str, ...]:
     raise AssertionError(f"unknown mechanical target: {target_name}")
 
 
-def _sample_divergence_design(
+def _target_design_fields(
     target_name: str,
     spectral: dict[str, Array],
-    sample_indices: Array,
     geometry: tuple[float, float, Array],
-) -> tuple[Array, Array, Array]:
-    """Sample divergence target rows and candidate divergence columns."""
+) -> TargetDesignFields:
+    """Build each target/candidate flux and divergence exactly once."""
     lx, theta_period, r_centers = geometry
-    target_div = _divergence_cylindrical_flux(spectral[target_name], lx, theta_period, r_centers)
-    y = _sample_field_components(target_div, sample_indices)
-    row_index = _component_row_index(sample_indices, target_div.shape[4:])
+    _log(f"{target_name}: building reusable spectral flux/divergence fields")
+    target_flux = spectral[target_name]
+    candidate_fluxes = tuple(_candidate_flux_terms(target_name, spectral, lx, theta_period, r_centers))
+    target_divergence = _divergence_cylindrical_flux(target_flux, lx, theta_period, r_centers)
+    candidate_divergences = tuple(
+        _divergence_cylindrical_flux(field, lx, theta_period, r_centers)
+        for field in candidate_fluxes
+    )
+    return TargetDesignFields(target_flux, candidate_fluxes, target_divergence, candidate_divergences)
+
+
+def _sample_divergence_design(fields: TargetDesignFields, sample_indices: Array) -> tuple[Array, Array, Array]:
+    """Sample divergence target rows and candidate divergence columns."""
+    y = _sample_field_components(fields.target_divergence, sample_indices)
+    row_index = _component_row_index(sample_indices, fields.target_divergence.shape[4:])
     columns = [
         _sample_field_components(term, sample_indices)
-        for term in _candidate_divergence_terms(target_name, spectral, lx, theta_period, r_centers)
+        for term in fields.candidate_divergences
     ]
     X = np.stack(columns, axis=1)
     finite = np.isfinite(y) & np.all(np.isfinite(X), axis=1)
     return y[finite], X[finite], row_index[finite]
 
 
-def _sample_flux_design(
-    target_name: str,
-    spectral: dict[str, Array],
-    sample_indices: Array,
-    geometry: tuple[float, float, Array],
-) -> tuple[Array, Array]:
+def _sample_flux_design(fields: TargetDesignFields, sample_indices: Array) -> tuple[Array, Array]:
     """Sample target flux components and candidate flux columns without saving them."""
-    lx, theta_period, r_centers = geometry
-    y = _sample_field_components(spectral[target_name], sample_indices)
+    y = _sample_field_components(fields.target_flux, sample_indices)
     columns = [
         _sample_field_components(term, sample_indices)
-        for term in _candidate_flux_terms(target_name, spectral, lx, theta_period, r_centers)
+        for term in fields.candidate_fluxes
     ]
     X = np.stack(columns, axis=1)
     finite = np.isfinite(y) & np.all(np.isfinite(X), axis=1)
     return y[finite], X[finite]
-
-
-def _candidate_divergence_terms(
-    target_name: str,
-    spectral: dict[str, Array],
-    lx: float,
-    theta_period: float,
-    r_centers: Array,
-) -> list[Array]:
-    """Return candidate columns in the divergence/source space used for fitting."""
-    if target_name == "Y_Q":
-        return _candidate_q_divergence_terms(spectral, lx, theta_period, r_centers)
-    return [
-        _divergence_cylindrical_flux(term, lx, theta_period, r_centers)
-        for term in _candidate_flux_terms(target_name, spectral, lx, theta_period, r_centers)
-    ]
 
 
 def _candidate_flux_terms(
@@ -731,50 +732,17 @@ def _candidate_flux_terms(
         ]
     if target_name == "Y_P":
         grad_p = _gradient_cylindrical_vector(p, lx, theta_period, r_centers)
-        lap_p = _laplacian_cylindrical_vector(p, lx, theta_period, r_centers)
-        grad_lap_p = _gradient_cylindrical_vector(lap_p, lx, theta_period, r_centers)
-        return [
-            a,
-            rho[..., None, None] * a,
-            psi6_sq[..., None, None] * a,
-            grad_p,
-            rho[..., None, None] * grad_p,
-            grad_lap_p,
-        ]
+        return [a, psi6_sq[..., None, None] * a, grad_p]
     if target_name == "Y_Q":
         grad_q = _gradient_cylindrical_rank2(q, lx, theta_period, r_centers)
         ubar = _estimate_ubar(spectral["Y_P"], a)
         ubar_p_alpha = ubar[..., None, None, None] * _p_dot_alpha_traceless(p)
-        zeros = np.zeros_like(ubar_p_alpha, dtype=np.float64)
         return [
             _project_flux_directions(ubar_p_alpha, "tangential"),
             _project_flux_directions(ubar_p_alpha, "radial"),
-            _project_flux_directions(grad_q, "tangential"),
             _project_flux_directions(grad_q, "radial"),
-            zeros,
-            zeros,
         ]
     raise AssertionError(f"unknown mechanical target: {target_name}")
-
-
-def _candidate_q_divergence_terms(
-    spectral: dict[str, Array],
-    lx: float,
-    theta_period: float,
-    r_centers: Array,
-) -> list[Array]:
-    """Return Q candidates after applying divergence to flux terms and keeping source terms."""
-    q = spectral["Q"]
-    psi6_sq = spectral["psi6_sq"]
-    flux_terms = _candidate_flux_terms("Y_Q", spectral, lx, theta_period, r_centers)
-    return [
-        _divergence_cylindrical_flux(flux_terms[0], lx, theta_period, r_centers),
-        _divergence_cylindrical_flux(flux_terms[1], lx, theta_period, r_centers),
-        _divergence_cylindrical_flux(flux_terms[2], lx, theta_period, r_centers),
-        _divergence_cylindrical_flux(flux_terms[3], lx, theta_period, r_centers),
-        q,
-        psi6_sq[..., None, None] * q,
-    ]
 
 
 def _project_flux_directions(values: Array, mode: str) -> Array:
@@ -796,7 +764,7 @@ def _gradient_cylindrical_scalar(values: Array, lx: float, theta_period: float, 
     operators = _spectral_operators(values, lx, theta_period, r_centers)
     to_spectral, to_cache = _radial_transfer_matrices(r_centers, operators)
     spectral_values = transfer_radial(values, to_spectral, 3)
-    return transfer_radial(operators.gradient_scalar_frames(spectral_values), to_cache, 3)
+    return transfer_radial(operators.gradient_scalar_frames(spectral_values, label="gradient"), to_cache, 3)
 
 
 def _divergence_cylindrical_flux(values: Array, lx: float, theta_period: float, r_centers: Array) -> Array:
@@ -806,7 +774,7 @@ def _divergence_cylindrical_flux(values: Array, lx: float, theta_period: float, 
     operators = _spectral_operators(values, lx, theta_period, r_centers)
     to_spectral, to_cache = _radial_transfer_matrices(r_centers, operators)
     spectral_values = transfer_radial(values, to_spectral, 3)
-    return transfer_radial(operators.divergence_frames(spectral_values), to_cache, 3)
+    return transfer_radial(operators.divergence_frames(spectral_values, label="divergence"), to_cache, 3)
 
 
 def _laplacian_cylindrical_scalar(values: Array, lx: float, theta_period: float, r_centers: Array) -> Array:

@@ -40,10 +40,12 @@ def run_validation(inputs: ValidationInputs, options: ValidationOptions | None =
     rho_fit[0], p_fit[0], q_fit[0] = inputs.rho[0], inputs.p[0], inputs.q[0]
     dt_max = 5.0e-3 if options.dt is None else float(options.dt)
     assert dt_max > 0.0
+    print(f"[rho_fitting.pde_validation] spectral rollout frames={frames} dt_max={dt_max:.6g}", flush=True)
     for frame in range(frames - 1):
         interval = float(times[frame + 1] - times[frame])
         steps = max(1, int(np.ceil(interval / dt_max)))
         dt = interval / steps
+        print(f"[rho_fitting.pde_validation] frame={frame + 1}/{frames - 1} substeps={steps}", flush=True)
         for substep in range(steps):
             time = float(times[frame]) + substep * dt
             rho, p, q = _imex_step(inputs, operators, rho, p, q, psi6, time, dt, options.mode, options.ubar_source, to_spectral)
@@ -54,6 +56,7 @@ def run_validation(inputs: ValidationInputs, options: ValidationOptions | None =
         rho_fit[frame + 1] = transfer_radial(rho, to_cache, 2)
         p_fit[frame + 1] = transfer_radial(p, to_cache, 2)
         q_fit[frame + 1] = transfer_radial(q, to_cache, 2)
+        print(f"[rho_fitting.pde_validation] frame={frame + 1}/{frames - 1} complete", flush=True)
     return _result(options.mode, rho_fit, p_fit, q_fit, inputs, times)
 
 

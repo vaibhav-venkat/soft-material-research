@@ -9,18 +9,13 @@ MECHANICAL_LABELS = {
     "A_dot_grad_rho": "A dot grad rho",
     "P": "P",
     "A": "A",
-    "rho_A": "rho A",
     "psi6sq_A": "psi6^2 A",
     "rho_delta_psi6sq_A": "rho delta psi6^2 A",
     "grad_P": "grad P",
-    "rho_grad_P": "rho grad P",
-    "grad_lap_P": "grad lap P",
     "tangential_projected_Ubar_P_alpha": "tangential Ubar P alpha",
     "radial_projected_Ubar_P_alpha": "radial Ubar P alpha",
-    "tangential_grad_Q": "tangential grad Q",
     "radial_grad_Q": "radial grad Q",
     "Q": "Q",
-    "psi6sq_Q": "psi6^2 Q",
 }
 
 

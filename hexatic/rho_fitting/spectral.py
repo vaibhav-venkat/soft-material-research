@@ -76,12 +76,14 @@ class CylindricalSpectralOperators:
         out[..., 2] = self.derivative(values, 0)
         return out
 
-    def gradient_scalar_frames(self, values: Array) -> Array:
+    def gradient_scalar_frames(self, values: Array, *, label: str = "gradient") -> Array:
         """Differentiate a complete ``(T, Nx, Ntheta, Nr)`` batch with one plan."""
         assert values.ndim == 4 and values.shape[1:] == self.shape
+        print(f"[rho_fitting.spectral] {label}: frames=0/{values.shape[0]}", flush=True)
         out = np.empty(values.shape + (3,), dtype=np.float64)
         for frame in range(values.shape[0]):
             out[frame] = self.gradient_scalar(values[frame])
+            _progress(label, frame + 1, values.shape[0])
         return out
 
     def divergence(self, values: Array) -> Array:
@@ -98,12 +100,14 @@ class CylindricalSpectralOperators:
             )
         return out
 
-    def divergence_frames(self, values: Array) -> Array:
+    def divergence_frames(self, values: Array, *, label: str = "divergence") -> Array:
         """Diverge a complete time batch while reusing the spatial transform plan."""
         assert values.ndim >= 5 and values.shape[1:4] == self.shape
+        print(f"[rho_fitting.spectral] {label}: frames=0/{values.shape[0]}", flush=True)
         out = np.empty(values.shape[:4] + values.shape[5:], dtype=np.float64)
         for frame in range(values.shape[0]):
             out[frame] = self.divergence(values[frame])
+            _progress(label, frame + 1, values.shape[0])
         return out
 
     def laplacian_scalar(self, values: Array) -> Array:
@@ -176,6 +180,12 @@ def transfer_radial(values: Array, matrix: Array, axis: int) -> Array:
     moved = np.moveaxis(values, axis, -1)
     assert moved.shape[-1] == matrix.shape[1]
     return np.moveaxis(np.einsum("...j,ij->...i", moved, matrix), -1, axis)
+
+
+def _progress(label: str, completed: int, total: int) -> None:
+    interval = max(1, min(10, total // 10))
+    if completed == total or completed % interval == 0:
+        print(f"[rho_fitting.spectral] {label}: frames={completed}/{total}", flush=True)
 
 
 @lru_cache(maxsize=8)
