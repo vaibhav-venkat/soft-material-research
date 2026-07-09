@@ -116,8 +116,8 @@ class CaseData:
     disclination_plus1: float   # fraction of particles
     disclination_minus1: float  # fraction of particles
     mean_psi6: float
-    mean_vx: float              # avg sum v_x per frame over the velocity frame window  (signed)
-    mean_abs_vx: float          # avg sum |v_x| per frame over the frame window
+    mean_vx: float              # avg per-particle v_x over the velocity frame window  (signed)
+    mean_abs_vx: float          # avg per-particle |v_x| over the frame window
     mean_px: float              # avg sum P_x per frame over the frame window  (signed)
     mean_abs_px: float          # avg sum |P_x| per frame over the frame window
 
@@ -233,11 +233,10 @@ def _velocity_from_npz(
     dx = np.diff(coords[f0:f1, :, 0], axis=0)  # (W-1, N)
     vx_window = dx / dt_per_frame                # (W-1, N)  actual velocity
 
-    # per-frame net: sum across particles for each frame-to-frame step
-    per_frame_net = np.sum(vx_window, axis=1)           # (W-1,)  total x-momentum per frame
-    per_frame_abs = np.sum(np.abs(vx_window), axis=1)   # (W-1,)  total |x-momentum| per frame
+    # per-frame: mean across particles for each frame-to-frame step
+    per_frame_net = np.mean(vx_window, axis=1)          # (W-1,)  per-particle net v_x
+    per_frame_abs = np.mean(np.abs(vx_window), axis=1)  # (W-1,)  per-particle |v_x|
 
-    # avg net per frame — signed sum, cancellations between frames possible
     mean_vx = float(np.mean(per_frame_net))
     mean_abs_vx = float(np.mean(per_frame_abs))
 
@@ -358,8 +357,8 @@ def build_figure(rows_data: list[CaseData], v0: int = DEFAULT_V0, v1: int = DEFA
             "Disclination density +1  (first frame)",
             "Disclination density −1  (first frame)",
             "Mean |ψ₆|  (first frame)",
-            f"avg over frames of Σ v_x  (frames {v0}–{v1})",
-            f"avg over frames of Σ |v_x|  (frames {v0}–{v1})",
+            f"avg over frames of ⟨v_x⟩  (frames {v0}–{v1})",
+            f"avg over frames of ⟨|v_x|⟩  (frames {v0}–{v1})",
             f"avg over frames of Σ P_x  (frames {v0}–{v1})",
             f"avg over frames of Σ |P_x|  (frames {v0}–{v1})",
         ),
@@ -369,8 +368,8 @@ def build_figure(rows_data: list[CaseData], v0: int = DEFAULT_V0, v1: int = DEFA
     _add_scatter(fig, 1, cd, plus1, labels, "+1 disclinations", "#dc2626", "triangle-up")
     _add_scatter(fig, 2, cd, minus1, labels, "−1 disclinations", "#2563eb", "triangle-down")
     _add_scatter(fig, 3, cd, psi6, labels, "mean |ψ₆|", "#7c3aed", "circle")
-    _add_scatter(fig, 4, cd, vx, labels, "avg Σ v_x", "#0891b2", "diamond")
-    _add_scatter(fig, 5, cd, abs_vx, labels, "avg Σ |v_x|", "#ea580c", "square")
+    _add_scatter(fig, 4, cd, vx, labels, "avg ⟨v_x⟩", "#0891b2", "diamond")
+    _add_scatter(fig, 5, cd, abs_vx, labels, "avg ⟨|v_x|⟩", "#ea580c", "square")
     _add_scatter(fig, 6, cd, px, labels, "avg Σ P_x", "#16a34a", "star")
     _add_scatter(fig, 7, cd, abs_px, labels, "avg Σ |P_x|", "#d97706", "cross")
 
@@ -394,8 +393,8 @@ def build_figure(rows_data: list[CaseData], v0: int = DEFAULT_V0, v1: int = DEFA
     fig.update_yaxes(title_text="fraction of particles", row=1, col=1)
     fig.update_yaxes(title_text="fraction of particles", row=2, col=1)
     fig.update_yaxes(title_text="⟨ |ψ₆| ⟩", row=3, col=1)
-    fig.update_yaxes(title_text="avg Σ v_x  (σ / τ)", row=4, col=1)
-    fig.update_yaxes(title_text="avg Σ |v_x|  (σ / τ)", row=5, col=1)
+    fig.update_yaxes(title_text="avg ⟨v_x⟩  (σ / τ)", row=4, col=1)
+    fig.update_yaxes(title_text="avg ⟨|v_x|⟩  (σ / τ)", row=5, col=1)
     fig.update_yaxes(title_text="avg Σ P_x", row=6, col=1)
     fig.update_yaxes(title_text="avg Σ |P_x|", row=7, col=1)
 
