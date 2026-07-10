@@ -109,10 +109,7 @@ def run_case(
 
     analysis = cylinder.ANALYSIS
     simulation = cylinder.SIMULATION
-    if gpu_id is None:
-        device = hoomd.device.CPU()
-    else:
-        device = hoomd.device.GPU(gpu_id=gpu_id)
+    device = hoomd.device.GPU(gpu_id=gpu_id)
     sim = hoomd.Simulation(device=device, seed=case.seed)
     sim.create_state_from_gsd(filename=str(case.initial_gsd))
 
