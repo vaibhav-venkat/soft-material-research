@@ -1,14 +1,15 @@
-"""Plot first-frame circumference-ring tilt versus C/D.
+"""Plot circumference-ring tilt versus C/D.
 
-Each unwrapped initializer writes particles one axial row at a time.  A row
-contains ``n_theta`` particles and is a circumference-wrapping ring.  This
-module fits a plane to every such row in the first saved trajectory frame and
-plots the axial component of its normal.
+Each unwrapped initializer writes particles one axial row at a time. A row
+contains ``n_theta`` particles and is a circumference-wrapping ring. This
+module fits a plane to every such row in either the exact initial state or the
+first saved trajectory frame and plots the axial component of its normal.
 
 Usage::
 
     pixi run python -m hexatic.unwrapped_analysis.plot_ring
-    pixi run python -m hexatic.unwrapped_analysis.plot_ring --output path/to/plot.html
+    pixi run python -m hexatic.unwrapped_analysis.plot_ring --source trajectory --frame 10
+    pixi run python -m hexatic.unwrapped_analysis.plot_ring --source trajectory --all-frames
 """
 
 from __future__ import annotations
@@ -28,7 +29,7 @@ from .cases import ANALYSIS_DIR, UnwrappedCase, all_cases
 
 
 OUTPUT_DIR = ANALYSIS_DIR / "output"
-DEFAULT_OUTPUT = OUTPUT_DIR / "ring_tilt_vs_c_over_d.html"
+DEFAULT_SOURCE = "initial"
 
 
 @dataclass(frozen=True)
@@ -69,11 +70,17 @@ def _fit_ring_plane_metrics(
     return normal_dot_x, tilt_deg, plane_rms
 
 
-def measure_case(case: UnwrappedCase) -> RingTiltCaseData:
-    """Measure all initialized rings in the first saved frame for one case."""
-    with gsd.hoomd.open(name=str(case.trajectory_gsd), mode="r") as trajectory:
-        assert len(trajectory) > 0, f"empty trajectory: {case.trajectory_gsd}"
-        frame = trajectory[0]
+def measure_case(
+    case: UnwrappedCase,
+    input_gsd: Path,
+    frame_index: int,
+) -> RingTiltCaseData:
+    """Measure all initialized rings in one selected GSD frame."""
+    with gsd.hoomd.open(name=str(input_gsd), mode="r") as trajectory:
+        assert 0 <= frame_index < len(trajectory), (
+            f"frame {frame_index} outside [0, {len(trajectory)}) for {input_gsd}"
+        )
+        frame = trajectory[frame_index]
 
     positions = np.asarray(frame.particles.position, dtype=np.float64)
     normal_dot_x, tilt_deg, plane_rms = _fit_ring_plane_metrics(positions, case)
@@ -147,17 +154,26 @@ def _add_metric_trace(
     )
 
 
-def build_figure(data: list[RingTiltCaseData]) -> go.Figure:
-    """Build the two-panel first-frame ring-normal figure."""
+def build_figure(
+    data: list[RingTiltCaseData],
+    source: str,
+    frame_index: int,
+) -> go.Figure:
+    """Build the two-panel ring-normal figure."""
     data = sorted(data, key=lambda item: item.c_over_d)
+    frame_label = (
+        "initial state (frame 0)"
+        if source == "initial"
+        else f"trajectory frame {frame_index}"
+    )
     figure = make_subplots(
         rows=2,
         cols=1,
         shared_xaxes=True,
         vertical_spacing=0.13,
         subplot_titles=(
-            "Mean axial normal component, ⟨|n · x̂|⟩ (first frame)",
-            "Mean ring tilt, ⟨arccos(|n · x̂|)⟩ (first frame)",
+            f"Mean axial normal component, ⟨|n · x̂|⟩ ({frame_label})",
+            f"Mean ring tilt, ⟨arccos(|n · x̂|)⟩ ({frame_label})",
         ),
     )
 
@@ -201,7 +217,7 @@ def build_figure(data: list[RingTiltCaseData]) -> go.Figure:
     figure.update_yaxes(title_text="mean |n · x̂|", row=1, col=1)
     figure.update_yaxes(title_text="mean tilt (degrees)", row=2, col=1)
     figure.update_layout(
-        title=dict(text="First-frame circumference-ring tilt vs C/D", x=0.5, xanchor="center"),
+        title=dict(text=f"Circumference-ring tilt vs C/D ({frame_label})", x=0.5, xanchor="center"),
         template="plotly_white",
         width=1000,
         height=780,
@@ -212,29 +228,165 @@ def build_figure(data: list[RingTiltCaseData]) -> go.Figure:
     return figure
 
 
+def build_time_figure(series: dict[str, list[RingTiltCaseData]]) -> go.Figure:
+    """Plot mean angular tilt and its time derivative over trajectory frames."""
+    figure = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.12,
+        subplot_titles=(
+            "Mean circumference-ring tilt",
+            "Angular rate of mean ring tilt",
+        ),
+    )
+    colors = ("#2563eb", "#dc2626", "#16a34a", "#9333ea", "#ea580c")
+    ordered = sorted(series.values(), key=lambda rows: rows[0].c_over_d)
+    for color, rows in zip(colors, ordered):
+        frame_indices = np.arange(len(rows), dtype=int)
+        tilt_deg = np.asarray([row.mean_tilt_deg for row in rows])
+        time = np.asarray([row.step for row in rows], dtype=float) * cylinder.TIMESTEP
+        angular_velocity = np.gradient(tilt_deg, time)
+        figure.add_trace(
+            go.Scatter(
+                x=frame_indices,
+                y=tilt_deg,
+                mode="lines+markers",
+                name=rows[0].case_id,
+                line=dict(color=color, width=2),
+                marker=dict(size=5, color=color),
+                customdata=np.asarray(
+                    [
+                        (row.step, row.std_tilt_deg, row.mean_plane_rms)
+                        for row in rows
+                    ],
+                    dtype=float,
+                ),
+                hovertemplate=(
+                    "case=%{fullData.name}<br>"
+                    "frame=%{x:d}<br>"
+                    "mean tilt=%{y:.6g} deg<br>"
+                    "step=%{customdata[0]:d}<br>"
+                    "ring tilt std=%{customdata[1]:.5g} deg<br>"
+                    "mean plane RMS=%{customdata[2]:.5g}<extra></extra>"
+                ),
+            ),
+            row=1,
+            col=1,
+        )
+        figure.add_trace(
+            go.Scatter(
+                x=frame_indices,
+                y=angular_velocity,
+                mode="lines+markers",
+                name=rows[0].case_id,
+                legendgroup=rows[0].case_id,
+                showlegend=False,
+                line=dict(color=color, width=2),
+                marker=dict(size=5, color=color),
+                customdata=np.asarray([row.step for row in rows], dtype=float),
+                hovertemplate=(
+                    "case=%{fullData.name}<br>"
+                    "frame=%{x:d}<br>"
+                    "tilt angular rate=%{y:.6g} deg / simulation time<br>"
+                    "step=%{customdata:d}<extra></extra>"
+                ),
+            ),
+            row=2,
+            col=1,
+        )
+
+    figure.update_xaxes(
+        title_text="trajectory frame index",
+        row=2,
+        col=1,
+        showgrid=True,
+        gridcolor="rgba(39,49,61,0.10)",
+        zeroline=False,
+    )
+    figure.update_yaxes(
+        title_text="mean ring tilt (degrees)",
+        row=1,
+        col=1,
+        showgrid=True,
+        gridcolor="rgba(39,49,61,0.10)",
+        zeroline=False,
+    )
+    figure.update_yaxes(
+        title_text="d(mean tilt) / dt (degrees / simulation time)",
+        row=2,
+        col=1,
+        showgrid=True,
+        gridcolor="rgba(39,49,61,0.10)",
+        zeroline=True,
+        zerolinecolor="rgba(39,49,61,0.35)",
+    )
+    figure.update_layout(
+        title=dict(text="Circumference-ring tilt and angular rate across trajectory frames", x=0.5, xanchor="center"),
+        template="plotly_white",
+        width=1080,
+        height=940,
+        hovermode="x unified",
+        legend=dict(title_text="case"),
+        margin=dict(l=90, r=40, t=90, b=75),
+    )
+    return figure
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Plot first-frame fitted circumference-ring normals versus C/D."
+        description="Plot fitted circumference-ring normals versus C/D."
+    )
+    parser.add_argument(
+        "--source",
+        choices=("initial", "trajectory"),
+        default=DEFAULT_SOURCE,
+        help="Read initial/*.gsd or frame 0 of gsd/*.gsd (default: initial)",
+    )
+    parser.add_argument(
+        "--frame",
+        type=int,
+        default=0,
+        help="Zero-based GSD frame index (default: 0)",
+    )
+    parser.add_argument(
+        "--all-frames",
+        action="store_true",
+        help="Plot mean angular tilt for every saved trajectory frame",
     )
     parser.add_argument(
         "--output",
         type=Path,
-        default=DEFAULT_OUTPUT,
-        help=f"Output HTML path (default: {DEFAULT_OUTPUT})",
+        default=None,
+        help="Output HTML path (default depends on --source)",
     )
     return parser.parse_args()
 
 
 def main() -> None:
     args = _parse_args()
+    assert args.frame >= 0, "--frame must be non-negative"
+    if args.all_frames:
+        assert args.source == "trajectory", "--all-frames requires --source trajectory"
     results: list[RingTiltCaseData] = []
+    series: dict[str, list[RingTiltCaseData]] = {}
     for case in all_cases():
         if not case.case_id.startswith("circ_"):
             continue
-        if not case.trajectory_gsd.exists():
-            print(f"[skip] missing {case.trajectory_gsd}")
+        input_gsd = case.initial_gsd if args.source == "initial" else case.trajectory_gsd
+        if not input_gsd.exists():
+            print(f"[skip] missing {input_gsd}")
             continue
-        result = measure_case(case)
+        if args.all_frames:
+            with gsd.hoomd.open(name=str(input_gsd), mode="r") as trajectory:
+                frame_count = len(trajectory)
+            series[case.case_id] = [
+                measure_case(case, input_gsd, frame_index)
+                for frame_index in range(frame_count)
+            ]
+            print(f"{case.case_id}: measured {frame_count} trajectory frames")
+            continue
+        result = measure_case(case, input_gsd, args.frame)
         results.append(result)
         print(
             f"{result.case_id}: C/D={result.c_over_d:.5f} "
@@ -244,10 +396,30 @@ def main() -> None:
             f"mean plane RMS={result.mean_plane_rms:.5e}"
         )
 
+    if args.all_frames:
+        assert series, "no unwrapped trajectory GSD files found"
+        output = (
+            Path(args.output)
+            if args.output is not None
+            else OUTPUT_DIR / "trajectory_ring_tilt_over_frames.html"
+        )
+        output.parent.mkdir(parents=True, exist_ok=True)
+        build_time_figure(series).write_html(output, include_plotlyjs="cdn", full_html=True)
+        print(f"Wrote {output}")
+        return
+
     assert results, "no unwrapped trajectory GSD files found"
-    output = Path(args.output)
+    output = (
+        Path(args.output)
+        if args.output is not None
+        else OUTPUT_DIR / f"{args.source}_frame_{args.frame}_ring_tilt_vs_c_over_d.html"
+    )
     output.parent.mkdir(parents=True, exist_ok=True)
-    build_figure(results).write_html(output, include_plotlyjs="cdn", full_html=True)
+    build_figure(results, args.source, args.frame).write_html(
+        output,
+        include_plotlyjs="cdn",
+        full_html=True,
+    )
     print(f"Wrote {output}")
 
 
