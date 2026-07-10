@@ -1,5 +1,4 @@
 mod frame;
-mod gaussian;
 mod grid;
 
 use burn::prelude::*;
@@ -15,7 +14,6 @@ use frame::{
     combine_particle_components, mechanical_frame_mask, print_conservation,
     sanitized_frame_component, sanitized_frame_scalar, write_mechanical_frame, FrameFields,
 };
-use gaussian::zr_integral;
 use grid::{radial_spacing, Grid3};
 
 use crate::mechanics::MechanicalFields;
@@ -347,13 +345,31 @@ fn deposit_gaussian_mechanical_frame<B: Backend>(
         .iter()
         .map(|values| tensor2::<B>(values.clone(), [1, particles], device))
         .collect();
-    let zr: Vec<f32> = (0..particles)
-        .map(|p| {
-            let ri = inputs.particle_r[p];
-            zr_integral(ri, grid.r_min, grid.r_max, inputs.sigma)
-        })
-        .collect();
-    let norm = tensor2::<B>(zr, [1, particles], device).reshape([particles]) + EPS;
+    // Normalize the actual discrete, cutoff Gaussian over the complete cylindrical
+    // grid. This includes x, theta, and r and therefore conserves one unit of mass
+    // per valid particle even when the grid is coarse or the radial domain is cut.
+    let mut norm = Tensor::<B, 1>::zeros([particles], device);
+    for start in (0..grid.len()).step_by(GAUSSIAN_GRID_CHUNK) {
+        let chunk = (grid.len() - start).min(GAUSSIAN_GRID_CHUNK);
+        let (_, _, _, volumes) = grid_chunk(grid, start, chunk);
+        let weights = gaussian_weights::<B>(
+            grid,
+            start,
+            chunk,
+            &particle_x,
+            &particle_theta,
+            &particle_r,
+            &valid,
+            inputs.sigma,
+            device,
+        );
+        let volume_tensor = tensor2::<B>(volumes, [chunk, 1], device);
+        norm = norm
+            + (weights * volume_tensor)
+                .sum_dim(0)
+                .reshape([particles]);
+    }
+    let norm = norm + EPS;
     for start in (0..grid.len()).step_by(GAUSSIAN_GRID_CHUNK) {
         let chunk = (grid.len() - start).min(GAUSSIAN_GRID_CHUNK);
         let (_, _, _, volumes) = grid_chunk(grid, start, chunk);

@@ -14,8 +14,6 @@ pub(super) struct Grid3 {
     pub(super) theta_period: f32,
     #[allow(dead_code)]
     pub(super) dr: f32,
-    pub(super) r_min: f32,
-    pub(super) r_max: f32,
 }
 
 impl Grid3 {
@@ -55,8 +53,6 @@ impl Grid3 {
                 }
             }
         }
-        let r_min = (r_centers[0] - 0.5 * dr as f64) as f32;
-        let r_max = (r_centers[nr - 1] + 0.5 * dr as f64) as f32;
         Ok(Self {
             nx,
             ntheta,
@@ -68,8 +64,6 @@ impl Grid3 {
             lx: lx as f32,
             theta_period: theta_period as f32,
             dr,
-            r_min,
-            r_max,
         })
     }
 
