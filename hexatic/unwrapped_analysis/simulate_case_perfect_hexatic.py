@@ -24,28 +24,46 @@ def _ensure_can_write(paths: tuple[Path, ...], overwrite: bool) -> None:
 
 
 def generate_unwrapped_lattice(case: UnwrappedCase) -> tuple[np.ndarray, np.ndarray]:
-    positions = np.empty((case.n_particles, 3), dtype=np.float64)
-    theta = np.empty(case.n_particles, dtype=np.float64)
+    positions = np.empty((case.perfect_hexatic_n_particles, 3), dtype=np.float64)
+    theta = np.empty(case.perfect_hexatic_n_particles, dtype=np.float64)
+
+    circumference_vector = np.asarray(case.circumference_lattice_vector, dtype=int)
+    axial_vector = np.asarray(case.axial_lattice_vector, dtype=int)
+    supercell = np.column_stack((circumference_vector, axial_vector))
+    inverse_supercell = np.linalg.inv(supercell)
+
+    corners = np.asarray(
+        (
+            (0, 0),
+            circumference_vector,
+            axial_vector,
+            circumference_vector + axial_vector,
+        )
+    )
+    lower = corners.min(axis=0)
+    upper = corners.max(axis=0)
 
     particle_idx = 0
-    twist_offset = case.h - case.a
-    # Offset the row spacing by the shear so the wrapped seam does not compress.
-    wrapped_spacing = case.h - twist_offset
-    x0 = -0.5 * case.twisted_lx + 0.5 * wrapped_spacing
-    for j in range(case.n_x):
-        x = x0 + j * wrapped_spacing
-        offset = 0.5 * (j % 2)
-        for i in range(case.n_theta):
-            surface_distance = ((i + offset) * case.a) % case.circumference
+    tolerance = 1e-12
+    for j in range(int(lower[0]), int(upper[0]) + 1):
+        for i in range(int(lower[1]), int(upper[1]) + 1):
+            circumference_fraction, axial_fraction = inverse_supercell @ (j, i)
+            if not (
+                -tolerance <= circumference_fraction < 1.0 - tolerance
+                and -tolerance <= axial_fraction < 1.0 - tolerance
+            ):
+                continue
+            surface_distance = circumference_fraction * case.circumference
             angle = surface_distance / case.radius
-            x_new = x + (1.0 - i / (case.n_theta - 1)) * twist_offset
             positions[particle_idx] = (
-                x_new,
+                (axial_fraction - 0.5) * case.perfect_hexatic_lx,
                 case.radius * math.sin(angle),
                 case.radius * math.cos(angle),
             )
             theta[particle_idx] = angle
             particle_idx += 1
+
+    assert particle_idx == case.perfect_hexatic_n_particles
 
     return positions, theta
 
@@ -71,6 +89,7 @@ def _write_initial_state(case: UnwrappedCase) -> None:
     np.random.seed(case.seed)
     position, theta = generate_unwrapped_lattice(case)
     n_particles = position.shape[0]
+
     transverse_length = 2.0 * case.wall_radius
 
     frame = gsd.hoomd.Frame()
@@ -82,7 +101,7 @@ def _write_initial_state(case: UnwrappedCase) -> None:
     frame.particles.image = np.zeros((n_particles, 3), dtype=np.int32)
     frame.particles.typeid = [0] * n_particles
     frame.configuration.box = [
-        case.twisted_lx,
+        case.perfect_hexatic_lx,
         transverse_length,
         transverse_length,
         0,
@@ -110,21 +129,27 @@ def run_case(
 
     case.metadata_json.parent.mkdir(parents=True, exist_ok=True)
     metadata = case.as_metadata()
-    metadata["lx"] = case.twisted_lx
-    metadata["twist_offset"] = case.h - case.a
-    metadata["twist_method"] = "linear_axial_shear_h_minus_a"
+    metadata["a"] = case.perfect_hexatic_a
+    metadata["lx"] = case.perfect_hexatic_lx
+    metadata["n_particles"] = case.perfect_hexatic_n_particles
+    metadata["circumference_lattice_vector"] = case.circumference_lattice_vector
+    metadata["axial_lattice_vector"] = case.axial_lattice_vector
     case.metadata_json.write_text(json.dumps(metadata, indent=2) + "\n")
     _write_initial_state(case)
 
     analysis = cylinder.ANALYSIS
     simulation = cylinder.SIMULATION
-    device = hoomd.device.GPU(gpu_id=gpu_id)
+    if gpu_id is None:
+        device = hoomd.device.CPU()
+    else:
+        device = hoomd.device.GPU(gpu_id=gpu_id)
     sim = hoomd.Simulation(device=device, seed=case.seed)
     sim.create_state_from_gsd(filename=str(case.initial_gsd))
 
     integrator = hoomd.md.Integrator(dt=simulation.timestep)
     sim.operations.integrator = integrator
     filter_all = hoomd.filter.All()
+
     integrator.methods.append(hoomd.md.methods.OverdampedViscous(filter=filter_all))
 
     cell = hoomd.md.nlist.Cell(buffer=0.4)
@@ -167,6 +192,7 @@ def run_case(
     logger = hoomd.logging.Logger(categories=["particle"])
     logger.add(lj, quantities=["forces", "virials"])
     logger.add(lj_wall, quantities=["forces", "virials"])
+
     gsd_writer = hoomd.write.GSD(
         filename=str(case.trajectory_gsd),
         trigger=hoomd.trigger.Periodic(case.trajectory_write_period),
@@ -179,10 +205,9 @@ def run_case(
     print(
         f"case={case.case_id} label={case.label} "
         f"R={case.radius:.12g} C={case.circumference:.12g} "
-        f"Ntheta={case.n_theta} Nx={case.n_x} "
-        f"Lx_target={case.lx_target:.12g} Lx={case.twisted_lx:.12g} "
-        f"twist_offset={case.h - case.a:.12g} "
-        f"wall_R={case.wall_radius:.12g} N={case.n_particles} "
+        f"Ntheta={case.n_theta} "
+        f"Lx_target={case.lx_target:.12g} Lx={case.perfect_hexatic_lx:.12g} "
+        f"wall_R={case.wall_radius:.12g} N={case.perfect_hexatic_n_particles} "
         f"steps={case.run_steps} write_period={case.trajectory_write_period} "
         f"output={case.trajectory_gsd}"
     )

@@ -18,7 +18,7 @@ rho-plot = "python -um hexatic.rho_fitting"
 pde-validate="python -um hexatic.rho_fitting.pde_validation --case radius_15D --mode all --overwrite"
 pde-diagnostic="python -um hexatic.rho_fitting.pde_validation --case radius_15D --mode all --no-plot --overwrite"
 pde-plot="python -um hexatic.rho_fitting.pde_validation --case radius_15D --mode all --plot-only --overwrite"
-unwrapped-sweep = "python -um hexatic.unwrapped_analysis.run_sweep --all"
+unwrapped-sweep = "python -um hexatic.unwrapped_analysis.run_sweep --all --overwrite"
 
 [dependencies]
 python = "3.13.*"

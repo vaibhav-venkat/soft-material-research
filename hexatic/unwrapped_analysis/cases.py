@@ -66,6 +66,36 @@ class UnwrappedCase:
         return self.n_x * self.h
 
     @property
+    def twisted_lx(self) -> float:
+        return self.n_x * self.a
+
+    @property
+    def circumference_lattice_vector(self) -> tuple[int, int]:
+        return 1, self.n_theta - 1
+
+    @property
+    def axial_lattice_vector(self) -> tuple[int, int]:
+        m, n = self.circumference_lattice_vector
+        divisor = math.gcd(2 * n + m, 2 * m + n)
+        return (2 * n + m) // divisor, -(2 * m + n) // divisor
+
+    @property
+    def perfect_hexatic_a(self) -> float:
+        m, n = self.circumference_lattice_vector
+        return self.circumference / math.sqrt(m * m + m * n + n * n)
+
+    @property
+    def perfect_hexatic_lx(self) -> float:
+        p, q = self.axial_lattice_vector
+        return self.perfect_hexatic_a * math.sqrt(p * p + p * q + q * q)
+
+    @property
+    def perfect_hexatic_n_particles(self) -> int:
+        m, n = self.circumference_lattice_vector
+        p, q = self.axial_lattice_vector
+        return abs(m * q - n * p)
+
+    @property
     def wall_radius(self) -> float:
         analysis = cylinder.ANALYSIS
         simulation = cylinder.SIMULATION
@@ -110,6 +140,7 @@ class UnwrappedCase:
             "h": self.h,
             "lx_target": self.lx_target,
             "lx": self.lx,
+            "twisted_lx": self.twisted_lx,
             "n_particles": self.n_particles,
             "rho": cylinder.RHO,
             "particle_diameter": cylinder.PARTICLE_DIAMETER,

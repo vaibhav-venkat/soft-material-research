@@ -89,7 +89,7 @@ def analyze_case(
         n_x_bins=ACTIVE_FIELD_X_BINS,
         n_theta_bins=ACTIVE_FIELD_THETA_BINS,
         cylinder_radius=case.radius,
-        box_length_x=case.lx,
+        box_length_x=case.twisted_lx,
     )
     save_active_matter_fields(
         fields,
