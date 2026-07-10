@@ -36,6 +36,17 @@ class CaseFrameMetrics:
     instantaneous_ring_count: int
     net_axial_velocity: float
     net_abs_axial_velocity: float
+    net_abs_axial_polarization: float
+
+
+def _net_abs_axial_polarization(case: UnwrappedCase) -> dict[int, float]:
+    """Return mean absolute axial polarization indexed by simulation step."""
+    path = ANALYSIS_DIR / "npz_fields" / f"{case.case_id}_active_matter_fields.npz"
+    with np.load(path) as data:
+        steps = np.asarray(data["steps"], dtype=np.int64)
+        directions = np.asarray(data["direction_cylindrical"], dtype=np.float64)
+    values = np.nanmean(np.abs(directions[:, :, 0]), axis=1)
+    return dict(zip(steps.tolist(), values.tolist(), strict=True))
 
 
 def _initial_row_tilt(positions: np.ndarray, case: UnwrappedCase) -> float:
@@ -72,6 +83,7 @@ def _net_axial_velocity(
 def measure_case(case: UnwrappedCase, interval: int) -> list[CaseFrameMetrics]:
     """Measure both ring definitions and net x velocity at selected frames."""
     results: list[CaseFrameMetrics] = []
+    abs_axial_polarization = _net_abs_axial_polarization(case)
     with gsd.hoomd.open(name=str(case.trajectory_gsd), mode="r") as trajectory:
         frame_indices = list(range(0, len(trajectory), interval))
         if frame_indices[-1] != len(trajectory) - 1:
@@ -105,6 +117,7 @@ def measure_case(case: UnwrappedCase, interval: int) -> list[CaseFrameMetrics]:
                     instantaneous_ring_count=ring_count,
                     net_axial_velocity=net_velocity,
                     net_abs_axial_velocity=net_abs_velocity,
+                    net_abs_axial_polarization=abs_axial_polarization[step],
                 )
             )
             previous_positions = positions
@@ -240,7 +253,7 @@ def build_lag_figure(
     series: dict[str, tuple[UnwrappedCase, list[CaseFrameMetrics]]],
     max_lag: int,
 ) -> go.Figure:
-    """Plot net |v_x|(t) versus initial-row tilt(t + lag) for every case."""
+    """Plot net |v_x| and |P_x| versus initial-row tilt at each lag."""
     n_cases = len(series)
     max_supported_lag = min(len(rows) - 2 for _, rows in series.values())
     max_lag = min(max_lag, max_supported_lag)
@@ -252,7 +265,7 @@ def build_lag_figure(
         shared_xaxes=True,
         vertical_spacing=0.055,
         subplot_titles=tuple(
-            f"{case_id}: corr(⟨|v_x|⟩(t), initial-row tilt(t + lag))"
+            f"{case_id}: correlation with initial-row tilt(t + lag)"
             for case_id in series
         ),
     )
@@ -270,26 +283,40 @@ def build_lag_figure(
             initial_tilt,
             lags,
         )
-        figure.add_trace(
-            go.Scatter(
-                x=lag_time,
-                y=correlation,
-                mode="lines+markers",
-                name=case_id,
-                line=dict(color=color, width=2.2),
-                marker=dict(size=5.5, color=color, line=dict(width=0.5, color="white")),
-                customdata=np.column_stack((lags, sample_count)),
-                hovertemplate=(
-                    "case=%{fullData.name}<br>"
-                    "lag=%{customdata[0]:d} sampled frames<br>"
-                    "lag time=%{x:.6g}<br>"
-                    "valid pairs=%{customdata[1]:d}<br>"
-                    "Pearson r=%{y:.6f}<extra></extra>"
-                ),
-            ),
-            row=row_index,
-            col=1,
+        abs_polarization = np.asarray(
+            [row.net_abs_axial_polarization for row in rows]
         )
+        polarization_correlation, polarization_sample_count = _pearson_lag_curve(
+            abs_polarization,
+            initial_tilt,
+            lags,
+        )
+        for name, values, counts, dash in (
+            (f"{case_id} ⟨|v_x|⟩", correlation, sample_count, "solid"),
+            (f"{case_id} ⟨|P_x|⟩", polarization_correlation, polarization_sample_count, "dash"),
+        ):
+            figure.add_trace(
+                go.Scatter(
+                    x=lag_time,
+                    y=values,
+                    mode="lines+markers",
+                    name=name,
+                    legendgroup=name.rsplit(" ", 1)[-1],
+                    showlegend=row_index == 1,
+                    line=dict(color=color, width=2.2, dash=dash),
+                    marker=dict(size=5.5, color=color, line=dict(width=0.5, color="white")),
+                    customdata=np.column_stack((lags, counts)),
+                    hovertemplate=(
+                        "%{fullData.name}<br>"
+                        "lag=%{customdata[0]:d} sampled frames<br>"
+                        "lag time=%{x:.6g}<br>"
+                        "valid pairs=%{customdata[1]:d}<br>"
+                        "Pearson r=%{y:.6f}<extra></extra>"
+                    ),
+                ),
+                row=row_index,
+                col=1,
+            )
         figure.add_hline(
             y=0.0,
             row=row_index,
@@ -323,7 +350,8 @@ def build_lag_figure(
     figure.update_layout(
         title=dict(
             text=(
-                "Lag correlation: net ⟨|v_x|⟩(t) and initial-row tilt(t + lag), "
+                "Lag correlation: net ⟨|v_x|⟩(t) and ⟨|P_x|⟩(t) "
+                "with initial-row tilt(t + lag), "
                 f"lags ±{max_lag} sampled frames"
             ),
             x=0.5,
@@ -333,7 +361,7 @@ def build_lag_figure(
         width=1080,
         height=330 * n_cases,
         hovermode="closest",
-        showlegend=False,
+        legend=dict(title_text="source quantity"),
         margin=dict(l=95, r=40, t=100, b=75),
     )
     return figure
