@@ -24,6 +24,7 @@ from .plot_dynamic_ring import reconstruct_ring_metrics
 
 
 OUTPUT_DIR = ANALYSIS_DIR / "output"
+DEFAULT_MAX_LAG = 30
 
 
 @dataclass(frozen=True)
@@ -109,6 +110,34 @@ def measure_case(case: UnwrappedCase, interval: int) -> list[CaseFrameMetrics]:
             previous_positions = positions
             previous_step = step
     return results
+
+
+def _lag_pair(a: np.ndarray, b: np.ndarray, lag: int) -> tuple[np.ndarray, np.ndarray]:
+    """Pair a(t) with b(t + lag)."""
+    if lag < 0:
+        return a[-lag:], b[:lag]
+    if lag > 0:
+        return a[:-lag], b[lag:]
+    return a, b
+
+
+def _pearson_lag_curve(
+    source: np.ndarray,
+    target: np.ndarray,
+    lags: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return Pearson r and valid-pair count for each lag."""
+    correlation = np.full(len(lags), np.nan, dtype=np.float64)
+    sample_count = np.zeros(len(lags), dtype=np.int64)
+    for index, lag in enumerate(lags):
+        x, y = _lag_pair(source, target, int(lag))
+        valid = np.isfinite(x) & np.isfinite(y)
+        x = x[valid]
+        y = y[valid]
+        sample_count[index] = len(x)
+        if len(x) >= 3 and np.std(x) > 0.0 and np.std(y) > 0.0:
+            correlation[index] = float(np.corrcoef(x, y)[0, 1])
+    return correlation, sample_count
 
 
 def build_figure(
@@ -207,9 +236,124 @@ def build_figure(
     return figure
 
 
+def build_lag_figure(
+    series: dict[str, tuple[UnwrappedCase, list[CaseFrameMetrics]]],
+    max_lag: int,
+) -> go.Figure:
+    """Plot net |v_x|(t) versus initial-row tilt(t + lag) for every case."""
+    n_cases = len(series)
+    max_supported_lag = min(len(rows) - 2 for _, rows in series.values())
+    max_lag = min(max_lag, max_supported_lag)
+    assert max_lag > 0, "at least three sampled frames are required for lag correlation"
+    lags = np.arange(-max_lag, max_lag + 1, dtype=int)
+    figure = make_subplots(
+        rows=n_cases,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.055,
+        subplot_titles=tuple(
+            f"{case_id}: corr(⟨|v_x|⟩(t), initial-row tilt(t + lag))"
+            for case_id in series
+        ),
+    )
+    colors = ("#2563eb", "#dc2626", "#16a34a", "#9333ea", "#ea580c")
+    for row_index, (color, (case_id, (_, rows))) in enumerate(
+        zip(colors, series.items()),
+        start=1,
+    ):
+        abs_velocity = np.asarray([row.net_abs_axial_velocity for row in rows])
+        initial_tilt = np.asarray([row.initial_row_tilt_deg for row in rows])
+        step = np.asarray([row.step for row in rows], dtype=float)
+        lag_time = lags * float(np.median(np.diff(step))) * cylinder.TIMESTEP
+        correlation, sample_count = _pearson_lag_curve(
+            abs_velocity,
+            initial_tilt,
+            lags,
+        )
+        figure.add_trace(
+            go.Scatter(
+                x=lag_time,
+                y=correlation,
+                mode="lines+markers",
+                name=case_id,
+                line=dict(color=color, width=2.2),
+                marker=dict(size=5.5, color=color, line=dict(width=0.5, color="white")),
+                customdata=np.column_stack((lags, sample_count)),
+                hovertemplate=(
+                    "case=%{fullData.name}<br>"
+                    "lag=%{customdata[0]:d} sampled frames<br>"
+                    "lag time=%{x:.6g}<br>"
+                    "valid pairs=%{customdata[1]:d}<br>"
+                    "Pearson r=%{y:.6f}<extra></extra>"
+                ),
+            ),
+            row=row_index,
+            col=1,
+        )
+        figure.add_hline(
+            y=0.0,
+            row=row_index,
+            col=1,
+            line=dict(color="#64748b", width=1, dash="dash"),
+        )
+        figure.add_vline(
+            x=0.0,
+            row=row_index,
+            col=1,
+            line=dict(color="#111827", width=1.2),
+        )
+        figure.update_yaxes(
+            title_text="Pearson r",
+            range=[-1.05, 1.05],
+            row=row_index,
+            col=1,
+            showgrid=True,
+            gridcolor="rgba(39,49,61,0.10)",
+            zeroline=False,
+        )
+
+    figure.update_xaxes(
+        title_text="lag time (simulation time)",
+        row=n_cases,
+        col=1,
+        showgrid=True,
+        gridcolor="rgba(39,49,61,0.10)",
+        zeroline=False,
+    )
+    figure.update_layout(
+        title=dict(
+            text=(
+                "Lag correlation: net ⟨|v_x|⟩(t) and initial-row tilt(t + lag), "
+                f"lags ±{max_lag} sampled frames"
+            ),
+            x=0.5,
+            xanchor="center",
+        ),
+        template="plotly_white",
+        width=1080,
+        height=330 * n_cases,
+        hovermode="closest",
+        showlegend=False,
+        margin=dict(l=95, r=40, t=100, b=75),
+    )
+    return figure
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Write a stacked all-case ring-tilt and net-velocity HTML plot."
+    )
+    parser.add_argument(
+        "--plot",
+        choices=("timeseries", "lag"),
+        default="timeseries",
+        help="Write the time series or its lag-correlation diagnostic",
+    )
+    parser.add_argument(
+        "--max-lag",
+        type=int,
+        default=DEFAULT_MAX_LAG,
+        help=f"Maximum lag in sampled frames for --plot lag (default: {DEFAULT_MAX_LAG})",
     )
     parser.add_argument(
         "--interval",
@@ -220,8 +364,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output",
         type=Path,
-        default=OUTPUT_DIR / "ring_tilt_velocity_by_case.html",
-        help="Output HTML path",
+        default=None,
+        help="Output HTML path (default depends on --plot)",
     )
     return parser.parse_args()
 
@@ -229,6 +373,7 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     args = _parse_args()
     assert args.interval > 0, "--interval must be positive"
+    assert args.max_lag > 0, "--max-lag must be positive"
     series: dict[str, tuple[UnwrappedCase, list[CaseFrameMetrics]]] = {}
     for case in all_cases():
         if not case.case_id.startswith("circ_"):
@@ -241,9 +386,19 @@ def main() -> None:
         print(f"{case.case_id}: frames={len(rows)}")
 
     assert series, "no unwrapped trajectory GSD files found"
-    output = Path(args.output)
+    default_name = (
+        "ring_tilt_velocity_by_case.html"
+        if args.plot == "timeseries"
+        else "initial_ring_tilt_abs_velocity_lag_correlation.html"
+    )
+    output = Path(args.output) if args.output is not None else OUTPUT_DIR / default_name
     output.parent.mkdir(parents=True, exist_ok=True)
-    build_figure(series).write_html(output, include_plotlyjs="cdn", full_html=True)
+    figure = (
+        build_figure(series)
+        if args.plot == "timeseries"
+        else build_lag_figure(series, args.max_lag)
+    )
+    figure.write_html(output, include_plotlyjs="cdn", full_html=True)
     print(f"Wrote {output}")
 
 
