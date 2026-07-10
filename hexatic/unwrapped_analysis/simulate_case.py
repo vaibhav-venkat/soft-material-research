@@ -28,17 +28,15 @@ def generate_unwrapped_lattice(case: UnwrappedCase) -> tuple[np.ndarray, np.ndar
     theta = np.empty(case.n_particles, dtype=np.float64)
 
     particle_idx = 0
-    twist_offset = case.h - case.a
-    # Offset the row spacing by the shear so the wrapped seam does not compress.
-    wrapped_spacing = case.h - twist_offset
-    x0 = -0.5 * case.twisted_lx + 0.5 * wrapped_spacing
+    x0 = -0.5 * case.lx + 0.5 * case.h
     for j in range(case.n_x):
-        x = x0 + j * wrapped_spacing
+        x = x0 + j * case.h
         offset = 0.5 * (j % 2)
         for i in range(case.n_theta):
             surface_distance = ((i + offset) * case.a) % case.circumference
             angle = surface_distance / case.radius
-            x_new = x + (1.0 - i / (case.n_theta - 1)) * twist_offset
+            x_new = x + (1.0 - i / (case.n_theta - 1)) * case.h
+            x_new = (x_new + 0.5 * case.lx) % case.lx - 0.5 * case.lx
             positions[particle_idx] = (
                 x_new,
                 case.radius * math.sin(angle),
@@ -81,14 +79,7 @@ def _write_initial_state(case: UnwrappedCase) -> None:
     frame.particles.orientation = outward_normal_quaternions(theta)
     frame.particles.image = np.zeros((n_particles, 3), dtype=np.int32)
     frame.particles.typeid = [0] * n_particles
-    frame.configuration.box = [
-        case.twisted_lx,
-        transverse_length,
-        transverse_length,
-        0,
-        0,
-        0,
-    ]
+    frame.configuration.box = [case.lx, transverse_length, transverse_length, 0, 0, 0]
     frame.configuration.dimensions = 3
     frame.particles.types = ["A"]
 
@@ -110,22 +101,29 @@ def run_case(
 
     case.metadata_json.parent.mkdir(parents=True, exist_ok=True)
     metadata = case.as_metadata()
-    metadata["lx"] = case.twisted_lx
-    metadata["twist_offset"] = case.h - case.a
-    metadata["twist_method"] = "linear_axial_shear_h_minus_a"
+    metadata["twist_offset"] = case.h
+    metadata["twist_method"] = "linear_axial_shear_one_row_relaxed"
+    metadata["twist_relaxation_steps"] = 70_000
     case.metadata_json.write_text(json.dumps(metadata, indent=2) + "\n")
     _write_initial_state(case)
 
     analysis = cylinder.ANALYSIS
     simulation = cylinder.SIMULATION
-    device = hoomd.device.GPU(gpu_id=gpu_id)
+    if gpu_id is None:
+        device = hoomd.device.CPU()
+    else:
+        device = hoomd.device.GPU(gpu_id=gpu_id)
     sim = hoomd.Simulation(device=device, seed=case.seed)
     sim.create_state_from_gsd(filename=str(case.initial_gsd))
 
     integrator = hoomd.md.Integrator(dt=simulation.timestep)
     sim.operations.integrator = integrator
     filter_all = hoomd.filter.All()
-    integrator.methods.append(hoomd.md.methods.OverdampedViscous(filter=filter_all))
+    relaxation = hoomd.md.methods.OverdampedViscous(
+        filter=filter_all,
+        default_gamma=1e6,
+    )
+    integrator.methods.append(relaxation)
 
     cell = hoomd.md.nlist.Cell(buffer=0.4)
     lj = hoomd.md.pair.LJ(nlist=cell)
@@ -151,6 +149,10 @@ def run_case(
         "r_cut": analysis.wall_cutoff,
     }
     integrator.forces.append(lj_wall)
+
+    for gamma in (1e6, 1e5, 1e4, 1e3, 1e2, 1e1, 1.0):
+        relaxation.default_gamma = gamma
+        sim.run(10_000)
 
     active = hoomd.md.force.Active(filter=hoomd.filter.Type(["A"]))
     active.use_orientation = True
@@ -180,8 +182,8 @@ def run_case(
         f"case={case.case_id} label={case.label} "
         f"R={case.radius:.12g} C={case.circumference:.12g} "
         f"Ntheta={case.n_theta} Nx={case.n_x} "
-        f"Lx_target={case.lx_target:.12g} Lx={case.twisted_lx:.12g} "
-        f"twist_offset={case.h - case.a:.12g} "
+        f"Lx_target={case.lx_target:.12g} Lx={case.lx:.12g} "
+        f"twist_offset={case.h:.12g} "
         f"wall_R={case.wall_radius:.12g} N={case.n_particles} "
         f"steps={case.run_steps} write_period={case.trajectory_write_period} "
         f"output={case.trajectory_gsd}"

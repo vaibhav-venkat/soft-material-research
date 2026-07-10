@@ -22,14 +22,14 @@ def validate_case(case: UnwrappedCase) -> dict[str, object]:
         positions,
         cylinder_radius=case.radius,
         shell_delta=cylinder.ANALYSIS.shell_delta,
-        box_length_x=case.twisted_lx,
+        box_length_x=case.lx,
     )
     counts = compute_neighbor_counts_frame_on_cylinder(
         positions,
         cylinder_radius=case.radius,
         shell_delta=cylinder.ANALYSIS.shell_delta,
         neighbor_radius=cylinder.ANALYSIS.neighbor_count_radius,
-        box_length_x=case.twisted_lx,
+        box_length_x=case.lx,
     )
 
     surface_mask = np.abs(psi) > 0.0
@@ -52,7 +52,7 @@ def validate_case(case: UnwrappedCase) -> dict[str, object]:
         "a": case.a,
         "h": case.h,
         "lx_target": case.lx_target,
-        "lx": case.twisted_lx,
+        "lx": case.lx,
         "neighbor_counts": dict(
             zip(unique_counts.astype(int).tolist(), count_totals.astype(int).tolist())
         ),

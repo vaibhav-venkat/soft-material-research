@@ -66,10 +66,6 @@ class UnwrappedCase:
         return self.n_x * self.h
 
     @property
-    def twisted_lx(self) -> float:
-        return self.n_x * self.a
-
-    @property
     def circumference_lattice_vector(self) -> tuple[int, int]:
         return 1, self.n_theta - 1
 
@@ -140,7 +136,6 @@ class UnwrappedCase:
             "h": self.h,
             "lx_target": self.lx_target,
             "lx": self.lx,
-            "twisted_lx": self.twisted_lx,
             "n_particles": self.n_particles,
             "rho": cylinder.RHO,
             "particle_diameter": cylinder.PARTICLE_DIAMETER,
