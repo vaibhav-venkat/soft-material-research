@@ -269,11 +269,7 @@ def build_lag_figure(
             for case_id in series
         ),
     )
-    colors = ("#2563eb", "#dc2626", "#16a34a", "#9333ea", "#ea580c")
-    for row_index, (color, (case_id, (_, rows))) in enumerate(
-        zip(colors, series.items()),
-        start=1,
-    ):
+    for row_index, (case_id, (_, rows)) in enumerate(series.items(), start=1):
         abs_velocity = np.asarray([row.net_abs_axial_velocity for row in rows])
         initial_tilt = np.asarray([row.initial_row_tilt_deg for row in rows])
         step = np.asarray([row.step for row in rows], dtype=float)
@@ -291,9 +287,15 @@ def build_lag_figure(
             initial_tilt,
             lags,
         )
-        for name, values, counts, dash in (
-            (f"{case_id} ⟨|v_x|⟩", correlation, sample_count, "solid"),
-            (f"{case_id} ⟨|P_x|⟩", polarization_correlation, polarization_sample_count, "dash"),
+        for name, values, counts, color, dash in (
+            (f"{case_id} ⟨|v_x|⟩", correlation, sample_count, "#2563eb", "solid"),
+            (
+                f"{case_id} ⟨|P_x|⟩",
+                polarization_correlation,
+                polarization_sample_count,
+                "#dc2626",
+                "dash",
+            ),
         ):
             figure.add_trace(
                 go.Scatter(
