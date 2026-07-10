@@ -2,7 +2,7 @@
 authors = ["Vaibhav Venkat <vaibhav@vaibhavvenkat.com>"]
 channels = ["conda-forge", "main", "r", "msys2"]
 name = "sap"
-platforms = ["osx-arm64"]
+platforms = ["osx-arm64", "linux-64"]
 version = "0.1.0"
 
 [tasks]
