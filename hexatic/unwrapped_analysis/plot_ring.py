@@ -228,7 +228,9 @@ def build_figure(
     return figure
 
 
-def build_time_figure(series: dict[str, list[RingTiltCaseData]]) -> go.Figure:
+def build_time_figure(
+    series: dict[str, list[tuple[int, RingTiltCaseData]]],
+) -> go.Figure:
     """Plot mean angular tilt and its time derivative over trajectory frames."""
     figure = make_subplots(
         rows=2,
@@ -241,9 +243,10 @@ def build_time_figure(series: dict[str, list[RingTiltCaseData]]) -> go.Figure:
         ),
     )
     colors = ("#2563eb", "#dc2626", "#16a34a", "#9333ea", "#ea580c")
-    ordered = sorted(series.values(), key=lambda rows: rows[0].c_over_d)
-    for color, rows in zip(colors, ordered):
-        frame_indices = np.arange(len(rows), dtype=int)
+    ordered = sorted(series.values(), key=lambda rows: rows[0][1].c_over_d)
+    for color, indexed_rows in zip(colors, ordered):
+        frame_indices = np.asarray([frame_index for frame_index, _ in indexed_rows])
+        rows = [row for _, row in indexed_rows]
         tilt_deg = np.asarray([row.mean_tilt_deg for row in rows])
         time = np.asarray([row.step for row in rows], dtype=float) * cylinder.TIMESTEP
         angular_velocity = np.gradient(tilt_deg, time)
@@ -355,6 +358,12 @@ def _parse_args() -> argparse.Namespace:
         help="Plot mean angular tilt for every saved trajectory frame",
     )
     parser.add_argument(
+        "--interval",
+        type=int,
+        default=1,
+        help="When using --all-frames, analyze every Nth frame and always include the final frame (default: 1)",
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=None,
@@ -366,10 +375,11 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     args = _parse_args()
     assert args.frame >= 0, "--frame must be non-negative"
+    assert args.interval > 0, "--interval must be positive"
     if args.all_frames:
         assert args.source == "trajectory", "--all-frames requires --source trajectory"
     results: list[RingTiltCaseData] = []
-    series: dict[str, list[RingTiltCaseData]] = {}
+    series: dict[str, list[tuple[int, RingTiltCaseData]]] = {}
     for case in all_cases():
         if not case.case_id.startswith("circ_"):
             continue
@@ -380,11 +390,17 @@ def main() -> None:
         if args.all_frames:
             with gsd.hoomd.open(name=str(input_gsd), mode="r") as trajectory:
                 frame_count = len(trajectory)
+            frame_indices = list(range(0, frame_count, args.interval))
+            if frame_indices[-1] != frame_count - 1:
+                frame_indices.append(frame_count - 1)
             series[case.case_id] = [
-                measure_case(case, input_gsd, frame_index)
-                for frame_index in range(frame_count)
+                (frame_index, measure_case(case, input_gsd, frame_index))
+                for frame_index in frame_indices
             ]
-            print(f"{case.case_id}: measured {frame_count} trajectory frames")
+            print(
+                f"{case.case_id}: measured {len(frame_indices)} of {frame_count} "
+                f"trajectory frames (interval={args.interval})"
+            )
             continue
         result = measure_case(case, input_gsd, args.frame)
         results.append(result)
