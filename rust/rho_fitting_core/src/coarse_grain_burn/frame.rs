@@ -1,95 +1,22 @@
-use ndarray::{Array5, Array6, ArrayD, ArrayView2, ArrayView3, IxDyn};
+use ndarray::{ArrayView2, ArrayView3};
 
-use super::grid::{flat_index, Grid3};
-use super::EPS;
+use super::grid::Grid3;
+use crate::mechanics::{relative_mass_error, MechanicalFieldSet, MechanicalFrame};
 
-pub(super) struct FrameFields {
-    pub(super) mass: Vec<f32>,
-    pub(super) psi6_num: Vec<f32>,
-    pub(super) p_num: [Vec<f32>; 3],
-    pub(super) q_num: [Vec<f32>; 9],
-    pub(super) j_rho_num: [Vec<f32>; 3],
-    pub(super) j_p_num: [Vec<f32>; 9],
-    pub(super) j_q_num: [Vec<f32>; 27],
-}
+pub(super) type FrameFields = MechanicalFrame;
 
-impl FrameFields {
-    pub(super) fn new(grid: usize) -> Self {
-        Self {
-            mass: vec![0.0; grid],
-            psi6_num: vec![0.0; grid],
-            p_num: std::array::from_fn(|_| vec![0.0; grid]),
-            q_num: std::array::from_fn(|_| vec![0.0; grid]),
-            j_rho_num: std::array::from_fn(|_| vec![0.0; grid]),
-            j_p_num: std::array::from_fn(|_| vec![0.0; grid]),
-            j_q_num: std::array::from_fn(|_| vec![0.0; grid]),
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
 pub(super) fn write_mechanical_frame(
     t: usize,
     grid: &Grid3,
     fields: &FrameFields,
-    rho: &mut ndarray::Array4<f64>,
-    psi6_sq: &mut ndarray::Array4<f64>,
-    p: &mut Array5<f64>,
-    q: &mut Array6<f64>,
-    a: &mut Array6<f64>,
-    j_rho: &mut Array5<f64>,
-    j_p: &mut Array6<f64>,
-    j_q: &mut ArrayD<f64>,
+    output: &mut MechanicalFieldSet,
 ) {
-    for ix in 0..grid.nx {
-        for itheta in 0..grid.ntheta {
-            for ir in 0..grid.nr {
-                let flat = flat_index(ix, itheta, ir, grid.ntheta, grid.nr);
-                let mass = fields.mass[flat];
-                let volume = grid.volumes[flat];
-                let density = mass / volume;
-                rho[[t, ix, itheta, ir]] = density as f64;
-                if mass > EPS {
-                    let psi = fields.psi6_num[flat] / mass;
-                    psi6_sq[[t, ix, itheta, ir]] = (psi * psi) as f64;
-                    for component in 0..3 {
-                        p[[t, ix, itheta, ir, component]] =
-                            (fields.p_num[component][flat] / volume) as f64;
-                        j_rho[[t, ix, itheta, ir, component]] =
-                            (fields.j_rho_num[component][flat] / volume) as f64;
-                    }
-                    for row in 0..3 {
-                        for col in 0..3 {
-                            let q_index = row * 3 + col;
-                            q[[t, ix, itheta, ir, row, col]] =
-                                (fields.q_num[q_index][flat] / volume) as f64;
-                            a[[t, ix, itheta, ir, row, col]] = q[[t, ix, itheta, ir, row, col]]
-                                + if row == col {
-                                    density as f64 / 3.0
-                                } else {
-                                    0.0
-                                };
-                            for flux in 0..3 {
-                                j_p[[t, ix, itheta, ir, flux, row]] =
-                                    (fields.j_p_num[flux * 3 + row][flat] / volume) as f64;
-                                j_q[IxDyn(&[t, ix, itheta, ir, flux, row, col])] =
-                                    (fields.j_q_num[flux * 9 + q_index][flat] / volume) as f64;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+    fields.write_into(t, &grid.domain, output);
 }
 
-pub(super) fn print_conservation(label: &str, mass: &[f32], expected: usize) {
-    let total: f64 = mass.iter().map(|value| *value as f64).sum();
-    let rel_error = if expected > 0 {
-        (total - expected as f64).abs() / expected as f64
-    } else {
-        0.0
-    };
+pub(super) fn print_conservation(label: &str, mass: &[f64], expected: usize) {
+    let total: f64 = mass.iter().sum();
+    let rel_error = relative_mass_error(mass, expected);
     println!(
         "[rho_fitting] GPU {label} mass conservation: total={:.6} expected={} rel_error={:.3e}",
         total, expected, rel_error

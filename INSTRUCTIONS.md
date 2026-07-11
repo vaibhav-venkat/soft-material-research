@@ -1,187 +1,44 @@
-# Instructions
+# 1. Consolidate the existing Rust core
+2. 
+There are two substantial implementations of mechanical deposition:
+CPU loops in [`mechanics/mod.rs`](/Users/vaibhavvenkat/structures_and_functions/rust/rho_fitting_core/src/mechanics/mod.rs)
 
-## Changing coarse-graining
-Right now, we use boundary renormalization for all directions (x, r, theta) within the coarse graining. 
+GPU/Burn deposition in [`coarse_grain_burn/mod.rs`](/Users/vaibhavvenkat/structures_and_functions/rust/rho_fitting_core/src/coarse_grain_burn/mod.rs)
 
-But instead, for x and theta which are periodic, do this instead, no renormalizing:
-1. Create ghost particles to calculate and account for the guassian
-That is, these are reflections like `x_i^{(m,n)} = x_i + (mL_x,nL_y),` for ` m,n\in\{-1,0,1\}`
-2. Then use them in the coarse-graining kernel. For example, like
-`\rho(t,x)=\sum_i\sum_{m,n} K\!\left[x-x_i(t)-(mL_x,nL_y)\right].`
 
-Keep the direction `r` as closed and renormalized, but for `x` and `theta` use this method instead
+Keep a single typed MechanicalFieldSet domain model and share validation, moment construction, conservation checks, and output conversion. 
 
-Thats the gist for x, y, but here is how to do it with (x, r, theta)
-Use a **mixed-boundary kernel**:
+The CPU version should be a reference/fallback backend, not a second independently evolving implementation. It should also not be preferred.
 
-* periodic wrapping / ghost copies in (x) and (\theta)
-* boundary renormalization only in the nonperiodic coordinate (r)
+Also replace dynamic-rank ArrayD for J_Q and targets internally with fixed-rank types. ArrayD is useful at the PyO3 boundary, but it forfeits shape guarantees inside Rust.
 
-So the kernel should not be treated as “fully missing mass” in all coordinates. The periodic coordinates have no missing mass; only the finite (r)-interval truncates the kernel.
+Useful domain types:
+```rust
+struct CylindricalGrid {
+    x: Array1<f64>,
+    theta: Array1<f64>,
+    r: Array1<f64>,
+    lx: f64,
+    theta_period: f64,
+}
 
-Suppose your state space is
+struct MechanicalFields {
+    rho: Array4<f64>,
+    p: Array5<f64>,
+    q: Array6<f64>,
+    a: Array6<f64>,
+    // fixed-rank current tensors
+}
 
-[
-x \in [0,L_x), \qquad \theta \in [0,2\pi), \qquad r \in [r_{\min},r_{\max}].
-]
+enum PhysicalComponent {
+    Axial,
+    Azimuthal,
+    Radial,
+}
+```
 
-Let the base smoothing kernel factor as
+And also other types when necessary. At the end of this, there shouldn't be two separate/divergent paths like mechanics/mod.rs and coarse-grain-burn/mod.rs which require changing both when making a simple edit. Minimize the leakage of any errors by consolidating these types of things.
 
-[
-K(\Delta x,\Delta \theta,\Delta r)
-==================================
+Most importantly, encode the physical order (x, e_theta, e_r) centrally to avoid any mismatch within the conventions between Python and Rust. Do this also for other frame types. 
 
-K_x(\Delta x)K_\theta(\Delta \theta)K_r(\Delta r),
-]
-
-with each 1D kernel normalized on the infinite line.
-
-For a particle at ((x_i,\theta_i,r_i)), define the **periodic wrapped kernel** in (x) and (\theta):
-
-[
-K_x^{\mathrm{per}}(x-x_i)
-=========================
-
-\sum_{m\in\mathbb{Z}} K_x(x-x_i-mL_x),
-]
-
-[
-K_\theta^{\mathrm{per}}(\theta-\theta_i)
-========================================
-
-\sum_{n\in\mathbb{Z}} K_\theta(\theta-\theta_i-2\pi n).
-]
-
-Then the only renormalization factor comes from the nonperiodic coordinate:
-
-[
-Z_r(r_i)
-========
-
-\int_{r_{\min}}^{r_{\max}} K_r(r-r_i),dr.
-]
-
-The mixed-boundary kernel is
-
-[
-K_{\mathrm{mixed}}
-==================
-
-K_x^{\mathrm{per}}(x-x_i)
-K_\theta^{\mathrm{per}}(\theta-\theta_i)
-\frac{K_r(r-r_i)}{Z_r(r_i)}.
-]
-
-Then
-
-[
-\int_0^{L_x}\int_0^{2\pi}\int_{r_{\min}}^{r_{\max}}
-K_{\mathrm{mixed}},dr,d\theta,dx
-================================
-
-1.
-
-]
-
-That is the key point: **the full kernel still integrates to 1**, but the normalization correction is only for the truncated (r)-direction.
-
-For a Gaussian (K_r),
-
-[
-K_r(r-r_i)
-==========
-
-\frac{1}{\sqrt{2\pi}\sigma_r}
-\exp\left[-\frac{(r-r_i)^2}{2\sigma_r^2}\right],
-]
-
-the renormalization factor is
-
-[
-Z_r(r_i)
-========
-
-## \Phi\left(\frac{r_{\max}-r_i}{\sigma_r}\right)
-
-\Phi\left(\frac{r_{\min}-r_i}{\sigma_r}\right),
-]
-
-where (\Phi) is the standard normal CDF.
-
-So your coarse-grained density would be
-
-[
-\rho(x,\theta,r)
-================
-
-\sum_i
-K_x^{\mathrm{per}}(x-x_i)
-K_\theta^{\mathrm{per}}(\theta-\theta_i)
-\frac{K_r(r-r_i)}{Z_r(r_i)}.
-]
-
-For a vector or orientation-weighted field (a),
-
-[
-A(x,\theta,r)
-=============
-
-\sum_i
-K_x^{\mathrm{per}}(x-x_i)
-K_\theta^{\mathrm{per}}(\theta-\theta_i)
-\frac{K_r(r-r_i)}{Z_r(r_i)}
-a_i.
-]
-
-### Implementation choice
-
-You can implement this without explicitly making ghost particles by using wrapped distances:
-
-[
-\Delta x =
-((x-x_i+L_x/2)\bmod L_x)-L_x/2,
-]
-
-[
-\Delta \theta =
-((\theta-\theta_i+\pi)\bmod 2\pi)-\pi.
-]
-
-Then use the ordinary Gaussian in those wrapped distances, and apply the (r)-renormalization.
-
-This is equivalent to one layer of ghost particles when the kernel width is small compared with the periodic domain size.
-
-### Important caveat
-
-If (r) has a physical volume element, for example cylindrical or polar coordinates with measure
-
-[
-dV = r,dr,d\theta,dx,
-]
-
-then the normalization should respect that measure. In that case,
-
-[
-Z_r(r_i)
-========
-
-\int_{r_{\min}}^{r_{\max}} K_r(r-r_i), r,dr
-]
-
-or whatever the correct measure is for your coordinates.
-
-Then use
-
-[
-K_{\mathrm{mixed}}
-==================
-
-K_x^{\mathrm{per}}K_\theta^{\mathrm{per}}
-\frac{K_r}{Z_r}.
-]
-
-So the rule is:
-
-**periodic directions: wrap or ghost-copy.
-nonperiodic directions: truncate and renormalize.
-full kernel normalization: enforce using only the missing-mass correction from the nonperiodic directions.**
+The idea is to emphasize as much types as possible while keeping and improving readability.

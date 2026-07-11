@@ -116,7 +116,7 @@ def reconstruct_ring_metrics(
 ) -> tuple[int, float, float]:
     """Return count, mean tilt, and mean plane RMS for instantaneous ring loops."""
     positions = np.asarray(positions, dtype=np.float64)
-    assert positions.shape == (case.n_particles, 3)
+    assert positions.shape == (case.plot_n_particles, 3)
     next_ids, link_dx, link_ds = _directed_circumferential_links(
         positions,
         cylinder_radius=case.radius,
@@ -132,7 +132,7 @@ def reconstruct_ring_metrics(
             continue
         if not 0.85 <= winding <= 1.15:
             continue
-        if abs(axial_drift) > 0.25 * case.a:
+        if abs(axial_drift) > 0.25 * case.plot_a:
             continue
 
         ring = positions[cycle]

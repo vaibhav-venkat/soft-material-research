@@ -26,6 +26,10 @@ from plotly.subplots import make_subplots
 from hexatic.constants import cylinder
 
 from .cases import ANALYSIS_DIR, UnwrappedCase, all_cases
+from .plot_dynamic_ring import (
+    _directed_circumferential_links,
+    _functional_cycles,
+)
 
 
 OUTPUT_DIR = ANALYSIS_DIR / "output"
@@ -49,23 +53,45 @@ class RingTiltCaseData:
 def _fit_ring_plane_metrics(
     positions: np.ndarray,
     case: UnwrappedCase,
+    box_length_x: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return per-ring |n.x|, tilt angle, and plane-fit RMS residual."""
+    """Return per-ring metrics from geometric circumferential cycles.
+
+    Perfect-supercell particles are not written in axial-row order, so a
+    reshape into ``(n_x, n_theta)`` would mix unrelated lattice sites.
+    """
     positions = np.asarray(positions, dtype=np.float64)
-    assert positions.shape == (case.n_particles, 3)
-
-    rings = positions.reshape(case.n_x, case.n_theta, 3)
-    normal_dot_x = np.empty(case.n_x, dtype=np.float64)
-    tilt_deg = np.empty(case.n_x, dtype=np.float64)
-    plane_rms = np.empty(case.n_x, dtype=np.float64)
-
-    for ring_idx, ring in enumerate(rings):
-        centered = ring - np.mean(ring, axis=0)
+    assert positions.shape == (case.plot_n_particles, 3)
+    next_ids, link_dx, link_ds = _directed_circumferential_links(
+        positions, case.radius, box_length_x
+    )
+    min_ring_particles = max(12, case.n_theta // 2)
+    metrics: list[tuple[float, float, float]] = []
+    for ring in _functional_cycles(next_ids):
+        winding = float(np.sum(link_ds[ring]) / case.circumference)
+        axial_drift = float(np.sum(link_dx[ring]))
+        if len(ring) < min_ring_particles:
+            continue
+        if not 0.85 <= winding <= 1.15:
+            continue
+        if abs(axial_drift) > 0.25 * case.plot_a:
+            continue
+        ring_positions = positions[ring]
+        centered = ring_positions - np.mean(ring_positions, axis=0)
         normal = np.linalg.svd(centered, full_matrices=False)[2][-1]
         dot_x = float(np.clip(abs(normal[0]), 0.0, 1.0))
-        normal_dot_x[ring_idx] = dot_x
-        tilt_deg[ring_idx] = float(np.degrees(np.arccos(dot_x)))
-        plane_rms[ring_idx] = float(np.sqrt(np.mean((centered @ normal) ** 2)))
+        metrics.append(
+            (
+                dot_x,
+                float(np.degrees(np.arccos(dot_x))),
+                float(np.sqrt(np.mean((centered @ normal) ** 2))),
+            )
+        )
+
+    if not metrics:
+        raise ValueError(f"No circumference-wrapping rings found for {case.case_id}")
+    values = np.asarray(metrics, dtype=np.float64)
+    normal_dot_x, tilt_deg, plane_rms = values.T
 
     return normal_dot_x, tilt_deg, plane_rms
 
@@ -83,12 +109,14 @@ def measure_case(
         frame = trajectory[frame_index]
 
     positions = np.asarray(frame.particles.position, dtype=np.float64)
-    normal_dot_x, tilt_deg, plane_rms = _fit_ring_plane_metrics(positions, case)
+    normal_dot_x, tilt_deg, plane_rms = _fit_ring_plane_metrics(
+        positions, case, float(frame.configuration.box[0])
+    )
     return RingTiltCaseData(
         case_id=case.case_id,
         c_over_d=case.circumference / cylinder.PARTICLE_DIAMETER,
         step=int(frame.configuration.step),
-        ring_count=case.n_x,
+        ring_count=len(normal_dot_x),
         mean_normal_dot_x=float(np.mean(normal_dot_x)),
         std_normal_dot_x=float(np.std(normal_dot_x)),
         mean_tilt_deg=float(np.mean(tilt_deg)),

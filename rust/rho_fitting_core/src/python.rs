@@ -1,17 +1,72 @@
-use numpy::{IntoPyArray, PyReadonlyArray1, PyReadonlyArray2, PyReadonlyArray3, PyReadonlyArrayDyn};
+use ndarray::{Array4, ArrayD, Ix5, Ix6, IxDyn};
+use numpy::{
+    IntoPyArray, PyReadonlyArray1, PyReadonlyArray2, PyReadonlyArray3, PyReadonlyArrayDyn,
+};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 #[cfg(any(feature = "gpu-metal", feature = "gpu-cuda"))]
 use crate::coarse_grain_burn;
-use crate::mechanics;
+use crate::mechanics::{self, CurrentQField};
 use crate::sampling;
-use crate::CoreError;
+use crate::{CoreError, CoreResult};
 
 fn to_py_err(error: CoreError) -> PyErr {
     // Convert Rust core errors into Python ValueError exceptions.
     PyValueError::new_err(error.to_string())
+}
+
+fn rank3_field_to_dynamic(field: &CurrentQField) -> ArrayD<f64> {
+    let (frames, nx, ntheta, nr) = field.dim();
+    let mut out = ArrayD::zeros(IxDyn(&[frames, nx, ntheta, nr, 3, 3, 3]));
+    for t in 0..frames {
+        for ix in 0..nx {
+            for itheta in 0..ntheta {
+                for ir in 0..nr {
+                    for flux in 0..3 {
+                        for row in 0..3 {
+                            for col in 0..3 {
+                                out[[t, ix, itheta, ir, flux, row, col]] =
+                                    field[[t, ix, itheta, ir]][flux][row][col];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+fn rank3_field_from_dynamic(
+    field: ndarray::ArrayViewD<'_, f64>,
+    name: &str,
+) -> CoreResult<CurrentQField> {
+    if field.ndim() != 7 || field.shape()[4..] != [3, 3, 3] {
+        return Err(CoreError::Shape(format!(
+            "{name} must have shape (T,Nx,Ntheta,Nr,3,3,3)"
+        )));
+    }
+    let shape = field.shape();
+    let mut out = Array4::from_elem((shape[0], shape[1], shape[2], shape[3]), [[[0.0; 3]; 3]; 3]);
+    for t in 0..shape[0] {
+        for ix in 0..shape[1] {
+            for itheta in 0..shape[2] {
+                for ir in 0..shape[3] {
+                    for flux in 0..3 {
+                        for row in 0..3 {
+                            for col in 0..3 {
+                                out[[t, ix, itheta, ir]][flux][row][col] =
+                                    field[[t, ix, itheta, ir, flux, row, col]];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 #[pyfunction]
@@ -19,7 +74,6 @@ fn to_py_err(error: CoreError) -> PyErr {
 fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
-
 
 #[pyfunction]
 #[pyo3(signature = (valid_mask, nd, seed, replace))]
@@ -82,7 +136,7 @@ fn build_mechanical_fields(
         out.set_item("psi6_sq", fields.psi6_sq.into_pyarray(py))?;
         out.set_item("J_rho", fields.j_rho.into_pyarray(py))?;
         out.set_item("J_P", fields.j_p.into_pyarray(py))?;
-        out.set_item("J_Q", fields.j_q.into_pyarray(py))?;
+        out.set_item("J_Q", rank3_field_to_dynamic(&fields.j_q).into_pyarray(py))?;
         return Ok(out.unbind());
     }
 
@@ -106,22 +160,27 @@ fn build_mechanical_targets(
     gamma: f64,
     u0: f64,
 ) -> PyResult<Py<PyDict>> {
-    let (y_rho, y_p, y_q) = mechanics::build_targets(
-        p.as_array(),
-        j_rho.as_array(),
-        j_p.as_array(),
-        j_q.as_array(),
-        gamma,
-        u0,
-    )
-    .map_err(to_py_err)?;
+    let p = p
+        .as_array()
+        .into_dimensionality::<Ix5>()
+        .map_err(|_| to_py_err(CoreError::Shape("P must have rank 5".to_string())))?;
+    let j_rho = j_rho
+        .as_array()
+        .into_dimensionality::<Ix5>()
+        .map_err(|_| to_py_err(CoreError::Shape("J_rho must have rank 5".to_string())))?;
+    let j_p = j_p
+        .as_array()
+        .into_dimensionality::<Ix6>()
+        .map_err(|_| to_py_err(CoreError::Shape("J_P must have rank 6".to_string())))?;
+    let j_q = rank3_field_from_dynamic(j_q.as_array(), "J_Q").map_err(to_py_err)?;
+    let targets =
+        mechanics::build_targets(p, j_rho, j_p, j_q.view(), gamma, u0).map_err(to_py_err)?;
     let out = PyDict::new(py);
-    out.set_item("Y_rho", y_rho.into_pyarray(py))?;
-    out.set_item("Y_P", y_p.into_pyarray(py))?;
-    out.set_item("Y_Q", y_q.into_pyarray(py))?;
+    out.set_item("Y_rho", targets.y_rho.into_pyarray(py))?;
+    out.set_item("Y_P", targets.y_p.into_pyarray(py))?;
+    out.set_item("Y_Q", rank3_field_to_dynamic(&targets.y_q).into_pyarray(py))?;
     Ok(out.unbind())
 }
-
 
 #[pyfunction]
 #[pyo3(signature = (target, library, sample_indices))]
