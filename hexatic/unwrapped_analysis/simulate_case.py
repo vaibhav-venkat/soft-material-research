@@ -109,7 +109,10 @@ def run_case(
 
     analysis = cylinder.ANALYSIS
     simulation = cylinder.SIMULATION
-    device = hoomd.device.GPU(gpu_id=gpu_id)
+    if gpu_id is None:
+        device = hoomd.device.CPU()
+    else:
+        device = hoomd.device.GPU(gpu_id=gpu_id)
     sim = hoomd.Simulation(device=device, seed=case.seed)
     sim.create_state_from_gsd(filename=str(case.initial_gsd))
 
@@ -147,10 +150,6 @@ def run_case(
     }
     integrator.forces.append(lj_wall)
 
-    for gamma in (1e6, 1e5, 1e4, 1e3, 1e2, 1e1, 1.0):
-        relaxation.default_gamma = gamma
-        sim.run(10_000)
-
     active = hoomd.md.force.Active(filter=hoomd.filter.Type(["A"]))
     active.use_orientation = True
     active.active_force["A"] = (simulation.gamma * simulation.u0, 0.0, 0.0)
@@ -162,6 +161,11 @@ def run_case(
         rotational_diffusion=1 / simulation.tau_r,
     )
     sim.operations += rot_diff
+
+    for gamma in (1e6, 1e5, 1e4, 1e3, 1e2, 1e1, 1.0):
+        relaxation.default_gamma = gamma
+        sim.run(10_000)
+    sim.timestep = 0
 
     logger = hoomd.logging.Logger(categories=["particle"])
     logger.add(lj, quantities=["forces", "virials"])

@@ -19,7 +19,7 @@ def _command_for_case(case: UnwrappedCase, args: argparse.Namespace) -> list[str
     command = [
         sys.executable,
         "-m",
-        "hexatic.unwrapped_analysis.simulate_case",
+        "hexatic.unwrapped_analysis.simulate_case_perfect_hexatic",
         "--case",
         case.case_id,
     ]
