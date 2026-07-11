@@ -61,9 +61,7 @@ def _fit_ring_plane_metrics(
     positions = np.asarray(positions, dtype=np.float64)
     assert positions.shape == (case.plot_n_particles, 3)
     metrics: list[tuple[float, float, float]] = []
-    cycles = _perfect_supercell_ring_cycles(case)
-    sample_stride = max(1, len(cycles) // 256)
-    for ring in cycles[::sample_stride]:
+    for ring in _selected_perfect_ring_cycles(case):
         ring_positions = positions[ring]
         centered = ring_positions - np.mean(ring_positions, axis=0)
         normal = np.linalg.svd(centered, full_matrices=False)[2][-1]
@@ -79,9 +77,6 @@ def _fit_ring_plane_metrics(
     if not metrics:
         raise ValueError(f"No perfect-supercell circumference paths found for {case.case_id}")
     values = np.asarray(metrics, dtype=np.float64)
-    planar = values[:, 2] <= 0.5 * cylinder.PARTICLE_DIAMETER
-    if np.any(planar):
-        values = values[planar]
     normal_dot_x, tilt_deg, plane_rms = values.T
 
     return normal_dot_x, tilt_deg, plane_rms
@@ -120,6 +115,23 @@ def _perfect_supercell_ring_cycles(case: UnwrappedCase) -> tuple[np.ndarray, ...
         path.append(particle_by_key[key(current)])
         cycles.append(np.asarray(path, dtype=np.int64))
     return tuple(cycles)
+
+
+@lru_cache(maxsize=None)
+def _selected_perfect_ring_cycles(case: UnwrappedCase) -> tuple[np.ndarray, ...]:
+    """Select a fixed, initially planar path sample for every later frame."""
+    initial_positions, _ = generate_unwrapped_lattice(case)
+    selected: list[np.ndarray] = []
+    for ring in _perfect_supercell_ring_cycles(case):
+        centered = initial_positions[ring] - np.mean(initial_positions[ring], axis=0)
+        normal = np.linalg.svd(centered, full_matrices=False)[2][-1]
+        plane_rms = float(np.sqrt(np.mean((centered @ normal) ** 2)))
+        if plane_rms <= 0.5 * cylinder.PARTICLE_DIAMETER:
+            selected.append(ring)
+    if not selected:
+        raise ValueError(f"No initially planar circumference paths for {case.case_id}")
+    stride = max(1, len(selected) // 256)
+    return tuple(selected[::stride])
 
 
 def measure_case(

@@ -24,7 +24,7 @@ from plotly.subplots import make_subplots
 from scipy.spatial import cKDTree  # type: ignore[unresolved-import]
 
 from .cases import ANALYSIS_DIR, UnwrappedCase, all_cases
-from .plot_ring import _perfect_supercell_ring_cycles
+from .plot_ring import _selected_perfect_ring_cycles
 
 
 OUTPUT_DIR = ANALYSIS_DIR / "output"
@@ -118,18 +118,14 @@ def reconstruct_ring_metrics(
     """Return count, mean tilt, and mean plane RMS for instantaneous ring loops."""
     positions = np.asarray(positions, dtype=np.float64)
     assert positions.shape == (case.plot_n_particles, 3)
-    cycles = _perfect_supercell_ring_cycles(case)
-    sample_stride = max(1, len(cycles) // 256)
     tilts: list[float] = []
     residuals: list[float] = []
-    for cycle in cycles[::sample_stride]:
+    for cycle in _selected_perfect_ring_cycles(case):
         ring = positions[cycle]
         centered = ring - np.mean(ring, axis=0)
         normal = np.linalg.svd(centered, full_matrices=False)[2][-1]
         dot_x = float(np.clip(abs(normal[0]), 0.0, 1.0))
         plane_rms = float(np.sqrt(np.mean((centered @ normal) ** 2)))
-        if plane_rms > 0.5 * cylinder.PARTICLE_DIAMETER:
-            continue
         tilts.append(float(np.degrees(np.arccos(dot_x))))
         residuals.append(plane_rms)
 

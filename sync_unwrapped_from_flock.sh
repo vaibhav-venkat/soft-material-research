@@ -20,8 +20,6 @@ if [[ "$DRY_RUN" == "1" ]]; then
 fi
 
 SYNC_DIRS=(
-  "hexatic/unwrapped_analysis/initial"
-  "hexatic/unwrapped_analysis/gsd"
   "hexatic/unwrapped_analysis/hexatic_output"
   "hexatic/unwrapped_analysis/npz_fields"
 )
