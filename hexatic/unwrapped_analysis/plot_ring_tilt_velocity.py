@@ -21,6 +21,7 @@ from hexatic.constants import cylinder
 
 from .cases import ANALYSIS_DIR, UnwrappedCase, all_cases
 from .plot_dynamic_ring import reconstruct_ring_metrics
+from .plot_ring import _fit_ring_plane_metrics
 
 
 OUTPUT_DIR = ANALYSIS_DIR / "output"
@@ -49,18 +50,12 @@ def _net_abs_axial_polarization(case: UnwrappedCase) -> dict[int, float]:
     return dict(zip(steps.tolist(), values.tolist(), strict=True))
 
 
-def _initial_row_tilt(positions: np.ndarray, case: UnwrappedCase) -> float:
-    """Return the mean fitted-plane tilt of the initializer's particle-ID rows."""
-    positions = np.asarray(positions, dtype=np.float64)
-    assert positions.shape == (case.n_particles, 3)
-    rings = positions.reshape(case.n_x, case.n_theta, 3)
-    tilts = np.empty(case.n_x, dtype=np.float64)
-    for ring_index, ring in enumerate(rings):
-        centered = ring - np.mean(ring, axis=0)
-        normal = np.linalg.svd(centered, full_matrices=False)[2][-1]
-        dot_x = float(np.clip(abs(normal[0]), 0.0, 1.0))
-        tilts[ring_index] = float(np.degrees(np.arccos(dot_x)))
-    return float(np.mean(tilts))
+def _initial_ring_tilt(
+    positions: np.ndarray, case: UnwrappedCase, box_length_x: float
+) -> float:
+    """Return mean tilt of geometrically reconstructed initial rings."""
+    _, tilt_deg, _ = _fit_ring_plane_metrics(positions, case, box_length_x)
+    return float(np.mean(tilt_deg))
 
 
 def _net_axial_velocity(
@@ -112,7 +107,9 @@ def measure_case(case: UnwrappedCase, interval: int) -> list[CaseFrameMetrics]:
                 CaseFrameMetrics(
                     frame_index=frame_index,
                     step=step,
-                    initial_row_tilt_deg=_initial_row_tilt(positions, case),
+                    initial_row_tilt_deg=_initial_ring_tilt(
+                        positions, case, box_length_x
+                    ),
                     instantaneous_tilt_deg=instantaneous_tilt,
                     instantaneous_ring_count=ring_count,
                     net_axial_velocity=net_velocity,
@@ -187,10 +184,10 @@ def build_figure(
         figure.add_trace(
             go.Scatter(
                 x=frame_indices, y=initial_tilt, mode="lines+markers",
-                name="initial particle-ID rows", legendgroup="initial", showlegend=show_legend,
+                name="geometric circumference rings", legendgroup="initial", showlegend=show_legend,
                 line=dict(color="#2563eb", width=2), marker=dict(size=4, color="#2563eb"),
                 customdata=steps,
-                hovertemplate="frame=%{x:d}<br>initial-row tilt=%{y:.6g} deg<br>step=%{customdata:d}<extra></extra>",
+                hovertemplate="frame=%{x:d}<br>circumference-ring tilt=%{y:.6g} deg<br>step=%{customdata:d}<extra></extra>",
             ), row=tilt_row, col=1,
         )
         figure.add_trace(
@@ -265,7 +262,7 @@ def build_lag_figure(
         shared_xaxes=True,
         vertical_spacing=0.055,
         subplot_titles=tuple(
-            f"{case_id}: correlation with initial-row tilt(t + lag)"
+            f"{case_id}: correlation with circumference-ring tilt(t + lag)"
             for case_id in series
         ),
     )
@@ -353,7 +350,7 @@ def build_lag_figure(
         title=dict(
             text=(
                 "Lag correlation: net ⟨|v_x|⟩(t) and ⟨|P_x|⟩(t) "
-                "with initial-row tilt(t + lag), "
+                "with circumference-ring tilt(t + lag), "
                 f"lags ±{max_lag} sampled frames"
             ),
             x=0.5,

@@ -7,16 +7,18 @@ use burn::tensor::TensorData;
 use burn_cuda::{Cuda, CudaDevice};
 #[cfg(feature = "gpu-metal")]
 use burn_wgpu::{graphics, init_setup, Metal, WgpuDevice};
-use ndarray::{Array5, Array6, ArrayD, ArrayView1, ArrayView2, ArrayView3, IxDyn};
+use ndarray::{ArrayView1, ArrayView2, ArrayView3};
 use std::panic::{catch_unwind, set_hook, take_hook, AssertUnwindSafe};
 
 use frame::{
     combine_particle_components, mechanical_frame_mask, print_conservation,
-    sanitized_frame_component, sanitized_frame_scalar, write_mechanical_frame, FrameFields,
+    sanitized_frame_component, sanitized_frame_scalar, write_mechanical_frame,
 };
-use grid::{radial_spacing, Grid3};
+use grid::Grid3;
 
-use crate::mechanics::MechanicalFields;
+use crate::mechanics::{
+    MechanicalFieldSet, MechanicalFrame, MechanicalInputViews, PhysicalComponent, TENSOR_COMPONENTS,
+};
 use crate::{CoreError, CoreResult};
 
 #[cfg(feature = "gpu-cuda")]
@@ -27,23 +29,9 @@ type MetalBackend = Metal<f32, i32, u8>;
 const EPS: f32 = 1.0e-12;
 const GAUSSIAN_GRID_CHUNK: usize = 256;
 
-pub(super) struct MechanicalInputs<'a> {
-    coords: ArrayView3<'a, f64>,
-    directions: ArrayView3<'a, f64>,
-    velocities: ArrayView3<'a, f64>,
-    psi6_abs: ArrayView2<'a, f64>,
-    mask: ArrayView2<'a, bool>,
-    x_centers: ArrayView1<'a, f64>,
-    theta_centers: ArrayView1<'a, f64>,
-    r_centers: ArrayView1<'a, f64>,
-    lx: f64,
-    theta_period: f64,
-    sigma: f64,
-}
-
 /// Build mechanical moment fields and current tensors with renormalized GPU Gaussian deposition.
 #[allow(clippy::too_many_arguments)]
-pub fn build_mechanical_fields(
+pub(crate) fn build_mechanical_fields(
     coords: ArrayView3<'_, f64>,
     directions: ArrayView3<'_, f64>,
     velocities: ArrayView3<'_, f64>,
@@ -57,8 +45,8 @@ pub fn build_mechanical_fields(
     sigma: f64,
     gamma: f64,
     u0: f64,
-) -> CoreResult<MechanicalFields> {
-    validate_mechanical_inputs(
+) -> CoreResult<MechanicalFieldSet> {
+    let inputs = MechanicalInputViews::new(
         coords,
         directions,
         velocities,
@@ -73,19 +61,6 @@ pub fn build_mechanical_fields(
         gamma,
         u0,
     )?;
-    let inputs = MechanicalInputs {
-        coords,
-        directions,
-        velocities,
-        psi6_abs,
-        mask,
-        x_centers,
-        theta_centers,
-        r_centers,
-        lx,
-        theta_period,
-        sigma,
-    };
     run_mechanical(inputs)
 }
 
@@ -104,7 +79,7 @@ fn catch_burn_panic<T>(backend: &str, func: impl FnOnce() -> CoreResult<T>) -> C
     })?
 }
 
-fn run_mechanical(inputs: MechanicalInputs<'_>) -> CoreResult<MechanicalFields> {
+fn run_mechanical(inputs: MechanicalInputViews<'_>) -> CoreResult<MechanicalFieldSet> {
     #[cfg(feature = "gpu-cuda")]
     if <CudaBackend as Backend>::device_count(0) > 0 {
         let device = CudaDevice::new(0);
@@ -133,33 +108,22 @@ fn run_mechanical(inputs: MechanicalInputs<'_>) -> CoreResult<MechanicalFields> 
 }
 
 fn mechanical_gaussian_device<B: Backend>(
-    inputs: MechanicalInputs<'_>,
+    inputs: MechanicalInputViews<'_>,
     device: &B::Device,
-) -> CoreResult<MechanicalFields> {
-    let MechanicalInputs {
+) -> CoreResult<MechanicalFieldSet> {
+    let MechanicalInputViews {
         coords,
         directions,
         velocities,
         psi6_abs,
         mask,
-        x_centers,
-        theta_centers,
-        r_centers,
-        lx,
-        theta_period,
+        grid: domain,
         sigma,
+        ..
     } = inputs;
     let (frames, particles, _) = coords.dim();
-    let grid = Grid3::new(x_centers, theta_centers, r_centers, lx, theta_period)?;
-    let mut rho = ndarray::Array4::<f64>::zeros((frames, grid.nx, grid.ntheta, grid.nr));
-    let mut psi6_sq =
-        ndarray::Array4::<f64>::from_elem((frames, grid.nx, grid.ntheta, grid.nr), f64::NAN);
-    let mut p = Array5::<f64>::zeros((frames, grid.nx, grid.ntheta, grid.nr, 3));
-    let mut q = Array6::<f64>::zeros((frames, grid.nx, grid.ntheta, grid.nr, 3, 3));
-    let mut a = Array6::<f64>::zeros((frames, grid.nx, grid.ntheta, grid.nr, 3, 3));
-    let mut j_rho = Array5::<f64>::zeros((frames, grid.nx, grid.ntheta, grid.nr, 3));
-    let mut j_p = Array6::<f64>::zeros((frames, grid.nx, grid.ntheta, grid.nr, 3, 3));
-    let mut j_q = ArrayD::<f64>::zeros(IxDyn(&[frames, grid.nx, grid.ntheta, grid.nr, 3, 3, 3]));
+    let grid = Grid3::from_domain(domain);
+    let mut output = MechanicalFieldSet::zeros(frames, &grid.domain);
 
     for t in 0..frames {
         println!(
@@ -183,18 +147,15 @@ fn mechanical_gaussian_device<B: Backend>(
             sanitized_frame_component(velocities, t, particles, 2),
         ];
         let psi6 = sanitized_frame_scalar(psi6_abs, t, particles);
-        let q_particle = [
-            combine_particle_components(&dir[0], &dir[0], -1.0 / 3.0),
-            combine_particle_components(&dir[0], &dir[1], 0.0),
-            combine_particle_components(&dir[0], &dir[2], 0.0),
-            combine_particle_components(&dir[1], &dir[0], 0.0),
-            combine_particle_components(&dir[1], &dir[1], -1.0 / 3.0),
-            combine_particle_components(&dir[1], &dir[2], 0.0),
-            combine_particle_components(&dir[2], &dir[0], 0.0),
-            combine_particle_components(&dir[2], &dir[1], 0.0),
-            combine_particle_components(&dir[2], &dir[2], -1.0 / 3.0),
-        ];
-        let mut fields = FrameFields::new(grid.len());
+        let q_particle = std::array::from_fn(|index| {
+            let (row, col) = TENSOR_COMPONENTS[index];
+            combine_particle_components(
+                &dir[row.index()],
+                &dir[col.index()],
+                if row == col { -1.0 / 3.0 } else { 0.0 },
+            )
+        });
+        let mut fields = MechanicalFrame::new(grid.len());
         let deposited = valid.iter().filter(|value| **value > 0.0).count();
         deposit_gaussian_mechanical_frame::<B>(
             GaussianFrameInputs {
@@ -212,98 +173,11 @@ fn mechanical_gaussian_device<B: Backend>(
             &mut fields,
             device,
         )?;
-        write_mechanical_frame(
-            t,
-            &grid,
-            &fields,
-            &mut rho,
-            &mut psi6_sq,
-            &mut p,
-            &mut q,
-            &mut a,
-            &mut j_rho,
-            &mut j_p,
-            &mut j_q,
-        );
+        write_mechanical_frame(t, &grid, &fields, &mut output);
         print_conservation("mechanical", &fields.mass, deposited);
     }
 
-    Ok(MechanicalFields {
-        rho,
-        p,
-        q,
-        a,
-        psi6_sq,
-        j_rho,
-        j_p,
-        j_q,
-    })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn validate_mechanical_inputs(
-    coords: ArrayView3<'_, f64>,
-    directions: ArrayView3<'_, f64>,
-    velocities: ArrayView3<'_, f64>,
-    psi6_abs: ArrayView2<'_, f64>,
-    mask: ArrayView2<'_, bool>,
-    x_centers: ArrayView1<'_, f64>,
-    theta_centers: ArrayView1<'_, f64>,
-    r_centers: ArrayView1<'_, f64>,
-    lx: f64,
-    theta_period: f64,
-    sigma: f64,
-    gamma: f64,
-    u0: f64,
-) -> CoreResult<()> {
-    let (frames, particles, components) = coords.dim();
-    if components != 3 {
-        return Err(CoreError::Shape(
-            "coords must have shape (T,N,3)".to_string(),
-        ));
-    }
-    if directions.dim() != (frames, particles, 3) || velocities.dim() != (frames, particles, 3) {
-        return Err(CoreError::Shape(
-            "directions and velocities must have shape (T,N,3)".to_string(),
-        ));
-    }
-    if psi6_abs.dim() != (frames, particles) {
-        return Err(CoreError::Shape(
-            "psi6_abs must have shape (T,N)".to_string(),
-        ));
-    }
-    if mask.dim() != (frames, particles) {
-        return Err(CoreError::Shape("mask must have shape (T,N)".to_string()));
-    }
-    if x_centers.is_empty() || theta_centers.is_empty() || r_centers.is_empty() {
-        return Err(CoreError::InvalidInput(
-            "grid centers must be non-empty".to_string(),
-        ));
-    }
-    if !(lx.is_finite()
-        && lx > 0.0
-        && theta_period.is_finite()
-        && theta_period > 0.0
-        && sigma.is_finite()
-        && sigma > 0.0
-        && gamma.is_finite()
-        && u0.is_finite()
-        && u0 != 0.0)
-    {
-        return Err(CoreError::InvalidInput(
-            "geometry and dynamics values must be finite and positive where required".to_string(),
-        ));
-    }
-    if !r_centers
-        .iter()
-        .all(|value| value.is_finite() && *value > 0.0)
-    {
-        return Err(CoreError::InvalidInput(
-            "radial centers must be finite and positive".to_string(),
-        ));
-    }
-    radial_spacing(r_centers)?;
-    Ok(())
+    Ok(output)
 }
 
 struct GaussianFrameInputs<'a> {
@@ -321,7 +195,7 @@ struct GaussianFrameInputs<'a> {
 fn deposit_gaussian_mechanical_frame<B: Backend>(
     inputs: GaussianFrameInputs<'_>,
     grid: &Grid3,
-    fields: &mut FrameFields,
+    fields: &mut MechanicalFrame,
     device: &B::Device,
 ) -> CoreResult<()> {
     let particles = inputs.particle_x.len();
@@ -364,10 +238,7 @@ fn deposit_gaussian_mechanical_frame<B: Backend>(
             device,
         );
         let volume_tensor = tensor2::<B>(volumes, [chunk, 1], device);
-        norm = norm
-            + (weights * volume_tensor)
-                .sum_dim(0)
-                .reshape([particles]);
+        norm = norm + (weights * volume_tensor).sum_dim(0).reshape([particles]);
     }
     let norm = norm + EPS;
     for start in (0..grid.len()).step_by(GAUSSIAN_GRID_CHUNK) {
@@ -392,42 +263,45 @@ fn deposit_gaussian_mechanical_frame<B: Backend>(
             tensor_vec(mass_weights.clone().sum_dim(1).reshape([chunk]))?,
         );
         write_chunk(
-            &mut fields.psi6_num,
+            &mut fields.psi6_mass,
             start,
             weighted_sum(&mass_weights, &psi6, chunk)?,
         );
-        for component in 0..3 {
+        for component in PhysicalComponent::ALL {
+            let component_index = component.index();
             write_chunk(
-                &mut fields.p_num[component],
+                &mut fields.p_mass[component_index],
                 start,
-                weighted_sum(&mass_weights, &dir_tensors[component], chunk)?,
+                weighted_sum(&mass_weights, &dir_tensors[component_index], chunk)?,
             );
             write_chunk(
-                &mut fields.j_rho_num[component],
+                &mut fields.j_rho_mass[component_index],
                 start,
-                weighted_sum(&mass_weights, &vel_tensors[component], chunk)?,
+                weighted_sum(&mass_weights, &vel_tensors[component_index], chunk)?,
             );
         }
-        for flux in 0..3 {
-            for component in 0..3 {
+        for flux in PhysicalComponent::ALL {
+            let flux_index = flux.index();
+            for component in PhysicalComponent::ALL {
+                let component_index = component.index();
                 write_chunk(
-                    &mut fields.j_p_num[flux * 3 + component],
+                    &mut fields.j_p_mass[flux_index * 3 + component_index],
                     start,
                     weighted_sum_product(
                         &mass_weights,
-                        &vel_tensors[flux],
-                        &dir_tensors[component],
+                        &vel_tensors[flux_index],
+                        &dir_tensors[component_index],
                         chunk,
                     )?,
                 );
             }
             for q_index in 0..9 {
                 write_chunk(
-                    &mut fields.j_q_num[flux * 9 + q_index],
+                    &mut fields.j_q_mass[flux_index * 9 + q_index],
                     start,
                     weighted_sum_product(
                         &mass_weights,
-                        &vel_tensors[flux],
+                        &vel_tensors[flux_index],
                         &q_tensors[q_index],
                         chunk,
                     )?,
@@ -436,7 +310,7 @@ fn deposit_gaussian_mechanical_frame<B: Backend>(
         }
         for q_index in 0..9 {
             write_chunk(
-                &mut fields.q_num[q_index],
+                &mut fields.q_mass[q_index],
                 start,
                 weighted_sum(&mass_weights, &q_tensors[q_index], chunk)?,
             );
@@ -498,9 +372,9 @@ fn weighted_sum_product<B: Backend>(
     )
 }
 
-fn write_chunk(target: &mut [f32], start: usize, values: Vec<f32>) {
+fn write_chunk(target: &mut [f64], start: usize, values: Vec<f32>) {
     for (offset, value) in values.into_iter().enumerate() {
-        target[start + offset] = value;
+        target[start + offset] = value as f64;
     }
 }
 

@@ -103,6 +103,21 @@ class UnwrappedCase:
         return self.n_theta * self.n_x
 
     @property
+    def plot_n_particles(self) -> int:
+        """Particle count used by plots reading perfect-supercell GSD files."""
+        return self.perfect_hexatic_n_particles
+
+    @property
+    def plot_lx(self) -> float:
+        """Axial box length used by plots reading perfect-supercell GSD files."""
+        return self.perfect_hexatic_lx
+
+    @property
+    def plot_a(self) -> float:
+        """Nearest-neighbor spacing used by perfect-supercell ring diagnostics."""
+        return self.perfect_hexatic_a
+
+    @property
     def initial_gsd(self) -> Path:
         return INITIAL_GSD_DIR / f"initial_{self.case_id}.gsd"
 

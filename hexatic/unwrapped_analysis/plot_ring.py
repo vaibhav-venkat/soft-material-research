@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 import gsd.hoomd
@@ -26,6 +27,7 @@ from plotly.subplots import make_subplots
 from hexatic.constants import cylinder
 
 from .cases import ANALYSIS_DIR, UnwrappedCase, all_cases
+from .simulate_case_perfect_hexatic import generate_unwrapped_lattice
 
 
 OUTPUT_DIR = ANALYSIS_DIR / "output"
@@ -49,25 +51,87 @@ class RingTiltCaseData:
 def _fit_ring_plane_metrics(
     positions: np.ndarray,
     case: UnwrappedCase,
+    box_length_x: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return per-ring |n.x|, tilt angle, and plane-fit RMS residual."""
+    """Return per-ring metrics from geometric circumferential cycles.
+
+    Perfect-supercell particles are not written in axial-row order, so a
+    reshape into ``(n_x, n_theta)`` would mix unrelated lattice sites.
+    """
     positions = np.asarray(positions, dtype=np.float64)
-    assert positions.shape == (case.n_particles, 3)
-
-    rings = positions.reshape(case.n_x, case.n_theta, 3)
-    normal_dot_x = np.empty(case.n_x, dtype=np.float64)
-    tilt_deg = np.empty(case.n_x, dtype=np.float64)
-    plane_rms = np.empty(case.n_x, dtype=np.float64)
-
-    for ring_idx, ring in enumerate(rings):
-        centered = ring - np.mean(ring, axis=0)
+    assert positions.shape == (case.plot_n_particles, 3)
+    metrics: list[tuple[float, float, float]] = []
+    for ring in _selected_perfect_ring_cycles(case):
+        ring_positions = positions[ring]
+        centered = ring_positions - np.mean(ring_positions, axis=0)
         normal = np.linalg.svd(centered, full_matrices=False)[2][-1]
         dot_x = float(np.clip(abs(normal[0]), 0.0, 1.0))
-        normal_dot_x[ring_idx] = dot_x
-        tilt_deg[ring_idx] = float(np.degrees(np.arccos(dot_x)))
-        plane_rms[ring_idx] = float(np.sqrt(np.mean((centered @ normal) ** 2)))
+        metrics.append(
+            (
+                dot_x,
+                float(np.degrees(np.arccos(dot_x))),
+                float(np.sqrt(np.mean((centered @ normal) ** 2))),
+            )
+        )
+
+    if not metrics:
+        raise ValueError(f"No perfect-supercell circumference paths found for {case.case_id}")
+    values = np.asarray(metrics, dtype=np.float64)
+    normal_dot_x, tilt_deg, plane_rms = values.T
 
     return normal_dot_x, tilt_deg, plane_rms
+
+
+@lru_cache(maxsize=None)
+def _perfect_supercell_ring_cycles(case: UnwrappedCase) -> tuple[np.ndarray, ...]:
+    """Build circumference paths from the exact twisted lattice vectors."""
+    positions, _ = generate_unwrapped_lattice(case)
+    supercell = np.column_stack(
+        (case.circumference_lattice_vector, case.axial_lattice_vector)
+    ).astype(float)
+    inverse = np.linalg.inv(supercell)
+    theta = np.mod(np.arctan2(positions[:, 1], positions[:, 2]), 2.0 * np.pi)
+    fractions = np.column_stack(
+        (theta / (2.0 * np.pi), positions[:, 0] / case.perfect_hexatic_lx + 0.5)
+    )
+    lattice_coordinates = np.rint(fractions @ supercell.T).astype(np.int64)
+
+    def key(coordinate: np.ndarray) -> tuple[float, float]:
+        fraction = np.mod(inverse @ coordinate, 1.0)
+        fraction[np.isclose(fraction, 1.0, atol=1.0e-8)] = 0.0
+        return tuple(np.round(fraction, 8))
+
+    particle_by_key = {
+        key(coordinate): index
+        for index, coordinate in enumerate(lattice_coordinates)
+    }
+    cycles: list[np.ndarray] = []
+    for coordinate in lattice_coordinates:
+        current = coordinate.copy()
+        path: list[int] = []
+        for _ in range(case.n_theta - 1):
+            path.append(particle_by_key[key(current)])
+            current += (0, 1)
+        path.append(particle_by_key[key(current)])
+        cycles.append(np.asarray(path, dtype=np.int64))
+    return tuple(cycles)
+
+
+@lru_cache(maxsize=None)
+def _selected_perfect_ring_cycles(case: UnwrappedCase) -> tuple[np.ndarray, ...]:
+    """Select a fixed, initially planar path sample for every later frame."""
+    initial_positions, _ = generate_unwrapped_lattice(case)
+    selected: list[np.ndarray] = []
+    for ring in _perfect_supercell_ring_cycles(case):
+        centered = initial_positions[ring] - np.mean(initial_positions[ring], axis=0)
+        normal = np.linalg.svd(centered, full_matrices=False)[2][-1]
+        plane_rms = float(np.sqrt(np.mean((centered @ normal) ** 2)))
+        if plane_rms <= 0.5 * cylinder.PARTICLE_DIAMETER:
+            selected.append(ring)
+    if not selected:
+        raise ValueError(f"No initially planar circumference paths for {case.case_id}")
+    stride = max(1, len(selected) // 256)
+    return tuple(selected[::stride])
 
 
 def measure_case(
@@ -83,12 +147,14 @@ def measure_case(
         frame = trajectory[frame_index]
 
     positions = np.asarray(frame.particles.position, dtype=np.float64)
-    normal_dot_x, tilt_deg, plane_rms = _fit_ring_plane_metrics(positions, case)
+    normal_dot_x, tilt_deg, plane_rms = _fit_ring_plane_metrics(
+        positions, case, float(frame.configuration.box[0])
+    )
     return RingTiltCaseData(
         case_id=case.case_id,
         c_over_d=case.circumference / cylinder.PARTICLE_DIAMETER,
         step=int(frame.configuration.step),
-        ring_count=case.n_x,
+        ring_count=len(normal_dot_x),
         mean_normal_dot_x=float(np.mean(normal_dot_x)),
         std_normal_dot_x=float(np.std(normal_dot_x)),
         mean_tilt_deg=float(np.mean(tilt_deg)),
