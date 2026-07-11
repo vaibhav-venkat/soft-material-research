@@ -1,263 +1,147 @@
 # Repository Guidelines
-**All tests have been removed. No more tests**
-## Current Goal
 
-The active work is `hexatic/rho_fitting`: fit and validate mechanical moment closures for the radius `15D` cylinder data. The current focus is not the HOOMD simulation itself; it is the cached/coarse-grained fields, regression libraries, divergence-aware fitting, and PDE validation rollouts.
+**All tests have been removed. Do not add or run a test suite.** Use targeted syntax, import, or build checks only when they are proportionate to the change.
 
-Key equations being validated:
+## Current Work
+
+The active simulation work is `hexatic/unwrapped_analysis`: the sweep now uses an **exact, twisted triangular-lattice supercell**. It is the replacement for the earlier experimentally sheared `simulate_case.py` route. The supercell gives a genuinely twisted cylinder while retaining perfect hexatic order at initialization, so it needs neither an overlap-prone coordinate shear nor a high-drag relaxation ramp.
+
+`hexatic/rho_fitting` remains the established analysis workflow for the radius `15D` trajectory. It now fits 3D cylindrical mechanical moment closures, assesses the closure in divergence space, and validates it by rolling out the fitted PDE. Treat the simulation work and the `rho_fitting` analysis inputs as separate unless new supercell trajectories are deliberately promoted into the fitting pipeline.
+
+## Unwrapped Twisted Supercell
+
+Use `hexatic.unwrapped_analysis.simulate_case_perfect_hexatic` for all new unwrapped simulations. `run_sweep.py` already dispatches to it:
+
+```bash
+pixi run python -m hexatic.unwrapped_analysis.run_sweep --all --overwrite
+pixi run python -m hexatic.unwrapped_analysis.simulate_case_perfect_hexatic --case circ_60_0D --overwrite
+```
+
+The lattice is indexed by triangular-basis integers `(j, i)`. Its circumference identification is
+
+```text
+c = (1, N_theta - 1),
+```
+
+so crossing the axial seam changes the azimuthal lattice index by one: `(0, 0)` identifies with `(1, N_theta - 1)`. `UnwrappedCase` constructs an integer axial supercell vector orthogonal to `c` in the triangular metric,
+
+```text
+p = ((2n + m)/g, -(2m + n)/g),  where c = (m, n), g = gcd(2n + m, 2m + n).
+```
+
+`simulate_case_perfect_hexatic.py` enumerates one fundamental parallelogram of `(c, p)`, maps its circumference fraction to `theta`, and maps its axial fraction to the periodic HOOMD `x` box. This preserves all triangular nearest-neighbour bonds under both periodic identifications. Consequently:
+
+- `perfect_hexatic_a`, `perfect_hexatic_lx`, and `perfect_hexatic_n_particles` are the physical supercell values; do not substitute the legacy `a`, `lx`, or `n_particles` properties when writing the perfect-supercell GSD.
+- The supercell generally has a different axial length and particle count from the old rectangular approximation. This is intentional and should be recorded when comparing cases.
+- The old `simulate_case.py` remains only as a non-perfect, linearly sheared experimental implementation. Do not use it for the sweep or as the reference initial condition.
+- Initial states, trajectories, and metadata retain the same per-case output paths. Running an alternative generator with `--overwrite` replaces those artifacts.
+
+## Rho-Fitting: Current Architecture
+
+The fitting workflow has grown from a surface-density fit into a 3D cylindrical mechanical-moment pipeline:
+
+```text
+GSD + active-matter NPZ + hexatic inputs
+  -> GPU Gaussian coarse-graining on (x, theta, r)
+  -> rho, P, Q, A and measured currents J_rho, J_P, J_Q
+  -> temporal Chebyshev filtering + cylindrical spectral derivatives
+  -> mechanical targets and candidate flux libraries
+  -> divergence-primary constrained sparse regression
+  -> cached fit/report/plots
+  -> dealiased cylindrical PDE rollout and validation artifacts
+```
+
+The moment and current conventions are now volumetric and use the orthonormal cylindrical frame `(x, e_theta, e_r)`:
+
+```text
+rho:   (T, Nx, Ntheta, Nr)
+P:     (T, Nx, Ntheta, Nr, 3)
+Q, A:  (T, Nx, Ntheta, Nr, 3, 3)
+J_rho: (T, Nx, Ntheta, Nr, 3)
+J_P:   (T, Nx, Ntheta, Nr, 3, 3)
+J_Q:   (T, Nx, Ntheta, Nr, 3, 3, 3)
+```
+
+The closures being fitted and rolled out are:
 
 ```text
 partial_t rho = -div(U0 P + F_rho / gamma)
-partial_t P   = -div(U0 F_P) + relaxation
-partial_t Q   = -div(F_Q) + relaxation
+partial_t P   = -U0 div(F_P) + P relaxation
+partial_t Q   = -div(F_Q) + Q relaxation
 ```
 
-Use 3D orientation moments with 2D surface flux directions:
+For every target, fitting and reporting distinguish the field/flux prediction from the divergence prediction. The divergence is the PDE-relevant primary target; a good flux R^2 alone is not evidence for a usable closure.
 
-```text
-P:     (T, Nx, Ny, 3)
-Q, A:  (T, Nx, Ny, 3, 3)
-J_rho: (T, Nx, Ny, 2)
-J_P:   (T, Nx, Ny, 2, 3)
-J_Q:   (T, Nx, Ny, 2, 3, 3)
-```
+Important Python modules:
 
-The report distinguishes:
+- `fit.py`: orchestrates loading, GPU coarse-graining, spectral fields, target/library construction, and regression output.
+- `config.py`: canonical case paths plus numerical controls, including radial bins/range and mechanical flux weighting.
+- `spectral.py`: cached Shenfun cylindrical `(x, theta, r)` operators, radial Chebyshev interpolation, and 2/3 filtering.
+- `basis.py`: Chebyshev temporal filtering/derivatives and temporal power diagnostics.
+- `regression.py`: constrained SR3/L1 fitting and coefficient-path/importance diagnostics.
+- `pde_validation/`: cache validation, IMEX rollout modes (`full`, `rho-only`, `p-only`, `q-only`), reports, and HTML plots.
 
-```text
-flux R^2:       fit F itself
-divergence R^2: fit div(F), the PDE-relevant target
-```
+## Rust Numerical Core
 
-Do not treat a good flux R^2 as proof of a good PDE closure.
+`rust/rho_fitting_core` is a PyO3/maturin extension exposed as `hexatic.rho_fitting._rho_fitting_core`. It is no longer just a small candidate-library helper. Its responsibilities are:
 
-## Architecture Notes
+- GPU Gaussian deposition of 3D cylindrical mechanical fields through Burn (`coarse_grain_burn/`), with Metal/WGPU and CUDA feature variants;
+- construction and validation of `rho`, `P`, `Q`, `A`, `psi6_sq`, and all current tensors;
+- conversion of measured currents into `Y_rho`, `Y_P`, and `Y_Q` mechanical targets;
+- finite-row/component sampling for regression; and
+- Python bindings and shape/error translation in `python.rs`.
 
-Keep this project concise. Avoid overbuilt classes, verbose helper layers, and broad refactors. Prefer small, direct functions.
-
-High-level flow:
-
-```text
-User -> plots/fits dynamics and fields -> analysis/rho_fitting workflows -> GSD, NPZ, reports, HTML
-```
-
-Important components:
-
-- Pixi is the default environment runner.
-- Numba is welcome where it keeps code simple.
-- SciPy is preferred for mathematically heavy operations when useful.
-- Rust is used for `rho_fitting_core`, especially mechanical field construction and candidate libraries.
-- Burn is used for GPU coarse-graining support. `faer`/CPU linear algebra does not need GPU.
-
-Use the Pixi environment from `pixi.toml`.
-
-## File Tree
-
-```text
-.
-├── AGENTS.md
-│   └── This guide for agents working in the repository.
-├── ARCHITECTURE.md
-│   └── Original architecture/data notes and conventions.
-├── pixi.toml
-│   └── Pixi tasks and dependencies. Includes `rho-fitting-build`.
-├── radii_analysis.sh
-│   └── Full radius workflow. Expensive; do not run casually.
-├── hexatic/
-│   ├── constants/
-│   │   └── Simulation constants and radius-aware geometry helpers.
-│   ├── hoomd_cylinder*.py, hoomd_spherical_cavity.py
-│   │   └── HOOMD simulation entrypoints. Expensive; avoid unless requested.
-│   ├── analysis/
-│   │   └── General plotting/analysis utilities.
-│   ├── active_matter_cylinder/
-│   │   ├── cartesian/
-│   │   │   └── Cartesian-grid active matter comparisons and stress/flux diagnostics.
-│   │   ├── fields/
-│   │   │   └── Field construction helpers.
-│   │   └── shear/
-│   │       └── Shear and stress decomposition logic.
-│   ├── chirality/
-│   │   └── Translation/bond chirality calculations.
-│   ├── cylinder_dynamics/
-│   │   └── Cylinder dynamical diagnostics, relaxation plots, and shell analyses.
-│   ├── model_fitting/
-│   │   ├── fitting/
-│   │   │   └── Older/general model-fitting infrastructure.
-│   │   ├── film_continuity/
-│   │   │   └── Continuity-equation style film fitting utilities.
-│   │   └── output/
-│   │       └── Generated model-fitting outputs.
-│   ├── radii_analysis/
-│   │   ├── gsd/
-│   │   ├── npz_fields/
-│   │   ├── hexatic_output/
-│   │   ├── metadata/
-│   │   └── logs/
-│   │       └── Radius sweep simulations, derived fields, and logs.
-│   ├── rho_fitting/
-│   │   ├── fit.py
-│   │   │   └── Main rho-fitting orchestration, caching, regression calls.
-│   │   ├── regression.py
-│   │   │   └── PySINDy SR3/L1 regression and stability path reporting.
-│   │   ├── outputs.py, report.py, plots.py
-│   │   │   └── Fit caches, markdown reports, and plots.
-│   │   ├── cache.py, config.py, library.py
-│   │   │   └── IO/config/candidate labels.
-│   │   ├── pde_validation/
-│   │   │   ├── model.py
-│   │   │   │   └── PDE rollout model and validation modes.
-│   │   │   ├── operators.py
-│   │   │   │   └── Surface derivatives and closure evaluation.
-│   │   │   ├── report.py
-│   │   │   │   └── Text report for RMSE/R^2 at selected rollout steps.
-│   │   │   ├── plot.py
-│   │   │   │   └── HTML visualizations.
-│   │   │   └── cache.py
-│   │   │       └── Validation cache loading and shape/name checks.
-│   │   ├── gsd/
-│   │   │   └── Local trajectory inputs for rho fitting.
-│   │   ├── hexatic_output/
-│   │   │   └── Hexatic order and neighbor-count text files.
-│   │   ├── npz/
-│   │   │   └── Input NPZ fields.
-│   │   └── output/
-│   │       └── Fit results, PDE validation NPZ/HTML/TXT reports.
-│   └── output/
-│       └── Generated simulation/analysis outputs.
-├── rust/
-│   └── rho_fitting_core/
-│       ├── src/mechanics/
-│       │   └── Rust mechanical coarse-graining targets and candidate libraries.
-│       ├── src/coarse_grain_burn.rs
-│       │   └── Burn-backed GPU coarse-graining support.
-│       ├── src/fft_ops.rs
-│       │   └── Spectral derivatives for candidate construction.
-│       └── Cargo.toml
-│           └── Native extension configuration.
-├── tests/
-│   └── Lightweight tests for fitting, mechanics, and PDE validation.
-└── outputs/, logs/
-    └── Generated scratch/agent outputs; usually unrelated to source changes.
-```
-
-## Important Data Sources
-
-Current radius `15D` data conventions from the architecture notes:
-
-```text
-100 frames
-9870 particles
-steps start at 100000
-radius = 15D
-```
-
-For this simulation, `Lx` is fixed by:
-
-```text
-FIXED_LX = 4000 / (RHO * pi * BASELINE_CYLINDER_RADIUS**2)
-```
-
-Do not assume `Lx` follows the helper function in `hexatic/constants/` for this dataset.
-
-Useful sources:
-
-- `hexatic/rho_fitting/gsd/trajectory_radius_15D.gsd`: particle positions, orientations, velocities.
-- `hexatic/rho_fitting/hexatic_output/radius_15D_hexatic_order.txt`: per-particle `psi6`.
-- `hexatic/rho_fitting/hexatic_output/radius_15D_neighbor_counts.txt`: neighbor counts; disclination charge can be inferred from `6 - neighbor_count`.
-- `hexatic/rho_fitting/output/radius_15D_fit_result.npz`: current rho-fitting cache.
-- `hexatic/rho_fitting/output/radius_15D_rho_fitting_report.md`: current fit report.
-- `hexatic/rho_fitting/output/radius_15D_pde_validation_report.txt`: PDE rollout RMSE/R^2 report.
-
-Older/general analysis NPZ files may live under `hexatic/density_analysis/npz/` or radius-analysis output folders. Prefer existing `.npz`/`.gsd` data over recomputation.
-
-## Array Conventions
-
-Particle-local arrays usually use:
-
-```text
-(frame, particle, component)
-```
-
-Gridded arrays usually use:
-
-```text
-(frame, Nx, Ny, ...)
-```
-
-For unwrapped cylinder surface fields:
-
-```text
-x direction      -> axis 0 / surface component 0
-y = R * theta    -> axis 1 / surface component 1
-radial direction -> orientation component 2
-```
-
-Most PDE/rho-fitting plots should use either `(x, R theta)` as a 2D unwrapped cylinder or convert carefully back to `(x, y, z)`.
-
-## Build, Test, And Run Commands
-
-Use Pixi for all Python and Rust commands.
-
-Common checks:
+The CPU mechanics implementation exists for core numerical logic, but the Python coarse-graining entry point requires a GPU-enabled build. Build the extension after changing Rust code or when the local ABI/Python version changes:
 
 ```bash
-pixi run python -m compileall hexatic
+pixi run rho-fitting-build        # Metal/WGPU
+pixi run rho-fitting-build-cuda   # CUDA
+```
+
+Keep physical-frame component order and array shapes synchronized across the Rust core, `fit.py`, `spectral.py`, and `pde_validation`. A mismatch can produce plausible arrays but incorrect cylindrical divergences.
+
+## Data and Outputs
+
+The canonical `radius_15D` fitting inputs are local to `hexatic/rho_fitting/`:
+
+- `gsd/trajectory_radius_15D.gsd`: positions, orientations, and velocities.
+- `npz/radius_15D_active_matter_fields.npz`: active-matter grid/trajectory inputs.
+- `hexatic_output/`: particle hexatic order, velocity, and neighbour-count data.
+- `output/radius_15D_fit_result.npz`: cached mechanical fields, targets, libraries, and fit coefficients.
+- `output/radius_15D_rho_fitting_report.md`: regression and mechanical-fit report.
+- `output/radius_15D_pde_validation_*.npz`, report, and HTML: rollout results.
+
+The current radius `15D` data has 100 frames and 9870 particles, starting at simulation step 100000. Its axial length is a dataset-specific fixed value; do not infer it from generic cylinder helpers.
+
+Generated artifacts are not source changes. Never overwrite them without explicit `--overwrite` and user authorization.
+
+## Commands
+
+Use Pixi for Python and Rust commands.
+
+```bash
+# Lightweight source checks
+pixi run python -m compileall hexatic/unwrapped_analysis hexatic/rho_fitting
 pixi run ty check hexatic/rho_fitting
-pixi run python -m unittest tests.test_rho_fitting_pde_validation
+
+# Rust extension checks/builds
 pixi run cargo check --manifest-path rust/rho_fitting_core/Cargo.toml
 pixi run cargo check --manifest-path rust/rho_fitting_core/Cargo.toml --features gpu-metal
-```
-
-Build the rho-fitting extension after Rust candidate/core changes:
-
-```bash
 pixi run rho-fitting-build
-```
 
-Fit from cached coarse-graining:
-
-```bash
+# Cached rho-fitting and PDE workflows (can be expensive)
 pixi run rho-fitting-lite --case radius_15D --fit-only --overwrite
-```
-
-Run PDE validation and write the text report:
-
-```bash
 pixi run python -m hexatic.rho_fitting.pde_validation --case radius_15D --mode all --no-plot --overwrite
 ```
 
-Avoid expensive workflows unless explicitly requested:
+Do not run full HOOMD sweeps, `radii_analysis.sh`, full coarse-graining, or PDE rollouts casually. They are expensive and write generated data.
 
-```bash
-bash radii_analysis.sh
-```
+## Working Rules
 
-## Coding Style
-
-- Use standard Python style, 4-space indentation, and type hints where they clarify interfaces.
-- Use dataclasses for structured result/config objects.
-- Keep functions small and direct.
-- Prefer existing local patterns over new abstractions.
-- Keep comments minimal; add them only for non-obvious physics, numerical assumptions, or file-format details.
-- Use `snake_case` for functions, variables, modules, and output filenames.
-- Use `PascalCase` for classes.
-- Use `assert` for fail-fast validation in this codebase unless a public API needs a specific exception.
-
-## Data And Output Practices
-
-- Prefer loading cached `.npz`/`.gsd` files over recomputing expensive intermediates.
-- Do not overwrite generated simulation data unless the command has an explicit `--overwrite` and the user requested it.
-- Keep generated reports/plots in package-specific output folders, especially `hexatic/rho_fitting/output/`.
-- Do not commit unrelated generated artifacts.
-
-## Agent Instructions
-
-- Read existing constants in `hexatic/constants/` before changing simulation geometry, density, time step, or radius handling.
-- Preserve radius-aware parameters; avoid global default radius assumptions.
-- Use `rg` for searches.
-- Use `apply_patch` for edits.
-- Run frequent lightweight lint/syntax checks after feature edits.
-- Do not run full simulations or expensive analysis scripts unless explicitly requested.
-- If touching rho-fitting Rust code, run `cargo check` and `cargo check --features gpu-metal` through Pixi.
-- If touching `pde_validation`, run compileall, `ty`, and `tests.test_rho_fitting_pde_validation`.
+- Read `hexatic/constants/` before changing any simulation geometry, density, interaction, or time-step parameter.
+- Preserve the supercell’s integer lattice-vector construction; do not reintroduce a fractional axial shear as a substitute for the twisted periodic identification.
+- Prefer cached NPZ/GSD inputs to recomputation.
+- Use `rg` for repository searches and `apply_patch` for edits.
+- Keep Python functions direct, with standard 4-space indentation and type hints where useful. Prefer small dataclasses for structured configuration/results.
+- For rho-fitting changes, preserve the `(x, theta, r)` grid order and physical `(x, e_theta, e_r)` component order throughout.
+- Do not commit generated GSD, NPZ, plots, HTML, logs, compiled extension binaries, or unrelated user changes.
