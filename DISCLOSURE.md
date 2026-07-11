@@ -7,4 +7,4 @@ Parts of this repository were developed with assistance from AI models:
 - Deepseek V4
 - mimo-v2.5.pro
 
-*All AI-assisted code was manually reviewed and tested*.
+*All AI-assisted code was manually reviewed, planned, and tested*.
