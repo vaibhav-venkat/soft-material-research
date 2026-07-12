@@ -11,6 +11,7 @@ from numpy.typing import NDArray
 
 Array = NDArray[Any]
 
+from hexatic.rho_fitting import _rho_fitting_core, _rho_fitting_core_import_error
 from hexatic.rho_fitting.spectral import CylindricalSpectralOperators
 
 
@@ -24,6 +25,12 @@ class ClosureFields:
     s_q: Array
     ubar: Array
     a_surface: Array
+
+
+def _core() -> Any:
+    if _rho_fitting_core is None:
+        raise ImportError(f"rho-fitting Rust core is unavailable: {_rho_fitting_core_import_error}")
+    return _rho_fitting_core
 
 
 def gradient_scalar(values: Array, operators: CylindricalSpectralOperators) -> Array:
@@ -70,9 +77,24 @@ def divergence_surface_flux(values: Array, operators: CylindricalSpectralOperato
     return divergence_vector(values, operators)
 
 
+def alignment_tensor(rho: Array, q: Array) -> Array:
+    """Build the shared alignment tensor ``A = Q + rho I / 3``."""
+    return np.asarray(
+        _core().build_alignment_tensor(
+            np.ascontiguousarray(rho, dtype=np.float64),
+            np.ascontiguousarray(q, dtype=np.float64),
+        )
+    )
+
+
 def a_dot_grad_rho(a: Array, grad_rho: Array) -> Array:
     """Contract the full second orientation moment against the cylindrical density gradient."""
-    return np.einsum("...ka,...a->...k", a, grad_rho)
+    return np.asarray(
+        _core().contract_alignment_gradient(
+            np.ascontiguousarray(a, dtype=np.float64),
+            np.ascontiguousarray(grad_rho, dtype=np.float64),
+        )
+    )
 
 
 def closure_fields(
@@ -113,31 +135,39 @@ def closure_fields(
         Coefficient order is positional and must match the Rust/Python library builders;
         this routine does not realign by term name.
     """
-    identity = np.eye(3, dtype=np.float64)
-    a = q + rho[..., None, None] * identity / 3.0
+    a = alignment_tensor(rho, q)
     a_surface = a
 
     grad_rho = gradient_scalar(rho, operators)
-    f_rho = (
-        y_rho_coefficients[0] * grad_rho
-        + y_rho_coefficients[1] * a_dot_grad_rho(a_surface, grad_rho)
-        + y_rho_coefficients[2] * p
+    f_rho = weighted_linear_combination(
+        [
+            grad_rho,
+            a_dot_grad_rho(a_surface, grad_rho),
+            p,
+        ],
+        y_rho_coefficients,
     )
 
     grad_p = gradient_vector(p, operators)
-    f_p = (
-        y_p_coefficients[0] * a_surface
-        + y_p_coefficients[1] * psi6_sq_fixed[..., None, None] * a_surface
-        + y_p_coefficients[2] * grad_p
+    f_p = weighted_linear_combination(
+        [
+            a_surface,
+            scale_by_scalar(psi6_sq_fixed, a_surface),
+            grad_p,
+        ],
+        y_p_coefficients,
     )
 
     ubar = estimate_ubar(f_p, a_surface) if ubar_override is None else ubar_override
     grad_q = gradient_rank2(q, operators)
-    ubar_p_alpha = ubar[..., None, None, None] * p_dot_alpha_traceless(p)
-    f_q = (
-        y_q_coefficients[0] * project_flux_directions(ubar_p_alpha, "tangential")
-        + y_q_coefficients[1] * project_flux_directions(ubar_p_alpha, "radial")
-        + y_q_coefficients[2] * project_flux_directions(grad_q, "radial")
+    ubar_p_alpha = scale_by_scalar(ubar, p_dot_alpha_traceless(p))
+    f_q = weighted_linear_combination(
+        [
+            project_flux_directions(ubar_p_alpha, "tangential"),
+            project_flux_directions(ubar_p_alpha, "radial"),
+            project_flux_directions(grad_q, "radial"),
+        ],
+        y_q_coefficients,
     )
     s_q = np.zeros_like(q)
     return ClosureFields(f_rho=f_rho, f_p=f_p, f_q=f_q, s_q=s_q, ubar=ubar, a_surface=a_surface)
@@ -145,33 +175,51 @@ def closure_fields(
 
 def estimate_ubar(y_p: Array, a: Array) -> Array:
     """Project the fitted P flux onto the alignment tensor to estimate speed."""
-    denominator = np.sum(a * a, axis=(-2, -1))
-    numerator = np.sum(y_p * a, axis=(-2, -1))
-    return np.divide(numerator, denominator, out=np.zeros_like(numerator), where=denominator > 0.0)
+    return np.asarray(
+        _core().estimate_ubar(
+            np.ascontiguousarray(y_p, dtype=np.float64),
+            np.ascontiguousarray(a, dtype=np.float64),
+        )
+    )
 
 
 def project_flux_directions(values: Array, mode: str) -> Array:
     """Project a cylindrical Q flux tensor onto tangential or radial flux directions."""
-    out = np.zeros_like(values, dtype=np.float64)
-    if mode == "tangential":
-        out[..., 0, :, :] = values[..., 0, :, :]
-        out[..., 1, :, :] = values[..., 1, :, :]
-    elif mode == "radial":
-        out[..., 2, :, :] = values[..., 2, :, :]
-    else:
+    if mode not in {"tangential", "radial"}:
         raise AssertionError(f"unknown flux projection mode: {mode}")
-    return out
+    return np.asarray(
+        _core().project_flux_directions(
+            np.ascontiguousarray(values, dtype=np.float64),
+            0 if mode == "tangential" else 1,
+        )
+    )
 
 
 def p_dot_alpha_traceless(p: Array) -> Array:
     """Build the symmetric traceless ``P``-alignment tensor used in the Q closure."""
-    out = np.zeros(p.shape[:-1] + (3, 3, 3), dtype=np.float64)
-    identity = np.eye(3, dtype=np.float64)
-    for k in range(3):
-        for a in range(3):
-            for b in range(3):
-                out[..., k, a, b] = p[..., a] * float(k == b) + p[..., b] * float(k == a) - (2.0 / 3.0) * p[..., k] * identity[a, b]
-    return out
+    return np.asarray(
+        _core().build_p_alignment(np.ascontiguousarray(p, dtype=np.float64))
+    )
+
+
+def scale_by_scalar(scalar: Array, values: Array) -> Array:
+    """Multiply every trailing tensor component by a scalar field."""
+    return np.asarray(
+        _core().scale_by_scalar(
+            np.ascontiguousarray(scalar, dtype=np.float64),
+            np.ascontiguousarray(values, dtype=np.float64),
+        )
+    )
+
+
+def weighted_linear_combination(fields: list[Array], coefficients: Array) -> Array:
+    """Return the Rust-owned coefficient-weighted sum of same-shaped fields."""
+    return np.asarray(
+        _core().weighted_linear_combination(
+            [np.ascontiguousarray(field, dtype=np.float64) for field in fields],
+            np.ascontiguousarray(coefficients, dtype=np.float64),
+        )
+    )
 
 
 def grad_p_symmetric_traceless(p: Array, operators: CylindricalSpectralOperators) -> Array:

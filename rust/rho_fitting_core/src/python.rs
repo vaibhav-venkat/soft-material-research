@@ -104,6 +104,87 @@ fn finite_grid_mask(
 }
 
 #[pyfunction]
+/// Build the alignment tensor `A = Q + rho I / 3`.
+fn build_alignment_tensor(
+    py: Python<'_>,
+    rho: PyReadonlyArrayDyn<'_, f64>,
+    q: PyReadonlyArrayDyn<'_, f64>,
+) -> PyResult<Py<PyAny>> {
+    let value = fitting::alignment_tensor(rho.as_array(), q.as_array()).map_err(to_py_err)?;
+    Ok(value.into_pyarray(py).into_any().unbind())
+}
+
+#[pyfunction]
+/// Contract `A` with a cylindrical density gradient.
+fn contract_alignment_gradient(
+    py: Python<'_>,
+    a: PyReadonlyArrayDyn<'_, f64>,
+    grad_rho: PyReadonlyArrayDyn<'_, f64>,
+) -> PyResult<Py<PyAny>> {
+    let value =
+        fitting::alignment_dot_gradient(a.as_array(), grad_rho.as_array()).map_err(to_py_err)?;
+    Ok(value.into_pyarray(py).into_any().unbind())
+}
+
+#[pyfunction]
+/// Estimate the scalar speed by projecting `Y_P` onto `A`.
+fn estimate_ubar(
+    py: Python<'_>,
+    y_p: PyReadonlyArrayDyn<'_, f64>,
+    a: PyReadonlyArrayDyn<'_, f64>,
+) -> PyResult<Py<PyAny>> {
+    let value = fitting::estimate_ubar(y_p.as_array(), a.as_array()).map_err(to_py_err)?;
+    Ok(value.into_pyarray(py).into_any().unbind())
+}
+
+#[pyfunction]
+/// Build the symmetric traceless P-alignment tensor.
+fn build_p_alignment(py: Python<'_>, p: PyReadonlyArrayDyn<'_, f64>) -> PyResult<Py<PyAny>> {
+    let value = fitting::p_alignment_traceless(p.as_array()).map_err(to_py_err)?;
+    Ok(value.into_pyarray(py).into_any().unbind())
+}
+
+#[pyfunction]
+/// Multiply every trailing tensor component by a scalar field.
+fn scale_by_scalar(
+    py: Python<'_>,
+    scalar: PyReadonlyArrayDyn<'_, f64>,
+    values: PyReadonlyArrayDyn<'_, f64>,
+) -> PyResult<Py<PyAny>> {
+    let value =
+        fitting::scale_by_scalar(scalar.as_array(), values.as_array()).map_err(to_py_err)?;
+    Ok(value.into_pyarray(py).into_any().unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (values, mode))]
+/// Keep tangential (`0`) or radial (`1`) flux directions.
+fn project_flux_directions(
+    py: Python<'_>,
+    values: PyReadonlyArrayDyn<'_, f64>,
+    mode: u8,
+) -> PyResult<Py<PyAny>> {
+    let value = fitting::project_flux_directions(values.as_array(), mode).map_err(to_py_err)?;
+    Ok(value.into_pyarray(py).into_any().unbind())
+}
+
+#[pyfunction]
+/// Return a coefficient-weighted sum of same-shaped fields.
+fn weighted_linear_combination(
+    py: Python<'_>,
+    fields: Vec<PyReadonlyArrayDyn<'_, f64>>,
+    coefficients: PyReadonlyArray1<'_, f64>,
+) -> PyResult<Py<PyAny>> {
+    let views = fields
+        .iter()
+        .map(|field| field.as_array())
+        .collect::<Vec<_>>();
+    let value =
+        fitting::weighted_linear_combination(&views, coefficients.as_array()).map_err(to_py_err)?;
+    Ok(value.into_pyarray(py).into_any().unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (target_divergence, divergence_library, sample_coordinates, target_flux=None, flux_library=None, flux_weight=0.0))]
 /// Assemble finite divergence rows and optional weighted flux rows for regression.
 fn assemble_regression_rows(
@@ -257,6 +338,13 @@ fn _rho_fitting_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(sample_grid_rows, m)?)?;
     m.add_function(wrap_pyfunction!(finite_grid_mask, m)?)?;
+    m.add_function(wrap_pyfunction!(build_alignment_tensor, m)?)?;
+    m.add_function(wrap_pyfunction!(contract_alignment_gradient, m)?)?;
+    m.add_function(wrap_pyfunction!(estimate_ubar, m)?)?;
+    m.add_function(wrap_pyfunction!(build_p_alignment, m)?)?;
+    m.add_function(wrap_pyfunction!(scale_by_scalar, m)?)?;
+    m.add_function(wrap_pyfunction!(project_flux_directions, m)?)?;
+    m.add_function(wrap_pyfunction!(weighted_linear_combination, m)?)?;
     m.add_function(wrap_pyfunction!(assemble_regression_rows, m)?)?;
     m.add_function(wrap_pyfunction!(build_mechanical_fields, m)?)?;
     m.add_function(wrap_pyfunction!(build_mechanical_targets, m)?)?;

@@ -9,7 +9,7 @@ import numpy as np
 from hexatic.rho_fitting.spectral import CylindricalSpectralOperators, barycentric_matrix, cached_cylindrical_operators, transfer_radial
 
 from ..cache import ValidationInputs, load_validation_inputs
-from ..operators import closure_fields, divergence_vector, estimate_ubar
+from ..operators import alignment_tensor, closure_fields, divergence_vector, estimate_ubar
 from .interpolation import interpolated_cached_fields, interpolated_fields
 from .types import P_RELAXATION_COEFFICIENT, Q_RELAXATION_COEFFICIENT, Array, ValidationOptions, ValidationResult
 
@@ -61,8 +61,9 @@ def run_validation(inputs: ValidationInputs, options: ValidationOptions | None =
 
 
 def _imex_step(inputs: ValidationInputs, operators: CylindricalSpectralOperators, rho: Array, p: Array, q: Array, psi6: Array, time: float, dt: float, mode: str, ubar_source: str, to_spectral: Array) -> tuple[Array, Array, Array]:
-    rho_ref, p_ref, q_ref, a_ref, y_p_ref = interpolated_cached_fields(inputs, time)
-    rho_ref, p_ref, q_ref, a_ref, y_p_ref = (transfer_radial(value, to_spectral, 2) for value in (rho_ref, p_ref, q_ref, a_ref, y_p_ref))
+    rho_ref, p_ref, q_ref, _a_ref, y_p_ref = interpolated_cached_fields(inputs, time)
+    rho_ref, p_ref, q_ref, _a_ref, y_p_ref = (transfer_radial(value, to_spectral, 2) for value in (rho_ref, p_ref, q_ref, _a_ref, y_p_ref))
+    a_ref = alignment_tensor(rho_ref, q_ref)
     rho_eval = rho if mode in {"full", "rho-only"} else rho_ref
     p_eval = p if mode in {"full", "p-only"} else p_ref
     q_eval = q if mode in {"full", "q-only"} else q_ref

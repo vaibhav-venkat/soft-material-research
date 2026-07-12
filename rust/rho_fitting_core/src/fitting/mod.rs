@@ -1,9 +1,16 @@
+mod algebra;
+
 use ndarray::{Array1, Array2, Array4, ArrayView2, ArrayViewD, IxDyn};
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 use crate::{CoreError, CoreResult};
+
+pub(crate) use algebra::{
+    alignment_dot_gradient, alignment_tensor, estimate_ubar, p_alignment_traceless,
+    project_flux_directions, scale_by_scalar, weighted_linear_combination,
+};
 
 /// Sample valid `(frame, x, theta, r)` rows from a four-dimensional mask.
 pub fn sample_grid_rows(

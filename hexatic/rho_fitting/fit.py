@@ -734,11 +734,22 @@ def _candidate_flux_terms(
     rho = spectral["rho"]
     p = spectral["P"]
     q = spectral["Q"]
-    a = spectral["A"]
     psi6_sq = spectral["psi6_sq"]
+    core = _core()
+    a = np.asarray(
+        core.build_alignment_tensor(
+            np.ascontiguousarray(rho, dtype=np.float64),
+            np.ascontiguousarray(q, dtype=np.float64),
+        )
+    )
     if target_name == "Y_rho":
         grad_rho = _gradient_cylindrical_scalar(rho, lx, theta_period, r_centers)
-        a_grad_rho = np.einsum("...ka,...a->...k", a, grad_rho)
+        a_grad_rho = np.asarray(
+            core.contract_alignment_gradient(
+                np.ascontiguousarray(a, dtype=np.float64),
+                np.ascontiguousarray(grad_rho, dtype=np.float64),
+            )
+        )
         return [
             grad_rho,
             a_grad_rho,
@@ -746,30 +757,36 @@ def _candidate_flux_terms(
         ]
     if target_name == "Y_P":
         grad_p = _gradient_cylindrical_vector(p, lx, theta_period, r_centers)
-        return [a, psi6_sq[..., None, None] * a, grad_p]
+        psi6_a = np.asarray(
+            core.scale_by_scalar(
+                np.ascontiguousarray(psi6_sq, dtype=np.float64),
+                np.ascontiguousarray(a, dtype=np.float64),
+            )
+        )
+        return [a, psi6_a, grad_p]
     if target_name == "Y_Q":
         grad_q = _gradient_cylindrical_rank2(q, lx, theta_period, r_centers)
-        ubar = _estimate_ubar(spectral["Y_P"], a)
-        ubar_p_alpha = ubar[..., None, None, None] * _p_dot_alpha_traceless(p)
+        ubar = np.asarray(
+            core.estimate_ubar(
+                np.ascontiguousarray(spectral["Y_P"], dtype=np.float64),
+                np.ascontiguousarray(a, dtype=np.float64),
+            )
+        )
+        p_alignment = np.asarray(
+            core.build_p_alignment(np.ascontiguousarray(p, dtype=np.float64))
+        )
+        ubar_p_alpha = np.asarray(
+            core.scale_by_scalar(
+                np.ascontiguousarray(ubar, dtype=np.float64),
+                np.ascontiguousarray(p_alignment, dtype=np.float64),
+            )
+        )
         return [
-            _project_flux_directions(ubar_p_alpha, "tangential"),
-            _project_flux_directions(ubar_p_alpha, "radial"),
-            _project_flux_directions(grad_q, "radial"),
+            np.asarray(core.project_flux_directions(ubar_p_alpha, 0)),
+            np.asarray(core.project_flux_directions(ubar_p_alpha, 1)),
+            np.asarray(core.project_flux_directions(np.ascontiguousarray(grad_q), 1)),
         ]
     raise AssertionError(f"unknown mechanical target: {target_name}")
-
-
-def _project_flux_directions(values: Array, mode: str) -> Array:
-    """Project a cylindrical flux tensor onto tangential or radial flux directions."""
-    out = np.zeros_like(values, dtype=np.float64)
-    if mode == "tangential":
-        out[..., 0, :, :] = values[..., 0, :, :]
-        out[..., 1, :, :] = values[..., 1, :, :]
-    elif mode == "radial":
-        out[..., 2, :, :] = values[..., 2, :, :]
-    else:
-        raise AssertionError(f"unknown flux projection mode: {mode}")
-    return out
 
 
 def _gradient_cylindrical_scalar(values: Array, lx: float, theta_period: float, r_centers: Array) -> Array:
@@ -827,24 +844,6 @@ def _laplacian_cylindrical_rank2(values: Array, lx: float, theta_period: float, 
     for row in range(values.shape[-2]):
         for col in range(values.shape[-1]):
             out[..., row, col] = _laplacian_cylindrical_scalar(values[..., row, col], lx, theta_period, r_centers)
-    return out
-
-
-def _estimate_ubar(y_p: Array, a: Array) -> Array:
-    """Project measured/fitted P flux onto all three rows of A."""
-    denominator = np.sum(a * a, axis=(-2, -1))
-    numerator = np.sum(y_p * a, axis=(-2, -1))
-    return np.divide(numerator, denominator, out=np.zeros_like(numerator), where=denominator > 0.0)
-
-
-def _p_dot_alpha_traceless(p: Array) -> Array:
-    """Build symmetric traceless P-alignment flux tensor over all 3 directions."""
-    out = np.zeros(p.shape[:-1] + (3, 3, 3), dtype=np.float64)
-    identity = np.eye(3, dtype=np.float64)
-    for k in range(3):
-        for a in range(3):
-            for b in range(3):
-                out[..., k, a, b] = p[..., a] * float(k == b) + p[..., b] * float(k == a) - (2.0 / 3.0) * p[..., k] * identity[a, b]
     return out
 
 
