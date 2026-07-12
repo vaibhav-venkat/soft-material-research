@@ -4,11 +4,13 @@ use numpy::{
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyList};
 
 use crate::coarse_grain_burn;
 use crate::fitting;
 use crate::mechanics::{self, CurrentQField};
+use crate::particles;
+use crate::temporal;
 use crate::{CoreError, CoreResult};
 
 fn to_py_err(error: CoreError) -> PyErr {
@@ -184,6 +186,164 @@ fn weighted_linear_combination(
     Ok(value.into_pyarray(py).into_any().unbind())
 }
 
+#[pyclass(name = "TemporalOperators")]
+struct PyTemporalOperators {
+    inner: temporal::TemporalOperators,
+}
+
+#[pymethods]
+impl PyTemporalOperators {
+    #[new]
+    #[pyo3(signature = (steps, timestep, cutoff))]
+    fn new(steps: PyReadonlyArray1<'_, i64>, timestep: f64, cutoff: usize) -> PyResult<Self> {
+        Ok(Self {
+            inner: temporal::TemporalOperators::new(steps.as_array(), timestep, cutoff)
+                .map_err(to_py_err)?,
+        })
+    }
+
+    /// Apply the shared temporal fit/evaluation operators to one contiguous field block.
+    fn apply(&self, py: Python<'_>, values: PyReadonlyArrayDyn<'_, f64>) -> PyResult<Py<PyDict>> {
+        let result = self.inner.apply(values.as_array()).map_err(to_py_err)?;
+        let out = PyDict::new(py);
+        out.set_item("cleaned", result.cleaned.into_pyarray(py))?;
+        out.set_item("filtered", result.filtered.into_pyarray(py))?;
+        out.set_item("derivative", result.derivative.into_pyarray(py))?;
+        out.set_item("coefficients", result.coefficients.into_pyarray(py))?;
+        Ok(out.unbind())
+    }
+
+    /// Apply the same precomputed operators to multiple field blocks.
+    fn apply_many(
+        &self,
+        py: Python<'_>,
+        fields: Vec<PyReadonlyArrayDyn<'_, f64>>,
+    ) -> PyResult<Py<PyList>> {
+        let out = PyList::empty(py);
+        for field in fields {
+            let result = self.inner.apply(field.as_array()).map_err(to_py_err)?;
+            let item = PyDict::new(py);
+            item.set_item("cleaned", result.cleaned.into_pyarray(py))?;
+            item.set_item("filtered", result.filtered.into_pyarray(py))?;
+            item.set_item("derivative", result.derivative.into_pyarray(py))?;
+            item.set_item("coefficients", result.coefficients.into_pyarray(py))?;
+            out.append(item)?;
+        }
+        Ok(out.unbind())
+    }
+
+    /// Return scaled time coordinates used by the Chebyshev fit.
+    fn scaled_times(&self, py: Python<'_>) -> Py<PyAny> {
+        self.inner
+            .scaled_times
+            .clone()
+            .into_pyarray(py)
+            .into_any()
+            .unbind()
+    }
+
+    /// Return physical time coordinates used by the Chebyshev fit.
+    fn times(&self, py: Python<'_>) -> Py<PyAny> {
+        self.inner
+            .times
+            .clone()
+            .into_pyarray(py)
+            .into_any()
+            .unbind()
+    }
+
+    /// Return ascending Chebyshev-Lobatto nodes used by the diagnostic interpolation.
+    fn diagnostic_nodes(&self, py: Python<'_>) -> Py<PyAny> {
+        self.inner
+            .diagnostic_nodes
+            .clone()
+            .into_pyarray(py)
+            .into_any()
+            .unbind()
+    }
+
+    /// Fit diagnostic coefficients for values already resampled on the Lobatto nodes.
+    fn diagnostic_coefficients(
+        &self,
+        py: Python<'_>,
+        values_at_nodes: PyReadonlyArrayDyn<'_, f64>,
+    ) -> PyResult<Py<PyAny>> {
+        let result = self
+            .inner
+            .diagnostic_coefficients(values_at_nodes.as_array())
+            .map_err(to_py_err)?;
+        Ok(result.into_pyarray(py).into_any().unbind())
+    }
+}
+
+#[pyfunction]
+#[pyo3(signature = (orientation))]
+/// Rotate HOOMD quaternions onto the body-frame active axis.
+fn particle_active_direction(
+    py: Python<'_>,
+    orientation: PyReadonlyArray3<'_, f64>,
+) -> PyResult<Py<PyAny>> {
+    let value =
+        particles::active_direction_from_quaternion(orientation.as_array()).map_err(to_py_err)?;
+    Ok(value.into_pyarray(py).into_any().unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (vectors, theta))]
+/// Project Cartesian vectors to `(x, radial, azimuthal)` components.
+fn cartesian_to_cylindrical(
+    py: Python<'_>,
+    vectors: PyReadonlyArray3<'_, f64>,
+    theta: PyReadonlyArray2<'_, f64>,
+) -> PyResult<Py<PyAny>> {
+    let value =
+        particles::cartesian_to_cylindrical_components(vectors.as_array(), theta.as_array())
+            .map_err(to_py_err)?;
+    Ok(value.into_pyarray(py).into_any().unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (coords, direction_cylindrical=None, active_direction=None, orientation=None))]
+/// Convert particle directions into canonical `(x, e_theta, e_r)` order.
+fn particle_directions(
+    py: Python<'_>,
+    coords: PyReadonlyArray3<'_, f64>,
+    direction_cylindrical: Option<PyReadonlyArray3<'_, f64>>,
+    active_direction: Option<PyReadonlyArray3<'_, f64>>,
+    orientation: Option<PyReadonlyArray3<'_, f64>>,
+) -> PyResult<Py<PyAny>> {
+    let value = particles::tangential_particle_vectors(particles::DirectionInputs {
+        coords: coords.as_array(),
+        direction_cylindrical: direction_cylindrical.as_ref().map(|value| value.as_array()),
+        active_direction: active_direction.as_ref().map(|value| value.as_array()),
+        orientation: orientation.as_ref().map(|value| value.as_array()),
+    })
+    .map_err(to_py_err)?;
+    Ok(value.into_pyarray(py).into_any().unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (coords, steps, timestep, lx, theta_period))]
+/// Estimate periodic particle velocities in canonical cylindrical component order.
+fn particle_surface_velocities(
+    py: Python<'_>,
+    coords: PyReadonlyArray3<'_, f64>,
+    steps: PyReadonlyArray1<'_, i64>,
+    timestep: f64,
+    lx: f64,
+    theta_period: f64,
+) -> PyResult<Py<PyAny>> {
+    let value = particles::surface_velocities(particles::VelocityInputs {
+        coords: coords.as_array(),
+        steps: steps.as_array(),
+        timestep,
+        lx,
+        theta_period,
+    })
+    .map_err(to_py_err)?;
+    Ok(value.into_pyarray(py).into_any().unbind())
+}
+
 #[pyfunction]
 #[pyo3(signature = (target_divergence, divergence_library, sample_coordinates, target_flux=None, flux_library=None, flux_weight=0.0))]
 /// Assemble finite divergence rows and optional weighted flux rows for regression.
@@ -345,6 +505,11 @@ fn _rho_fitting_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(scale_by_scalar, m)?)?;
     m.add_function(wrap_pyfunction!(project_flux_directions, m)?)?;
     m.add_function(wrap_pyfunction!(weighted_linear_combination, m)?)?;
+    m.add_class::<PyTemporalOperators>()?;
+    m.add_function(wrap_pyfunction!(particle_active_direction, m)?)?;
+    m.add_function(wrap_pyfunction!(cartesian_to_cylindrical, m)?)?;
+    m.add_function(wrap_pyfunction!(particle_directions, m)?)?;
+    m.add_function(wrap_pyfunction!(particle_surface_velocities, m)?)?;
     m.add_function(wrap_pyfunction!(assemble_regression_rows, m)?)?;
     m.add_function(wrap_pyfunction!(build_mechanical_fields, m)?)?;
     m.add_function(wrap_pyfunction!(build_mechanical_targets, m)?)?;

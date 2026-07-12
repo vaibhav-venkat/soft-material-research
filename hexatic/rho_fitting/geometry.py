@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from . import _rho_fitting_core, _rho_fitting_core_import_error
+
 
 def theta_to_y(theta: np.ndarray, radius: float) -> np.ndarray:
     """Convert cylindrical angle coordinates to unwrapped surface distance."""
@@ -58,26 +60,7 @@ def active_direction_from_quaternion(orientation: np.ndarray) -> np.ndarray:
     Edge cases:
         Zero-norm quaternions are rejected instead of silently producing NaNs.
     """
-    orientation = np.asarray(orientation, dtype=float)
-    assert orientation.ndim == 3 and orientation.shape[-1] == 4, (
-        "orientation must have shape (frames, particles, 4)"
-    )
-
-    norms = np.linalg.norm(orientation, axis=-1)
-    assert np.all(norms > 0.0), "orientation contains zero-norm quaternions"
-    quat = orientation / norms[..., np.newaxis]
-    w = quat[..., 0]
-    x = quat[..., 1]
-    y = quat[..., 2]
-    z = quat[..., 3]
-    return np.stack(
-        (
-            1.0 - 2.0 * (y * y + z * z),
-            2.0 * (x * y + w * z),
-            2.0 * (x * z - w * y),
-        ),
-        axis=-1,
-    )
+    return np.asarray(_core().particle_active_direction(np.ascontiguousarray(orientation, dtype=float)))
 
 
 def cartesian_to_cylindrical_components(vectors: np.ndarray, theta: np.ndarray) -> np.ndarray:
@@ -91,17 +74,14 @@ def cartesian_to_cylindrical_components(vectors: np.ndarray, theta: np.ndarray) 
         Array with components ``(x, radial, azimuthal)`` and the same leading axes as
         ``theta``.
     """
-    vectors = np.asarray(vectors, dtype=float)
+    vectors = np.ascontiguousarray(vectors, dtype=float)
     theta = np.asarray(theta, dtype=float)
-    assert vectors.shape[-1] == 3 and vectors.shape[:-1] == theta.shape, (
+    assert vectors.ndim == 3 and vectors.shape[-1] == 3 and vectors.shape[:-1] == theta.shape, (
         "vectors must have shape theta.shape + (3,)"
     )
-
-    sin_theta = np.sin(theta)
-    cos_theta = np.cos(theta)
-    radial = vectors[..., 1] * sin_theta + vectors[..., 2] * cos_theta
-    azimuthal = vectors[..., 1] * cos_theta - vectors[..., 2] * sin_theta
-    return np.stack((vectors[..., 0], radial, azimuthal), axis=-1)
+    return np.asarray(
+        _core().cartesian_to_cylindrical(vectors, np.ascontiguousarray(theta, dtype=float))
+    )
 
 
 def tangential_particle_vectors(
@@ -132,21 +112,20 @@ def tangential_particle_vectors(
         Exactly one orientation source is not required, but at least one usable source must
         be present when cached cylindrical directions are absent.
     """
-    coords = np.asarray(coords, dtype=float)
-    assert coords.ndim == 3 and coords.shape[-1] >= 2, "coords must have shape (frames, particles, >=2)"
-
-    if direction_cylindrical is not None:
-        cylindrical = np.asarray(direction_cylindrical, dtype=float)
-    else:
-        if active_direction is None:
-            if orientation is None:
-                assert False, "missing particle orientation source"
-            active_direction = active_direction_from_quaternion(orientation)
-        cylindrical = cartesian_to_cylindrical_components(active_direction, coords[..., 1])
-
-    assert cylindrical.shape[:2] == coords.shape[:2] and cylindrical.shape[-1] == 3, (
-        "particle directions must match coords frame/particle axes"
+    coords = np.ascontiguousarray(coords, dtype=float)
+    assert coords.ndim == 3 and coords.shape[-1] == 3, "coords must have shape (frames, particles, 3)"
+    return np.asarray(
+        _core().particle_directions(
+            coords,
+            None if direction_cylindrical is None else np.ascontiguousarray(direction_cylindrical, dtype=float),
+            None if active_direction is None else np.ascontiguousarray(active_direction, dtype=float),
+            None if orientation is None else np.ascontiguousarray(orientation, dtype=float),
+        )
     )
-    return np.ascontiguousarray(
-        np.stack((cylindrical[..., 0], cylindrical[..., 2], cylindrical[..., 1]), axis=-1)
-    )
+
+
+def _core():
+    """Return the compiled particle-transform core."""
+    if _rho_fitting_core is None:
+        raise ImportError(f"rho-fitting Rust core is unavailable: {_rho_fitting_core_import_error}")
+    return _rho_fitting_core

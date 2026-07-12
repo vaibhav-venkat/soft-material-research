@@ -120,15 +120,18 @@ fn mechanical_gaussian_device<B: Backend>(
     device: &B::Device,
 ) -> CoreResult<MechanicalFieldSet> {
     let MechanicalInputViews {
+        particles,
+        grid: domain,
+        sigma,
+        ..
+    } = inputs;
+    let crate::fields::ParticleFieldSet {
         coords,
         directions,
         velocities,
         psi6_abs,
         mask,
-        grid: domain,
-        sigma,
-        ..
-    } = inputs;
+    } = particles;
     let (frames, particles, _) = coords.dim();
     let grid = Grid3::from_domain(domain);
     let mut output = MechanicalFieldSet::zeros(frames, &grid.domain);

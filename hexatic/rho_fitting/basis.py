@@ -1,12 +1,13 @@
-"""Chebyshev time basis helpers."""
+"""Chebyshev time basis helpers backed by the Rust temporal operator module."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
 import numpy as np
-from numpy.polynomial import chebyshev as cheb
 from scipy.interpolate import CubicSpline
+
+from . import _rho_fitting_core, _rho_fitting_core_import_error
 
 
 @dataclass(frozen=True)
@@ -22,14 +23,7 @@ class ChebyshevTimeResult:
 
 
 def temporal_power_spectrum(*coefficients: np.ndarray) -> np.ndarray:
-    """Compute Chebyshev-mode power summed over all non-time axes.
-
-    Parameters:
-        coefficients: One or more coefficient arrays with time/mode as axis 0.
-
-    Returns:
-        One-dimensional power array with length equal to the shared coefficient count.
-    """
+    """Compute Chebyshev-mode power summed over all non-time axes."""
     assert coefficients, "at least one coefficient array is required"
     power = np.zeros(coefficients[0].shape[0], dtype=np.float64)
     for coeff in coefficients:
@@ -58,109 +52,97 @@ def chebyshev_filter_and_derivative(
     timestep: float,
     cutoff: int,
 ) -> ChebyshevTimeResult:
-    """Smooth a time series with a Chebyshev fit and evaluate its time derivative.
+    """Apply shared Rust Chebyshev operators to every flattened spatial column.
 
-    Parameters:
-        values: Time-indexed array whose axis 0 is frames; remaining axes are fitted
-            independently with shared time coordinates.
-        steps: Simulation step numbers aligned with ``values`` axis 0.
-        timestep: Physical time represented by one simulation step.
-        cutoff: Number of low-order Chebyshev modes retained in the filtered signal.
-
-    Returns:
-        ``ChebyshevTimeResult`` containing filtered values, physical-time derivatives,
-        diagnostic full-spectrum coefficients, and the scaled time coordinates.
-
-    Examples:
-        ``result = chebyshev_filter_and_derivative(rho, steps, timestep, cutoff=10)``
-
-    Edge cases:
-        A single frame returns a zero derivative; repeated or decreasing steps are rejected.
+    The Rust operator construction performs the dense least-squares factorization once,
+    repairs non-finite temporal samples in parallel, and evaluates both the retained fit
+    and its physical-time derivative. SciPy remains only for the diagnostic cubic-spline
+    resampling path.
     """
-    values = np.asarray(values, dtype=np.float64)
+    values = np.ascontiguousarray(values, dtype=np.float64)
+    assert values.ndim >= 1, "values must have a temporal axis"
     frame_count = values.shape[0]
     cutoff = validate_cheb_cutoff(cutoff, frame_count)
-    times = physical_times(steps, timestep)
-    assert times.size == frame_count, "steps length must match values time axis"
-    values = _fill_nonfinite_time_values(values, times)
-
-    scaled, half_span = _scaled_times(times)
-    fit_coeffs = _fit_coefficients(values, scaled, cutoff - 1)
-    diagnostic_coeffs = _diagnostic_coefficients(values, scaled)
-
-    flat_coeffs = fit_coeffs.reshape((cutoff, -1))
-    filtered = cheb.chebval(scaled, flat_coeffs).T.reshape(values.shape)
+    if _rho_fitting_core is None:
+        raise ImportError(f"rho-fitting Rust core is unavailable: {_rho_fitting_core_import_error}")
+    operators = _rho_fitting_core.TemporalOperators(
+        np.ascontiguousarray(steps, dtype=np.int64),
+        float(timestep),
+        int(cutoff),
+    )
+    result = operators.apply(values)
+    cleaned = np.asarray(result["cleaned"])
+    scaled_times = np.asarray(operators.scaled_times())
+    nodes = np.asarray(operators.diagnostic_nodes())
     if frame_count == 1:
-        derivative = np.zeros_like(filtered)
+        node_values = cleaned
     else:
-        derivative_coeffs = cheb.chebder(flat_coeffs, axis=0)
-        derivative = cheb.chebval(scaled, derivative_coeffs).T.reshape(values.shape) / half_span
-
+        flat = cleaned.reshape((frame_count, -1))
+        node_values = CubicSpline(scaled_times, flat, axis=0)(nodes).reshape(values.shape)
+    coefficients = np.asarray(
+        operators.diagnostic_coefficients(np.ascontiguousarray(node_values, dtype=np.float64))
+    )
     return ChebyshevTimeResult(
-        filtered=np.ascontiguousarray(filtered),
-        derivative=np.ascontiguousarray(derivative),
-        coefficients=diagnostic_coeffs,
-        times=times,
-        scaled_times=scaled,
+        filtered=np.ascontiguousarray(np.asarray(result["filtered"])),
+        derivative=np.ascontiguousarray(np.asarray(result["derivative"])),
+        coefficients=np.ascontiguousarray(coefficients),
+        times=np.asarray(operators.times()),
+        scaled_times=scaled_times,
         cutoff=cutoff,
     )
 
 
-def _scaled_times(times: np.ndarray) -> tuple[np.ndarray, float]:
-    """Map physical times onto ``[-1, 1]`` and return the physical half-span."""
-    if times.size == 1:
-        return np.zeros_like(times), 1.0
-    span = times[-1] - times[0]
-    assert span > 0.0, "steps must increase over time"
-    center = 0.5 * (times[0] + times[-1])
-    half_span = 0.5 * span
-    return (times - center) / half_span, half_span
-
-
-def _fit_coefficients(values: np.ndarray, scaled_times: np.ndarray, degree: int) -> np.ndarray:
-    """Fit Chebyshev coefficients independently for each non-time array element."""
-    frame_count = values.shape[0]
-    flat = values.reshape((frame_count, -1))
-    vandermonde = cheb.chebvander(scaled_times, degree)
-    coeffs, *_ = np.linalg.lstsq(vandermonde, flat, rcond=None)
-    return coeffs.reshape((degree + 1, *values.shape[1:]))
-
-
-def _fill_nonfinite_time_values(values: np.ndarray, times: np.ndarray) -> np.ndarray:
-    """Replace non-finite samples by temporal interpolation before spectral fitting."""
-    if np.all(np.isfinite(values)):
-        return values
-    frame_count = values.shape[0]
-    flat = values.reshape((frame_count, -1)).copy()
-    for column in range(flat.shape[1]):
-        series = flat[:, column]
-        finite = np.isfinite(series)
-        if finite.all():
-            continue
-        if not finite.any():
-            series[:] = 0.0
-        elif finite.sum() == 1:
-            series[~finite] = series[finite][0]
-        else:
-            series[~finite] = np.interp(times[~finite], times[finite], series[finite])
-    return flat.reshape(values.shape)
-
-
-def _diagnostic_coefficients(values: np.ndarray, scaled_times: np.ndarray) -> np.ndarray:
-    """Compute full-order coefficients after resampling onto Chebyshev-Lobatto nodes."""
-    if values.shape[0] == 1:
-        return values.copy()
-    nodes, node_values = _values_at_chebyshev_lobatto_nodes(values, scaled_times)
-    return _fit_coefficients(node_values, nodes, node_values.shape[0] - 1)
-
-
-def _values_at_chebyshev_lobatto_nodes(
-    values: np.ndarray,
-    scaled_times: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Interpolate time-series values onto Chebyshev-Lobatto nodes in scaled time."""
-    frame_count = values.shape[0]
-    nodes = np.cos(np.pi * np.arange(frame_count) / (frame_count - 1))[::-1]
-    flat = values.reshape((frame_count, -1))
-    sampled = CubicSpline(scaled_times, flat, axis=0)(nodes)
-    return nodes, sampled.reshape(values.shape)
+def chebyshev_filter_fields(
+    values: tuple[np.ndarray, ...],
+    steps: np.ndarray,
+    timestep: float,
+    cutoff: int,
+) -> tuple[ChebyshevTimeResult, ...]:
+    """Filter multiple fields with one precomputed temporal operator set."""
+    assert values, "at least one field is required"
+    arrays = tuple(np.ascontiguousarray(value, dtype=np.float64) for value in values)
+    frame_count = arrays[0].shape[0]
+    assert all(value.ndim >= 1 and value.shape[0] == frame_count for value in arrays)
+    cutoff = validate_cheb_cutoff(cutoff, frame_count)
+    if _rho_fitting_core is None:
+        raise ImportError(f"rho-fitting Rust core is unavailable: {_rho_fitting_core_import_error}")
+    operators = _rho_fitting_core.TemporalOperators(
+        np.ascontiguousarray(steps, dtype=np.int64),
+        float(timestep),
+        int(cutoff),
+    )
+    payloads = operators.apply_many(list(arrays))
+    cleaned = [np.asarray(payload["cleaned"]) for payload in payloads]
+    widths = [max(1, int(np.prod(value.shape[1:], dtype=np.int64))) for value in arrays]
+    combined = np.concatenate(
+        [value.reshape((frame_count, width)) for value, width in zip(cleaned, widths, strict=True)],
+        axis=1,
+    )
+    scaled_times = np.asarray(operators.scaled_times())
+    nodes = np.asarray(operators.diagnostic_nodes())
+    node_combined = (
+        combined
+        if frame_count == 1
+        else CubicSpline(scaled_times, combined, axis=0)(nodes)
+    )
+    diagnostic_combined = np.asarray(
+        operators.diagnostic_coefficients(np.ascontiguousarray(node_combined, dtype=np.float64))
+    )
+    results: list[ChebyshevTimeResult] = []
+    offset = 0
+    for array, width, payload in zip(arrays, widths, payloads, strict=True):
+        coefficient_slice = diagnostic_combined[:, offset : offset + width]
+        results.append(
+            ChebyshevTimeResult(
+                filtered=np.ascontiguousarray(np.asarray(payload["filtered"])),
+                derivative=np.ascontiguousarray(np.asarray(payload["derivative"])),
+                coefficients=np.ascontiguousarray(
+                    coefficient_slice.reshape((frame_count, *array.shape[1:]))
+                ),
+                times=np.asarray(operators.times()),
+                scaled_times=scaled_times,
+                cutoff=cutoff,
+            )
+        )
+        offset += width
+    return tuple(results)

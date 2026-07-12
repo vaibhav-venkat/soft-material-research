@@ -4,6 +4,9 @@ use ndarray::{
     ArrayView6,
 };
 
+use crate::fields::ParticleFieldSet;
+pub(crate) use crate::fields::{CurrentQField, MechanicalFieldSet, Rank3Tensor};
+
 pub(crate) const PHYSICAL_COMPONENT_COUNT: usize = 3;
 
 /// Components are always ordered as `(x, e_theta, e_r)` throughout the core.
@@ -39,10 +42,6 @@ pub(crate) const TENSOR_COMPONENTS: [(PhysicalComponent, PhysicalComponent); 9] 
     (PhysicalComponent::Radial, PhysicalComponent::Azimuthal),
     (PhysicalComponent::Radial, PhysicalComponent::Radial),
 ];
-
-pub(crate) type Rank3Tensor =
-    [[[f64; PHYSICAL_COMPONENT_COUNT]; PHYSICAL_COMPONENT_COUNT]; PHYSICAL_COMPONENT_COUNT];
-pub(crate) type CurrentQField = Array4<Rank3Tensor>;
 
 /// Owned cylindrical grid shared by CPU and GPU deposition backends.
 #[derive(Clone)]
@@ -165,11 +164,7 @@ pub(crate) fn relative_mass_error(mass: &[f64], expected: usize) -> f64 {
 /// Validated particle arrays plus the canonical grid used by either backend.
 #[derive(Clone)]
 pub(crate) struct MechanicalInputViews<'a> {
-    pub(crate) coords: ArrayView3<'a, f64>,
-    pub(crate) directions: ArrayView3<'a, f64>,
-    pub(crate) velocities: ArrayView3<'a, f64>,
-    pub(crate) psi6_abs: ArrayView2<'a, f64>,
-    pub(crate) mask: ArrayView2<'a, bool>,
+    pub(crate) particles: ParticleFieldSet<'a>,
     pub(crate) grid: CylindricalGrid,
     pub(crate) sigma: f64,
 }
@@ -219,26 +214,17 @@ impl<'a> MechanicalInputViews<'a> {
             ));
         }
         Ok(Self {
-            coords,
-            directions,
-            velocities,
-            psi6_abs,
-            mask,
+            particles: ParticleFieldSet {
+                coords,
+                directions,
+                velocities,
+                psi6_abs,
+                mask,
+            },
             grid: CylindricalGrid::new(x_centers, theta_centers, r_centers, lx, theta_period)?,
             sigma,
         })
     }
-}
-
-pub(crate) struct MechanicalFieldSet {
-    pub(crate) rho: Array4<f64>,
-    pub(crate) p: Array5<f64>,
-    pub(crate) q: Array6<f64>,
-    pub(crate) a: Array6<f64>,
-    pub(crate) psi6_sq: Array4<f64>,
-    pub(crate) j_rho: Array5<f64>,
-    pub(crate) j_p: Array6<f64>,
-    pub(crate) j_q: CurrentQField,
 }
 
 impl MechanicalFieldSet {
