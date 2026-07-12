@@ -7,6 +7,7 @@ pub mod geometry;
 pub mod interpolation;
 pub mod mechanics;
 pub mod particles;
+pub mod pde;
 pub mod python;
 pub mod regression;
 pub mod spectral;

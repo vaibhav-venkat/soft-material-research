@@ -11,6 +11,7 @@ use crate::fitting;
 use crate::interpolation;
 use crate::mechanics::{self, CurrentQField};
 use crate::particles;
+use crate::pde;
 use crate::regression;
 use crate::spectral;
 use crate::temporal;
@@ -422,6 +423,61 @@ fn fit_constrained_lasso(
     Ok(out.unbind())
 }
 
+#[pyfunction]
+#[pyo3(signature = (rho, p, q, psi6_sq, y_p, times, c_rho, c_p, c_q, r_centers, r_edges, lx, theta_period, u0, gamma, frames, dt_max, mode, ubar_source))]
+/// Run one complete cylindrical IMEX validation rollout in Rust.
+#[allow(clippy::too_many_arguments)]
+fn run_pde_validation(
+    py: Python<'_>,
+    rho: PyReadonlyArrayDyn<'_, f64>,
+    p: PyReadonlyArrayDyn<'_, f64>,
+    q: PyReadonlyArrayDyn<'_, f64>,
+    psi6_sq: PyReadonlyArrayDyn<'_, f64>,
+    y_p: PyReadonlyArrayDyn<'_, f64>,
+    times: PyReadonlyArray1<'_, f64>,
+    c_rho: PyReadonlyArray1<'_, f64>,
+    c_p: PyReadonlyArray1<'_, f64>,
+    c_q: PyReadonlyArray1<'_, f64>,
+    r_centers: PyReadonlyArray1<'_, f64>,
+    r_edges: PyReadonlyArray1<'_, f64>,
+    lx: f64,
+    theta_period: f64,
+    u0: f64,
+    gamma: f64,
+    frames: usize,
+    dt_max: f64,
+    mode: u8,
+    ubar_source: u8,
+) -> PyResult<Py<PyDict>> {
+    let result = pde::run_validation(
+        rho.as_array(),
+        p.as_array(),
+        q.as_array(),
+        psi6_sq.as_array(),
+        y_p.as_array(),
+        times.as_array(),
+        c_rho.as_array(),
+        c_p.as_array(),
+        c_q.as_array(),
+        r_centers.as_array(),
+        r_edges.as_array(),
+        lx,
+        theta_period,
+        u0,
+        gamma,
+        frames,
+        dt_max,
+        mode,
+        ubar_source,
+    )
+    .map_err(to_py_err)?;
+    let out = PyDict::new(py);
+    out.set_item("rho", result.rho.into_pyarray(py))?;
+    out.set_item("P", result.p.into_pyarray(py))?;
+    out.set_item("Q", result.q.into_pyarray(py))?;
+    Ok(out.unbind())
+}
+
 #[pymethods]
 impl PyTemporalOperators {
     #[new]
@@ -743,6 +799,7 @@ fn _rho_fitting_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(barycentric_matrix, m)?)?;
     m.add_function(wrap_pyfunction!(transfer_radial, m)?)?;
     m.add_function(wrap_pyfunction!(fit_constrained_lasso, m)?)?;
+    m.add_function(wrap_pyfunction!(run_pde_validation, m)?)?;
     m.add_function(wrap_pyfunction!(particle_active_direction, m)?)?;
     m.add_function(wrap_pyfunction!(cartesian_to_cylindrical, m)?)?;
     m.add_function(wrap_pyfunction!(particle_directions, m)?)?;
