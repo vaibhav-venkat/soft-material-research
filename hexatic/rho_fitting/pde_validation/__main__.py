@@ -17,13 +17,13 @@ from .report import write_pde_validation_report
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Validate rho-fitting closures with Shenfun spectral rollouts.")
+    parser = argparse.ArgumentParser(description="Validate rho-fitting closures with native spectral RK4 rollouts.")
     parser.add_argument("--case", default="radius_15D")
     parser.add_argument("--cache", type=Path, default=None)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--max-frames", type=int, default=None)
-    parser.add_argument("--solver", choices=("imex-rk",), default="imex-rk")
-    parser.add_argument("--dt", type=float, default=None, help="maximum solver step; also Euler substep size")
+    parser.add_argument("--solver", choices=("rk4",), default="rk4")
+    parser.add_argument("--dt", type=float, default=None, help="maximum RK4 substep size")
     parser.add_argument("--ubar-source", choices=("cached", "fitted"), default="cached")
     parser.add_argument("--mode", choices=("all", "full", "rho-only", "p-only", "q-only"), default="all")
     parser.add_argument("--rho-only", action="store_true", help="evolve rho while using cached P and Q fields")
@@ -75,7 +75,7 @@ def main(argv: list[str] | None = None) -> int:
                 "cache_path": str(cache_path),
                 "analysis": "rho_fitting_pde_validation",
                 "mode": run_mode,
-                "solver": "rust_imex",
+                "solver": "rust_rk4",
                 "basis": "Rust Fourier(x) x Fourier(theta) x Chebyshev-Gauss(r)",
                 "dealiasing": "two_thirds_modal_cutoff",
                 "radial_boundary": "chebyshev_gauss_collocation_no_explicit_bc",

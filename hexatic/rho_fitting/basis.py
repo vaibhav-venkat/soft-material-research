@@ -57,8 +57,7 @@ def chebyshev_filter_and_derivative(
 
     The Rust operator construction performs the dense least-squares factorization once,
     repairs non-finite temporal samples in parallel, and evaluates both the retained fit
-    and its physical-time derivative. SciPy remains only for the diagnostic cubic-spline
-    resampling path.
+    and its physical-time derivative, including diagnostic cubic-spline resampling.
     """
     values = np.ascontiguousarray(values, dtype=np.float64)
     assert values.ndim >= 1, "values must have a temporal axis"

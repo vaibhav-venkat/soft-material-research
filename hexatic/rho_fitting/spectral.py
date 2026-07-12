@@ -169,5 +169,5 @@ def cached_cylindrical_operators(
     ntheta: int,
     nr: int,
 ) -> CylindricalSpectralOperators:
-    """Return one reusable Shenfun plan per cylindrical grid geometry."""
+    """Return one reusable native spectral plan per cylindrical grid geometry."""
     return CylindricalSpectralOperators(lx, theta_period, r_min, r_max, (nx, ntheta, nr))

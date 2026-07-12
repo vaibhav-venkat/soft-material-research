@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 
 from hexatic.rho_fitting import _rho_fitting_core, _rho_fitting_core_import_error
+from hexatic.rho_fitting.constants import DEFAULT_PDE_DT_MAX
 from ..cache import ValidationInputs, load_validation_inputs
 from .types import Array, ValidationOptions, ValidationResult
 
@@ -17,7 +18,8 @@ def run_validation(inputs: ValidationInputs, options: ValidationOptions | None =
     frames = inputs.rho.shape[0] if options.max_frames is None else min(inputs.rho.shape[0], options.max_frames)
     assert frames >= 2
     times = inputs.times[:frames]
-    dt_max = 5.0e-3 if options.dt is None else float(options.dt)
+    assert options.solver == "rk4", f"unsupported PDE solver: {options.solver}"
+    dt_max = DEFAULT_PDE_DT_MAX if options.dt is None else float(options.dt)
     assert dt_max > 0.0
     if _rho_fitting_core is None:
         raise ImportError(f"rho-fitting Rust core is unavailable: {_rho_fitting_core_import_error}")

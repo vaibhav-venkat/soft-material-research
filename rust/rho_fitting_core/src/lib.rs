@@ -1,5 +1,6 @@
 pub mod arrays;
 pub mod coarse_grain_burn;
+pub mod constants;
 pub mod errors;
 pub mod fields;
 pub mod fitting;

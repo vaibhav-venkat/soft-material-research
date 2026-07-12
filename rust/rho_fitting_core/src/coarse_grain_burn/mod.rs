@@ -247,7 +247,10 @@ fn deposit_gaussian_mechanical_frame<B: Backend>(
         norm = norm + (weights * volume_tensor).sum_dim(0).reshape([particles]);
     }
     let norm = norm + EPS;
-    let mut packed_chunks = Vec::new();
+    // A second evaluation is required for exact per-particle discrete normalization,
+    // but write every result directly into one device allocation. Retaining all chunk
+    // tensors before concatenation caused peak memory to approach twice the output size.
+    let mut packed = Tensor::<B, 2>::zeros([grid.len(), PACKED_FEATURES], device);
     for start in (0..grid.len()).step_by(GAUSSIAN_GRID_CHUNK) {
         let chunk = (grid.len() - start).min(GAUSSIAN_GRID_CHUNK);
         let weights = gaussian_weights::<B>(
@@ -266,9 +269,9 @@ fn deposit_gaussian_mechanical_frame<B: Backend>(
             .clone()
             .slice([start..start + chunk, 0..1]);
         let mass_weights = weights * volume_tensor / norm.clone().reshape([1, particles]);
-        packed_chunks.push(mass_weights.matmul(particle_features.clone()));
+        let chunk_fields = mass_weights.matmul(particle_features.clone());
+        packed = packed.slice_assign([start..start + chunk, 0..PACKED_FEATURES], chunk_fields);
     }
-    let packed = Tensor::cat(packed_chunks, 0);
     write_packed_frame(fields, tensor_matrix(packed)?, grid.len())?;
     Ok(())
 }

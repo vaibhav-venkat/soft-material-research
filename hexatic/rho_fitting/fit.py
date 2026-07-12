@@ -21,7 +21,7 @@ from .outputs import mechanical_report_lines, write_mechanical_outputs
 from .particles import particle_surface_velocities, particle_tangent_directions
 from .spectral import CylindricalSpectralOperators, barycentric_matrix, cached_cylindrical_operators, transfer_radial
 from .plots import write_temporal_power_plots
-from .regression import StabilityResult, stability_selection
+from .regression import SparseRegressionResult, fit_sparse_regression
 
 Array: TypeAlias = NDArray[Any]
 
@@ -43,9 +43,9 @@ class MechanicalFitPayload(TypedDict):
     """Mechanical fit matrices, row indices, libraries, and fitted model results."""
 
     sample_indices: Array
-    Y_rho_fit: StabilityResult
-    Y_P_fit: StabilityResult
-    Y_Q_fit: StabilityResult
+    Y_rho_fit: SparseRegressionResult
+    Y_P_fit: SparseRegressionResult
+    Y_Q_fit: SparseRegressionResult
     Y_rho_rows: Array
     Y_P_rows: Array
     Y_Q_rows: Array
@@ -155,7 +155,7 @@ def run(config: RhoFittingConfig) -> RhoFittingResult:
         )
 
     fit_payload = fit_mechanical(active, spectral, config)
-    output_payload = cast(Mapping[str, np.ndarray | StabilityResult], fit_payload)
+    output_payload = cast(Mapping[str, np.ndarray | SparseRegressionResult], fit_payload)
     output_config = _overwrite_config(config) if config.fit_only else config
     cache_path, report_path = write_mechanical_outputs(active, coarse, spectral, output_payload, output_config)
     active_terms = tuple(
@@ -616,7 +616,7 @@ def _fit_divergence_primary_target(
     sample_indices: Array,
     config: RhoFittingConfig,
     geometry: tuple[float, float, Array],
-) -> tuple[StabilityResult, Array, Array]:
+) -> tuple[SparseRegressionResult, Array, Array]:
     """Fit one mechanical target with divergence rows as the primary evaluation target.
 
     Parameters:
@@ -661,7 +661,7 @@ def _fit_divergence_primary_target(
         f"flux_rows={0 if X_flux is None else X_flux.shape[0]} "
         f"flux_weight={flux_weight:.6g} terms={', '.join(names)}"
     )
-    fit = stability_selection(
+    fit = fit_sparse_regression(
         X_fit,
         y_fit,
         names,
@@ -887,7 +887,7 @@ def _radial_spacing(r_centers: Array) -> float:
 
 
 def _spectral_operators(values: Array, lx: float, theta_period: float, r_centers: Array) -> CylindricalSpectralOperators:
-    """Create the shared annular Shenfun operator for a time-indexed grid."""
+    """Create the shared native annular spectral operator for a time-indexed grid."""
     dr = _radial_spacing(r_centers)
     return cached_cylindrical_operators(
         lx,
@@ -904,7 +904,7 @@ def _radial_transfer_matrices(
     r_centers: Array,
     operators: CylindricalSpectralOperators,
 ) -> tuple[Array, Array]:
-    """Return cached-grid to Shenfun-grid and reverse radial interpolation matrices."""
+    """Return cached-grid to spectral-grid and reverse radial interpolation matrices."""
     nodes = operators.radial_nodes()
     return barycentric_matrix(r_centers, nodes), barycentric_matrix(nodes, r_centers)
 

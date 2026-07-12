@@ -1,12 +1,10 @@
 use ndarray::{ArrayD, ArrayView1, ArrayViewD, Axis, IxDyn};
 
+use crate::constants::{P_RELAXATION_COEFFICIENT, Q_RELAXATION_COEFFICIENT};
 use crate::fitting;
 use crate::interpolation::RadialTransfer;
 use crate::spectral::CylindricalSpectralOperators;
 use crate::{CoreError, CoreResult};
-
-const P_RELAXATION: f64 = 2.0;
-const Q_RELAXATION: f64 = 0.6642702159746572;
 
 pub(crate) struct ValidationResult {
     pub(crate) rho: ArrayD<f64>,
@@ -111,58 +109,101 @@ pub(crate) fn run_validation(
         let p_refs = transfer_pair(&to_spectral, p_cache.clone(), saved_frame)?;
         let q_refs = transfer_pair(&to_spectral, q_cache.clone(), saved_frame)?;
         let y_p_refs = transfer_pair(&to_spectral, y_p_cache.clone(), saved_frame)?;
+        println!(
+            "[rho_fitting.pde] frame={}/{} substeps={steps}",
+            saved_frame + 1,
+            frames - 1
+        );
         for substep in 0..steps {
             let weight = substep as f64 / steps as f64;
-            let rho_ref = interpolate(&rho_refs.0, &rho_refs.1, weight);
-            let p_ref = interpolate(&p_refs.0, &p_refs.1, weight);
-            let q_ref = interpolate(&q_refs.0, &q_refs.1, weight);
-            let y_p_ref = interpolate(&y_p_refs.0, &y_p_refs.1, weight);
-            let rho_eval = if mode == 0 || mode == 1 {
-                &rho
-            } else {
-                &rho_ref
-            };
-            let p_eval = if mode == 0 || mode == 2 { &p } else { &p_ref };
-            let q_eval = if mode == 0 || mode == 3 { &q } else { &q_ref };
-            let a_ref = fitting::alignment_tensor(rho_ref.view(), q_ref.view())?;
-            let ubar_override = if ubar_source == 0 {
-                Some(fitting::estimate_ubar(y_p_ref.view(), a_ref.view())?)
-            } else {
-                None
-            };
-            let (f_rho, f_p, f_q) = closure_fields(
-                rho_eval,
-                p_eval,
-                q_eval,
+            let state = State { rho, p, q };
+            let k1 = rollout_rhs(
+                &state,
+                weight,
+                &rho_refs,
+                &p_refs,
+                &q_refs,
+                &y_p_refs,
                 &psi6,
                 c_rho,
                 c_p,
                 c_q,
                 &operators,
-                ubar_override.as_ref(),
+                u0,
+                gamma,
+                mode,
+                ubar_source,
             )?;
-            let rho_flux = combine_scaled(p_eval, u0, &f_rho, 1.0 / gamma)?;
-            let d_rho = operators
-                .divergence(rho_flux.view(), 0)?
-                .mapv(|value| -value);
-            let d_p = operators
-                .divergence(f_p.view(), 0)?
-                .mapv(|value| -u0 * value);
-            let d_q = operators.divergence(f_q.view(), 0)?.mapv(|value| -value);
+            let stage2 = state.add_scaled(&k1, 0.5 * dt)?;
+            let k2 = rollout_rhs(
+                &stage2,
+                weight + 0.5 / steps as f64,
+                &rho_refs,
+                &p_refs,
+                &q_refs,
+                &y_p_refs,
+                &psi6,
+                c_rho,
+                c_p,
+                c_q,
+                &operators,
+                u0,
+                gamma,
+                mode,
+                ubar_source,
+            )?;
+            let stage3 = state.add_scaled(&k2, 0.5 * dt)?;
+            let k3 = rollout_rhs(
+                &stage3,
+                weight + 0.5 / steps as f64,
+                &rho_refs,
+                &p_refs,
+                &q_refs,
+                &y_p_refs,
+                &psi6,
+                c_rho,
+                c_p,
+                c_q,
+                &operators,
+                u0,
+                gamma,
+                mode,
+                ubar_source,
+            )?;
+            let stage4 = state.add_scaled(&k3, dt)?;
+            let k4 = rollout_rhs(
+                &stage4,
+                weight + 1.0 / steps as f64,
+                &rho_refs,
+                &p_refs,
+                &q_refs,
+                &y_p_refs,
+                &psi6,
+                c_rho,
+                c_p,
+                c_q,
+                &operators,
+                u0,
+                gamma,
+                mode,
+                ubar_source,
+            )?;
+            let next = state.rk4(&k1, &k2, &k3, &k4, dt)?;
+            let next_weight = weight + 1.0 / steps as f64;
             rho = if mode == 0 || mode == 1 {
-                add_scaled(&rho, &d_rho, dt)?
+                next.rho
             } else {
-                rho_ref
+                interpolate(&rho_refs.0, &rho_refs.1, next_weight)
             };
             p = if mode == 0 || mode == 2 {
-                add_scaled(&p, &d_p, dt)?.mapv(|value| value / (1.0 - dt * P_RELAXATION))
+                next.p
             } else {
-                p_ref
+                interpolate(&p_refs.0, &p_refs.1, next_weight)
             };
             q = if mode == 0 || mode == 3 {
-                add_scaled(&q, &d_q, dt)?.mapv(|value| value / (1.0 - dt * Q_RELAXATION))
+                next.q
             } else {
-                q_ref
+                interpolate(&q_refs.0, &q_refs.1, next_weight)
             };
             rho = operators.filter_two_thirds(rho.view(), 0)?;
             p = operators.filter_two_thirds(p.view(), 0)?;
@@ -178,6 +219,11 @@ pub(crate) fn run_validation(
                 )));
             }
         }
+        println!(
+            "[rho_fitting.pde] frame={}/{} complete",
+            saved_frame + 1,
+            frames - 1
+        );
         rho_output
             .index_axis_mut(Axis(0), saved_frame + 1)
             .assign(&to_cache.apply(rho.view(), 2)?);
@@ -192,6 +238,122 @@ pub(crate) fn run_validation(
         rho: rho_output,
         p: p_output,
         q: q_output,
+    })
+}
+
+struct State {
+    rho: ArrayD<f64>,
+    p: ArrayD<f64>,
+    q: ArrayD<f64>,
+}
+
+impl State {
+    fn add_scaled(&self, rhs: &Self, scale: f64) -> CoreResult<Self> {
+        Ok(Self {
+            rho: add_scaled(&self.rho, &rhs.rho, scale)?,
+            p: add_scaled(&self.p, &rhs.p, scale)?,
+            q: add_scaled(&self.q, &rhs.q, scale)?,
+        })
+    }
+    fn rk4(&self, k1: &Self, k2: &Self, k3: &Self, k4: &Self, dt: f64) -> CoreResult<Self> {
+        let combine = |value: &ArrayD<f64>,
+                       a: &ArrayD<f64>,
+                       b: &ArrayD<f64>,
+                       c: &ArrayD<f64>,
+                       d: &ArrayD<f64>|
+         -> CoreResult<ArrayD<f64>> {
+            if value.shape() != a.shape()
+                || a.shape() != b.shape()
+                || b.shape() != c.shape()
+                || c.shape() != d.shape()
+            {
+                return Err(CoreError::Shape("RK4 stage shapes differ".to_string()));
+            }
+            Ok(value + &((a + &(b * 2.0) + &(c * 2.0) + d) * (dt / 6.0)))
+        };
+        Ok(Self {
+            rho: combine(&self.rho, &k1.rho, &k2.rho, &k3.rho, &k4.rho)?,
+            p: combine(&self.p, &k1.p, &k2.p, &k3.p, &k4.p)?,
+            q: combine(&self.q, &k1.q, &k2.q, &k3.q, &k4.q)?,
+        })
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rollout_rhs(
+    state: &State,
+    weight: f64,
+    rho_refs: &(ArrayD<f64>, ArrayD<f64>),
+    p_refs: &(ArrayD<f64>, ArrayD<f64>),
+    q_refs: &(ArrayD<f64>, ArrayD<f64>),
+    y_p_refs: &(ArrayD<f64>, ArrayD<f64>),
+    psi6: &ArrayD<f64>,
+    c_rho: ArrayView1<'_, f64>,
+    c_p: ArrayView1<'_, f64>,
+    c_q: ArrayView1<'_, f64>,
+    operators: &CylindricalSpectralOperators,
+    u0: f64,
+    gamma: f64,
+    mode: u8,
+    ubar_source: u8,
+) -> CoreResult<State> {
+    let rho_ref = interpolate(&rho_refs.0, &rho_refs.1, weight);
+    let p_ref = interpolate(&p_refs.0, &p_refs.1, weight);
+    let q_ref = interpolate(&q_refs.0, &q_refs.1, weight);
+    let y_p_ref = interpolate(&y_p_refs.0, &y_p_refs.1, weight);
+    let rho_eval = if mode == 0 || mode == 1 {
+        &state.rho
+    } else {
+        &rho_ref
+    };
+    let p_eval = if mode == 0 || mode == 2 {
+        &state.p
+    } else {
+        &p_ref
+    };
+    let q_eval = if mode == 0 || mode == 3 {
+        &state.q
+    } else {
+        &q_ref
+    };
+    let a_ref = fitting::alignment_tensor(rho_ref.view(), q_ref.view())?;
+    let ubar = if ubar_source == 0 {
+        Some(fitting::estimate_ubar(y_p_ref.view(), a_ref.view())?)
+    } else {
+        None
+    };
+    let (f_rho, f_p, f_q) = closure_fields(
+        rho_eval,
+        p_eval,
+        q_eval,
+        psi6,
+        c_rho,
+        c_p,
+        c_q,
+        operators,
+        ubar.as_ref(),
+    )?;
+    let rho_flux = combine_scaled(p_eval, u0, &f_rho, 1.0 / gamma)?;
+    let d_rho = if mode == 0 || mode == 1 {
+        operators.divergence(rho_flux.view(), 0)?.mapv(|v| -v)
+    } else {
+        ArrayD::zeros(rho_ref.raw_dim())
+    };
+    let d_p = if mode == 0 || mode == 2 {
+        operators.divergence(f_p.view(), 0)?.mapv(|v| -u0 * v)
+            + &(p_eval * P_RELAXATION_COEFFICIENT)
+    } else {
+        ArrayD::zeros(p_ref.raw_dim())
+    };
+    let d_q = if mode == 0 || mode == 3 {
+        operators.divergence(f_q.view(), 0)?.mapv(|v| -v) + &(q_eval * Q_RELAXATION_COEFFICIENT)
+    } else {
+        ArrayD::zeros(q_ref.raw_dim())
+    };
+    Ok(State {
+        rho: d_rho,
+        p: d_p,
+        q: d_q,
     })
 }
 

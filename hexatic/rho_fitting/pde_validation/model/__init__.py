@@ -1,4 +1,4 @@
-"""Shenfun spectral model for validating rho-fitting closures."""
+"""Native spectral RK4 model for validating rho-fitting closures."""
 
 from .core import run_validation, run_validation_from_cache, validation_metric_arrays
 from .interpolation import (

@@ -13,7 +13,7 @@ from .config import RhoFittingConfig
 from .field_types import MechanicalRawFields, MechanicalSpectralFields
 from .geometry import surface_lengths
 from .io import ActiveMatterArrays
-from .regression import StabilityResult
+from .regression import SparseRegressionResult
 from .report import write_report
 
 
@@ -21,7 +21,7 @@ def write_mechanical_outputs(
     active: ActiveMatterArrays,
     coarse: MechanicalRawFields,
     spectral: MechanicalSpectralFields,
-    fit_payload: Mapping[str, np.ndarray | StabilityResult],
+    fit_payload: Mapping[str, np.ndarray | SparseRegressionResult],
     config: RhoFittingConfig,
 ) -> tuple[Path, Path]:
     """Write mechanical fit cache arrays and the markdown summary report."""
@@ -30,9 +30,9 @@ def write_mechanical_outputs(
     y_rho_fit = fit_payload["Y_rho_fit"]
     y_p_fit = fit_payload["Y_P_fit"]
     y_q_fit = fit_payload["Y_Q_fit"]
-    assert isinstance(y_rho_fit, StabilityResult)
-    assert isinstance(y_p_fit, StabilityResult)
-    assert isinstance(y_q_fit, StabilityResult)
+    assert isinstance(y_rho_fit, SparseRegressionResult)
+    assert isinstance(y_p_fit, SparseRegressionResult)
+    assert isinstance(y_q_fit, SparseRegressionResult)
     arrays = cast(Mapping[str, np.ndarray], fit_payload)
     assert config.settings is not None, "rho fitting settings were not initialized"
     write_npz_atomic(
@@ -85,15 +85,15 @@ def write_mechanical_outputs(
         Y_rho_importance=y_rho_fit.importance,
         Y_P_importance=y_p_fit.importance,
         Y_Q_importance=y_q_fit.importance,
-        Y_rho_importance_path=y_rho_fit.importance_path,
-        Y_P_importance_path=y_p_fit.importance_path,
-        Y_Q_importance_path=y_q_fit.importance_path,
-        Y_rho_tau_values=y_rho_fit.tau_values,
-        Y_P_tau_values=y_p_fit.tau_values,
-        Y_Q_tau_values=y_q_fit.tau_values,
-        Y_rho_tau_index=np.asarray(-1 if y_rho_fit.tau_index is None else y_rho_fit.tau_index),
-        Y_P_tau_index=np.asarray(-1 if y_p_fit.tau_index is None else y_p_fit.tau_index),
-        Y_Q_tau_index=np.asarray(-1 if y_q_fit.tau_index is None else y_q_fit.tau_index),
+        Y_rho_importance_samples=y_rho_fit.importance_samples,
+        Y_P_importance_samples=y_p_fit.importance_samples,
+        Y_Q_importance_samples=y_q_fit.importance_samples,
+        Y_rho_lambda_values=y_rho_fit.lambda_values,
+        Y_P_lambda_values=y_p_fit.lambda_values,
+        Y_Q_lambda_values=y_q_fit.lambda_values,
+        Y_rho_lambda_index=np.asarray(-1 if y_rho_fit.lambda_index is None else y_rho_fit.lambda_index),
+        Y_P_lambda_index=np.asarray(-1 if y_p_fit.lambda_index is None else y_p_fit.lambda_index),
+        Y_Q_lambda_index=np.asarray(-1 if y_q_fit.lambda_index is None else y_q_fit.lambda_index),
         Y_rho_active=y_rho_fit.active,
         Y_P_active=y_p_fit.active,
         Y_Q_active=y_q_fit.active,
@@ -134,7 +134,7 @@ def mechanical_report_lines(
     grid_shape: tuple[int, int, int],
     sigma: float,
     cheb_cutoff: int,
-    fits: dict[str, StabilityResult],
+    fits: dict[str, SparseRegressionResult],
 ) -> list[str]:
     """Build markdown report lines for divergence-first mechanical closure fits."""
     lines = [
@@ -157,7 +157,7 @@ def mechanical_report_lines(
                 f"- divergence r2: {fit.r2:.8g}",
                 f"- flux rmse: {_optional_float(fit.auxiliary_rmse)}",
                 f"- flux r2: {_optional_float(fit.auxiliary_r2)}",
-                f"- tau_index: {fit.tau_index if fit.tau_index is not None else 'none'}",
+                f"- selected lambda: {fit.lambda_values[fit.lambda_index] if fit.lambda_index is not None else 'none'}",
                 f"- solver: rust-clarabel ({fit.solver_status}, {fit.solver_iterations} iterations)",
                 f"- objective: {format_float(fit.objective)}",
                 "",
@@ -178,18 +178,18 @@ def mechanical_report_lines(
                 f"{importance:.4f} | {format_float(raw_correlation)} |"
             )
         lines.append("")
-        if fit.tau_values.size:
+        if fit.lambda_values.size:
             lines.extend(
                 [
-                    f"### {target} tau importance path",
+                    f"### {target} selected-lambda importance",
                     "",
-                    "| tau index | tau | " + " | ".join(_markdown_cell(label) for label in fit.labels) + " |",
+                    "| lambda index | lambda | " + " | ".join(_markdown_cell(label) for label in fit.labels) + " |",
                     "|---:|---:|" + "---:|" * len(fit.labels),
                 ]
             )
-            for tau_index, tau in enumerate(fit.tau_values):
-                values = " | ".join(f"{value:.4f}" for value in fit.importance_path[tau_index])
-                lines.append(f"| {tau_index} | {tau:.6g} | {values} |")
+            for lambda_index, regularization in enumerate(fit.lambda_values):
+                values = " | ".join(f"{value:.4f}" for value in fit.importance_samples[lambda_index])
+                lines.append(f"| {lambda_index} | {regularization:.6g} | {values} |")
             lines.append("")
     return lines
 

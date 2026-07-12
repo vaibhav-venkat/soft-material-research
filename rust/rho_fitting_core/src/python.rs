@@ -7,6 +7,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
 use crate::coarse_grain_burn;
+use crate::constants;
 use crate::fitting;
 use crate::interpolation;
 use crate::mechanics::{self, CurrentQField};
@@ -78,6 +79,22 @@ fn rank3_field_from_dynamic(
 /// Return the compiled rho-fitting core crate version.
 fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
+}
+
+#[pyfunction]
+fn numerical_constants(py: Python<'_>) -> PyResult<Py<PyDict>> {
+    let out = PyDict::new(py);
+    out.set_item(
+        "p_relaxation_coefficient",
+        constants::P_RELAXATION_COEFFICIENT,
+    )?;
+    out.set_item(
+        "q_relaxation_coefficient",
+        constants::Q_RELAXATION_COEFFICIENT,
+    )?;
+    out.set_item("default_pde_dt_max", constants::DEFAULT_PDE_DT_MAX)?;
+    out.set_item("regression_tolerance", constants::REGRESSION_TOLERANCE)?;
+    Ok(out.unbind())
 }
 
 #[pyfunction]
@@ -196,11 +213,19 @@ fn temporal_power_spectrum(
     py: Python<'_>,
     coefficients: Vec<PyReadonlyArrayDyn<'_, f64>>,
 ) -> PyResult<Py<PyAny>> {
-    let views = coefficients
-        .iter()
-        .map(|values| values.as_array())
+    let coefficients = coefficients
+        .into_iter()
+        .map(|values| values.as_array().to_owned())
         .collect::<Vec<_>>();
-    let result = temporal::power_spectrum(&views).map_err(to_py_err)?;
+    let result = py
+        .detach(|| {
+            let views = coefficients
+                .iter()
+                .map(|values| values.view())
+                .collect::<Vec<_>>();
+            temporal::power_spectrum(&views)
+        })
+        .map_err(to_py_err)?;
     Ok(result.into_pyarray(py).into_any().unbind())
 }
 
@@ -239,9 +264,9 @@ impl PyRadialTransfer {
         values: PyReadonlyArrayDyn<'_, f64>,
         axis: usize,
     ) -> PyResult<Py<PyAny>> {
-        let result = self
-            .inner
-            .apply(values.as_array(), axis)
+        let values = values.as_array().to_owned();
+        let result = py
+            .detach(|| self.inner.apply(values.view(), axis))
             .map_err(to_py_err)?;
         Ok(result.into_pyarray(py).into_any().unbind())
     }
@@ -296,9 +321,9 @@ impl PyCylindricalSpectralOperators {
         direction: usize,
         grid_offset: usize,
     ) -> PyResult<Py<PyAny>> {
-        let result = self
-            .inner
-            .derivative(values.as_array(), grid_offset, direction)
+        let values = values.as_array().to_owned();
+        let result = py
+            .detach(|| self.inner.derivative(values.view(), grid_offset, direction))
             .map_err(to_py_err)?;
         Ok(result.into_pyarray(py).into_any().unbind())
     }
@@ -310,9 +335,9 @@ impl PyCylindricalSpectralOperators {
         values: PyReadonlyArrayDyn<'_, f64>,
         grid_offset: usize,
     ) -> PyResult<Py<PyAny>> {
-        let result = self
-            .inner
-            .gradient(values.as_array(), grid_offset)
+        let values = values.as_array().to_owned();
+        let result = py
+            .detach(|| self.inner.gradient(values.view(), grid_offset))
             .map_err(to_py_err)?;
         Ok(result.into_pyarray(py).into_any().unbind())
     }
@@ -324,9 +349,9 @@ impl PyCylindricalSpectralOperators {
         values: PyReadonlyArrayDyn<'_, f64>,
         grid_offset: usize,
     ) -> PyResult<Py<PyAny>> {
-        let result = self
-            .inner
-            .divergence(values.as_array(), grid_offset)
+        let values = values.as_array().to_owned();
+        let result = py
+            .detach(|| self.inner.divergence(values.view(), grid_offset))
             .map_err(to_py_err)?;
         Ok(result.into_pyarray(py).into_any().unbind())
     }
@@ -338,9 +363,9 @@ impl PyCylindricalSpectralOperators {
         values: PyReadonlyArrayDyn<'_, f64>,
         grid_offset: usize,
     ) -> PyResult<Py<PyAny>> {
-        let result = self
-            .inner
-            .laplacian(values.as_array(), grid_offset)
+        let values = values.as_array().to_owned();
+        let result = py
+            .detach(|| self.inner.laplacian(values.view(), grid_offset))
             .map_err(to_py_err)?;
         Ok(result.into_pyarray(py).into_any().unbind())
     }
@@ -352,9 +377,9 @@ impl PyCylindricalSpectralOperators {
         values: PyReadonlyArrayDyn<'_, f64>,
         grid_offset: usize,
     ) -> PyResult<Py<PyAny>> {
-        let result = self
-            .inner
-            .filter_two_thirds(values.as_array(), grid_offset)
+        let values = values.as_array().to_owned();
+        let result = py
+            .detach(|| self.inner.filter_two_thirds(values.view(), grid_offset))
             .map_err(to_py_err)?;
         Ok(result.into_pyarray(py).into_any().unbind())
     }
@@ -366,7 +391,10 @@ fn barycentric_matrix(
     source: PyReadonlyArray1<'_, f64>,
     target: PyReadonlyArray1<'_, f64>,
 ) -> PyResult<Py<PyAny>> {
-    let result = interpolation::barycentric_matrix(source.as_array(), target.as_array())
+    let source = source.as_array().to_owned();
+    let target = target.as_array().to_owned();
+    let result = py
+        .detach(|| interpolation::barycentric_matrix(source.view(), target.view()))
         .map_err(to_py_err)?;
     Ok(result.into_pyarray(py).into_any().unbind())
 }
@@ -378,9 +406,14 @@ fn transfer_radial(
     matrix: PyReadonlyArray2<'_, f64>,
     axis: usize,
 ) -> PyResult<Py<PyAny>> {
-    let transfer =
-        interpolation::RadialTransfer::from_matrix(matrix.as_array()).map_err(to_py_err)?;
-    let result = transfer.apply(values.as_array(), axis).map_err(to_py_err)?;
+    let values = values.as_array().to_owned();
+    let matrix = matrix.as_array().to_owned();
+    let result = py
+        .detach(|| {
+            let transfer = interpolation::RadialTransfer::from_matrix(matrix.view())?;
+            transfer.apply(values.view(), axis)
+        })
+        .map_err(to_py_err)?;
     Ok(result.into_pyarray(py).into_any().unbind())
 }
 
@@ -397,16 +430,23 @@ fn fit_constrained_lasso(
     non_positive: PyReadonlyArray1<'_, i64>,
     non_negative: PyReadonlyArray1<'_, i64>,
 ) -> PyResult<Py<PyDict>> {
-    let result = regression::fit_constrained_lasso(
-        x.as_array(),
-        y.as_array(),
-        lambda,
-        tolerance,
-        max_iterations,
-        non_positive.as_array(),
-        non_negative.as_array(),
-    )
-    .map_err(to_py_err)?;
+    let x = x.as_array().to_owned();
+    let y = y.as_array().to_owned();
+    let non_positive = non_positive.as_array().to_owned();
+    let non_negative = non_negative.as_array().to_owned();
+    let result = py
+        .detach(|| {
+            regression::fit_constrained_lasso(
+                x.view(),
+                y.view(),
+                lambda,
+                tolerance,
+                max_iterations,
+                non_positive.view(),
+                non_negative.view(),
+            )
+        })
+        .map_err(to_py_err)?;
     let out = PyDict::new(py);
     out.set_item("coefficients", result.coefficients.into_pyarray(py))?;
     out.set_item(
@@ -425,7 +465,7 @@ fn fit_constrained_lasso(
 
 #[pyfunction]
 #[pyo3(signature = (rho, p, q, psi6_sq, y_p, times, c_rho, c_p, c_q, r_centers, r_edges, lx, theta_period, u0, gamma, frames, dt_max, mode, ubar_source))]
-/// Run one complete cylindrical IMEX validation rollout in Rust.
+/// Run one complete cylindrical RK4 validation rollout in Rust.
 #[allow(clippy::too_many_arguments)]
 fn run_pde_validation(
     py: Python<'_>,
@@ -449,28 +489,42 @@ fn run_pde_validation(
     mode: u8,
     ubar_source: u8,
 ) -> PyResult<Py<PyDict>> {
-    let result = pde::run_validation(
-        rho.as_array(),
-        p.as_array(),
-        q.as_array(),
-        psi6_sq.as_array(),
-        y_p.as_array(),
-        times.as_array(),
-        c_rho.as_array(),
-        c_p.as_array(),
-        c_q.as_array(),
-        r_centers.as_array(),
-        r_edges.as_array(),
-        lx,
-        theta_period,
-        u0,
-        gamma,
-        frames,
-        dt_max,
-        mode,
-        ubar_source,
-    )
-    .map_err(to_py_err)?;
+    let rho = rho.as_array().to_owned();
+    let p = p.as_array().to_owned();
+    let q = q.as_array().to_owned();
+    let psi6_sq = psi6_sq.as_array().to_owned();
+    let y_p = y_p.as_array().to_owned();
+    let times = times.as_array().to_owned();
+    let c_rho = c_rho.as_array().to_owned();
+    let c_p = c_p.as_array().to_owned();
+    let c_q = c_q.as_array().to_owned();
+    let r_centers = r_centers.as_array().to_owned();
+    let r_edges = r_edges.as_array().to_owned();
+    let result = py
+        .detach(|| {
+            pde::run_validation(
+                rho.view(),
+                p.view(),
+                q.view(),
+                psi6_sq.view(),
+                y_p.view(),
+                times.view(),
+                c_rho.view(),
+                c_p.view(),
+                c_q.view(),
+                r_centers.view(),
+                r_edges.view(),
+                lx,
+                theta_period,
+                u0,
+                gamma,
+                frames,
+                dt_max,
+                mode,
+                ubar_source,
+            )
+        })
+        .map_err(to_py_err)?;
     let out = PyDict::new(py);
     out.set_item("rho", result.rho.into_pyarray(py))?;
     out.set_item("P", result.p.into_pyarray(py))?;
@@ -491,7 +545,10 @@ impl PyTemporalOperators {
 
     /// Apply the shared temporal fit/evaluation operators to one contiguous field block.
     fn apply(&self, py: Python<'_>, values: PyReadonlyArrayDyn<'_, f64>) -> PyResult<Py<PyDict>> {
-        let result = self.inner.apply(values.as_array()).map_err(to_py_err)?;
+        let values = values.as_array().to_owned();
+        let result = py
+            .detach(|| self.inner.apply(values.view()))
+            .map_err(to_py_err)?;
         let out = PyDict::new(py);
         out.set_item("cleaned", result.cleaned.into_pyarray(py))?;
         out.set_item("filtered", result.filtered.into_pyarray(py))?;
@@ -506,9 +563,20 @@ impl PyTemporalOperators {
         py: Python<'_>,
         fields: Vec<PyReadonlyArrayDyn<'_, f64>>,
     ) -> PyResult<Py<PyList>> {
+        let fields = fields
+            .into_iter()
+            .map(|field| field.as_array().to_owned())
+            .collect::<Vec<_>>();
+        let results = py
+            .detach(|| {
+                fields
+                    .iter()
+                    .map(|field| self.inner.apply(field.view()))
+                    .collect::<CoreResult<Vec<_>>>()
+            })
+            .map_err(to_py_err)?;
         let out = PyList::empty(py);
-        for field in fields {
-            let result = self.inner.apply(field.as_array()).map_err(to_py_err)?;
+        for result in results {
             let item = PyDict::new(py);
             item.set_item("cleaned", result.cleaned.into_pyarray(py))?;
             item.set_item("filtered", result.filtered.into_pyarray(py))?;
@@ -696,22 +764,33 @@ fn build_mechanical_fields(
     gamma: f64,
     u0: f64,
 ) -> PyResult<Py<PyDict>> {
-    let fields = coarse_grain_burn::build_mechanical_fields(
-        coords.as_array(),
-        directions.as_array(),
-        velocities.as_array(),
-        psi6_abs.as_array(),
-        mask.as_array(),
-        x_centers.as_array(),
-        theta_centers.as_array(),
-        r_centers.as_array(),
-        lx,
-        theta_period,
-        sigma,
-        gamma,
-        u0,
-    )
-    .map_err(to_py_err)?;
+    let coords = coords.as_array().to_owned();
+    let directions = directions.as_array().to_owned();
+    let velocities = velocities.as_array().to_owned();
+    let psi6_abs = psi6_abs.as_array().to_owned();
+    let mask = mask.as_array().to_owned();
+    let x_centers = x_centers.as_array().to_owned();
+    let theta_centers = theta_centers.as_array().to_owned();
+    let r_centers = r_centers.as_array().to_owned();
+    let fields = py
+        .detach(|| {
+            coarse_grain_burn::build_mechanical_fields(
+                coords.view(),
+                directions.view(),
+                velocities.view(),
+                psi6_abs.view(),
+                mask.view(),
+                x_centers.view(),
+                theta_centers.view(),
+                r_centers.view(),
+                lx,
+                theta_period,
+                sigma,
+                gamma,
+                u0,
+            )
+        })
+        .map_err(to_py_err)?;
     let out = PyDict::new(py);
     out.set_item("rho", fields.rho.into_pyarray(py))?;
     out.set_item("P", fields.p.into_pyarray(py))?;
@@ -783,6 +862,7 @@ fn sample_component_rows(
 /// Register the Python module functions exposed by the compiled extension.
 fn _rho_fitting_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
+    m.add_function(wrap_pyfunction!(numerical_constants, m)?)?;
     m.add_function(wrap_pyfunction!(sample_grid_rows, m)?)?;
     m.add_function(wrap_pyfunction!(finite_grid_mask, m)?)?;
     m.add_function(wrap_pyfunction!(build_alignment_tensor, m)?)?;

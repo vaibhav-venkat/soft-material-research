@@ -7,13 +7,13 @@ from pathlib import Path
 
 import numpy as np
 
-from .regression import StabilityResult
+from .regression import SparseRegressionResult
 
 
 def write_density_plots(
     output_dir: Path,
     case_id: str,
-    fit: StabilityResult,
+    fit: SparseRegressionResult,
     y_true: np.ndarray,
     rho: np.ndarray,
     partial_t_rho: np.ndarray,
@@ -102,7 +102,7 @@ def _plotter(output_dir: Path):
     return plt
 
 
-def _coefficient_plot(path: Path, fit: StabilityResult, plt) -> None:
+def _coefficient_plot(path: Path, fit: SparseRegressionResult, plt) -> None:
     x = np.arange(len(fit.labels))
     fig, axis = plt.subplots(figsize=(max(6.0, 0.7 * len(fit.labels)), 4.0))
     axis.bar(x, fit.coefficients, color=np.where(fit.active, "#2b6cb0", "#a0aec0"))
@@ -118,15 +118,15 @@ def _coefficient_plot(path: Path, fit: StabilityResult, plt) -> None:
     plt.close(fig)
 
 
-def _importance_plot(path: Path, fit: StabilityResult, plt) -> None:
-    tau = np.asarray(fit.tau_values, dtype=np.float64)
-    tau_max = tau[0] if tau.size and tau[0] != 0.0 else 1.0
-    x = -np.log10(np.maximum(tau / tau_max, np.finfo(float).tiny))
+def _importance_plot(path: Path, fit: SparseRegressionResult, plt) -> None:
+    lambdas = np.asarray(fit.lambda_values, dtype=np.float64)
+    lambda_max = lambdas[0] if lambdas.size and lambdas[0] != 0.0 else 1.0
+    x = -np.log10(np.maximum(lambdas / lambda_max, np.finfo(float).tiny))
     fig, axis = plt.subplots(figsize=(7.0, 4.5))
     for idx, label in enumerate(fit.labels):
-        axis.plot(x, fit.importance_path[:, idx], marker="o", markersize=2.5, linewidth=1.2, label=label)
+        axis.plot(x, fit.importance_samples[:, idx], marker="o", markersize=2.5, linewidth=1.2, label=label)
     axis.axhline(0.6, color="black", linewidth=1.0, linestyle="--")
-    axis.set_xlabel("-log10(tau / tau_max)")
+    axis.set_xlabel("-log10(lambda / lambda_max)")
     axis.set_ylabel("importance score")
     axis.set_ylim(-0.03, 1.03)
     axis.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), fontsize=8)
@@ -135,7 +135,7 @@ def _importance_plot(path: Path, fit: StabilityResult, plt) -> None:
     plt.close(fig)
 
 
-def _predicted_true_plot(path: Path, fit: StabilityResult, y_true: np.ndarray, plt) -> None:
+def _predicted_true_plot(path: Path, fit: SparseRegressionResult, y_true: np.ndarray, plt) -> None:
     rows = np.linspace(0, y_true.size - 1, min(20_000, y_true.size), dtype=int)
     y_plot = y_true[rows]
     pred_plot = fit.y_pred[rows]
