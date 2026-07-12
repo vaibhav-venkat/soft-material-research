@@ -4,6 +4,7 @@ pub mod errors;
 pub mod fields;
 pub mod fitting;
 pub mod geometry;
+pub mod interpolation;
 pub mod mechanics;
 pub mod particles;
 pub mod python;

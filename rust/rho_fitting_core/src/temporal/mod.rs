@@ -224,13 +224,10 @@ impl TemporalOperators {
         let derivative = ArrayD::from_shape_vec(IxDyn(&shape), derivative).map_err(|error| {
             CoreError::InvalidInput(format!("derivative field assembly failed: {error}"))
         })?;
-        let coefficients = ArrayD::from_shape_vec(
-            IxDyn(&coefficient_shape),
-            diagnostic_coefficients,
-        )
-            .map_err(|error| {
-                CoreError::InvalidInput(format!("coefficient assembly failed: {error}"))
-            })?;
+        let coefficients =
+            ArrayD::from_shape_vec(IxDyn(&coefficient_shape), diagnostic_coefficients).map_err(
+                |error| CoreError::InvalidInput(format!("coefficient assembly failed: {error}")),
+            )?;
         Ok(TemporalFieldResult {
             cleaned: ArrayD::from_shape_vec(IxDyn(&shape), cleaned_output).map_err(|error| {
                 CoreError::InvalidInput(format!("cleaned field assembly failed: {error}"))
@@ -298,7 +295,11 @@ fn cubic_resample_operator(source: &Array1<f64>, target: &Array1<f64>) -> CoreRe
         let span = source[1] - source[0];
         return Ok(Array2::from_shape_fn((target.len(), 2), |(row, col)| {
             let weight = (target[row] - source[0]) / span;
-            if col == 0 { 1.0 - weight } else { weight }
+            if col == 0 {
+                1.0 - weight
+            } else {
+                weight
+            }
         }));
     }
     if n == 3 {

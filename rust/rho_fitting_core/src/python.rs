@@ -8,6 +8,7 @@ use pyo3::types::{PyDict, PyList};
 
 use crate::coarse_grain_burn;
 use crate::fitting;
+use crate::interpolation;
 use crate::mechanics::{self, CurrentQField};
 use crate::particles;
 use crate::temporal;
@@ -203,6 +204,68 @@ fn temporal_power_spectrum(
 #[pyclass(name = "TemporalOperators")]
 struct PyTemporalOperators {
     inner: temporal::TemporalOperators,
+}
+
+#[pyclass(name = "RadialTransfer")]
+struct PyRadialTransfer {
+    inner: interpolation::RadialTransfer,
+}
+
+#[pymethods]
+impl PyRadialTransfer {
+    #[new]
+    fn new(source: PyReadonlyArray1<'_, f64>, target: PyReadonlyArray1<'_, f64>) -> PyResult<Self> {
+        Ok(Self {
+            inner: interpolation::RadialTransfer::new(source.as_array(), target.as_array())
+                .map_err(to_py_err)?,
+        })
+    }
+
+    fn matrix(&self, py: Python<'_>) -> Py<PyAny> {
+        self.inner
+            .matrix()
+            .clone()
+            .into_pyarray(py)
+            .into_any()
+            .unbind()
+    }
+
+    fn apply(
+        &self,
+        py: Python<'_>,
+        values: PyReadonlyArrayDyn<'_, f64>,
+        axis: usize,
+    ) -> PyResult<Py<PyAny>> {
+        let result = self
+            .inner
+            .apply(values.as_array(), axis)
+            .map_err(to_py_err)?;
+        Ok(result.into_pyarray(py).into_any().unbind())
+    }
+}
+
+#[pyfunction]
+fn barycentric_matrix(
+    py: Python<'_>,
+    source: PyReadonlyArray1<'_, f64>,
+    target: PyReadonlyArray1<'_, f64>,
+) -> PyResult<Py<PyAny>> {
+    let result = interpolation::barycentric_matrix(source.as_array(), target.as_array())
+        .map_err(to_py_err)?;
+    Ok(result.into_pyarray(py).into_any().unbind())
+}
+
+#[pyfunction]
+fn transfer_radial(
+    py: Python<'_>,
+    values: PyReadonlyArrayDyn<'_, f64>,
+    matrix: PyReadonlyArray2<'_, f64>,
+    axis: usize,
+) -> PyResult<Py<PyAny>> {
+    let transfer =
+        interpolation::RadialTransfer::from_matrix(matrix.as_array()).map_err(to_py_err)?;
+    let result = transfer.apply(values.as_array(), axis).map_err(to_py_err)?;
+    Ok(result.into_pyarray(py).into_any().unbind())
 }
 
 #[pymethods]
@@ -521,6 +584,9 @@ fn _rho_fitting_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(weighted_linear_combination, m)?)?;
     m.add_function(wrap_pyfunction!(temporal_power_spectrum, m)?)?;
     m.add_class::<PyTemporalOperators>()?;
+    m.add_class::<PyRadialTransfer>()?;
+    m.add_function(wrap_pyfunction!(barycentric_matrix, m)?)?;
+    m.add_function(wrap_pyfunction!(transfer_radial, m)?)?;
     m.add_function(wrap_pyfunction!(particle_active_direction, m)?)?;
     m.add_function(wrap_pyfunction!(cartesian_to_cylindrical, m)?)?;
     m.add_function(wrap_pyfunction!(particle_directions, m)?)?;

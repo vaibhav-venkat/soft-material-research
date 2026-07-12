@@ -156,30 +156,32 @@ class CylindricalSpectralOperators:
 
 
 def barycentric_matrix(source: Array, target: Array) -> Array:
-    """Return the degree-N barycentric interpolation matrix from source to target."""
+    """Return the Rust-built degree-N barycentric interpolation matrix."""
     source = np.asarray(source, dtype=np.float64)
     target = np.asarray(target, dtype=np.float64)
     assert source.ndim == target.ndim == 1 and source.size >= 2
-    weights = np.ones(source.size, dtype=np.float64)
-    for index in range(source.size):
-        weights[index] = 1.0 / np.prod(source[index] - np.delete(source, index))
-    matrix = np.empty((target.size, source.size), dtype=np.float64)
-    for row, point in enumerate(target):
-        exact = np.flatnonzero(np.isclose(point, source, rtol=0.0, atol=1.0e-13))
-        if exact.size:
-            matrix[row] = 0.0
-            matrix[row, exact[0]] = 1.0
-        else:
-            values = weights / (point - source)
-            matrix[row] = values / np.sum(values)
-    return matrix
+    from . import _rho_fitting_core
+
+    assert _rho_fitting_core is not None, "rho-fitting Rust core is unavailable"
+    return np.asarray(
+        _rho_fitting_core.barycentric_matrix(
+            np.ascontiguousarray(source), np.ascontiguousarray(target)
+        )
+    )
 
 
 def transfer_radial(values: Array, matrix: Array, axis: int) -> Array:
-    """Apply a precomputed radial interpolation matrix along one array axis."""
-    moved = np.moveaxis(values, axis, -1)
-    assert moved.shape[-1] == matrix.shape[1]
-    return np.moveaxis(np.einsum("...j,ij->...i", moved, matrix), -1, axis)
+    """Apply a precomputed radial interpolation matrix in Rust."""
+    from . import _rho_fitting_core
+
+    assert _rho_fitting_core is not None, "rho-fitting Rust core is unavailable"
+    return np.asarray(
+        _rho_fitting_core.transfer_radial(
+            np.ascontiguousarray(values, dtype=np.float64),
+            np.ascontiguousarray(matrix, dtype=np.float64),
+            int(axis),
+        )
+    )
 
 
 def _progress(label: str, completed: int, total: int) -> None:
