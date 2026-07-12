@@ -11,6 +11,7 @@ use crate::fitting;
 use crate::interpolation;
 use crate::mechanics::{self, CurrentQField};
 use crate::particles;
+use crate::spectral;
 use crate::temporal;
 use crate::{CoreError, CoreResult};
 
@@ -239,6 +240,119 @@ impl PyRadialTransfer {
         let result = self
             .inner
             .apply(values.as_array(), axis)
+            .map_err(to_py_err)?;
+        Ok(result.into_pyarray(py).into_any().unbind())
+    }
+}
+
+#[pyclass(name = "CylindricalSpectralOperators")]
+struct PyCylindricalSpectralOperators {
+    inner: spectral::CylindricalSpectralOperators,
+}
+
+#[pymethods]
+impl PyCylindricalSpectralOperators {
+    #[new]
+    #[pyo3(signature = (lx, theta_period, r_min, r_max, nx, ntheta, nr))]
+    fn new(
+        lx: f64,
+        theta_period: f64,
+        r_min: f64,
+        r_max: f64,
+        nx: usize,
+        ntheta: usize,
+        nr: usize,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            inner: spectral::CylindricalSpectralOperators::new(
+                lx,
+                theta_period,
+                r_min,
+                r_max,
+                nx,
+                ntheta,
+                nr,
+            )
+            .map_err(to_py_err)?,
+        })
+    }
+
+    fn radial_nodes(&self, py: Python<'_>) -> Py<PyAny> {
+        self.inner
+            .radial_nodes
+            .clone()
+            .into_pyarray(py)
+            .into_any()
+            .unbind()
+    }
+
+    #[pyo3(signature = (values, direction, grid_offset=0))]
+    fn derivative(
+        &self,
+        py: Python<'_>,
+        values: PyReadonlyArrayDyn<'_, f64>,
+        direction: usize,
+        grid_offset: usize,
+    ) -> PyResult<Py<PyAny>> {
+        let result = self
+            .inner
+            .derivative(values.as_array(), grid_offset, direction)
+            .map_err(to_py_err)?;
+        Ok(result.into_pyarray(py).into_any().unbind())
+    }
+
+    #[pyo3(signature = (values, grid_offset=0))]
+    fn gradient(
+        &self,
+        py: Python<'_>,
+        values: PyReadonlyArrayDyn<'_, f64>,
+        grid_offset: usize,
+    ) -> PyResult<Py<PyAny>> {
+        let result = self
+            .inner
+            .gradient(values.as_array(), grid_offset)
+            .map_err(to_py_err)?;
+        Ok(result.into_pyarray(py).into_any().unbind())
+    }
+
+    #[pyo3(signature = (values, grid_offset=0))]
+    fn divergence(
+        &self,
+        py: Python<'_>,
+        values: PyReadonlyArrayDyn<'_, f64>,
+        grid_offset: usize,
+    ) -> PyResult<Py<PyAny>> {
+        let result = self
+            .inner
+            .divergence(values.as_array(), grid_offset)
+            .map_err(to_py_err)?;
+        Ok(result.into_pyarray(py).into_any().unbind())
+    }
+
+    #[pyo3(signature = (values, grid_offset=0))]
+    fn laplacian(
+        &self,
+        py: Python<'_>,
+        values: PyReadonlyArrayDyn<'_, f64>,
+        grid_offset: usize,
+    ) -> PyResult<Py<PyAny>> {
+        let result = self
+            .inner
+            .laplacian(values.as_array(), grid_offset)
+            .map_err(to_py_err)?;
+        Ok(result.into_pyarray(py).into_any().unbind())
+    }
+
+    #[pyo3(signature = (values, grid_offset=0))]
+    fn filter_two_thirds(
+        &self,
+        py: Python<'_>,
+        values: PyReadonlyArrayDyn<'_, f64>,
+        grid_offset: usize,
+    ) -> PyResult<Py<PyAny>> {
+        let result = self
+            .inner
+            .filter_two_thirds(values.as_array(), grid_offset)
             .map_err(to_py_err)?;
         Ok(result.into_pyarray(py).into_any().unbind())
     }
@@ -585,6 +699,7 @@ fn _rho_fitting_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(temporal_power_spectrum, m)?)?;
     m.add_class::<PyTemporalOperators>()?;
     m.add_class::<PyRadialTransfer>()?;
+    m.add_class::<PyCylindricalSpectralOperators>()?;
     m.add_function(wrap_pyfunction!(barycentric_matrix, m)?)?;
     m.add_function(wrap_pyfunction!(transfer_radial, m)?)?;
     m.add_function(wrap_pyfunction!(particle_active_direction, m)?)?;

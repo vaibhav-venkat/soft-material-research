@@ -8,6 +8,7 @@ pub mod interpolation;
 pub mod mechanics;
 pub mod particles;
 pub mod python;
+pub mod spectral;
 pub mod temporal;
 
 pub use errors::{CoreError, CoreResult};

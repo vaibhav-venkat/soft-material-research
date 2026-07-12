@@ -38,10 +38,6 @@ rust = "*"
 maturin = "*"
 rust-analyzer = "*"
 ty = ">=0.0.56,<0.0.57"
-shenfun = ">=4.3.0,<4.4"
-mpi4py = ">=4.0,<5"
-mpi4py-fft = ">=2.0,<3"
-sympy = ">=1.14,<2"
 
 [pypi-dependencies]
 pysindy = { version = ">=2.1.0, <3", extras = ["miosr", "sbr", "cvxpy"] }

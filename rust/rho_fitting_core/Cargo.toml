@@ -26,6 +26,7 @@ burn-cuda = { version = "0.21", default-features = false, features = ["std"], op
 burn-wgpu = { version = "0.21", default-features = false, features = ["std", "metal"], optional = true }
 rayon = "1"
 burn-flex = "0.21"
+rustfft = "6"
 
 [features]
 default = []
