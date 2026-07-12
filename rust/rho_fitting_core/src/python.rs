@@ -186,6 +186,20 @@ fn weighted_linear_combination(
     Ok(value.into_pyarray(py).into_any().unbind())
 }
 
+#[pyfunction]
+/// Sum squared temporal coefficients over every non-mode axis.
+fn temporal_power_spectrum(
+    py: Python<'_>,
+    coefficients: Vec<PyReadonlyArrayDyn<'_, f64>>,
+) -> PyResult<Py<PyAny>> {
+    let views = coefficients
+        .iter()
+        .map(|values| values.as_array())
+        .collect::<Vec<_>>();
+    let result = temporal::power_spectrum(&views).map_err(to_py_err)?;
+    Ok(result.into_pyarray(py).into_any().unbind())
+}
+
 #[pyclass(name = "TemporalOperators")]
 struct PyTemporalOperators {
     inner: temporal::TemporalOperators,
@@ -505,6 +519,7 @@ fn _rho_fitting_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(scale_by_scalar, m)?)?;
     m.add_function(wrap_pyfunction!(project_flux_directions, m)?)?;
     m.add_function(wrap_pyfunction!(weighted_linear_combination, m)?)?;
+    m.add_function(wrap_pyfunction!(temporal_power_spectrum, m)?)?;
     m.add_class::<PyTemporalOperators>()?;
     m.add_function(wrap_pyfunction!(particle_active_direction, m)?)?;
     m.add_function(wrap_pyfunction!(cartesian_to_cylindrical, m)?)?;

@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.interpolate import CubicSpline
 
 from . import _rho_fitting_core, _rho_fitting_core_import_error
 
@@ -23,13 +22,15 @@ class ChebyshevTimeResult:
 
 
 def temporal_power_spectrum(*coefficients: np.ndarray) -> np.ndarray:
-    """Compute Chebyshev-mode power summed over all non-time axes."""
+    """Compute Chebyshev-mode power in Rust over all non-time axes."""
     assert coefficients, "at least one coefficient array is required"
-    power = np.zeros(coefficients[0].shape[0], dtype=np.float64)
-    for coeff in coefficients:
-        axes = tuple(range(1, coeff.ndim))
-        power += np.sum(np.abs(coeff) ** 2, axis=axes)
-    return power
+    if _rho_fitting_core is None:
+        raise ImportError(f"rho-fitting Rust core is unavailable: {_rho_fitting_core_import_error}")
+    return np.asarray(
+        _rho_fitting_core.temporal_power_spectrum(
+            [np.ascontiguousarray(value, dtype=np.float64) for value in coefficients]
+        )
+    )
 
 
 def validate_cheb_cutoff(cutoff: int, frame_count: int) -> int:
@@ -71,21 +72,11 @@ def chebyshev_filter_and_derivative(
         int(cutoff),
     )
     result = operators.apply(values)
-    cleaned = np.asarray(result["cleaned"])
     scaled_times = np.asarray(operators.scaled_times())
-    nodes = np.asarray(operators.diagnostic_nodes())
-    if frame_count == 1:
-        node_values = cleaned
-    else:
-        flat = cleaned.reshape((frame_count, -1))
-        node_values = CubicSpline(scaled_times, flat, axis=0)(nodes).reshape(values.shape)
-    coefficients = np.asarray(
-        operators.diagnostic_coefficients(np.ascontiguousarray(node_values, dtype=np.float64))
-    )
     return ChebyshevTimeResult(
         filtered=np.ascontiguousarray(np.asarray(result["filtered"])),
         derivative=np.ascontiguousarray(np.asarray(result["derivative"])),
-        coefficients=np.ascontiguousarray(coefficients),
+        coefficients=np.ascontiguousarray(np.asarray(result["coefficients"])),
         times=np.asarray(operators.times()),
         scaled_times=scaled_times,
         cutoff=cutoff,
@@ -112,37 +103,17 @@ def chebyshev_filter_fields(
         int(cutoff),
     )
     payloads = operators.apply_many(list(arrays))
-    cleaned = [np.asarray(payload["cleaned"]) for payload in payloads]
-    widths = [max(1, int(np.prod(value.shape[1:], dtype=np.int64))) for value in arrays]
-    combined = np.concatenate(
-        [value.reshape((frame_count, width)) for value, width in zip(cleaned, widths, strict=True)],
-        axis=1,
-    )
     scaled_times = np.asarray(operators.scaled_times())
-    nodes = np.asarray(operators.diagnostic_nodes())
-    node_combined = (
-        combined
-        if frame_count == 1
-        else CubicSpline(scaled_times, combined, axis=0)(nodes)
-    )
-    diagnostic_combined = np.asarray(
-        operators.diagnostic_coefficients(np.ascontiguousarray(node_combined, dtype=np.float64))
-    )
     results: list[ChebyshevTimeResult] = []
-    offset = 0
-    for array, width, payload in zip(arrays, widths, payloads, strict=True):
-        coefficient_slice = diagnostic_combined[:, offset : offset + width]
+    for array, payload in zip(arrays, payloads, strict=True):
         results.append(
             ChebyshevTimeResult(
                 filtered=np.ascontiguousarray(np.asarray(payload["filtered"])),
                 derivative=np.ascontiguousarray(np.asarray(payload["derivative"])),
-                coefficients=np.ascontiguousarray(
-                    coefficient_slice.reshape((frame_count, *array.shape[1:]))
-                ),
+                coefficients=np.ascontiguousarray(np.asarray(payload["coefficients"])),
                 times=np.asarray(operators.times()),
                 scaled_times=scaled_times,
                 cutoff=cutoff,
             )
         )
-        offset += width
     return tuple(results)

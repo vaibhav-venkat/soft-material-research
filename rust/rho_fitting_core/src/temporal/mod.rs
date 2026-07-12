@@ -5,6 +5,44 @@ use rayon::prelude::*;
 
 use crate::{CoreError, CoreResult};
 
+pub(crate) fn power_spectrum(coefficients: &[ArrayViewD<'_, f64>]) -> CoreResult<Array1<f64>> {
+    let Some(first) = coefficients.first() else {
+        return Err(CoreError::InvalidInput(
+            "at least one coefficient field is required".to_string(),
+        ));
+    };
+    if first.ndim() == 0 {
+        return Err(CoreError::Shape(
+            "coefficient fields must have a leading mode axis".to_string(),
+        ));
+    }
+    let modes = first.shape()[0];
+    if coefficients
+        .iter()
+        .any(|values| values.ndim() == 0 || values.shape()[0] != modes)
+    {
+        return Err(CoreError::Shape(
+            "coefficient fields must share the leading mode axis".to_string(),
+        ));
+    }
+    let power = (0..modes)
+        .into_par_iter()
+        .map(|mode| {
+            coefficients
+                .iter()
+                .map(|values| {
+                    values
+                        .index_axis(ndarray::Axis(0), mode)
+                        .iter()
+                        .map(|value| value * value)
+                        .sum::<f64>()
+                })
+                .sum::<f64>()
+        })
+        .collect::<Vec<_>>();
+    Ok(Array1::from_vec(power))
+}
+
 /// Time-grid operators shared by every spatial field in one fitting run.
 pub(crate) struct TemporalOperators {
     pub(crate) times: Array1<f64>,
@@ -12,6 +50,7 @@ pub(crate) struct TemporalOperators {
     pub(crate) diagnostic_nodes: Array1<f64>,
     pub(crate) fit_operator: Array2<f64>,
     pub(crate) diagnostic_fit_operator: Array2<f64>,
+    pub(crate) diagnostic_operator: Array2<f64>,
     pub(crate) evaluation_operator: Array2<f64>,
     pub(crate) derivative_operator: Array2<f64>,
     pub(crate) cutoff: usize,
@@ -82,6 +121,9 @@ impl TemporalOperators {
             )
         };
         let diagnostic_fit_operator = coefficient_operator(&diagnostic_nodes, frame_count - 1)?;
+        let diagnostic_resample_operator =
+            cubic_resample_operator(&scaled_times, &diagnostic_nodes)?;
+        let diagnostic_operator = diagnostic_fit_operator.dot(&diagnostic_resample_operator);
         let evaluation_operator = evaluation_matrix(&scaled_times, cutoff - 1, false, 1.0);
         let derivative_basis = evaluation_matrix(&scaled_times, cutoff - 1, true, half_span);
         let derivative_operator = derivative_basis.dot(&fit_operator);
@@ -91,6 +133,7 @@ impl TemporalOperators {
             diagnostic_nodes,
             fit_operator,
             diagnostic_fit_operator,
+            diagnostic_operator,
             evaluation_operator,
             derivative_operator,
             cutoff,
@@ -152,15 +195,23 @@ impl TemporalOperators {
                 }
             });
 
-        let mut coefficient_shape = vec![self.cutoff];
+        let mut diagnostic_coefficients = vec![0.0; frames * columns];
+        diagnostic_coefficients
+            .par_chunks_mut(columns)
+            .enumerate()
+            .for_each(|(mode, output)| {
+                for column in 0..columns {
+                    output[column] = (0..frames)
+                        .map(|frame| {
+                            self.diagnostic_operator[[mode, frame]]
+                                * cleaned[column * frames + frame]
+                        })
+                        .sum();
+                }
+            });
+
+        let mut coefficient_shape = vec![frames];
         coefficient_shape.extend_from_slice(&shape[1..]);
-        let mut coefficient_output = vec![0.0; self.cutoff * columns];
-        for column in 0..columns {
-            for mode in 0..self.cutoff {
-                coefficient_output[mode * columns + column] =
-                    fit_coefficients[column * self.cutoff + mode];
-            }
-        }
         let mut cleaned_output = vec![0.0; frames * columns];
         for column in 0..columns {
             for frame in 0..frames {
@@ -173,7 +224,10 @@ impl TemporalOperators {
         let derivative = ArrayD::from_shape_vec(IxDyn(&shape), derivative).map_err(|error| {
             CoreError::InvalidInput(format!("derivative field assembly failed: {error}"))
         })?;
-        let coefficients = ArrayD::from_shape_vec(IxDyn(&coefficient_shape), coefficient_output)
+        let coefficients = ArrayD::from_shape_vec(
+            IxDyn(&coefficient_shape),
+            diagnostic_coefficients,
+        )
             .map_err(|error| {
                 CoreError::InvalidInput(format!("coefficient assembly failed: {error}"))
             })?;
@@ -233,6 +287,77 @@ impl TemporalOperators {
             CoreError::InvalidInput(format!("diagnostic coefficient assembly failed: {error}"))
         })
     }
+}
+
+fn cubic_resample_operator(source: &Array1<f64>, target: &Array1<f64>) -> CoreResult<Array2<f64>> {
+    let n = source.len();
+    if n == 1 {
+        return Ok(Array2::ones((target.len(), 1)));
+    }
+    if n == 2 {
+        let span = source[1] - source[0];
+        return Ok(Array2::from_shape_fn((target.len(), 2), |(row, col)| {
+            let weight = (target[row] - source[0]) / span;
+            if col == 0 { 1.0 - weight } else { weight }
+        }));
+    }
+    if n == 3 {
+        return Ok(Array2::from_shape_fn((target.len(), 3), |(row, col)| {
+            let x = target[row];
+            (0..3)
+                .filter(|other| *other != col)
+                .map(|other| (x - source[other]) / (source[col] - source[other]))
+                .product()
+        }));
+    }
+
+    // Solve the not-a-knot cubic-spline system once for every unit sample vector.
+    let mut system = Mat::<f64>::zeros(n, n);
+    let mut rhs = Mat::<f64>::zeros(n, n);
+    let h = (0..n - 1)
+        .map(|index| source[index + 1] - source[index])
+        .collect::<Vec<_>>();
+    system[(0, 0)] = -h[1];
+    system[(0, 1)] = h[0] + h[1];
+    system[(0, 2)] = -h[0];
+    for row in 1..n - 1 {
+        system[(row, row - 1)] = h[row - 1];
+        system[(row, row)] = 2.0 * (h[row - 1] + h[row]);
+        system[(row, row + 1)] = h[row];
+        rhs[(row, row - 1)] = 6.0 / h[row - 1];
+        rhs[(row, row)] = -6.0 * (1.0 / h[row - 1] + 1.0 / h[row]);
+        rhs[(row, row + 1)] = 6.0 / h[row];
+    }
+    system[(n - 1, n - 3)] = -h[n - 2];
+    system[(n - 1, n - 2)] = h[n - 3] + h[n - 2];
+    system[(n - 1, n - 1)] = -h[n - 3];
+    let second = system.as_ref().qr().solve_lstsq(rhs);
+
+    Ok(Array2::from_shape_fn((target.len(), n), |(row, column)| {
+        let x = target[row];
+        let interval = source
+            .iter()
+            .position(|value| *value > x)
+            .map(|index| index.saturating_sub(1))
+            .unwrap_or(n - 2)
+            .min(n - 2);
+        let width = h[interval];
+        let a = (source[interval + 1] - x) / width;
+        let b = (x - source[interval]) / width;
+        let direct = if column == interval {
+            a
+        } else if column == interval + 1 {
+            b
+        } else {
+            0.0
+        };
+        direct
+            + ((a * a * a - a) * second[(interval, column)]
+                + (b * b * b - b) * second[(interval + 1, column)])
+                * width
+                * width
+                / 6.0
+    }))
 }
 
 fn cleaned_columns(values: ArrayViewD<'_, f64>, times: &Array1<f64>) -> Vec<f64> {
