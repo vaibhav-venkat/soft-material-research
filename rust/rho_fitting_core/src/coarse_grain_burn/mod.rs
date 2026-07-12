@@ -18,7 +18,7 @@ use frame::{
 use grid::Grid3;
 
 use crate::mechanics::{
-    MechanicalFieldSet, MechanicalFrame, MechanicalInputViews, PhysicalComponent, TENSOR_COMPONENTS,
+    MechanicalFieldSet, MechanicalFrame, MechanicalInputViews, TENSOR_COMPONENTS,
 };
 use crate::{CoreError, CoreResult};
 
@@ -31,6 +31,7 @@ type FlexBackend = Flex<f32, i32>;
 
 const EPS: f32 = 1.0e-12;
 const GAUSSIAN_GRID_CHUNK: usize = 256;
+const PACKED_FEATURES: usize = 53;
 
 /// Build mechanical moment fields and current tensors with renormalized Burn Gaussian deposition.
 #[allow(clippy::too_many_arguments)]
@@ -134,6 +135,7 @@ fn mechanical_gaussian_device<B: Backend>(
     } = particles;
     let (frames, particles, _) = coords.dim();
     let grid = Grid3::from_domain(domain);
+    let device_grid = DeviceGrid::<B>::new(&grid, device);
     let mut output = MechanicalFieldSet::zeros(frames, &grid.domain);
 
     for t in 0..frames {
@@ -181,6 +183,7 @@ fn mechanical_gaussian_device<B: Backend>(
                 sigma: sigma as f32,
             },
             &grid,
+            &device_grid,
             &mut fields,
             device,
         )?;
@@ -206,6 +209,7 @@ struct GaussianFrameInputs<'a> {
 fn deposit_gaussian_mechanical_frame<B: Backend>(
     inputs: GaussianFrameInputs<'_>,
     grid: &Grid3,
+    device_grid: &DeviceGrid<B>,
     fields: &mut MechanicalFrame,
     device: &B::Device,
 ) -> CoreResult<()> {
@@ -214,31 +218,20 @@ fn deposit_gaussian_mechanical_frame<B: Backend>(
     let particle_x = tensor2::<B>(inputs.particle_x.to_vec(), [1, particles], device);
     let particle_theta = tensor2::<B>(inputs.particle_theta.to_vec(), [1, particles], device);
     let particle_r = tensor2::<B>(inputs.particle_r.to_vec(), [1, particles], device);
-    let dir_tensors = [
-        tensor2::<B>(inputs.dir[0].clone(), [1, particles], device),
-        tensor2::<B>(inputs.dir[1].clone(), [1, particles], device),
-        tensor2::<B>(inputs.dir[2].clone(), [1, particles], device),
-    ];
-    let vel_tensors = [
-        tensor2::<B>(inputs.vel[0].clone(), [1, particles], device),
-        tensor2::<B>(inputs.vel[1].clone(), [1, particles], device),
-        tensor2::<B>(inputs.vel[2].clone(), [1, particles], device),
-    ];
-    let psi6 = tensor2::<B>(inputs.psi6.to_vec(), [1, particles], device);
-    let q_tensors: Vec<Tensor<B, 2>> = inputs
-        .q_particle
-        .iter()
-        .map(|values| tensor2::<B>(values.clone(), [1, particles], device))
-        .collect();
+    let particle_features = tensor2::<B>(
+        packed_particle_features(&inputs),
+        [particles, PACKED_FEATURES],
+        device,
+    );
     // Normalize the actual discrete, cutoff Gaussian over the complete cylindrical
     // grid. This includes x, theta, and r and therefore conserves one unit of mass
     // per valid particle even when the grid is coarse or the radial domain is cut.
     let mut norm = Tensor::<B, 1>::zeros([particles], device);
     for start in (0..grid.len()).step_by(GAUSSIAN_GRID_CHUNK) {
         let chunk = (grid.len() - start).min(GAUSSIAN_GRID_CHUNK);
-        let (_, _, _, volumes) = grid_chunk(grid, start, chunk);
         let weights = gaussian_weights::<B>(
             grid,
+            device_grid,
             start,
             chunk,
             &particle_x,
@@ -246,17 +239,20 @@ fn deposit_gaussian_mechanical_frame<B: Backend>(
             &particle_r,
             &valid,
             inputs.sigma,
-            device,
         );
-        let volume_tensor = tensor2::<B>(volumes, [chunk, 1], device);
+        let volume_tensor = device_grid
+            .volumes
+            .clone()
+            .slice([start..start + chunk, 0..1]);
         norm = norm + (weights * volume_tensor).sum_dim(0).reshape([particles]);
     }
     let norm = norm + EPS;
+    let mut packed_chunks = Vec::new();
     for start in (0..grid.len()).step_by(GAUSSIAN_GRID_CHUNK) {
         let chunk = (grid.len() - start).min(GAUSSIAN_GRID_CHUNK);
-        let (_, _, _, volumes) = grid_chunk(grid, start, chunk);
         let weights = gaussian_weights::<B>(
             grid,
+            device_grid,
             start,
             chunk,
             &particle_x,
@@ -264,75 +260,23 @@ fn deposit_gaussian_mechanical_frame<B: Backend>(
             &particle_r,
             &valid,
             inputs.sigma,
-            device,
         );
-        let volume_tensor = tensor2::<B>(volumes, [chunk, 1], device);
+        let volume_tensor = device_grid
+            .volumes
+            .clone()
+            .slice([start..start + chunk, 0..1]);
         let mass_weights = weights * volume_tensor / norm.clone().reshape([1, particles]);
-        write_chunk(
-            &mut fields.mass,
-            start,
-            tensor_vec(mass_weights.clone().sum_dim(1).reshape([chunk]))?,
-        );
-        write_chunk(
-            &mut fields.psi6_mass,
-            start,
-            weighted_sum(&mass_weights, &psi6, chunk)?,
-        );
-        for component in PhysicalComponent::ALL {
-            let component_index = component.index();
-            write_chunk(
-                &mut fields.p_mass[component_index],
-                start,
-                weighted_sum(&mass_weights, &dir_tensors[component_index], chunk)?,
-            );
-            write_chunk(
-                &mut fields.j_rho_mass[component_index],
-                start,
-                weighted_sum(&mass_weights, &vel_tensors[component_index], chunk)?,
-            );
-        }
-        for flux in PhysicalComponent::ALL {
-            let flux_index = flux.index();
-            for component in PhysicalComponent::ALL {
-                let component_index = component.index();
-                write_chunk(
-                    &mut fields.j_p_mass[flux_index * 3 + component_index],
-                    start,
-                    weighted_sum_product(
-                        &mass_weights,
-                        &vel_tensors[flux_index],
-                        &dir_tensors[component_index],
-                        chunk,
-                    )?,
-                );
-            }
-            for q_index in 0..9 {
-                write_chunk(
-                    &mut fields.j_q_mass[flux_index * 9 + q_index],
-                    start,
-                    weighted_sum_product(
-                        &mass_weights,
-                        &vel_tensors[flux_index],
-                        &q_tensors[q_index],
-                        chunk,
-                    )?,
-                );
-            }
-        }
-        for q_index in 0..9 {
-            write_chunk(
-                &mut fields.q_mass[q_index],
-                start,
-                weighted_sum(&mass_weights, &q_tensors[q_index], chunk)?,
-            );
-        }
+        packed_chunks.push(mass_weights.matmul(particle_features.clone()));
     }
+    let packed = Tensor::cat(packed_chunks, 0);
+    write_packed_frame(fields, tensor_matrix(packed)?, grid.len())?;
     Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
 fn gaussian_weights<B: Backend>(
     grid: &Grid3,
+    device_grid: &DeviceGrid<B>,
     start: usize,
     chunk: usize,
     particle_x: &Tensor<B, 2>,
@@ -340,12 +284,13 @@ fn gaussian_weights<B: Backend>(
     particle_r: &Tensor<B, 2>,
     valid: &Tensor<B, 2>,
     sigma: f32,
-    device: &B::Device,
 ) -> Tensor<B, 2> {
-    let (xs, thetas, rs, _) = grid_chunk(grid, start, chunk);
-    let grid_x = tensor2::<B>(xs, [chunk, 1], device);
-    let grid_theta = tensor2::<B>(thetas, [chunk, 1], device);
-    let grid_r = tensor2::<B>(rs, [chunk, 1], device);
+    let grid_x = device_grid.x.clone().slice([start..start + chunk, 0..1]);
+    let grid_theta = device_grid
+        .theta
+        .clone()
+        .slice([start..start + chunk, 0..1]);
+    let grid_r = device_grid.r.clone().slice([start..start + chunk, 0..1]);
     let dx_raw = grid_x - particle_x.clone();
     let dx = dx_raw.clone() - (dx_raw / grid.lx).round() * grid.lx;
     let dtheta_raw = grid_theta - particle_theta.clone();
@@ -358,47 +303,100 @@ fn gaussian_weights<B: Backend>(
     weights.mask_fill(dist2.greater_elem(cutoff2), 0.0) * valid.clone()
 }
 
-fn weighted_sum<B: Backend>(
-    weights: &Tensor<B, 2>,
-    values: &Tensor<B, 2>,
-    chunk: usize,
-) -> CoreResult<Vec<f32>> {
-    tensor_vec(
-        (weights.clone() * values.clone())
-            .sum_dim(1)
-            .reshape([chunk]),
-    )
-}
-
-fn weighted_sum_product<B: Backend>(
-    weights: &Tensor<B, 2>,
-    left: &Tensor<B, 2>,
-    right: &Tensor<B, 2>,
-    chunk: usize,
-) -> CoreResult<Vec<f32>> {
-    tensor_vec(
-        (weights.clone() * left.clone() * right.clone())
-            .sum_dim(1)
-            .reshape([chunk]),
-    )
-}
-
-fn write_chunk(target: &mut [f64], start: usize, values: Vec<f32>) {
-    for (offset, value) in values.into_iter().enumerate() {
-        target[start + offset] = value as f64;
-    }
-}
-
 fn tensor2<B: Backend>(values: Vec<f32>, shape: [usize; 2], device: &B::Device) -> Tensor<B, 2> {
     Tensor::<B, 2>::from_data(TensorData::new(values, shape), device)
 }
 
-fn tensor_vec<B: Backend>(tensor: Tensor<B, 1>) -> CoreResult<Vec<f32>> {
+fn tensor_matrix<B: Backend>(tensor: Tensor<B, 2>) -> CoreResult<Vec<f32>> {
     tensor
         .try_into_data()
         .map_err(|error| CoreError::InvalidInput(format!("Burn readback failed: {error}")))?
         .to_vec::<f32>()
         .map_err(|error| CoreError::InvalidInput(format!("Burn data conversion failed: {error}")))
+}
+
+struct DeviceGrid<B: Backend> {
+    x: Tensor<B, 2>,
+    theta: Tensor<B, 2>,
+    r: Tensor<B, 2>,
+    volumes: Tensor<B, 2>,
+}
+
+impl<B: Backend> DeviceGrid<B> {
+    fn new(grid: &Grid3, device: &B::Device) -> Self {
+        let (x, theta, r, volumes) = grid_chunk(grid, 0, grid.len());
+        Self {
+            x: tensor2(x, [grid.len(), 1], device),
+            theta: tensor2(theta, [grid.len(), 1], device),
+            r: tensor2(r, [grid.len(), 1], device),
+            volumes: tensor2(volumes, [grid.len(), 1], device),
+        }
+    }
+}
+
+fn packed_particle_features(inputs: &GaussianFrameInputs<'_>) -> Vec<f32> {
+    let particles = inputs.particle_x.len();
+    let mut output = vec![0.0; particles * PACKED_FEATURES];
+    for particle in 0..particles {
+        let row = &mut output[particle * PACKED_FEATURES..(particle + 1) * PACKED_FEATURES];
+        row[0] = 1.0;
+        row[1] = inputs.psi6[particle];
+        row[2..5].copy_from_slice(&[
+            inputs.dir[0][particle],
+            inputs.dir[1][particle],
+            inputs.dir[2][particle],
+        ]);
+        for q_index in 0..9 {
+            row[5 + q_index] = inputs.q_particle[q_index][particle];
+        }
+        row[14..17].copy_from_slice(&[
+            inputs.vel[0][particle],
+            inputs.vel[1][particle],
+            inputs.vel[2][particle],
+        ]);
+        for flux in 0..3 {
+            for component in 0..3 {
+                row[17 + flux * 3 + component] =
+                    inputs.vel[flux][particle] * inputs.dir[component][particle];
+            }
+            for q_index in 0..9 {
+                row[26 + flux * 9 + q_index] =
+                    inputs.vel[flux][particle] * inputs.q_particle[q_index][particle];
+            }
+        }
+    }
+    output
+}
+
+fn write_packed_frame(
+    fields: &mut MechanicalFrame,
+    values: Vec<f32>,
+    grid_len: usize,
+) -> CoreResult<()> {
+    if values.len() != grid_len * PACKED_FEATURES {
+        return Err(CoreError::Shape(
+            "packed mechanical readback has an unexpected shape".to_string(),
+        ));
+    }
+    for cell in 0..grid_len {
+        let row = &values[cell * PACKED_FEATURES..(cell + 1) * PACKED_FEATURES];
+        fields.mass[cell] = row[0] as f64;
+        fields.psi6_mass[cell] = row[1] as f64;
+        for component in 0..3 {
+            fields.p_mass[component][cell] = row[2 + component] as f64;
+            fields.j_rho_mass[component][cell] = row[14 + component] as f64;
+        }
+        for q_index in 0..9 {
+            fields.q_mass[q_index][cell] = row[5 + q_index] as f64;
+        }
+        for index in 0..9 {
+            fields.j_p_mass[index][cell] = row[17 + index] as f64;
+        }
+        for index in 0..27 {
+            fields.j_q_mass[index][cell] = row[26 + index] as f64;
+        }
+    }
+    Ok(())
 }
 
 fn grid_chunk(
