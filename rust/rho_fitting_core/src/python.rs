@@ -11,6 +11,7 @@ use crate::fitting;
 use crate::interpolation;
 use crate::mechanics::{self, CurrentQField};
 use crate::particles;
+use crate::regression;
 use crate::spectral;
 use crate::temporal;
 use crate::{CoreError, CoreResult};
@@ -382,6 +383,45 @@ fn transfer_radial(
     Ok(result.into_pyarray(py).into_any().unbind())
 }
 
+#[pyfunction]
+#[pyo3(signature = (x, y, lambda, tolerance, max_iterations, non_positive, non_negative))]
+/// Fit one column-normalized, sign-constrained L1 regression problem.
+fn fit_constrained_lasso(
+    py: Python<'_>,
+    x: PyReadonlyArray2<'_, f64>,
+    y: PyReadonlyArray1<'_, f64>,
+    lambda: f64,
+    tolerance: f64,
+    max_iterations: usize,
+    non_positive: PyReadonlyArray1<'_, i64>,
+    non_negative: PyReadonlyArray1<'_, i64>,
+) -> PyResult<Py<PyDict>> {
+    let result = regression::fit_constrained_lasso(
+        x.as_array(),
+        y.as_array(),
+        lambda,
+        tolerance,
+        max_iterations,
+        non_positive.as_array(),
+        non_negative.as_array(),
+    )
+    .map_err(to_py_err)?;
+    let out = PyDict::new(py);
+    out.set_item("coefficients", result.coefficients.into_pyarray(py))?;
+    out.set_item(
+        "normalized_coefficients",
+        result.normalized_coefficients.into_pyarray(py),
+    )?;
+    out.set_item("column_norms", result.column_norms.into_pyarray(py))?;
+    out.set_item("objective", result.objective)?;
+    out.set_item("status", result.status)?;
+    out.set_item("iterations", result.iterations)?;
+    out.set_item("primal_residual", result.primal_residual)?;
+    out.set_item("dual_residual", result.dual_residual)?;
+    out.set_item("gap", result.gap)?;
+    Ok(out.unbind())
+}
+
 #[pymethods]
 impl PyTemporalOperators {
     #[new]
@@ -702,6 +742,7 @@ fn _rho_fitting_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCylindricalSpectralOperators>()?;
     m.add_function(wrap_pyfunction!(barycentric_matrix, m)?)?;
     m.add_function(wrap_pyfunction!(transfer_radial, m)?)?;
+    m.add_function(wrap_pyfunction!(fit_constrained_lasso, m)?)?;
     m.add_function(wrap_pyfunction!(particle_active_direction, m)?)?;
     m.add_function(wrap_pyfunction!(cartesian_to_cylindrical, m)?)?;
     m.add_function(wrap_pyfunction!(particle_directions, m)?)?;

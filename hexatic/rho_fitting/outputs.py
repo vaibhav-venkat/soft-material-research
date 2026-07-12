@@ -158,6 +158,8 @@ def mechanical_report_lines(
                 f"- flux rmse: {_optional_float(fit.auxiliary_rmse)}",
                 f"- flux r2: {_optional_float(fit.auxiliary_r2)}",
                 f"- tau_index: {fit.tau_index if fit.tau_index is not None else 'none'}",
+                f"- solver: rust-clarabel ({fit.solver_status}, {fit.solver_iterations} iterations)",
+                f"- objective: {format_float(fit.objective)}",
                 "",
                 "| term | active | coefficient | importance | raw corr |",
                 "|---|---:|---:|---:|---:|",

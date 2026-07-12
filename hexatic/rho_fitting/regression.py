@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import warnings
 
 import numpy as np
-import pysindy as ps
-from sklearn.exceptions import ConvergenceWarning
+
+from . import _rho_fitting_core, _rho_fitting_core_import_error
 
 
 @dataclass(frozen=True)
@@ -28,6 +27,9 @@ class StabilityResult:
     r2: float
     auxiliary_rmse: float | None = None
     auxiliary_r2: float | None = None
+    solver_status: str = "unknown"
+    solver_iterations: int = 0
+    objective: float = float("nan")
 
 
 def stability_selection(
@@ -107,7 +109,7 @@ def stability_selection(
             f"non_positive={_constraint_labels(names, non_positive_indices)} "
             f"non_negative={_constraint_labels(names, non_negative_indices)}"
         )
-    coefficients_path, importance_path = _fit_single_tau(
+    coefficients_path, importance_path, solver_diagnostics = _fit_single_tau(
         X,
         y,
         selected_tau,
@@ -148,6 +150,9 @@ def stability_selection(
         r2,
         auxiliary_rmse,
         auxiliary_r2,
+        solver_diagnostics[0],
+        solver_diagnostics[1],
+        solver_diagnostics[2],
     )
 
 
@@ -208,12 +213,12 @@ def _fit_single_tau(
     max_iter: int,
     non_positive_indices: tuple[int, ...],
     non_negative_indices: tuple[int, ...],
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, tuple[str, int, float]]:
     """Fit constrained SR3 coefficients at one selected tau value."""
     coefficients_path = np.zeros((1, X.shape[1]), dtype=np.float64)
     importance_path = np.zeros_like(coefficients_path)
     _progress(f"  tau 1/1: {tau:.6g}")
-    coefficients_path[0] = _constrained_sr3_coefficients(
+    coefficients, diagnostics = _constrained_sr3_coefficients(
         X,
         y,
         reg_weight_lam=float(tau),
@@ -221,8 +226,9 @@ def _fit_single_tau(
         non_positive_indices=non_positive_indices,
         non_negative_indices=non_negative_indices,
     )
-    importance_path[0] = _coefficient_importance(coefficients_path[0])
-    return coefficients_path, importance_path
+    coefficients_path[0] = coefficients
+    importance_path[0] = _coefficient_importance(coefficients)
+    return coefficients_path, importance_path, diagnostics
 
 
 def _regression_metrics(y: np.ndarray, y_pred: np.ndarray) -> tuple[float, float]:
@@ -284,27 +290,27 @@ def _constrained_sr3_coefficients(
     max_iter: int,
     non_positive_indices: tuple[int, ...],
     non_negative_indices: tuple[int, ...],
-) -> np.ndarray:
-    """Fit one PySINDy ConstrainedSR3 model and return a flat coefficient vector."""
-    constraint_lhs = _sign_constraint_lhs(X.shape[1], 1, non_positive_indices, non_negative_indices)
-    constraint_rhs = np.zeros(constraint_lhs.shape[0], dtype=np.float64) if constraint_lhs is not None else None
-    optimizer = _ConstrainedSR3(
-        reg_weight_lam=float(reg_weight_lam),
-        regularizer="L1",
-        max_iter=int(max_iter),
-        normalize_columns=True,
-        unbias=False,
-        constraint_lhs=constraint_lhs,
-        constraint_rhs=constraint_rhs,
-        constraint_order="feature",
-        inequality_constraints=constraint_lhs is not None,
+) -> tuple[np.ndarray, tuple[str, int, float]]:
+    """Fit the current single-lambda constrained L1 problem in native Rust."""
+    if _rho_fitting_core is None:
+        raise ImportError(f"rho-fitting Rust core is unavailable: {_rho_fitting_core_import_error}")
+    result = _rho_fitting_core.fit_constrained_lasso(
+        np.ascontiguousarray(X, dtype=np.float64),
+        np.ascontiguousarray(y, dtype=np.float64),
+        float(reg_weight_lam),
+        1.0e-5,
+        int(max_iter),
+        np.asarray(non_positive_indices, dtype=np.int64),
+        np.asarray(non_negative_indices, dtype=np.int64),
     )
-    optimizer.fit_intercept = False
-    assert optimizer.fit_intercept is False, "PySINDy ConstrainedSR3 must not fit an intercept"
-    optimizer.fit(np.ascontiguousarray(X, dtype=np.float64), np.ascontiguousarray(y, dtype=np.float64))
-    coefficients = np.asarray(optimizer.coef_, dtype=np.float64).reshape(-1)
-    assert coefficients.shape == (X.shape[1],), "PySINDy returned an unexpected coefficient shape"
-    return coefficients
+    coefficients = np.asarray(result["coefficients"], dtype=np.float64)
+    assert coefficients.shape == (X.shape[1],), "Rust solver returned an unexpected coefficient shape"
+    diagnostics = (
+        str(result["status"]),
+        int(result["iterations"]),
+        float(result["objective"]),
+    )
+    return coefficients, diagnostics
 
 
 def _constraint_indices(names: tuple[str, ...], constrained_names: tuple[str, ...]) -> tuple[int, ...]:
@@ -318,103 +324,6 @@ def _constraint_labels(names: tuple[str, ...], indices: tuple[int, ...]) -> str:
     if not indices:
         return "none"
     return ",".join(names[index] for index in indices)
-
-
-class _ConstrainedSR3(ps.ConstrainedSR3):
-    """ConstrainedSR3 variant that tries installed CVXPY solvers and falls back to zeros."""
-
-    def _update_coef_cvxpy(self, xi, cost, var_len, coef_prev, tol):  # type: ignore[no-untyped-def]
-        """Solve the SR3 CVXPY subproblem with local solver-specific options."""
-        import cvxpy as cp
-
-        if self.use_constraints:
-            assert self.constraint_lhs is not None
-            assert self.constraint_rhs is not None
-            assert self.constraint_separation_index is not None
-            constraints = []
-            if self.equality_constraints:
-                constraints.append(
-                    self.constraint_lhs[self.constraint_separation_index :, :] @ xi
-                    == self.constraint_rhs[self.constraint_separation_index :],
-                )
-            if self.inequality_constraints:
-                constraints.append(
-                    self.constraint_lhs[: self.constraint_separation_index, :] @ xi
-                    <= self.constraint_rhs[: self.constraint_separation_index]
-                )
-            problem = cp.Problem(cp.Minimize(cost), constraints)
-        else:
-            problem = cp.Problem(cp.Minimize(cost))
-
-        solvers = tuple(solver for solver in ("CLARABEL", "SCS") if solver in cp.installed_solvers())
-        for solver in solvers:
-            try:
-                problem.solve(
-                    solver=solver,
-                    verbose=self.verbose_cvxpy,
-                    **_cvxpy_solver_options(solver, self.max_iter, tol),
-                )
-                if xi.value is not None:
-                    return np.asarray(xi.value, dtype=np.float64).reshape(coef_prev.shape)
-            except cp.error.SolverError:
-                continue
-        warnings.warn(
-            "ConstrainedSR3 CVXPY solve failed or was infeasible; setting coefs to zeros",
-            ConvergenceWarning,
-        )
-        return np.zeros((var_len,), dtype=np.float64).reshape(coef_prev.shape)
-
-
-def _cvxpy_solver_options(solver: str, max_iter: int, tol: float) -> dict[str, float | int]:
-    """Return option names expected by the selected CVXPY solver."""
-    if solver == "CLARABEL":
-        return {
-            "max_iter": int(max_iter),
-            "tol_gap_abs": float(tol),
-            "tol_gap_rel": float(tol),
-            "tol_feas": float(tol),
-        }
-    if solver == "SCS":
-        return {
-            "max_iters": int(max_iter),
-            "eps_abs": float(tol),
-            "eps_rel": float(tol),
-        }
-    return {}
-
-
-def _sign_constraint_lhs(
-    n_features: int,
-    n_targets: int,
-    non_positive_indices: tuple[int, ...],
-    non_negative_indices: tuple[int, ...],
-) -> np.ndarray | None:
-    """Build inequality rows enforcing selected coefficient signs independently."""
-    rows: list[np.ndarray] = []
-    for index in non_positive_indices:
-        rows.extend(_constraint_rows(n_features, n_targets, index, sign=1.0))
-    for index in non_negative_indices:
-        rows.extend(_constraint_rows(n_features, n_targets, index, sign=-1.0))
-    if not rows:
-        return None
-    return np.vstack(rows)
-
-
-def _constraint_rows(
-    n_features: int,
-    n_targets: int,
-    index: int,
-    *,
-    sign: float,
-) -> list[np.ndarray]:
-    """Return one sign-constraint row per target component for a feature."""
-    rows = []
-    offset = index * n_targets
-    for target in range(n_targets):
-        row = np.zeros(n_features * n_targets, dtype=np.float64)
-        row[offset + target] = float(sign)
-        rows.append(row)
-    return rows
 
 
 def _coefficient_importance(coefficients: np.ndarray) -> np.ndarray:
