@@ -45,6 +45,7 @@ pub(crate) type Rank3Tensor =
 pub(crate) type CurrentQField = Array4<Rank3Tensor>;
 
 /// Owned cylindrical grid shared by CPU and GPU deposition backends.
+#[derive(Clone)]
 pub(crate) struct CylindricalGrid {
     pub(crate) x: Array1<f64>,
     pub(crate) theta: Array1<f64>,
@@ -119,10 +120,6 @@ impl CylindricalGrid {
         (self.x.len(), self.theta.len(), self.r.len())
     }
 
-    pub(crate) fn len(&self) -> usize {
-        self.x.len() * self.theta.len() * self.r.len()
-    }
-
     pub(crate) fn flat_index(&self, ix: usize, itheta: usize, ir: usize) -> usize {
         ix * self.theta.len() * self.r.len() + itheta * self.r.len() + ir
     }
@@ -166,6 +163,7 @@ pub(crate) fn relative_mass_error(mass: &[f64], expected: usize) -> f64 {
 }
 
 /// Validated particle arrays plus the canonical grid used by either backend.
+#[derive(Clone)]
 pub(crate) struct MechanicalInputViews<'a> {
     pub(crate) coords: ArrayView3<'a, f64>,
     pub(crate) directions: ArrayView3<'a, f64>,
@@ -301,43 +299,6 @@ impl MechanicalFrame {
             j_rho_mass: std::array::from_fn(|_| vec![0.0; grid_len]),
             j_p_mass: std::array::from_fn(|_| vec![0.0; grid_len]),
             j_q_mass: std::array::from_fn(|_| vec![0.0; grid_len]),
-        }
-    }
-
-    pub(crate) fn deposit(
-        &mut self,
-        flat: usize,
-        mass: f64,
-        psi6: f64,
-        direction: [f64; 3],
-        velocity: [f64; 3],
-    ) {
-        let mut q = [[0.0; 3]; 3];
-        for (row, col) in TENSOR_COMPONENTS {
-            q[row.index()][col.index()] = direction[row.index()] * direction[col.index()]
-                - if row == col { 1.0 / 3.0 } else { 0.0 };
-        }
-        self.mass[flat] += mass;
-        self.psi6_mass[flat] += mass * psi6;
-        for component in PhysicalComponent::ALL {
-            let index = component.index();
-            self.p_mass[index][flat] += mass * direction[index];
-            self.j_rho_mass[index][flat] += mass * velocity[index];
-        }
-        for flux in PhysicalComponent::ALL {
-            for component in PhysicalComponent::ALL {
-                let flux_index = flux.index();
-                let component_index = component.index();
-                self.j_p_mass[flux_index * 3 + component_index][flat] +=
-                    mass * velocity[flux_index] * direction[component_index];
-            }
-            for (tensor_index, (row, col)) in TENSOR_COMPONENTS.into_iter().enumerate() {
-                self.j_q_mass[flux.index() * 9 + tensor_index][flat] +=
-                    mass * velocity[flux.index()] * q[row.index()][col.index()];
-            }
-        }
-        for (tensor_index, (row, col)) in TENSOR_COMPONENTS.into_iter().enumerate() {
-            self.q_mass[tensor_index][flat] += mass * q[row.index()][col.index()];
         }
     }
 

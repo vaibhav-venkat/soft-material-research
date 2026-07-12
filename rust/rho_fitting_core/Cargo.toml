@@ -20,15 +20,16 @@ pyo3 = { version = "0.29", features = ["extension-module"] }
 rand = "0.8"
 rand_chacha = "0.3"
 thiserror = "2"
-burn = { version = "0.21", default-features = false, features = ["std", "fusion", "autotune"], optional = true }
+burn = { version = "0.21", default-features = false, features = ["std", "flex", "fusion", "autotune"] }
 burn-cuda = { version = "0.21", default-features = false, features = ["std"], optional = true }
 burn-wgpu = { version = "0.21", default-features = false, features = ["std", "metal"], optional = true }
 rayon = { version = "1", optional = true }
+burn-flex = "0.21"
 
 [features]
 default = []
-gpu-metal = ["burn", "burn-wgpu"]
-gpu-cuda = ["burn", "burn-cuda"]
+gpu-metal = ["burn-wgpu"]
+gpu-cuda = ["burn-cuda"]
 gpu = ["gpu-metal", "gpu-cuda"]
 parallel = ["rayon"]
 

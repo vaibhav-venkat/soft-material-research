@@ -1,6 +1,7 @@
 mod frame;
 mod grid;
 
+use burn::backend::{flex::FlexDevice, Flex};
 use burn::prelude::*;
 use burn::tensor::TensorData;
 #[cfg(feature = "gpu-cuda")]
@@ -26,10 +27,12 @@ type CudaBackend = Cuda<f32, i32>;
 #[cfg(feature = "gpu-metal")]
 type MetalBackend = Metal<f32, i32, u8>;
 
+type FlexBackend = Flex<f32, i32>;
+
 const EPS: f32 = 1.0e-12;
 const GAUSSIAN_GRID_CHUNK: usize = 256;
 
-/// Build mechanical moment fields and current tensors with renormalized GPU Gaussian deposition.
+/// Build mechanical moment fields and current tensors with renormalized Burn Gaussian deposition.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_mechanical_fields(
     coords: ArrayView3<'_, f64>,
@@ -94,17 +97,22 @@ fn run_mechanical(inputs: MechanicalInputViews<'_>) -> CoreResult<MechanicalFiel
     #[cfg(feature = "gpu-metal")]
     {
         let device = WgpuDevice::DefaultDevice;
-        println!("[rho_fitting] using Burn Metal/WGPU backend for renormalized mechanical Gaussian fields");
-        return catch_burn_panic("Metal/WGPU", || {
+        println!("[rho_fitting] trying Burn Metal/WGPU backend for renormalized mechanical Gaussian fields");
+        if let Ok(fields) = catch_burn_panic("Metal/WGPU", || {
             init_setup::<graphics::Metal>(&device, Default::default());
-            mechanical_gaussian_device::<MetalBackend>(inputs, &device)
-        });
+            mechanical_gaussian_device::<MetalBackend>(inputs.clone(), &device)
+        }) {
+            return Ok(fields);
+        }
+        println!("[rho_fitting] Metal/WGPU unavailable; falling back to Burn Flex");
     }
 
-    #[allow(unreachable_code)]
-    Err(CoreError::InvalidInput(
-        "extension was built without a supported Burn GPU backend".to_string(),
-    ))
+    println!(
+        "[rho_fitting] using Burn Flex CPU backend for renormalized mechanical Gaussian fields"
+    );
+    catch_burn_panic("Flex", || {
+        mechanical_gaussian_device::<FlexBackend>(inputs, &FlexDevice)
+    })
 }
 
 fn mechanical_gaussian_device<B: Backend>(
@@ -127,7 +135,7 @@ fn mechanical_gaussian_device<B: Backend>(
 
     for t in 0..frames {
         println!(
-            "[rho_fitting] GPU Gaussian mechanical coarse-grain frame {}/{}",
+            "[rho_fitting] Burn Gaussian mechanical coarse-grain frame {}/{}",
             t + 1,
             frames
         );

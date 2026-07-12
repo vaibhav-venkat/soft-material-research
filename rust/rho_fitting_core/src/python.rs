@@ -6,10 +6,9 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-#[cfg(any(feature = "gpu-metal", feature = "gpu-cuda"))]
 use crate::coarse_grain_burn;
+use crate::fitting;
 use crate::mechanics::{self, CurrentQField};
-use crate::sampling;
 use crate::{CoreError, CoreResult};
 
 fn to_py_err(error: CoreError) -> PyErr {
@@ -77,23 +76,82 @@ fn version() -> &'static str {
 
 #[pyfunction]
 #[pyo3(signature = (valid_mask, nd, seed, replace))]
-/// Sample `(frame, ix, iy)` rows from a boolean valid-mask grid.
-fn sample_rows(
+/// Sample `(frame, ix, theta, r)` rows from a boolean valid-mask grid.
+fn sample_grid_rows(
     py: Python<'_>,
-    valid_mask: PyReadonlyArray3<'_, bool>,
+    valid_mask: PyReadonlyArrayDyn<'_, bool>,
     nd: usize,
     seed: u64,
     replace: bool,
 ) -> PyResult<Py<PyAny>> {
     let rows =
-        sampling::sample_rows(valid_mask.as_array(), nd, seed, replace).map_err(to_py_err)?;
+        fitting::sample_grid_rows(valid_mask.as_array(), nd, seed, replace).map_err(to_py_err)?;
     Ok(rows.into_pyarray(py).into_any().unbind())
 }
 
 #[pyfunction]
+/// Build a finite-value `(T,Nx,Ntheta,Nr)` mask from a sequence of fields.
+fn finite_grid_mask(
+    py: Python<'_>,
+    fields: Vec<PyReadonlyArrayDyn<'_, f64>>,
+) -> PyResult<Py<PyAny>> {
+    let views = fields
+        .iter()
+        .map(|field| field.as_array())
+        .collect::<Vec<_>>();
+    let mask = fitting::finite_grid_mask(&views).map_err(to_py_err)?;
+    Ok(mask.into_pyarray(py).into_any().unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (target_divergence, divergence_library, sample_coordinates, target_flux=None, flux_library=None, flux_weight=0.0))]
+/// Assemble finite divergence rows and optional weighted flux rows for regression.
+fn assemble_regression_rows(
+    py: Python<'_>,
+    target_divergence: PyReadonlyArrayDyn<'_, f64>,
+    divergence_library: PyReadonlyArrayDyn<'_, f64>,
+    sample_coordinates: PyReadonlyArray2<'_, i64>,
+    target_flux: Option<PyReadonlyArrayDyn<'_, f64>>,
+    flux_library: Option<PyReadonlyArrayDyn<'_, f64>>,
+    flux_weight: f64,
+) -> PyResult<Py<PyDict>> {
+    let rows = fitting::assemble_regression_rows(
+        target_divergence.as_array(),
+        divergence_library.as_array(),
+        sample_coordinates.as_array(),
+        target_flux.as_ref().map(|value| value.as_array()),
+        flux_library.as_ref().map(|value| value.as_array()),
+        flux_weight,
+    )
+    .map_err(to_py_err)?;
+    let out = PyDict::new(py);
+    out.set_item("X", rows.x.into_pyarray(py))?;
+    out.set_item("y", rows.y.into_pyarray(py))?;
+    out.set_item("divergence_X", rows.divergence_x.into_pyarray(py))?;
+    out.set_item("divergence_y", rows.divergence_y.into_pyarray(py))?;
+    out.set_item("divergence_rows", rows.divergence_rows.into_pyarray(py))?;
+    out.set_item("row_index", rows.row_index.into_pyarray(py))?;
+    if let Some(flux_x) = rows.flux_x {
+        out.set_item("flux_X", flux_x.into_pyarray(py))?;
+    } else {
+        out.set_item("flux_X", py.None())?;
+    }
+    if let Some(flux_y) = rows.flux_y {
+        out.set_item("flux_y", flux_y.into_pyarray(py))?;
+    } else {
+        out.set_item("flux_y", py.None())?;
+    }
+    if let Some(flux_row_index) = rows.flux_row_index {
+        out.set_item("flux_row_index", flux_row_index.into_pyarray(py))?;
+    } else {
+        out.set_item("flux_row_index", py.None())?;
+    }
+    Ok(out.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (coords, directions, velocities, psi6_abs, mask, x_centers, theta_centers, r_centers, lx, theta_period, sigma, gamma, u0))]
-/// Python wrapper for GPU Gaussian mechanical coarse-grained fields and current tensors.
-#[allow(unused_variables)]
+/// Python wrapper for Burn Gaussian mechanical coarse-grained fields and current tensors.
 fn build_mechanical_fields(
     py: Python<'_>,
     coords: PyReadonlyArray3<'_, f64>,
@@ -110,42 +168,32 @@ fn build_mechanical_fields(
     gamma: f64,
     u0: f64,
 ) -> PyResult<Py<PyDict>> {
-    #[cfg(any(feature = "gpu-metal", feature = "gpu-cuda"))]
-    {
-        let result = coarse_grain_burn::build_mechanical_fields(
-            coords.as_array(),
-            directions.as_array(),
-            velocities.as_array(),
-            psi6_abs.as_array(),
-            mask.as_array(),
-            x_centers.as_array(),
-            theta_centers.as_array(),
-            r_centers.as_array(),
-            lx,
-            theta_period,
-            sigma,
-            gamma,
-            u0,
-        );
-        let fields = result.map_err(to_py_err)?;
-        let out = PyDict::new(py);
-        out.set_item("rho", fields.rho.into_pyarray(py))?;
-        out.set_item("P", fields.p.into_pyarray(py))?;
-        out.set_item("Q", fields.q.into_pyarray(py))?;
-        out.set_item("A", fields.a.into_pyarray(py))?;
-        out.set_item("psi6_sq", fields.psi6_sq.into_pyarray(py))?;
-        out.set_item("J_rho", fields.j_rho.into_pyarray(py))?;
-        out.set_item("J_P", fields.j_p.into_pyarray(py))?;
-        out.set_item("J_Q", rank3_field_to_dynamic(&fields.j_q).into_pyarray(py))?;
-        return Ok(out.unbind());
-    }
-
-    #[cfg(not(any(feature = "gpu-metal", feature = "gpu-cuda")))]
-    {
-        Err(PyValueError::new_err(
-            "mechanical coarse-graining requires a GPU feature; build with gpu-metal, gpu-cuda, or gpu",
-        ))
-    }
+    let fields = coarse_grain_burn::build_mechanical_fields(
+        coords.as_array(),
+        directions.as_array(),
+        velocities.as_array(),
+        psi6_abs.as_array(),
+        mask.as_array(),
+        x_centers.as_array(),
+        theta_centers.as_array(),
+        r_centers.as_array(),
+        lx,
+        theta_period,
+        sigma,
+        gamma,
+        u0,
+    )
+    .map_err(to_py_err)?;
+    let out = PyDict::new(py);
+    out.set_item("rho", fields.rho.into_pyarray(py))?;
+    out.set_item("P", fields.p.into_pyarray(py))?;
+    out.set_item("Q", fields.q.into_pyarray(py))?;
+    out.set_item("A", fields.a.into_pyarray(py))?;
+    out.set_item("psi6_sq", fields.psi6_sq.into_pyarray(py))?;
+    out.set_item("J_rho", fields.j_rho.into_pyarray(py))?;
+    out.set_item("J_P", fields.j_p.into_pyarray(py))?;
+    out.set_item("J_Q", rank3_field_to_dynamic(&fields.j_q).into_pyarray(py))?;
+    Ok(out.unbind())
 }
 
 #[pyfunction]
@@ -191,7 +239,7 @@ fn sample_component_rows(
     library: PyReadonlyArrayDyn<'_, f64>,
     sample_indices: PyReadonlyArray2<'_, i64>,
 ) -> PyResult<Py<PyDict>> {
-    let (rows, row_index) = mechanics::sample_component_rows(
+    let (rows, row_index) = fitting::sample_component_rows(
         target.as_array(),
         library.as_array(),
         sample_indices.as_array(),
@@ -207,7 +255,9 @@ fn sample_component_rows(
 /// Register the Python module functions exposed by the compiled extension.
 fn _rho_fitting_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
-    m.add_function(wrap_pyfunction!(sample_rows, m)?)?;
+    m.add_function(wrap_pyfunction!(sample_grid_rows, m)?)?;
+    m.add_function(wrap_pyfunction!(finite_grid_mask, m)?)?;
+    m.add_function(wrap_pyfunction!(assemble_regression_rows, m)?)?;
     m.add_function(wrap_pyfunction!(build_mechanical_fields, m)?)?;
     m.add_function(wrap_pyfunction!(build_mechanical_targets, m)?)?;
     m.add_function(wrap_pyfunction!(sample_component_rows, m)?)?;

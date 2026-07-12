@@ -552,7 +552,10 @@ def print_mechanical_correlations(
         ("Y_Q", Y_Q_NAMES),
     ):
         fields = _target_design_fields(target_name, spectral, geometry)
-        y, X, _row_index = _sample_divergence_design(fields, sample_indices)
+        assembled = _assemble_regression_rows(fields, sample_indices, 0.0)
+        y = assembled["divergence_y"]
+        X = assembled["divergence_X"]
+        assert y is not None and X is not None
         labels = mechanical_labels(names)
         _log(f"{target_name} correlation rows={X.shape[0]} terms={', '.join(names)}")
         _log("raw feature correlations with target")
@@ -565,15 +568,14 @@ def _mechanical_sample_indices(spectral: dict[str, Array], config: RhoFittingCon
     """Sample valid ``(time, x, theta, r)`` grid indices for mechanical regression."""
     settings = _settings(config)
     valid_mask = _mechanical_valid_mask(spectral)
-    flat_valid = np.flatnonzero(valid_mask.reshape(-1))
-    assert flat_valid.size > 0, "no valid rows to sample"
-    rng = np.random.default_rng(settings.seed)
-    if settings.replace:
-        chosen = rng.choice(flat_valid, size=settings.nd, replace=True)
-    else:
-        chosen = rng.choice(flat_valid, size=min(settings.nd, flat_valid.size), replace=False)
-    unraveled = np.unravel_index(chosen, valid_mask.shape)
-    sample_indices = np.stack(unraveled, axis=1).astype(np.int64, copy=False)
+    sample_indices = np.asarray(
+        _core().sample_grid_rows(
+            np.ascontiguousarray(valid_mask, dtype=bool),
+            int(settings.nd),
+            int(settings.seed),
+            bool(settings.replace),
+        )
+    )
     _validate_sample_count(settings.nd, sample_indices.shape[0], settings.replace)
     return sample_indices
 
@@ -617,17 +619,24 @@ def _fit_divergence_primary_target(
     settings = _settings(config)
     names = _target_names(target_name)
     fields = _target_design_fields(target_name, spectral, geometry)
-    y_div, X_div, row_index = _sample_divergence_design(fields, sample_indices)
-    y_fit = y_div
-    X_fit = X_div
-    y_flux: Array | None = None
-    X_flux: Array | None = None
     flux_weight = float(settings.mechanical_flux_weight)
-    if flux_weight > 0.0:
-        y_flux, X_flux = _sample_flux_design(fields, sample_indices)
-        y_fit = np.concatenate((y_div, flux_weight * y_flux))
-        X_fit = np.vstack((X_div, flux_weight * X_flux))
-    rows = np.column_stack((y_div, X_div))
+    assembled = _assemble_regression_rows(fields, sample_indices, flux_weight)
+    y_div = assembled["divergence_y"]
+    X_div = assembled["divergence_X"]
+    row_index = assembled["row_index"]
+    y_fit = assembled["y"]
+    X_fit = assembled["X"]
+    y_flux = assembled["flux_y"]
+    X_flux = assembled["flux_X"]
+    rows = assembled["divergence_rows"]
+    assert (
+        y_div is not None
+        and X_div is not None
+        and row_index is not None
+        and y_fit is not None
+        and X_fit is not None
+        and rows is not None
+    )
     labels = mechanical_labels(names)
     _log(
         f"{target_name} fit rows={X_fit.shape[0]} divergence_rows={X_div.shape[0]} "
@@ -684,29 +693,34 @@ def _target_design_fields(
     return TargetDesignFields(target_flux, candidate_fluxes, target_divergence, candidate_divergences)
 
 
-def _sample_divergence_design(fields: TargetDesignFields, sample_indices: Array) -> tuple[Array, Array, Array]:
-    """Sample divergence target rows and candidate divergence columns."""
-    y = _sample_field_components(fields.target_divergence, sample_indices)
-    row_index = _component_row_index(sample_indices, fields.target_divergence.shape[4:])
-    columns = [
-        _sample_field_components(term, sample_indices)
-        for term in fields.candidate_divergences
-    ]
-    X = np.stack(columns, axis=1)
-    finite = np.isfinite(y) & np.all(np.isfinite(X), axis=1)
-    return y[finite], X[finite], row_index[finite]
-
-
-def _sample_flux_design(fields: TargetDesignFields, sample_indices: Array) -> tuple[Array, Array]:
-    """Sample target flux components and candidate flux columns without saving them."""
-    y = _sample_field_components(fields.target_flux, sample_indices)
-    columns = [
-        _sample_field_components(term, sample_indices)
-        for term in fields.candidate_fluxes
-    ]
-    X = np.stack(columns, axis=1)
-    finite = np.isfinite(y) & np.all(np.isfinite(X), axis=1)
-    return y[finite], X[finite]
+def _assemble_regression_rows(
+    fields: TargetDesignFields,
+    sample_indices: Array,
+    flux_weight: float,
+) -> dict[str, Array | None]:
+    """Assemble finite divergence/flux regression rows in the Rust core."""
+    core = _core()
+    divergence_library = np.ascontiguousarray(
+        np.stack(fields.candidate_divergences, axis=0),
+        dtype=np.float64,
+    )
+    target_flux: Array | None = None
+    flux_library: Array | None = None
+    if flux_weight > 0.0:
+        target_flux = np.ascontiguousarray(fields.target_flux, dtype=np.float64)
+        flux_library = np.ascontiguousarray(
+            np.stack(fields.candidate_fluxes, axis=0),
+            dtype=np.float64,
+        )
+    payload = core.assemble_regression_rows(
+        np.ascontiguousarray(fields.target_divergence, dtype=np.float64),
+        divergence_library,
+        np.ascontiguousarray(sample_indices, dtype=np.int64),
+        target_flux,
+        flux_library,
+        flux_weight,
+    )
+    return {name: np.asarray(value) if value is not None else None for name, value in payload.items()}
 
 
 def _candidate_flux_terms(
@@ -878,76 +892,6 @@ def _radial_transfer_matrices(
     return barycentric_matrix(r_centers, nodes), barycentric_matrix(nodes, r_centers)
 
 
-def _sample_field_components(field: Array, sample_indices: Array) -> Array:
-    """Sample all non-grid components at sampled `(T,Nx,Ntheta,Nr)` rows."""
-    values = field[sample_indices[:, 0], sample_indices[:, 1], sample_indices[:, 2], sample_indices[:, 3]]
-    return np.asarray(values, dtype=np.float64).reshape(-1)
-
-
-def _component_row_index(sample_indices: Array, component_shape: tuple[int, ...]) -> Array:
-    """Build row metadata matching `_sample_field_components` flattening order."""
-    component_count = int(np.prod(component_shape, dtype=np.int64)) if component_shape else 1
-    rows = np.repeat(sample_indices, component_count, axis=0)
-    if not component_shape:
-        return rows
-    component_indices = np.array(np.unravel_index(np.arange(component_count), component_shape)).T
-    tiled = np.tile(component_indices, (sample_indices.shape[0], 1))
-    return np.hstack((rows, tiled.astype(np.int64, copy=False)))
-
-
-def _sample_component_matrix(
-    target: Array,
-    library: Array,
-    sample_indices: Array,
-) -> tuple[Array, Array, Array, Array]:
-    """Sample all tensor components at grid locations into ``[target, features...]`` rows."""
-    core = _core()
-    row_payload = core.sample_component_rows(
-        np.ascontiguousarray(target, dtype=np.float64),
-        np.ascontiguousarray(library, dtype=np.float64),
-        np.ascontiguousarray(sample_indices, dtype=np.int64),
-    )
-    rows = np.asarray(row_payload["rows"])
-    row_index = np.asarray(row_payload["row_index"])
-    y = rows[:, 0]
-    X = rows[:, 1:]
-    finite = np.isfinite(y) & np.all(np.isfinite(X), axis=1)
-    return rows[finite], row_index[finite], y[finite], X[finite]
-
-
-def _sample_divergence_matrix(
-    target: Array,
-    library: Array,
-    sample_indices: Array,
-    lx: float,
-    ly: float,
-) -> tuple[Array, Array]:
-    """Sample divergence of a flux target and all candidate flux terms."""
-    target_div = _divergence_surface_flux_field(target, lx, ly)
-    div_terms = np.asarray([_divergence_surface_flux_field(term, lx, ly) for term in library], dtype=np.float64)
-    if target_div.ndim == 3:
-        y_div = _sample_scalar(target_div, sample_indices)
-        X_div = np.stack([_sample_scalar(term, sample_indices) for term in div_terms], axis=1)
-    else:
-        _rows, _row_index, y_div, X_div = _sample_component_matrix(target_div, div_terms, sample_indices)
-    finite = np.isfinite(y_div) & np.all(np.isfinite(X_div), axis=1)
-    return y_div[finite], X_div[finite]
-
-
-def _divergence_surface_flux_field(field: Array, lx: float, ly: float) -> Array:
-    """Compute centered periodic divergence from the first two surface flux components."""
-    field = np.asarray(field, dtype=np.float64)
-    assert field.ndim >= 4 and field.shape[3] >= 2, "flux field must have shape (T,Nx,Ny,>=2,...)"
-    nx = field.shape[1]
-    ny = field.shape[2]
-    dx = lx / nx
-    dy = ly / ny
-    return (
-        (np.roll(field[:, :, :, 0, ...], -1, axis=1) - np.roll(field[:, :, :, 0, ...], 1, axis=1)) / (2.0 * dx)
-        + (np.roll(field[:, :, :, 1, ...], -1, axis=2) - np.roll(field[:, :, :, 1, ...], 1, axis=2)) / (2.0 * dy)
-    )
-
-
 def _raw_feature_correlations(X: Array, y: Array) -> Array:
     """Compute Pearson correlations between each feature column and the target."""
     y_centered = y - np.mean(y)
@@ -970,12 +914,19 @@ def _format_correlation(value: float) -> str:
 
 def _mechanical_valid_mask(spectral: dict[str, Array]) -> Array:
     """Return grid points where all mechanical target and candidate inputs are finite."""
-    valid = np.isfinite(spectral["rho"])
-    for name in ("P", "A", "J_rho", "J_P", "J_Q", "Y_rho", "Y_P", "Y_Q"):
-        axes = tuple(range(4, spectral[name].ndim))
-        valid &= np.all(np.isfinite(spectral[name]), axis=axes)
-    valid &= np.isfinite(spectral["psi6_sq"])
-    return valid
+    fields = [
+        spectral["rho"],
+        spectral["P"],
+        spectral["A"],
+        spectral["J_rho"],
+        spectral["J_P"],
+        spectral["J_Q"],
+        spectral["Y_rho"],
+        spectral["Y_P"],
+        spectral["Y_Q"],
+        spectral["psi6_sq"],
+    ]
+    return np.asarray(_core().finite_grid_mask(fields), dtype=bool)
 
 
 def _load_hexatic_abs_frames(path: Path, active: ActiveMatterArrays) -> Array:
@@ -1015,11 +966,6 @@ def _validate_temporal_alignment(
     assert j_time.filtered.shape[:4] == rho_time.filtered.shape
     assert np.array_equal(rho_time.times, j_time.times)
     assert np.array_equal(rho_time.scaled_times, j_time.scaled_times)
-
-
-def _sample_scalar(field: Array, sample_indices: Array) -> Array:
-    """Sample scalar field values at ``(time, x, theta, r)`` integer indices."""
-    return field[sample_indices[:, 0], sample_indices[:, 1], sample_indices[:, 2], sample_indices[:, 3]]
 
 
 def _validate_sample_count(requested: int, actual: int, replace: bool) -> None:
