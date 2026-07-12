@@ -19,7 +19,7 @@ Replace the current Gaussian, grid-chunk Burn coarse-graining path with a GPU-on
 
 ## Target Structure
 
-Prefer the smallest structure that stays readable. If `rust/rho_fitting_core/src/coarse_grain_burn.rs` becomes too large, split it into a module folder with only the pieces that earn their keep:
+Prefer the smallest structure that stays readable. The current GPU backend lives in `crates/rho_fitting_gpu/src/coarse_grain_burn/` and should remain split into focused modules:
 
 - `coarse_grain_burn/mod.rs`: public API, validation, backend dispatch.
 - `coarse_grain_burn/backend.rs`: CUDA vs MLX device setup and panic handling.
@@ -175,9 +175,9 @@ Keep module names flexible. Avoid both one giant file and a broad helper layer t
 Use Pixi for all checks.
 
 1. Rust compile checks:
-   - `pixi run cargo check --manifest-path rust/rho_fitting_core/Cargo.toml --features gpu-metal`
-   - `pixi run cargo check --manifest-path rust/rho_fitting_core/Cargo.toml --features gpu-cuda`
-   - `pixi run cargo check --manifest-path rust/rho_fitting_core/Cargo.toml --features gpu`
+   - `pixi run cargo check --manifest-path packages/rho-fitting-core/Cargo.toml --features gpu-metal`
+   - `pixi run cargo check --manifest-path packages/rho-fitting-core/Cargo.toml --features gpu-cuda`
+   - `pixi run cargo check --manifest-path packages/rho-fitting-core/Cargo.toml --features gpu`
    - Run the no-feature cargo check only if non-coarse-graining Rust APIs are intentionally kept buildable without GPU support.
 
 2. Build check:

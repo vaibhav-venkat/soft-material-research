@@ -1,0 +1,25 @@
+[package]
+name = "rho-fitting-gpu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Burn-backed GPU coarse-graining for rho fitting"
+
+[lints]
+workspace = true
+
+[dependencies]
+burn.workspace = true
+burn-flex.workspace = true
+burn-cuda = { workspace = true, optional = true }
+burn-wgpu = { workspace = true, optional = true }
+ndarray.workspace = true
+rho-fitting-types = { path = "../rho_fitting_types" }
+
+[features]
+default = []
+gpu-metal = ["dep:burn-wgpu"]
+gpu-cuda = ["dep:burn-cuda"]
+gpu = ["gpu-metal", "gpu-cuda"]
+

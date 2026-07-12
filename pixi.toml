@@ -6,9 +6,11 @@ platforms = ["osx-arm64", "linux-64"]
 version = "0.1.0"
 
 [tasks]
-rho-fitting-build = "maturin develop --manifest-path rust/rho_fitting_core/Cargo.toml --features gpu-metal --release"
-rho-fitting-build-cuda = "maturin develop --manifest-path rust/rho_fitting_core/Cargo.toml --release --features gpu-cuda"
-rho-fitting-build-gpu = "maturin develop --manifest-path rust/rho_fitting_core/Cargo.toml --release --features gpu"
+rho-fitting-build = "maturin develop --manifest-path packages/rho-fitting-core/Cargo.toml --features gpu-metal --release"
+rho-fitting-build-cuda = "maturin develop --manifest-path packages/rho-fitting-core/Cargo.toml --release --features gpu-cuda"
+rho-fitting-build-gpu = "maturin develop --manifest-path packages/rho-fitting-core/Cargo.toml --release --features gpu"
+cargo-check = "cargo check --workspace --all-features"
+cargo-fmt-check = "cargo fmt --all --check"
 rho-fitting-smoke = "python -um hexatic.rho_fitting --case radius_15D --nd 1000 --no-plot"
 rho-fitting = "RHO_FITTING_GPU=1 python -um hexatic.rho_fitting --overwrite --nd 100000"
 rho-fitting-lite = "RHO_FITTING_GPU=1 python -um hexatic.rho_fitting --overwrite --nd 20000"

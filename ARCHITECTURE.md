@@ -2,6 +2,30 @@
 
 **DO NOT BE VERBOSE** **BE CONCISE** **LIMIT COMMENTS** **BE CLEAN AND SIMPLE**
 
+## Rust workspace
+
+The rho-fitting native path is a Cargo workspace with a one-way dependency
+direction:
+
+```text
+packages/rho-fitting-core       PyO3 + NumPy adapter
+             |              \
+             v               v
+crates/rho_fitting_numerics   crates/rho_fitting_gpu
+             |
+             v
+      crates/rho_fitting_types
+```
+
+`rho-fitting-types` owns the cylindrical grid, physical component order
+`(x, e_theta, e_r)`, mechanical field containers, validation errors, and
+targets. `rho-fitting-numerics` owns Python-free fitting, spectral, temporal,
+interpolation, particle, regression, and PDE algorithms. `rho-fitting-gpu`
+owns Burn backend selection and Gaussian deposition. The package under
+`packages/rho-fitting-core` only validates/converts NumPy arrays and translates
+Rust errors into Python exceptions, while preserving the import path
+`hexatic.rho_fitting._rho_fitting_core`.
+
 ## 2. High-Level System Diagram
  
 [User] <--> [Plots/fits dynamics and fields] <--> [Runs multiple_sim_analyis] <--> [GSD, NPZ, and archive files]

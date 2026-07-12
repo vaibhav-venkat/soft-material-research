@@ -11,6 +11,8 @@ DS_Store
 # pixi environments
 .pixi/*
 !.pixi/config.toml
+# Cargo workspace output
+target/
 *.html
 *.log
 *.json

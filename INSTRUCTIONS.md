@@ -1,9 +1,9 @@
 # 1. Consolidate the existing Rust core
 2. 
 There are two substantial implementations of mechanical deposition:
-CPU loops in [`mechanics/mod.rs`](/Users/vaibhavvenkat/structures_and_functions/rust/rho_fitting_core/src/mechanics/mod.rs)
+Shared mechanical domain types in [`crates/rho_fitting_types/src/mechanics/domain.rs`](/Users/vaibhavvenkat/structures_and_functions/crates/rho_fitting_types/src/mechanics/domain.rs)
 
-GPU/Burn deposition in [`coarse_grain_burn/mod.rs`](/Users/vaibhavvenkat/structures_and_functions/rust/rho_fitting_core/src/coarse_grain_burn/mod.rs)
+GPU/Burn deposition in [`crates/rho_fitting_gpu/src/coarse_grain_burn/mod.rs`](/Users/vaibhavvenkat/structures_and_functions/crates/rho_fitting_gpu/src/coarse_grain_burn/mod.rs)
 
 
 Keep a single typed MechanicalFieldSet domain model and share validation, moment construction, conservation checks, and output conversion. 
