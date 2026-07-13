@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 from pathlib import Path
 
 import gsd.hoomd
@@ -12,9 +13,6 @@ from hexatic.constants import cylinder
 from .cases import GSD_DIR, UnwrappedCase, ensure_output_dirs, get_case
 
 
-RUN_STEPS = int(1e7)
-
-
 def _output_gsd(case: UnwrappedCase) -> Path:
     return GSD_DIR / f"trajectory_{case.case_id}_last_frame.gsd"
 
@@ -24,62 +22,172 @@ def _ensure_can_write(path: Path, overwrite: bool) -> None:
         raise FileExistsError(f"Refusing to overwrite existing file: {path}")
 
 
-def _inner_particle_tags(case: UnwrappedCase) -> np.ndarray:
-    """Select movable tags once from the source trajectory's final frame."""
+def random_uniform_quaternions(
+    n_particles: int,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    u1 = rng.random(n_particles)
+    u2 = rng.random(n_particles)
+    u3 = rng.random(n_particles)
+    qx = np.sqrt(1.0 - u1) * np.sin(2.0 * np.pi * u2)
+    qy = np.sqrt(1.0 - u1) * np.cos(2.0 * np.pi * u2)
+    qz = np.sqrt(u1) * np.sin(2.0 * np.pi * u3)
+    qw = np.sqrt(u1) * np.cos(2.0 * np.pi * u3)
+    quaternions = np.column_stack((qw, qx, qy, qz))
+    quaternions /= np.linalg.norm(quaternions, axis=1)[:, np.newaxis]
+    return quaternions
+
+
+def _inner_lattice_positions(
+    n_particles: int,
+    box: np.ndarray,
+    cylinder_radius: float,
+) -> np.ndarray:
+    """Build an exact-count rectangular lattice strictly inside the cylinder."""
+    if n_particles == 0:
+        return np.empty((0, 3), dtype=np.float64)
+
+    analysis = cylinder.ANALYSIS
+    lx = float(box[0])
+    axial_extent = 0.5 * lx - analysis.last_frame_lattice_axial_gap
+    corner_radius = cylinder_radius - analysis.last_frame_lattice_radial_gap
+    transverse_extent = corner_radius / math.sqrt(2.0)
+    if axial_extent <= 0.0 or transverse_extent <= 0.0:
+        raise ValueError("Configured lattice gaps leave no interior lattice volume")
+
+    best: tuple[float, int, int] | None = None
+    max_transverse_sites = math.ceil(math.sqrt(n_particles)) + 1
+    for n_transverse in range(2, max_transverse_sites + 1):
+        n_axial = math.ceil(n_particles / n_transverse**2)
+        axial_spacing = 2.0 * axial_extent / max(1, n_axial - 1)
+        transverse_spacing = 2.0 * transverse_extent / (n_transverse - 1)
+        anisotropy = abs(math.log(axial_spacing / transverse_spacing))
+        candidate = (anisotropy, n_axial, n_transverse)
+        if best is None or candidate[0] < best[0]:
+            best = candidate
+
+    if best is None:
+        raise ValueError("Unable to construct an interior lattice")
+
+    _, n_axial, n_transverse = best
+    x = np.linspace(-axial_extent, axial_extent, n_axial)
+    transverse = np.linspace(-transverse_extent, transverse_extent, n_transverse)
+    xv, yv, zv = np.meshgrid(x, transverse, transverse, indexing="ij")
+    candidates = np.column_stack(
+        (xv.ravel(), yv.ravel(), zv.ravel())
+    )
+
+    # Spread the vacancies uniformly instead of trimming the lattice boundaries.
+    selected = np.floor(
+        (np.arange(n_particles, dtype=np.float64) + 0.5)
+        * candidates.shape[0]
+        / n_particles
+    ).astype(np.int64)
+    return candidates[selected]
+
+
+def _write_refilled_initial_frame(case: UnwrappedCase, output_gsd: Path) -> tuple[int, int]:
+    analysis = cylinder.ANALYSIS
     with gsd.hoomd.open(name=str(case.trajectory_gsd), mode="r") as trajectory:
         if len(trajectory) == 0:
             raise ValueError(f"Trajectory contains no frames: {case.trajectory_gsd}")
-        positions = np.asarray(trajectory[-1].particles.position)
+        source = trajectory[-1]
 
-    radial_distance = np.linalg.norm(positions[:, 1:3], axis=1)
-    inner_radius = case.radius - cylinder.ANALYSIS.shell_delta
-    return np.flatnonzero(radial_distance <= inner_radius).astype(np.uint32)
+    source_positions = np.asarray(source.particles.position)
+    radial_distance = np.linalg.norm(source_positions[:, 1:3], axis=1)
+    inner_radius = case.radius - analysis.frozen_shell_delta
+    shell_mask = radial_distance > inner_radius
+    shell_indices = np.flatnonzero(shell_mask)
+    n_shell = shell_indices.size
+    n_inner = source_positions.shape[0] - n_shell
+    if n_inner == 0:
+        raise ValueError(f"No interior particles to replace for case {case.case_id}")
+
+    box = np.asarray(source.configuration.box, dtype=np.float64)
+    lattice_positions = _inner_lattice_positions(n_inner, box, case.radius)
+    rng = np.random.default_rng(case.seed)
+
+    frame = gsd.hoomd.Frame()
+    frame.configuration.box = box
+    frame.configuration.dimensions = source.configuration.dimensions
+    frame.configuration.step = source.configuration.step
+    frame.particles.N = source_positions.shape[0]
+    frame.particles.types = ["A"]
+    frame.particles.typeid = np.zeros(frame.particles.N, dtype=np.uint32)
+    frame.particles.position = np.vstack(
+        (source_positions[shell_indices], lattice_positions)
+    )
+    frame.particles.orientation = np.vstack(
+        (
+            np.asarray(source.particles.orientation)[shell_indices],
+            random_uniform_quaternions(n_inner, rng),
+        )
+    )
+    frame.particles.velocity = np.zeros((frame.particles.N, 3), dtype=np.float32)
+    frame.particles.velocity[:n_shell, 0] = (
+        cylinder.SIMULATION.shell_velocity_x_marker
+    )
+    frame.particles.image = np.zeros((frame.particles.N, 3), dtype=np.int32)
+    frame.particles.diameter = np.full(
+        frame.particles.N,
+        analysis.particle_diameter,
+        dtype=np.float32,
+    )
+    frame.particles.moment_inertia = np.ones(
+        (frame.particles.N, 3),
+        dtype=np.float32,
+    )
+
+    with gsd.hoomd.open(name=str(output_gsd), mode="w") as target:
+        target.append(frame)
+    return n_shell, n_inner
 
 
 def run_case(
     case: UnwrappedCase,
+    run_steps: int = cylinder.SIMULATION.last_frame_run_steps,
     overwrite: bool = False,
+    device_name: str = "gpu",
     gpu_id: int | None = None,
 ) -> None:
+    if run_steps < 0:
+        raise ValueError("run_steps must be non-negative")
+
     ensure_output_dirs()
     if not case.trajectory_gsd.exists():
         raise FileNotFoundError(f"Missing trajectory GSD: {case.trajectory_gsd}")
 
     output_gsd = _output_gsd(case)
     _ensure_can_write(output_gsd, overwrite)
-    inner_tags = _inner_particle_tags(case)
-    if inner_tags.size == 0:
-        raise ValueError(
-            f"No particles lie inside the shell cutoff for case {case.case_id}"
-        )
+    n_shell, n_inner = _write_refilled_initial_frame(case, output_gsd)
 
     analysis = cylinder.ANALYSIS
     simulation = cylinder.SIMULATION
-    device = hoomd.device.GPU(gpu_id=gpu_id)
-    sim = hoomd.Simulation(device=device, seed=case.seed)
-    sim.create_state_from_gsd(filename=str(case.trajectory_gsd), frame=-1)
-
-    shell_tags = np.setdiff1d(
-        np.arange(sim.state.N_particles, dtype=np.uint32),
-        inner_tags,
-        assume_unique=True,
+    device = (
+        hoomd.device.CPU()
+        if device_name == "cpu"
+        else hoomd.device.GPU(gpu_id=gpu_id)
     )
-    snapshot = sim.state.get_snapshot()
-    if snapshot.communicator.rank == 0:
-        snapshot.particles.velocity[shell_tags, 0] = 1.0
-    sim.state.set_snapshot(snapshot)
+    sim = hoomd.Simulation(device=device, seed=case.seed)
+    sim.create_state_from_gsd(filename=str(output_gsd), frame=0)
 
-    # Tags is intentionally static: particles remain integrated even if they later
-    # enter the shell region, while particles initially in the shell stay frozen.
+    # The retained shell is written first. This fixed tag range remains frozen;
+    # every newly initialized lattice particle remains integrated at all radii.
+    inner_tags = np.arange(n_shell, n_shell + n_inner, dtype=np.uint32)
     inner = hoomd.filter.Tags(inner_tags)
     integrator = hoomd.md.Integrator(dt=simulation.timestep)
     integrator.methods.append(hoomd.md.methods.OverdampedViscous(filter=inner))
     sim.operations.integrator = integrator
 
-    cell = hoomd.md.nlist.Cell(buffer=0.4)
+    cell = hoomd.md.nlist.Cell(buffer=simulation.neighbor_list_buffer)
     lj = hoomd.md.pair.LJ(nlist=cell)
     lj.params[("A", "A")] = dict(
-        epsilon=50 * simulation.gamma * simulation.u0 * analysis.sigma,
+        epsilon=(
+            simulation.interaction_epsilon_multiplier
+            * simulation.gamma
+            * simulation.u0
+            * analysis.sigma
+        ),
         sigma=analysis.sigma,
     )
     lj.r_cut[("A", "A")] = analysis.wall_cutoff
@@ -96,7 +204,12 @@ def run_case(
     lj_wall = hoomd.md.external.wall.LJ(walls=walls)
     lj_wall.params["A"] = {
         "sigma": analysis.sigma,
-        "epsilon": 50 * simulation.gamma * simulation.u0 * analysis.sigma,
+        "epsilon": (
+            simulation.interaction_epsilon_multiplier
+            * simulation.gamma
+            * simulation.u0
+            * analysis.sigma
+        ),
         "r_cut": analysis.wall_cutoff,
     }
     integrator.forces.append(lj_wall)
@@ -120,27 +233,32 @@ def run_case(
     gsd_writer = hoomd.write.GSD(
         filename=str(output_gsd),
         trigger=hoomd.trigger.Periodic(case.trajectory_write_period),
-        mode="wb",
+        mode="ab",
         dynamic=["property", "particles/orientation"],
         logger=logger,
     )
     sim.operations.writers.append(gsd_writer)
 
-    n_particles = sim.state.N_particles
     print(
         f"case={case.case_id} source={case.trajectory_gsd} "
-        f"inner={inner_tags.size} shell={shell_tags.size} "
-        f"shell_delta={analysis.shell_delta:.12g} steps={RUN_STEPS} "
-        f"write_period={case.trajectory_write_period} output={output_gsd}"
+        f"lattice={n_inner} shell={n_shell} total={sim.state.N_particles} "
+        f"shell_delta={analysis.frozen_shell_delta:.12g} steps={run_steps} "
+        f"device={device_name} output={output_gsd}"
     )
-    sim.run(RUN_STEPS)
+    sim.run(run_steps)
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Continue an unwrapped case with its outer shell frozen."
+        description="Refill the interior of an unwrapped case with a Cartesian lattice."
     )
     parser.add_argument("--case", required=True)
+    parser.add_argument(
+        "--steps",
+        type=int,
+        default=cylinder.SIMULATION.last_frame_run_steps,
+    )
+    parser.add_argument("--device", choices=("cpu", "gpu"), default="gpu")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--gpu-id", type=int, default=None)
     return parser.parse_args()
@@ -150,7 +268,9 @@ def main() -> None:
     args = _parse_args()
     run_case(
         get_case(args.case),
+        run_steps=args.steps,
         overwrite=args.overwrite,
+        device_name=args.device,
         gpu_id=args.gpu_id,
     )
 

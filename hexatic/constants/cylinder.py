@@ -46,6 +46,13 @@ LATTICE_SPACING = 2.0 ** (1.0 / 6.0) + 0.5
 TRANSVERSE_WALL_CUTOFF_MARGIN = 8.0
 TRANSVERSE_PARTICLE_DIAMETER_MARGIN = 2.0
 WALL_CLEARANCE_EPSILON = 1.0e-3
+FROZEN_SHELL_DELTA = 0.1 * PARTICLE_DIAMETER
+LAST_FRAME_LATTICE_AXIAL_GAP = PARTICLE_DIAMETER
+LAST_FRAME_LATTICE_RADIAL_GAP = 2 * PARTICLE_DIAMETER
+LAST_FRAME_RUN_STEPS = int(1e7)
+NEIGHBOR_LIST_BUFFER = 0.4
+INTERACTION_EPSILON_MULTIPLIER = 50.0
+SHELL_VELOCITY_X_MARKER = 1.0
 MIN_ANGULAR_CANDIDATES = 12
 ANGULAR_CANDIDATE_MULTIPLIER = 4
 
@@ -95,6 +102,9 @@ class CylinderAnalysisConfig:
     min_neighbor_count_radius: float = wall_cutoff
     max_neighbor_count_radius: float = 2.0 ** (7.0 / 6.0) * SIGMA
     shell_delta: float = wall_cutoff
+    frozen_shell_delta: float = FROZEN_SHELL_DELTA
+    last_frame_lattice_axial_gap: float = LAST_FRAME_LATTICE_AXIAL_GAP
+    last_frame_lattice_radial_gap: float = LAST_FRAME_LATTICE_RADIAL_GAP
     # neighbor_count_radius: float = 1.85 * SIGMA
     neighbor_count_radius: float = 1.7272 * PARTICLE_DIAMETER
     dislocation_pair_distance: float = 1.7272 * PARTICLE_DIAMETER
@@ -120,6 +130,10 @@ class CylinderSimulationConfig:
     transverse_wall_cutoff_margin: float = TRANSVERSE_WALL_CUTOFF_MARGIN
     transverse_particle_diameter_margin: float = TRANSVERSE_PARTICLE_DIAMETER_MARGIN
     wall_clearance_epsilon: float = WALL_CLEARANCE_EPSILON
+    last_frame_run_steps: int = LAST_FRAME_RUN_STEPS
+    neighbor_list_buffer: float = NEIGHBOR_LIST_BUFFER
+    interaction_epsilon_multiplier: float = INTERACTION_EPSILON_MULTIPLIER
+    shell_velocity_x_marker: float = SHELL_VELOCITY_X_MARKER
     min_angular_candidates: int = MIN_ANGULAR_CANDIDATES
     angular_candidate_multiplier: int = ANGULAR_CANDIDATE_MULTIPLIER
 
