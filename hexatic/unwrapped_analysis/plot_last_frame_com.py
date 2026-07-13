@@ -79,14 +79,23 @@ def inner_center_of_mass(trajectory_gsd: Path) -> tuple[np.ndarray, np.ndarray]:
                 )[inner_tags]
             else:
                 image = np.zeros_like(position, dtype=np.int32)
+            # HOOMD image flags make the axial coordinate continuous when a
+            # particle crosses the periodic x boundary.
             unwrapped_position = position + image @ _box_vectors(box)
-            center_of_mass[frame_index] = np.mean(unwrapped_position, axis=0)
+            # Cylindrical convention: position = (x, r sin(theta), r cos(theta)).
+            theta = np.arctan2(position[:, 1], position[:, 2])
+            center_of_mass[frame_index, 0] = np.mean(unwrapped_position[:, 0])
+            center_of_mass[frame_index, 1] = np.mean(
+                np.linalg.norm(position[:, 1:3], axis=1)
+            )
+            center_of_mass[frame_index, 2] = np.angle(np.mean(np.exp(1j * theta)))
             steps[frame_index] = _read_inherited_chunk(
                 trajectory,
                 frame_index,
                 "configuration/step",
             ).reshape(-1)[0]
 
+    center_of_mass[:, 2] = np.unwrap(center_of_mass[:, 2])
     elapsed_time = (steps - steps[0]) * simulation.timestep
     return elapsed_time, center_of_mass
 
@@ -101,12 +110,13 @@ def plot_case(
     elapsed_time, center_of_mass = inner_center_of_mass(trajectory_gsd)
 
     output.parent.mkdir(parents=True, exist_ok=True)
-    figure, axis = plt.subplots()
-    for component, label in enumerate(("x", "y", "z")):
-        axis.plot(elapsed_time, center_of_mass[:, component], marker=".", label=label)
-    axis.set_xlabel("elapsed simulation time")
-    axis.set_ylabel("inner-particle center of mass")
-    axis.legend()
+    labels = ("x COM", "mean r", "circular theta COM (rad)")
+    figure, axes = plt.subplots(3, 1, sharex=True)
+    for component, (axis, label) in enumerate(zip(axes, labels)):
+        axis.plot(elapsed_time, center_of_mass[:, component], marker=".")
+        axis.set_ylabel(label)
+    axes[-1].set_xlabel("elapsed simulation time")
+    figure.suptitle("Inner-particle center of mass")
     figure.tight_layout()
     figure.savefig(output)
     plt.close(figure)
