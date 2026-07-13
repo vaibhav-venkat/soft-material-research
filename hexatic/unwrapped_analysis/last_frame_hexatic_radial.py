@@ -122,6 +122,10 @@ def calculate_radial_hexatic(
         psi6 = np.empty((frame_indices.size, n_particles), dtype=np.complex64)
         radial_sums = np.zeros((frame_indices.size, radial_bins), dtype=np.float64)
         radial_counts = np.zeros((frame_indices.size, radial_bins), dtype=np.int64)
+        radial_volumes = np.empty((frame_indices.size, radial_bins), dtype=np.float64)
+        shell_cross_section_areas = np.pi * (
+            radial_edges[1:] ** 2 - radial_edges[:-1] ** 2
+        )
 
         print(
             f"source={trajectory_gsd} frames={frame_indices.size} "
@@ -164,6 +168,7 @@ def calculate_radial_hexatic(
                 frame_radii,
                 bins=radial_edges,
             )[0]
+            radial_volumes[output_index] = shell_cross_section_areas * float(box[0])
             steps[output_index] = _read_inherited_chunk(
                 trajectory,
                 int(frame_index),
@@ -184,11 +189,18 @@ def calculate_radial_hexatic(
 
     total_sums = np.sum(radial_sums, axis=0)
     total_counts = np.sum(radial_counts, axis=0)
+    total_volumes = np.sum(radial_volumes, axis=0)
     radial_mean = np.divide(
         total_sums,
         total_counts,
         out=np.full(radial_bins, np.nan, dtype=np.float64),
         where=total_counts > 0,
+    )
+    radial_number_density = np.divide(
+        total_counts,
+        total_volumes,
+        out=np.zeros(radial_bins, dtype=np.float64),
+        where=total_volumes > 0.0,
     )
     return {
         "frame_indices": frame_indices,
@@ -199,8 +211,11 @@ def calculate_radial_hexatic(
         "radial_centers": radial_centers,
         "frame_radial_sums": radial_sums,
         "frame_radial_counts": radial_counts,
+        "frame_radial_volumes": radial_volumes,
         "radial_mean_abs_psi6": radial_mean,
         "radial_counts": total_counts,
+        "radial_volumes": total_volumes,
+        "radial_number_density": radial_number_density,
     }
 
 
@@ -208,14 +223,26 @@ def plot_radial_hexatic(result: dict[str, np.ndarray], output: Path) -> Path:
     output.parent.mkdir(parents=True, exist_ok=True)
     figure, axis = plt.subplots()
     populated = result["radial_counts"] > 0
-    axis.plot(
+    hexatic_line = axis.plot(
         result["radial_centers"][populated],
         result["radial_mean_abs_psi6"][populated],
         marker=".",
-    )
+        label="mean |psi6|",
+    )[0]
     axis.set_xlabel("r")
     axis.set_ylabel("mean |psi6|")
     axis.set_ylim(0.0, 1.0)
+    density_axis = axis.twinx()
+    density_line = density_axis.plot(
+        result["radial_centers"],
+        result["radial_number_density"],
+        marker=".",
+        color="tab:orange",
+        label="number density",
+    )[0]
+    density_axis.set_ylabel("number density")
+    density_axis.set_ylim(bottom=0.0)
+    axis.legend(handles=(hexatic_line, density_line))
     axis.set_title("Combined film and center hexatic order")
     figure.tight_layout()
     figure.savefig(output)
