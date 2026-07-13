@@ -49,13 +49,13 @@ def inner_center_of_mass(trajectory_gsd: Path) -> tuple[np.ndarray, np.ndarray]:
         if trajectory.nframes == 0:
             raise ValueError(f"Trajectory contains no frames: {trajectory_gsd}")
 
-        initial_velocity = _read_inherited_chunk(
+        initial_typeid = _read_inherited_chunk(
             trajectory,
             0,
-            "particles/velocity",
+            "particles/typeid",
         )
         inner_tags = np.flatnonzero(
-            initial_velocity[:, 0] != simulation.shell_velocity_x_marker
+            initial_typeid == simulation.center_particle_type_id
         )
         if inner_tags.size == 0:
             raise ValueError("The initial frame contains no marked inner particles")

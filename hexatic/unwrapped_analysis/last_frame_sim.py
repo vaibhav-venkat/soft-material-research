@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import itertools
 import math
 from pathlib import Path
 
@@ -87,8 +88,18 @@ def _write_refilled_initial_frame(case: UnwrappedCase, output_gsd: Path) -> tupl
     frame.configuration.dimensions = source.configuration.dimensions
     frame.configuration.step = source.configuration.step
     frame.particles.N = n_shell + n_inner
-    frame.particles.types = ["A"]
-    frame.particles.typeid = np.zeros(frame.particles.N, dtype=np.uint32)
+    simulation = cylinder.SIMULATION
+    frame.particles.types = [
+        simulation.shell_particle_type,
+        simulation.center_particle_type,
+    ]
+    typeids = np.full(
+        frame.particles.N,
+        simulation.shell_particle_type_id,
+        dtype=np.uint32,
+    )
+    typeids[n_shell:] = simulation.center_particle_type_id
+    frame.particles.typeid = typeids
     frame.particles.position = np.vstack(
         (source_positions[shell_indices], lattice_positions)
     )
@@ -99,9 +110,6 @@ def _write_refilled_initial_frame(case: UnwrappedCase, output_gsd: Path) -> tupl
         )
     )
     frame.particles.velocity = np.zeros((frame.particles.N, 3), dtype=np.float32)
-    frame.particles.velocity[:n_shell, 0] = (
-        cylinder.SIMULATION.shell_velocity_x_marker
-    )
     frame.particles.image = np.zeros((frame.particles.N, 3), dtype=np.int32)
     frame.particles.diameter = np.full(
         frame.particles.N,
@@ -146,17 +154,18 @@ def run_case(
     sim = hoomd.Simulation(device=device, seed=case.seed)
     sim.create_state_from_gsd(filename=str(output_gsd), frame=0)
 
-    # The retained shell is written first. This fixed tag range remains frozen;
-    # every newly initialized lattice particle remains integrated at all radii.
-    inner_tags = np.arange(n_shell, n_shell + n_inner, dtype=np.uint32)
-    inner = hoomd.filter.Tags(inner_tags)
+    center = hoomd.filter.Type([simulation.center_particle_type])
     integrator = hoomd.md.Integrator(dt=simulation.timestep)
-    integrator.methods.append(hoomd.md.methods.OverdampedViscous(filter=inner))
+    integrator.methods.append(hoomd.md.methods.OverdampedViscous(filter=center))
     sim.operations.integrator = integrator
 
     cell = hoomd.md.nlist.Cell(buffer=simulation.neighbor_list_buffer)
     lj = hoomd.md.pair.LJ(nlist=cell)
-    lj.params[("A", "A")] = dict(
+    particle_types = (
+        simulation.shell_particle_type,
+        simulation.center_particle_type,
+    )
+    pair_parameters = dict(
         epsilon=(
             simulation.interaction_epsilon_multiplier
             * simulation.gamma
@@ -165,7 +174,9 @@ def run_case(
         ),
         sigma=analysis.sigma,
     )
-    lj.r_cut[("A", "A")] = analysis.wall_cutoff
+    for type_pair in itertools.combinations_with_replacement(particle_types, 2):
+        lj.params[type_pair] = pair_parameters
+        lj.r_cut[type_pair] = analysis.wall_cutoff
     integrator.forces.append(lj)
 
     walls = [
@@ -177,22 +188,27 @@ def run_case(
         )
     ]
     lj_wall = hoomd.md.external.wall.LJ(walls=walls)
-    lj_wall.params["A"] = {
-        "sigma": analysis.sigma,
-        "epsilon": (
-            simulation.interaction_epsilon_multiplier
-            * simulation.gamma
-            * simulation.u0
-            * analysis.sigma
-        ),
-        "r_cut": analysis.wall_cutoff,
-    }
+    for particle_type in particle_types:
+        lj_wall.params[particle_type] = {
+            "sigma": analysis.sigma,
+            "epsilon": (
+                simulation.interaction_epsilon_multiplier
+                * simulation.gamma
+                * simulation.u0
+                * analysis.sigma
+            ),
+            "r_cut": analysis.wall_cutoff,
+        }
     integrator.forces.append(lj_wall)
 
-    active = hoomd.md.force.Active(filter=inner)
+    active = hoomd.md.force.Active(filter=center)
     active.use_orientation = True
-    active.active_force["A"] = (simulation.gamma * simulation.u0, 0.0, 0.0)
-    active.active_torque["A"] = (0.0, 0.0, 0.0)
+    active.active_force[simulation.center_particle_type] = (
+        simulation.gamma * simulation.u0,
+        0.0,
+        0.0,
+    )
+    active.active_torque[simulation.center_particle_type] = (0.0, 0.0, 0.0)
     integrator.forces.append(active)
 
     rot_diff = active.create_diffusion_updater(

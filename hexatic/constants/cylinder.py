@@ -53,7 +53,10 @@ LAST_FRAME_LATTICE_SPACING = PARTICLE_DIAMETER
 LAST_FRAME_RUN_STEPS = int(1e7)
 NEIGHBOR_LIST_BUFFER = 0.4
 INTERACTION_EPSILON_MULTIPLIER = 50.0
-SHELL_VELOCITY_X_MARKER = 1.0
+SHELL_PARTICLE_TYPE = "shell"
+CENTER_PARTICLE_TYPE = "center"
+SHELL_PARTICLE_TYPE_ID = 0
+CENTER_PARTICLE_TYPE_ID = 1
 MIN_ANGULAR_CANDIDATES = 12
 ANGULAR_CANDIDATE_MULTIPLIER = 4
 
@@ -135,7 +138,10 @@ class CylinderSimulationConfig:
     last_frame_run_steps: int = LAST_FRAME_RUN_STEPS
     neighbor_list_buffer: float = NEIGHBOR_LIST_BUFFER
     interaction_epsilon_multiplier: float = INTERACTION_EPSILON_MULTIPLIER
-    shell_velocity_x_marker: float = SHELL_VELOCITY_X_MARKER
+    shell_particle_type: str = SHELL_PARTICLE_TYPE
+    center_particle_type: str = CENTER_PARTICLE_TYPE
+    shell_particle_type_id: int = SHELL_PARTICLE_TYPE_ID
+    center_particle_type_id: int = CENTER_PARTICLE_TYPE_ID
     min_angular_candidates: int = MIN_ANGULAR_CANDIDATES
     angular_candidate_multiplier: int = ANGULAR_CANDIDATE_MULTIPLIER
 
