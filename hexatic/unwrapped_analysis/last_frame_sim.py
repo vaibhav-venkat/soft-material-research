@@ -10,11 +10,15 @@ import numpy as np
 
 from hexatic.constants import cylinder
 
-from .cases import GSD_DIR, UnwrappedCase, ensure_output_dirs, get_case
+from .cases import ANALYSIS_DIR, GSD_DIR, UnwrappedCase, ensure_output_dirs, get_case
 
 
 def _output_gsd(case: UnwrappedCase) -> Path:
     return GSD_DIR / f"trajectory_{case.case_id}_last_frame.gsd"
+
+
+def _com_plot(case: UnwrappedCase) -> Path:
+    return ANALYSIS_DIR / "output" / f"{case.case_id}_last_frame_inner_com.png"
 
 
 def _ensure_can_write(path: Path, overwrite: bool) -> None:
@@ -39,14 +43,10 @@ def random_uniform_quaternions(
 
 
 def _inner_lattice_positions(
-    n_particles: int,
     box: np.ndarray,
     cylinder_radius: float,
 ) -> np.ndarray:
-    """Build an exact-count rectangular lattice strictly inside the cylinder."""
-    if n_particles == 0:
-        return np.empty((0, 3), dtype=np.float64)
-
+    """Build a dense rectangular lattice strictly inside the cylinder."""
     analysis = cylinder.ANALYSIS
     lx = float(box[0])
     axial_extent = 0.5 * lx - analysis.last_frame_lattice_axial_gap
@@ -55,35 +55,13 @@ def _inner_lattice_positions(
     if axial_extent <= 0.0 or transverse_extent <= 0.0:
         raise ValueError("Configured lattice gaps leave no interior lattice volume")
 
-    best: tuple[float, int, int] | None = None
-    max_transverse_sites = math.ceil(math.sqrt(n_particles)) + 1
-    for n_transverse in range(2, max_transverse_sites + 1):
-        n_axial = math.ceil(n_particles / n_transverse**2)
-        axial_spacing = 2.0 * axial_extent / max(1, n_axial - 1)
-        transverse_spacing = 2.0 * transverse_extent / (n_transverse - 1)
-        anisotropy = abs(math.log(axial_spacing / transverse_spacing))
-        candidate = (anisotropy, n_axial, n_transverse)
-        if best is None or candidate[0] < best[0]:
-            best = candidate
-
-    if best is None:
-        raise ValueError("Unable to construct an interior lattice")
-
-    _, n_axial, n_transverse = best
+    target_spacing = analysis.last_frame_lattice_spacing
+    n_axial = max(2, round(2.0 * axial_extent / target_spacing) + 1)
+    n_transverse = max(2, round(2.0 * transverse_extent / target_spacing) + 1)
     x = np.linspace(-axial_extent, axial_extent, n_axial)
     transverse = np.linspace(-transverse_extent, transverse_extent, n_transverse)
     xv, yv, zv = np.meshgrid(x, transverse, transverse, indexing="ij")
-    candidates = np.column_stack(
-        (xv.ravel(), yv.ravel(), zv.ravel())
-    )
-
-    # Spread the vacancies uniformly instead of trimming the lattice boundaries.
-    selected = np.floor(
-        (np.arange(n_particles, dtype=np.float64) + 0.5)
-        * candidates.shape[0]
-        / n_particles
-    ).astype(np.int64)
-    return candidates[selected]
+    return np.column_stack((xv.ravel(), yv.ravel(), zv.ravel()))
 
 
 def _write_refilled_initial_frame(case: UnwrappedCase, output_gsd: Path) -> tuple[int, int]:
@@ -99,19 +77,20 @@ def _write_refilled_initial_frame(case: UnwrappedCase, output_gsd: Path) -> tupl
     shell_mask = radial_distance > inner_radius
     shell_indices = np.flatnonzero(shell_mask)
     n_shell = shell_indices.size
-    n_inner = source_positions.shape[0] - n_shell
-    if n_inner == 0:
+    n_deleted_inner = source_positions.shape[0] - n_shell
+    if n_deleted_inner == 0:
         raise ValueError(f"No interior particles to replace for case {case.case_id}")
 
     box = np.asarray(source.configuration.box, dtype=np.float64)
-    lattice_positions = _inner_lattice_positions(n_inner, box, case.radius)
+    lattice_positions = _inner_lattice_positions(box, case.radius)
+    n_inner = lattice_positions.shape[0]
     rng = np.random.default_rng(case.seed)
 
     frame = gsd.hoomd.Frame()
     frame.configuration.box = box
     frame.configuration.dimensions = source.configuration.dimensions
     frame.configuration.step = source.configuration.step
-    frame.particles.N = source_positions.shape[0]
+    frame.particles.N = n_shell + n_inner
     frame.particles.types = ["A"]
     frame.particles.typeid = np.zeros(frame.particles.N, dtype=np.uint32)
     frame.particles.position = np.vstack(
@@ -141,6 +120,42 @@ def _write_refilled_initial_frame(case: UnwrappedCase, output_gsd: Path) -> tupl
     with gsd.hoomd.open(name=str(output_gsd), mode="w") as target:
         target.append(frame)
     return n_shell, n_inner
+
+
+def _plot_inner_center_of_mass(case: UnwrappedCase, trajectory_gsd: Path) -> Path:
+    import matplotlib.pyplot as plt
+
+    simulation = cylinder.SIMULATION
+    with gsd.hoomd.open(name=str(trajectory_gsd), mode="r") as trajectory:
+        first_velocity = np.asarray(trajectory[0].particles.velocity)
+        inner_tags = np.flatnonzero(
+            first_velocity[:, 0] != simulation.shell_velocity_x_marker
+        )
+        steps = np.empty(len(trajectory), dtype=np.int64)
+        center_of_mass = np.empty((len(trajectory), 3), dtype=np.float64)
+        for frame_index, frame in enumerate(trajectory):
+            positions = np.asarray(frame.particles.position)[inner_tags]
+            images = np.asarray(frame.particles.image)[inner_tags]
+            box_lengths = np.asarray(frame.configuration.box[:3])
+            center_of_mass[frame_index] = np.mean(
+                positions + images * box_lengths,
+                axis=0,
+            )
+            steps[frame_index] = frame.configuration.step
+
+    elapsed_time = (steps - steps[0]) * simulation.timestep
+    output = _com_plot(case)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    figure, axis = plt.subplots()
+    for component, label in enumerate(("x", "y", "z")):
+        axis.plot(elapsed_time, center_of_mass[:, component], marker=".", label=label)
+    axis.set_xlabel("elapsed simulation time")
+    axis.set_ylabel("inner-particle center of mass")
+    axis.legend()
+    figure.tight_layout()
+    figure.savefig(output)
+    plt.close(figure)
+    return output
 
 
 def run_case(
@@ -246,6 +261,8 @@ def run_case(
         f"device={device_name} output={output_gsd}"
     )
     sim.run(run_steps)
+    plot_path = _plot_inner_center_of_mass(case, output_gsd)
+    print(f"inner_center_of_mass_plot={plot_path}")
 
 
 def _parse_args() -> argparse.Namespace:

@@ -49,6 +49,7 @@ WALL_CLEARANCE_EPSILON = 1.0e-3
 FROZEN_SHELL_DELTA = 0.1 * PARTICLE_DIAMETER
 LAST_FRAME_LATTICE_AXIAL_GAP = PARTICLE_DIAMETER
 LAST_FRAME_LATTICE_RADIAL_GAP = 2 * PARTICLE_DIAMETER
+LAST_FRAME_LATTICE_SPACING = PARTICLE_DIAMETER
 LAST_FRAME_RUN_STEPS = int(1e7)
 NEIGHBOR_LIST_BUFFER = 0.4
 INTERACTION_EPSILON_MULTIPLIER = 50.0
@@ -105,6 +106,7 @@ class CylinderAnalysisConfig:
     frozen_shell_delta: float = FROZEN_SHELL_DELTA
     last_frame_lattice_axial_gap: float = LAST_FRAME_LATTICE_AXIAL_GAP
     last_frame_lattice_radial_gap: float = LAST_FRAME_LATTICE_RADIAL_GAP
+    last_frame_lattice_spacing: float = LAST_FRAME_LATTICE_SPACING
     # neighbor_count_radius: float = 1.85 * SIGMA
     neighbor_count_radius: float = 1.7272 * PARTICLE_DIAMETER
     dislocation_pair_distance: float = 1.7272 * PARTICLE_DIAMETER
