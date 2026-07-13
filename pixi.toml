@@ -22,6 +22,12 @@ pde-diagnostic="python -um hexatic.rho_fitting.pde_validation --case radius_15D 
 pde-plot="python -um hexatic.rho_fitting.pde_validation --case radius_15D --mode all --plot-only --overwrite"
 unwrapped-sweep = "python -um hexatic.unwrapped_analysis.run_sweep --all --overwrite"
 unwrapped-analysis = "python -um hexatic.unwrapped_analysis.run_analysis --all --overwrite --skip-shear-series"
+big-lx-gpu-check = "python -um hexatic.big_lx.gpu_check"
+big-lx-validate = "python -um hexatic.big_lx.validate_cases"
+big-lx-sweep = "python -um hexatic.big_lx.run_sweep"
+big-lx-analysis = "python -um hexatic.big_lx.run_analysis"
+big-lx-pipeline = "python -um hexatic.big_lx.run_pipeline"
+big-lx-dry-run = "python -um hexatic.big_lx.run_pipeline --dry-run"
 [dependencies]
 python = "3.13.*"
 hoomd = "7.0.1.*"
@@ -32,6 +38,7 @@ pip = "*"
 setuptools = "*"
 wheel = "*"
 scipy = ">=1.17.1,<2"
+safetensors = ">=0.5,<1"
 plotly = ">=6.8.0,<7"
 scikit-learn = ">=1.9.0,<2"
 numba = ">=0.65.1,<0.66"
@@ -45,3 +52,15 @@ rust-src = ">=1.96.0,<2"
 [pypi-dependencies]
 pysindy = { version = ">=2.1.0, <3", extras = ["miosr", "sbr", "cvxpy"] }
 desloppify = ">=1.0, <2"
+
+[feature.big-lx-cuda12]
+platforms = ["linux-64"]
+
+[feature.big-lx-cuda12.pypi-dependencies]
+jax = { version = ">=0.10.2,<0.11", extras = ["cuda12"] }
+
+[feature.big-lx-cuda12.system-requirements]
+cuda = "12"
+
+[environments]
+big-lx-cuda12 = ["big-lx-cuda12"]
