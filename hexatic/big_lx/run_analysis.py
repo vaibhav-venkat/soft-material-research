@@ -4,10 +4,12 @@ import argparse
 from pathlib import Path
 import sys
 
-from hexatic.active_matter_cylinder import LOCAL_POCKET_RADIUS
+from hexatic.constants import cylinder
 
 from .cases import CasePaths, DEFAULT_OUTPUT_ROOT, select_cases
 from .scheduler import ScheduledJob, parse_gpu_ids, run_jobs
+
+LOCAL_POCKET_RADIUS = 2.0 * cylinder.ANALYSIS.particle_diameter
 
 
 def analysis_jobs(args: argparse.Namespace) -> tuple[ScheduledJob, ...]:

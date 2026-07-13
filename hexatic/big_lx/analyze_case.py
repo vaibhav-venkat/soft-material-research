@@ -7,7 +7,6 @@ from pathlib import Path
 import gsd.hoomd
 import numpy as np
 
-from hexatic.active_matter_cylinder import LOCAL_POCKET_RADIUS
 from hexatic.constants import cylinder
 
 from .backend import ArrayBackend, select_backend
@@ -19,6 +18,8 @@ from .storage import (
     save_safetensors_atomic,
     write_json_atomic,
 )
+
+LOCAL_POCKET_RADIUS = 2.0 * cylinder.ANALYSIS.particle_diameter
 
 
 def _logged_particle_array(frame, quantity: str, n_particles: int) -> np.ndarray:

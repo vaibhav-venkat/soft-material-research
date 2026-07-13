@@ -4,11 +4,13 @@ import argparse
 from pathlib import Path
 from types import SimpleNamespace
 
-from hexatic.active_matter_cylinder import LOCAL_POCKET_RADIUS
+from hexatic.constants import cylinder
 
 from .cases import DEFAULT_OUTPUT_ROOT
 from .run_analysis import run_analysis
 from .run_sweep import run_sweep
+
+LOCAL_POCKET_RADIUS = 2.0 * cylinder.ANALYSIS.particle_diameter
 
 
 def _parse_args() -> argparse.Namespace:
