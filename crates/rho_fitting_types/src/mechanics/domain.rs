@@ -1,24 +1,26 @@
 use crate::{CoreError, CoreResult};
 use ndarray::{
-    Array1, Array4, Array5, Array6, ArrayView1, ArrayView2, ArrayView3, ArrayView4, ArrayView5,
-    ArrayView6,
+    Array1, Array4, Array5, Array6, ArrayD, ArrayView1, ArrayView2, ArrayView3, ArrayView5,
+    ArrayView6, IxDyn,
 };
 
-pub(crate) const PHYSICAL_COMPONENT_COUNT: usize = 3;
+use crate::fields::ParticleFieldSet;
+pub use crate::fields::{CurrentQField, MechanicalFieldSet};
+
+pub const PHYSICAL_COMPONENT_COUNT: usize = 3;
 
 /// Components are always ordered as `(x, e_theta, e_r)` throughout the core.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PhysicalComponent {
+pub enum PhysicalComponent {
     Axial,
     Azimuthal,
     Radial,
 }
 
 impl PhysicalComponent {
-    pub(crate) const ALL: [Self; PHYSICAL_COMPONENT_COUNT] =
-        [Self::Axial, Self::Azimuthal, Self::Radial];
+    pub const ALL: [Self; PHYSICAL_COMPONENT_COUNT] = [Self::Axial, Self::Azimuthal, Self::Radial];
 
-    pub(crate) const fn index(self) -> usize {
+    pub const fn index(self) -> usize {
         match self {
             Self::Axial => 0,
             Self::Azimuthal => 1,
@@ -28,7 +30,8 @@ impl PhysicalComponent {
 }
 
 /// Row-major tensor component order derived from the same physical frame.
-pub(crate) const TENSOR_COMPONENTS: [(PhysicalComponent, PhysicalComponent); 9] = [
+/// xx, xtheta, xr, thetax, ...
+pub const TENSOR_COMPONENTS: [(PhysicalComponent, PhysicalComponent); 9] = [
     (PhysicalComponent::Axial, PhysicalComponent::Axial),
     (PhysicalComponent::Axial, PhysicalComponent::Azimuthal),
     (PhysicalComponent::Axial, PhysicalComponent::Radial),
@@ -40,22 +43,19 @@ pub(crate) const TENSOR_COMPONENTS: [(PhysicalComponent, PhysicalComponent); 9] 
     (PhysicalComponent::Radial, PhysicalComponent::Radial),
 ];
 
-pub(crate) type Rank3Tensor =
-    [[[f64; PHYSICAL_COMPONENT_COUNT]; PHYSICAL_COMPONENT_COUNT]; PHYSICAL_COMPONENT_COUNT];
-pub(crate) type CurrentQField = Array4<Rank3Tensor>;
-
-/// Owned cylindrical grid shared by CPU and GPU deposition backends.
-pub(crate) struct CylindricalGrid {
-    pub(crate) x: Array1<f64>,
-    pub(crate) theta: Array1<f64>,
-    pub(crate) r: Array1<f64>,
-    pub(crate) lx: f64,
-    pub(crate) theta_period: f64,
-    pub(crate) cell_volumes: Array1<f64>,
+/// Owned cylindrical grid
+#[derive(Clone)]
+pub struct CylindricalGrid {
+    pub x: Array1<f64>,
+    pub theta: Array1<f64>,
+    pub r: Array1<f64>,
+    pub lx: f64,
+    pub theta_period: f64,
+    pub cell_volumes: Array1<f64>,
 }
 
 impl CylindricalGrid {
-    pub(crate) fn new(
+    pub fn new(
         x: ArrayView1<'_, f64>,
         theta: ArrayView1<'_, f64>,
         r: ArrayView1<'_, f64>,
@@ -75,8 +75,7 @@ impl CylindricalGrid {
             || theta_period <= 0.0
         {
             return Err(CoreError::InvalidInput(
-                "grid coordinates and periods must be finite and positive where required"
-                    .to_string(),
+                "grid coordinates and periods must be finite and positive".to_string(),
             ));
         }
         if !r.iter().all(|value| value.is_finite() && *value > 0.0) {
@@ -115,20 +114,16 @@ impl CylindricalGrid {
         })
     }
 
-    pub(crate) fn shape(&self) -> (usize, usize, usize) {
+    pub fn shape(&self) -> (usize, usize, usize) {
         (self.x.len(), self.theta.len(), self.r.len())
     }
 
-    pub(crate) fn len(&self) -> usize {
-        self.x.len() * self.theta.len() * self.r.len()
-    }
-
-    pub(crate) fn flat_index(&self, ix: usize, itheta: usize, ir: usize) -> usize {
+    pub fn flat_index(&self, ix: usize, itheta: usize, ir: usize) -> usize {
         ix * self.theta.len() * self.r.len() + itheta * self.r.len() + ir
     }
 }
 
-pub(crate) fn radial_spacing(r: ArrayView1<'_, f64>) -> CoreResult<f64> {
+pub fn radial_spacing(r: ArrayView1<'_, f64>) -> CoreResult<f64> {
     if r.len() == 1 {
         let dr = r[0] * 0.1;
         return if dr.is_finite() && dr > 0.0 {
@@ -145,8 +140,8 @@ pub(crate) fn radial_spacing(r: ArrayView1<'_, f64>) -> CoreResult<f64> {
             "radial centers must be increasing".to_string(),
         ));
     }
-    for index in 1..r.len() - 1 {
-        let next = r[index + 1] - r[index];
+    for idx in 1..r.len() - 1 {
+        let next = r[idx + 1] - r[idx];
         if (next - dr).abs() > 1.0e-8 * dr.abs().max(1.0) {
             return Err(CoreError::InvalidInput(
                 "radial centers must be uniformly spaced".to_string(),
@@ -156,7 +151,7 @@ pub(crate) fn radial_spacing(r: ArrayView1<'_, f64>) -> CoreResult<f64> {
     Ok(dr)
 }
 
-pub(crate) fn relative_mass_error(mass: &[f64], expected: usize) -> f64 {
+pub fn relative_mass_error(mass: &[f64], expected: usize) -> f64 {
     let total: f64 = mass.iter().sum();
     if expected > 0 {
         (total - expected as f64).abs() / expected as f64
@@ -165,20 +160,17 @@ pub(crate) fn relative_mass_error(mass: &[f64], expected: usize) -> f64 {
     }
 }
 
-/// Validated particle arrays plus the canonical grid used by either backend.
-pub(crate) struct MechanicalInputViews<'a> {
-    pub(crate) coords: ArrayView3<'a, f64>,
-    pub(crate) directions: ArrayView3<'a, f64>,
-    pub(crate) velocities: ArrayView3<'a, f64>,
-    pub(crate) psi6_abs: ArrayView2<'a, f64>,
-    pub(crate) mask: ArrayView2<'a, bool>,
-    pub(crate) grid: CylindricalGrid,
-    pub(crate) sigma: f64,
+/// Validated particle arrays plus the canonical grid
+#[derive(Clone)]
+pub struct MechanicalInputViews<'a> {
+    pub particles: ParticleFieldSet<'a>,
+    pub grid: CylindricalGrid,
+    pub sigma: f64,
 }
 
 impl<'a> MechanicalInputViews<'a> {
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
+    pub fn new(
         coords: ArrayView3<'a, f64>,
         directions: ArrayView3<'a, f64>,
         velocities: ArrayView3<'a, f64>,
@@ -221,30 +213,21 @@ impl<'a> MechanicalInputViews<'a> {
             ));
         }
         Ok(Self {
-            coords,
-            directions,
-            velocities,
-            psi6_abs,
-            mask,
+            particles: ParticleFieldSet {
+                coords,
+                directions,
+                velocities,
+                hexatic_order: psi6_abs,
+                mask,
+            },
             grid: CylindricalGrid::new(x_centers, theta_centers, r_centers, lx, theta_period)?,
             sigma,
         })
     }
 }
 
-pub(crate) struct MechanicalFieldSet {
-    pub(crate) rho: Array4<f64>,
-    pub(crate) p: Array5<f64>,
-    pub(crate) q: Array6<f64>,
-    pub(crate) a: Array6<f64>,
-    pub(crate) psi6_sq: Array4<f64>,
-    pub(crate) j_rho: Array5<f64>,
-    pub(crate) j_p: Array6<f64>,
-    pub(crate) j_q: CurrentQField,
-}
-
 impl MechanicalFieldSet {
-    pub(crate) fn zeros(frames: usize, grid: &CylindricalGrid) -> Self {
+    pub fn zeros(frames: usize, grid: &CylindricalGrid) -> Self {
         let (nx, ntheta, nr) = grid.shape();
         Self {
             rho: Array4::zeros((frames, nx, ntheta, nr)),
@@ -265,7 +248,7 @@ impl MechanicalFieldSet {
                 PHYSICAL_COMPONENT_COUNT,
                 PHYSICAL_COMPONENT_COUNT,
             )),
-            psi6_sq: Array4::from_elem((frames, nx, ntheta, nr), f64::NAN),
+            hexatic_order: Array4::from_elem((frames, nx, ntheta, nr), f32::NAN),
             j_rho: Array5::zeros((frames, nx, ntheta, nr, PHYSICAL_COMPONENT_COUNT)),
             j_p: Array6::zeros((
                 frames,
@@ -275,27 +258,27 @@ impl MechanicalFieldSet {
                 PHYSICAL_COMPONENT_COUNT,
                 PHYSICAL_COMPONENT_COUNT,
             )),
-            j_q: Array4::from_elem((frames, nx, ntheta, nr), [[[0.0; 3]; 3]; 3]),
+            j_q: ArrayD::zeros(IxDyn(&[frames, nx, ntheta, nr, 3, 3, 3])),
         }
     }
 }
 
 /// Mass-weighted frame accumulator used by both CPU and Burn deposition.
-pub(crate) struct MechanicalFrame {
-    pub(crate) mass: Vec<f64>,
-    pub(crate) psi6_mass: Vec<f64>,
-    pub(crate) p_mass: [Vec<f64>; 3],
-    pub(crate) q_mass: [Vec<f64>; 9],
-    pub(crate) j_rho_mass: [Vec<f64>; 3],
-    pub(crate) j_p_mass: [Vec<f64>; 9],
-    pub(crate) j_q_mass: [Vec<f64>; 27],
+pub struct MechanicalFrame {
+    pub mass: Vec<f64>,
+    pub hexatic_mass: Vec<f64>,
+    pub p_mass: [Vec<f64>; 3],
+    pub q_mass: [Vec<f64>; 9],
+    pub j_rho_mass: [Vec<f64>; 3],
+    pub j_p_mass: [Vec<f64>; 9],
+    pub j_q_mass: [Vec<f64>; 27],
 }
 
 impl MechanicalFrame {
-    pub(crate) fn new(grid_len: usize) -> Self {
+    pub fn new(grid_len: usize) -> Self {
         Self {
             mass: vec![0.0; grid_len],
-            psi6_mass: vec![0.0; grid_len],
+            hexatic_mass: vec![0.0; grid_len],
             p_mass: std::array::from_fn(|_| vec![0.0; grid_len]),
             q_mass: std::array::from_fn(|_| vec![0.0; grid_len]),
             j_rho_mass: std::array::from_fn(|_| vec![0.0; grid_len]),
@@ -304,44 +287,7 @@ impl MechanicalFrame {
         }
     }
 
-    pub(crate) fn deposit(
-        &mut self,
-        flat: usize,
-        mass: f64,
-        psi6: f64,
-        direction: [f64; 3],
-        velocity: [f64; 3],
-    ) {
-        let mut q = [[0.0; 3]; 3];
-        for (row, col) in TENSOR_COMPONENTS {
-            q[row.index()][col.index()] = direction[row.index()] * direction[col.index()]
-                - if row == col { 1.0 / 3.0 } else { 0.0 };
-        }
-        self.mass[flat] += mass;
-        self.psi6_mass[flat] += mass * psi6;
-        for component in PhysicalComponent::ALL {
-            let index = component.index();
-            self.p_mass[index][flat] += mass * direction[index];
-            self.j_rho_mass[index][flat] += mass * velocity[index];
-        }
-        for flux in PhysicalComponent::ALL {
-            for component in PhysicalComponent::ALL {
-                let flux_index = flux.index();
-                let component_index = component.index();
-                self.j_p_mass[flux_index * 3 + component_index][flat] +=
-                    mass * velocity[flux_index] * direction[component_index];
-            }
-            for (tensor_index, (row, col)) in TENSOR_COMPONENTS.into_iter().enumerate() {
-                self.j_q_mass[flux.index() * 9 + tensor_index][flat] +=
-                    mass * velocity[flux.index()] * q[row.index()][col.index()];
-            }
-        }
-        for (tensor_index, (row, col)) in TENSOR_COMPONENTS.into_iter().enumerate() {
-            self.q_mass[tensor_index][flat] += mass * q[row.index()][col.index()];
-        }
-    }
-
-    pub(crate) fn write_into(
+    pub fn write_into(
         &self,
         frame: usize,
         grid: &CylindricalGrid,
@@ -355,32 +301,34 @@ impl MechanicalFrame {
                     let volume = grid.cell_volumes[flat];
                     let mass = self.mass[flat];
                     let density = mass / volume;
-                    fields.rho[[frame, ix, itheta, ir]] = density;
+                    fields.rho[[frame, ix, itheta, ir]] = density as f32;
                     if mass <= 1.0e-12 {
                         continue;
                     }
-                    let psi = self.psi6_mass[flat] / mass;
-                    fields.psi6_sq[[frame, ix, itheta, ir]] = psi * psi;
+                    let psi = self.hexatic_mass[flat] / mass;
+                    // TODO: Make the value just psi, not psi^2. Update it across the report and all conventions as well.
+                    fields.hexatic_order[[frame, ix, itheta, ir]] = (psi * psi) as f32;
                     for component in PhysicalComponent::ALL {
                         let index = component.index();
                         fields.p[[frame, ix, itheta, ir, index]] =
-                            self.p_mass[index][flat] / volume;
+                            (self.p_mass[index][flat] / volume) as f32;
                         fields.j_rho[[frame, ix, itheta, ir, index]] =
-                            self.j_rho_mass[index][flat] / volume;
+                            (self.j_rho_mass[index][flat] / volume) as f32;
                     }
                     for (tensor_index, (row, col)) in TENSOR_COMPONENTS.into_iter().enumerate() {
                         let row_index = row.index();
                         let col_index = col.index();
                         let q_value = self.q_mass[tensor_index][flat] / volume;
-                        fields.q[[frame, ix, itheta, ir, row_index, col_index]] = q_value;
+                        fields.q[[frame, ix, itheta, ir, row_index, col_index]] = q_value as f32;
+                        // TODO: Add d = 3 to the constants.rs, and use it instead of 3.0
                         fields.a[[frame, ix, itheta, ir, row_index, col_index]] =
-                            q_value + if row == col { density / 3.0 } else { 0.0 };
+                            (q_value + if row == col { density / 3.0 } else { 0.0 }) as f32;
                         for flux in PhysicalComponent::ALL {
                             let flux_index = flux.index();
                             fields.j_p[[frame, ix, itheta, ir, flux_index, row_index]] =
-                                self.j_p_mass[flux_index * 3 + row_index][flat] / volume;
-                            fields.j_q[[frame, ix, itheta, ir]][flux_index][row_index][col_index] =
-                                self.j_q_mass[flux_index * 9 + tensor_index][flat] / volume;
+                                (self.j_p_mass[flux_index * 3 + row_index][flat] / volume) as f32;
+                            fields.j_q[[frame, ix, itheta, ir, flux_index, row_index, col_index]] =
+                                (self.j_q_mass[flux_index * 9 + tensor_index][flat] / volume) as f32;
                         }
                     }
                 }
@@ -389,17 +337,15 @@ impl MechanicalFrame {
     }
 }
 
-pub(crate) struct MechanicalTargets {
-    pub(crate) y_rho: Array5<f64>,
-    pub(crate) y_p: Array6<f64>,
-    pub(crate) y_q: CurrentQField,
+pub struct MechanicalTargets {
+    pub y_rho: Array5<f64>,
+    pub y_p: Array6<f64>,
 }
 
-pub(crate) fn build_targets(
+pub fn build_targets(
     p: ArrayView5<'_, f64>,
     j_rho: ArrayView5<'_, f64>,
     j_p: ArrayView6<'_, f64>,
-    j_q: ArrayView4<'_, Rank3Tensor>,
     gamma: f64,
     u0: f64,
 ) -> CoreResult<MechanicalTargets> {
@@ -419,11 +365,6 @@ pub(crate) fn build_targets(
             "J_P must have shape (T,Nx,Ntheta,Nr,3,3)".to_string(),
         ));
     }
-    if j_q.shape() != [shape[0], shape[1], shape[2], shape[3]] {
-        return Err(CoreError::Shape(
-            "J_Q must have shape (T,Nx,Ntheta,Nr,3,3,3)".to_string(),
-        ));
-    }
     if !(gamma.is_finite() && u0.is_finite() && u0 != 0.0) {
         return Err(CoreError::InvalidInput(
             "gamma must be finite and u0 must be nonzero".to_string(),
@@ -433,6 +374,5 @@ pub(crate) fn build_targets(
     Ok(MechanicalTargets {
         y_rho,
         y_p: j_p.to_owned() / u0,
-        y_q: j_q.to_owned(),
     })
 }

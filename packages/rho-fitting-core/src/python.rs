@@ -1,0 +1,861 @@
+use ndarray::{Ix5, Ix6};
+use numpy::{
+    IntoPyArray, PyReadonlyArray1, PyReadonlyArray2, PyReadonlyArray3, PyReadonlyArrayDyn,
+};
+use pyo3::exceptions::PyValueError;
+use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyList};
+
+use crate::coarse_grain_burn;
+use crate::constants;
+use crate::fitting;
+use crate::interpolation;
+use crate::mechanics;
+use crate::particles;
+use crate::pde;
+use crate::regression;
+use crate::spectral;
+use crate::temporal;
+use crate::{CoreError, CoreResult};
+
+fn to_py_err(error: CoreError) -> PyErr {
+    // Convert Rust core errors into Python ValueError exceptions.
+    PyValueError::new_err(error.to_string())
+}
+
+#[pyfunction]
+/// Return the compiled rho-fitting core crate version.
+fn version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+#[pyfunction]
+fn numerical_constants(py: Python<'_>) -> PyResult<Py<PyDict>> {
+    let out = PyDict::new(py);
+    out.set_item(
+        "p_relaxation_coefficient",
+        constants::P_RELAXATION_COEFFICIENT,
+    )?;
+    out.set_item(
+        "q_relaxation_coefficient",
+        constants::Q_RELAXATION_COEFFICIENT,
+    )?;
+    out.set_item("default_pde_dt_max", constants::DEFAULT_PDE_DT_MAX)?;
+    out.set_item("validation_bound_scale", constants::VALIDATION_BOUND_SCALE)?;
+    out.set_item("regression_tolerance", constants::REGRESSION_TOLERANCE)?;
+    Ok(out.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (valid_mask, nd, seed, replace))]
+/// Sample `(frame, ix, theta, r)` rows from a boolean valid-mask grid.
+fn sample_grid_rows(
+    py: Python<'_>,
+    valid_mask: PyReadonlyArrayDyn<'_, bool>,
+    nd: usize,
+    seed: u64,
+    replace: bool,
+) -> PyResult<Py<PyAny>> {
+    let rows =
+        fitting::sample_grid_rows(valid_mask.as_array(), nd, seed, replace).map_err(to_py_err)?;
+    Ok(rows.into_pyarray(py).into_any().unbind())
+}
+
+#[pyfunction]
+/// Build a finite-value `(T,Nx,Ntheta,Nr)` mask from a sequence of fields.
+fn finite_grid_mask(
+    py: Python<'_>,
+    fields: Vec<PyReadonlyArrayDyn<'_, f64>>,
+) -> PyResult<Py<PyAny>> {
+    let views = fields
+        .iter()
+        .map(|field| field.as_array())
+        .collect::<Vec<_>>();
+    let mask = fitting::finite_grid_mask(&views).map_err(to_py_err)?;
+    Ok(mask.into_pyarray(py).into_any().unbind())
+}
+
+#[pyfunction]
+/// Build the alignment tensor `A = Q + rho I / 3`.
+fn build_alignment_tensor(
+    py: Python<'_>,
+    rho: PyReadonlyArrayDyn<'_, f64>,
+    q: PyReadonlyArrayDyn<'_, f64>,
+) -> PyResult<Py<PyAny>> {
+    let value = fitting::alignment_tensor(rho.as_array(), q.as_array()).map_err(to_py_err)?;
+    Ok(value.into_pyarray(py).into_any().unbind())
+}
+
+#[pyfunction]
+/// Contract `A` with a cylindrical density gradient.
+fn contract_alignment_gradient(
+    py: Python<'_>,
+    a: PyReadonlyArrayDyn<'_, f64>,
+    grad_rho: PyReadonlyArrayDyn<'_, f64>,
+) -> PyResult<Py<PyAny>> {
+    let value =
+        fitting::alignment_dot_gradient(a.as_array(), grad_rho.as_array()).map_err(to_py_err)?;
+    Ok(value.into_pyarray(py).into_any().unbind())
+}
+
+#[pyfunction]
+/// Estimate the scalar speed by projecting `Y_P` onto `A`.
+fn estimate_ubar(
+    py: Python<'_>,
+    y_p: PyReadonlyArrayDyn<'_, f64>,
+    a: PyReadonlyArrayDyn<'_, f64>,
+) -> PyResult<Py<PyAny>> {
+    let value = fitting::estimate_ubar(y_p.as_array(), a.as_array()).map_err(to_py_err)?;
+    Ok(value.into_pyarray(py).into_any().unbind())
+}
+
+#[pyfunction]
+/// Build the symmetric traceless P-alignment tensor.
+fn build_p_alignment(py: Python<'_>, p: PyReadonlyArrayDyn<'_, f64>) -> PyResult<Py<PyAny>> {
+    let value = fitting::p_alignment_traceless(p.as_array()).map_err(to_py_err)?;
+    Ok(value.into_pyarray(py).into_any().unbind())
+}
+
+#[pyfunction]
+/// Multiply every trailing tensor component by a scalar field.
+fn scale_by_scalar(
+    py: Python<'_>,
+    scalar: PyReadonlyArrayDyn<'_, f64>,
+    values: PyReadonlyArrayDyn<'_, f64>,
+) -> PyResult<Py<PyAny>> {
+    let value =
+        fitting::scale_by_scalar(scalar.as_array(), values.as_array()).map_err(to_py_err)?;
+    Ok(value.into_pyarray(py).into_any().unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (values, mode))]
+/// Keep tangential (`0`) or radial (`1`) flux directions.
+fn project_flux_directions(
+    py: Python<'_>,
+    values: PyReadonlyArrayDyn<'_, f64>,
+    mode: u8,
+) -> PyResult<Py<PyAny>> {
+    let value = fitting::project_flux_directions(values.as_array(), mode).map_err(to_py_err)?;
+    Ok(value.into_pyarray(py).into_any().unbind())
+}
+
+#[pyfunction]
+/// Return a coefficient-weighted sum of same-shaped fields.
+fn weighted_linear_combination(
+    py: Python<'_>,
+    fields: Vec<PyReadonlyArrayDyn<'_, f64>>,
+    coefficients: PyReadonlyArray1<'_, f64>,
+) -> PyResult<Py<PyAny>> {
+    let views = fields
+        .iter()
+        .map(|field| field.as_array())
+        .collect::<Vec<_>>();
+    let value =
+        fitting::weighted_linear_combination(&views, coefficients.as_array()).map_err(to_py_err)?;
+    Ok(value.into_pyarray(py).into_any().unbind())
+}
+
+#[pyfunction]
+/// Sum squared temporal coefficients over every non-mode axis.
+fn temporal_power_spectrum(
+    py: Python<'_>,
+    coefficients: Vec<PyReadonlyArrayDyn<'_, f64>>,
+) -> PyResult<Py<PyAny>> {
+    let coefficients = coefficients
+        .into_iter()
+        .map(|values| values.as_array().to_owned())
+        .collect::<Vec<_>>();
+    let result = py
+        .detach(|| {
+            let views = coefficients
+                .iter()
+                .map(|values| values.view())
+                .collect::<Vec<_>>();
+            temporal::power_spectrum(&views)
+        })
+        .map_err(to_py_err)?;
+    Ok(result.into_pyarray(py).into_any().unbind())
+}
+
+#[pyclass(name = "TemporalOperators")]
+struct PyTemporalOperators {
+    inner: temporal::TemporalOperators,
+}
+
+#[pyclass(name = "RadialTransfer")]
+struct PyRadialTransfer {
+    inner: interpolation::RadialTransfer,
+}
+
+#[pymethods]
+impl PyRadialTransfer {
+    #[new]
+    fn new(source: PyReadonlyArray1<'_, f64>, target: PyReadonlyArray1<'_, f64>) -> PyResult<Self> {
+        Ok(Self {
+            inner: interpolation::RadialTransfer::new(source.as_array(), target.as_array())
+                .map_err(to_py_err)?,
+        })
+    }
+
+    fn matrix(&self, py: Python<'_>) -> Py<PyAny> {
+        self.inner
+            .matrix()
+            .clone()
+            .into_pyarray(py)
+            .into_any()
+            .unbind()
+    }
+
+    fn apply(
+        &self,
+        py: Python<'_>,
+        values: PyReadonlyArrayDyn<'_, f64>,
+        axis: usize,
+    ) -> PyResult<Py<PyAny>> {
+        let values = values.as_array().to_owned();
+        let result = py
+            .detach(|| self.inner.apply(values.view(), axis))
+            .map_err(to_py_err)?;
+        Ok(result.into_pyarray(py).into_any().unbind())
+    }
+}
+
+#[pyclass(name = "CylindricalSpectralOperators")]
+struct PyCylindricalSpectralOperators {
+    inner: spectral::CylindricalSpectralOperators,
+}
+
+#[pymethods]
+impl PyCylindricalSpectralOperators {
+    #[new]
+    #[pyo3(signature = (lx, theta_period, r_min, r_max, nx, ntheta, nr))]
+    fn new(
+        lx: f64,
+        theta_period: f64,
+        r_min: f64,
+        r_max: f64,
+        nx: usize,
+        ntheta: usize,
+        nr: usize,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            inner: spectral::CylindricalSpectralOperators::new(
+                lx,
+                theta_period,
+                r_min,
+                r_max,
+                nx,
+                ntheta,
+                nr,
+            )
+            .map_err(to_py_err)?,
+        })
+    }
+
+    fn radial_nodes(&self, py: Python<'_>) -> Py<PyAny> {
+        self.inner
+            .radial_nodes
+            .clone()
+            .into_pyarray(py)
+            .into_any()
+            .unbind()
+    }
+
+    #[pyo3(signature = (values, direction, grid_offset=0))]
+    fn derivative(
+        &self,
+        py: Python<'_>,
+        values: PyReadonlyArrayDyn<'_, f64>,
+        direction: usize,
+        grid_offset: usize,
+    ) -> PyResult<Py<PyAny>> {
+        let values = values.as_array().to_owned();
+        let result = py
+            .detach(|| self.inner.derivative(values.view(), grid_offset, direction))
+            .map_err(to_py_err)?;
+        Ok(result.into_pyarray(py).into_any().unbind())
+    }
+
+    #[pyo3(signature = (values, grid_offset=0))]
+    fn gradient(
+        &self,
+        py: Python<'_>,
+        values: PyReadonlyArrayDyn<'_, f64>,
+        grid_offset: usize,
+    ) -> PyResult<Py<PyAny>> {
+        let values = values.as_array().to_owned();
+        let result = py
+            .detach(|| self.inner.gradient(values.view(), grid_offset))
+            .map_err(to_py_err)?;
+        Ok(result.into_pyarray(py).into_any().unbind())
+    }
+
+    #[pyo3(signature = (values, grid_offset=0))]
+    fn divergence(
+        &self,
+        py: Python<'_>,
+        values: PyReadonlyArrayDyn<'_, f64>,
+        grid_offset: usize,
+    ) -> PyResult<Py<PyAny>> {
+        let values = values.as_array().to_owned();
+        let result = py
+            .detach(|| self.inner.divergence(values.view(), grid_offset))
+            .map_err(to_py_err)?;
+        Ok(result.into_pyarray(py).into_any().unbind())
+    }
+
+    #[pyo3(signature = (values, grid_offset=0))]
+    fn laplacian(
+        &self,
+        py: Python<'_>,
+        values: PyReadonlyArrayDyn<'_, f64>,
+        grid_offset: usize,
+    ) -> PyResult<Py<PyAny>> {
+        let values = values.as_array().to_owned();
+        let result = py
+            .detach(|| self.inner.laplacian(values.view(), grid_offset))
+            .map_err(to_py_err)?;
+        Ok(result.into_pyarray(py).into_any().unbind())
+    }
+
+    #[pyo3(signature = (values, grid_offset=0))]
+    fn filter_two_thirds(
+        &self,
+        py: Python<'_>,
+        values: PyReadonlyArrayDyn<'_, f64>,
+        grid_offset: usize,
+    ) -> PyResult<Py<PyAny>> {
+        let values = values.as_array().to_owned();
+        let result = py
+            .detach(|| self.inner.filter_two_thirds(values.view(), grid_offset))
+            .map_err(to_py_err)?;
+        Ok(result.into_pyarray(py).into_any().unbind())
+    }
+}
+
+#[pyfunction]
+fn barycentric_matrix(
+    py: Python<'_>,
+    source: PyReadonlyArray1<'_, f64>,
+    target: PyReadonlyArray1<'_, f64>,
+) -> PyResult<Py<PyAny>> {
+    let source = source.as_array().to_owned();
+    let target = target.as_array().to_owned();
+    let result = py
+        .detach(|| interpolation::barycentric_matrix(source.view(), target.view()))
+        .map_err(to_py_err)?;
+    Ok(result.into_pyarray(py).into_any().unbind())
+}
+
+#[pyfunction]
+fn transfer_radial(
+    py: Python<'_>,
+    values: PyReadonlyArrayDyn<'_, f64>,
+    matrix: PyReadonlyArray2<'_, f64>,
+    axis: usize,
+) -> PyResult<Py<PyAny>> {
+    let values = values.as_array().to_owned();
+    let matrix = matrix.as_array().to_owned();
+    let result = py
+        .detach(|| {
+            let transfer = interpolation::RadialTransfer::from_matrix(matrix.view())?;
+            transfer.apply(values.view(), axis)
+        })
+        .map_err(to_py_err)?;
+    Ok(result.into_pyarray(py).into_any().unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x, y, lambda, tolerance, max_iterations, non_positive, non_negative))]
+/// Fit one column-normalized, sign-constrained L1 regression problem.
+fn fit_constrained_lasso(
+    py: Python<'_>,
+    x: PyReadonlyArray2<'_, f64>,
+    y: PyReadonlyArray1<'_, f64>,
+    lambda: f64,
+    tolerance: f64,
+    max_iterations: usize,
+    non_positive: PyReadonlyArray1<'_, i64>,
+    non_negative: PyReadonlyArray1<'_, i64>,
+) -> PyResult<Py<PyDict>> {
+    let x = x.as_array().to_owned();
+    let y = y.as_array().to_owned();
+    let non_positive = non_positive.as_array().to_owned();
+    let non_negative = non_negative.as_array().to_owned();
+    let result = py
+        .detach(|| {
+            regression::fit_constrained_lasso(
+                x.view(),
+                y.view(),
+                lambda,
+                tolerance,
+                max_iterations,
+                non_positive.view(),
+                non_negative.view(),
+            )
+        })
+        .map_err(to_py_err)?;
+    let out = PyDict::new(py);
+    out.set_item("coefficients", result.coefficients.into_pyarray(py))?;
+    out.set_item(
+        "normalized_coefficients",
+        result.normalized_coefficients.into_pyarray(py),
+    )?;
+    out.set_item("column_norms", result.column_norms.into_pyarray(py))?;
+    out.set_item("objective", result.objective)?;
+    out.set_item("status", result.status)?;
+    out.set_item("iterations", result.iterations)?;
+    out.set_item("primal_residual", result.primal_residual)?;
+    out.set_item("dual_residual", result.dual_residual)?;
+    out.set_item("gap", result.gap)?;
+    Ok(out.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (rho, p, q, psi6_sq, y_p, times, c_rho, c_p, c_q, r_centers, r_edges, lx, theta_period, u0, gamma, frames, dt_max, mode, ubar_source))]
+/// Run one complete cylindrical RK4 validation rollout in Rust.
+#[allow(clippy::too_many_arguments)]
+fn run_pde_validation(
+    py: Python<'_>,
+    rho: PyReadonlyArrayDyn<'_, f64>,
+    p: PyReadonlyArrayDyn<'_, f64>,
+    q: PyReadonlyArrayDyn<'_, f64>,
+    psi6_sq: PyReadonlyArrayDyn<'_, f64>,
+    y_p: PyReadonlyArrayDyn<'_, f64>,
+    times: PyReadonlyArray1<'_, f64>,
+    c_rho: PyReadonlyArray1<'_, f64>,
+    c_p: PyReadonlyArray1<'_, f64>,
+    c_q: PyReadonlyArray1<'_, f64>,
+    r_centers: PyReadonlyArray1<'_, f64>,
+    r_edges: PyReadonlyArray1<'_, f64>,
+    lx: f64,
+    theta_period: f64,
+    u0: f64,
+    gamma: f64,
+    frames: usize,
+    dt_max: f64,
+    mode: u8,
+    ubar_source: u8,
+) -> PyResult<Py<PyDict>> {
+    let rho = rho.as_array().to_owned();
+    let p = p.as_array().to_owned();
+    let q = q.as_array().to_owned();
+    let psi6_sq = psi6_sq.as_array().to_owned();
+    let y_p = y_p.as_array().to_owned();
+    let times = times.as_array().to_owned();
+    let c_rho = c_rho.as_array().to_owned();
+    let c_p = c_p.as_array().to_owned();
+    let c_q = c_q.as_array().to_owned();
+    let r_centers = r_centers.as_array().to_owned();
+    let r_edges = r_edges.as_array().to_owned();
+    let result = py
+        .detach(|| {
+            pde::run_validation(
+                rho.view(),
+                p.view(),
+                q.view(),
+                psi6_sq.view(),
+                y_p.view(),
+                times.view(),
+                c_rho.view(),
+                c_p.view(),
+                c_q.view(),
+                r_centers.view(),
+                r_edges.view(),
+                lx,
+                theta_period,
+                u0,
+                gamma,
+                frames,
+                dt_max,
+                mode,
+                ubar_source,
+            )
+        })
+        .map_err(to_py_err)?;
+    let out = PyDict::new(py);
+    out.set_item("rho", result.rho.into_pyarray(py))?;
+    out.set_item("P", result.p.into_pyarray(py))?;
+    out.set_item("Q", result.q.into_pyarray(py))?;
+    Ok(out.unbind())
+}
+
+#[pymethods]
+impl PyTemporalOperators {
+    #[new]
+    #[pyo3(signature = (steps, timestep, cutoff))]
+    fn new(steps: PyReadonlyArray1<'_, i64>, timestep: f64, cutoff: usize) -> PyResult<Self> {
+        Ok(Self {
+            inner: temporal::TemporalOperators::new(steps.as_array(), timestep, cutoff)
+                .map_err(to_py_err)?,
+        })
+    }
+
+    /// Apply the shared temporal fit/evaluation operators to one contiguous field block.
+    fn apply(&self, py: Python<'_>, values: PyReadonlyArrayDyn<'_, f64>) -> PyResult<Py<PyDict>> {
+        let values = values.as_array().to_owned();
+        let result = py
+            .detach(|| self.inner.apply(values.view()))
+            .map_err(to_py_err)?;
+        let out = PyDict::new(py);
+        out.set_item("cleaned", result.cleaned.into_pyarray(py))?;
+        out.set_item("filtered", result.filtered.into_pyarray(py))?;
+        out.set_item("derivative", result.derivative.into_pyarray(py))?;
+        out.set_item("coefficients", result.coefficients.into_pyarray(py))?;
+        Ok(out.unbind())
+    }
+
+    /// Apply the same precomputed operators to multiple field blocks.
+    fn apply_many(
+        &self,
+        py: Python<'_>,
+        fields: Vec<PyReadonlyArrayDyn<'_, f64>>,
+    ) -> PyResult<Py<PyList>> {
+        let fields = fields
+            .into_iter()
+            .map(|field| field.as_array().to_owned())
+            .collect::<Vec<_>>();
+        let results = py
+            .detach(|| {
+                fields
+                    .iter()
+                    .map(|field| self.inner.apply(field.view()))
+                    .collect::<CoreResult<Vec<_>>>()
+            })
+            .map_err(to_py_err)?;
+        let out = PyList::empty(py);
+        for result in results {
+            let item = PyDict::new(py);
+            item.set_item("cleaned", result.cleaned.into_pyarray(py))?;
+            item.set_item("filtered", result.filtered.into_pyarray(py))?;
+            item.set_item("derivative", result.derivative.into_pyarray(py))?;
+            item.set_item("coefficients", result.coefficients.into_pyarray(py))?;
+            out.append(item)?;
+        }
+        Ok(out.unbind())
+    }
+
+    /// Memory-bounded production path: one field, optional derivative, reduced power.
+    fn apply_compact(
+        &self,
+        py: Python<'_>,
+        values: PyReadonlyArrayDyn<'_, f64>,
+        include_derivative: bool,
+    ) -> PyResult<Py<PyDict>> {
+        // Intentionally retain the GIL here so the borrowed NumPy allocation can be
+        // read directly. Copying a canonical J_Q input before detaching costs ~2.3 GiB.
+        let result = self
+            .inner
+            .apply_compact(values.as_array(), include_derivative)
+            .map_err(to_py_err)?;
+        let out = PyDict::new(py);
+        out.set_item("filtered", result.filtered.into_pyarray(py))?;
+        if let Some(derivative) = result.derivative {
+            out.set_item("derivative", derivative.into_pyarray(py))?;
+        } else {
+            out.set_item("derivative", py.None())?;
+        }
+        out.set_item("power", result.power.into_pyarray(py))?;
+        Ok(out.unbind())
+    }
+
+    /// Return scaled time coordinates used by the Chebyshev fit.
+    fn scaled_times(&self, py: Python<'_>) -> Py<PyAny> {
+        self.inner
+            .scaled_times
+            .clone()
+            .into_pyarray(py)
+            .into_any()
+            .unbind()
+    }
+
+    /// Return physical time coordinates used by the Chebyshev fit.
+    fn times(&self, py: Python<'_>) -> Py<PyAny> {
+        self.inner
+            .times
+            .clone()
+            .into_pyarray(py)
+            .into_any()
+            .unbind()
+    }
+
+    /// Return ascending Chebyshev-Lobatto nodes used by the diagnostic interpolation.
+    fn diagnostic_nodes(&self, py: Python<'_>) -> Py<PyAny> {
+        self.inner
+            .diagnostic_nodes
+            .clone()
+            .into_pyarray(py)
+            .into_any()
+            .unbind()
+    }
+
+    /// Fit diagnostic coefficients for values already resampled on the Lobatto nodes.
+    fn diagnostic_coefficients(
+        &self,
+        py: Python<'_>,
+        values_at_nodes: PyReadonlyArrayDyn<'_, f64>,
+    ) -> PyResult<Py<PyAny>> {
+        let result = self
+            .inner
+            .diagnostic_coefficients(values_at_nodes.as_array())
+            .map_err(to_py_err)?;
+        Ok(result.into_pyarray(py).into_any().unbind())
+    }
+}
+
+#[pyfunction]
+#[pyo3(signature = (orientation))]
+/// Rotate HOOMD quaternions onto the body-frame active axis.
+fn particle_active_direction(
+    py: Python<'_>,
+    orientation: PyReadonlyArray3<'_, f64>,
+) -> PyResult<Py<PyAny>> {
+    let value =
+        particles::active_direction_from_quaternion(orientation.as_array()).map_err(to_py_err)?;
+    Ok(value.into_pyarray(py).into_any().unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (vectors, theta))]
+/// Project Cartesian vectors to `(x, radial, azimuthal)` components.
+fn cartesian_to_cylindrical(
+    py: Python<'_>,
+    vectors: PyReadonlyArray3<'_, f64>,
+    theta: PyReadonlyArray2<'_, f64>,
+) -> PyResult<Py<PyAny>> {
+    let value =
+        particles::cartesian_to_cylindrical_components(vectors.as_array(), theta.as_array())
+            .map_err(to_py_err)?;
+    Ok(value.into_pyarray(py).into_any().unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (coords, direction_cylindrical=None, active_direction=None, orientation=None))]
+/// Convert particle directions into canonical `(x, e_theta, e_r)` order.
+fn particle_directions(
+    py: Python<'_>,
+    coords: PyReadonlyArray3<'_, f64>,
+    direction_cylindrical: Option<PyReadonlyArray3<'_, f64>>,
+    active_direction: Option<PyReadonlyArray3<'_, f64>>,
+    orientation: Option<PyReadonlyArray3<'_, f64>>,
+) -> PyResult<Py<PyAny>> {
+    let value = particles::tangential_particle_vectors(particles::DirectionInputs {
+        coords: coords.as_array(),
+        direction_cylindrical: direction_cylindrical.as_ref().map(|value| value.as_array()),
+        active_direction: active_direction.as_ref().map(|value| value.as_array()),
+        orientation: orientation.as_ref().map(|value| value.as_array()),
+    })
+    .map_err(to_py_err)?;
+    Ok(value.into_pyarray(py).into_any().unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (coords, steps, timestep, lx, theta_period))]
+/// Estimate periodic particle velocities in canonical cylindrical component order.
+fn particle_surface_velocities(
+    py: Python<'_>,
+    coords: PyReadonlyArray3<'_, f64>,
+    steps: PyReadonlyArray1<'_, i64>,
+    timestep: f64,
+    lx: f64,
+    theta_period: f64,
+) -> PyResult<Py<PyAny>> {
+    let value = particles::surface_velocities(particles::VelocityInputs {
+        coords: coords.as_array(),
+        steps: steps.as_array(),
+        timestep,
+        lx,
+        theta_period,
+    })
+    .map_err(to_py_err)?;
+    Ok(value.into_pyarray(py).into_any().unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (target_divergence, divergence_library, sample_coordinates, target_flux=None, flux_library=None, flux_weight=0.0))]
+/// Assemble finite divergence rows and optional weighted flux rows for regression.
+fn assemble_regression_rows(
+    py: Python<'_>,
+    target_divergence: PyReadonlyArrayDyn<'_, f64>,
+    divergence_library: PyReadonlyArrayDyn<'_, f64>,
+    sample_coordinates: PyReadonlyArray2<'_, i64>,
+    target_flux: Option<PyReadonlyArrayDyn<'_, f64>>,
+    flux_library: Option<PyReadonlyArrayDyn<'_, f64>>,
+    flux_weight: f64,
+) -> PyResult<Py<PyDict>> {
+    let rows = fitting::assemble_regression_rows(
+        target_divergence.as_array(),
+        divergence_library.as_array(),
+        sample_coordinates.as_array(),
+        target_flux.as_ref().map(|value| value.as_array()),
+        flux_library.as_ref().map(|value| value.as_array()),
+        flux_weight,
+    )
+    .map_err(to_py_err)?;
+    let out = PyDict::new(py);
+    out.set_item("X", rows.x.into_pyarray(py))?;
+    out.set_item("y", rows.y.into_pyarray(py))?;
+    out.set_item("divergence_X", rows.divergence_x.into_pyarray(py))?;
+    out.set_item("divergence_y", rows.divergence_y.into_pyarray(py))?;
+    out.set_item("divergence_rows", rows.divergence_rows.into_pyarray(py))?;
+    out.set_item("row_index", rows.row_index.into_pyarray(py))?;
+    if let Some(flux_x) = rows.flux_x {
+        out.set_item("flux_X", flux_x.into_pyarray(py))?;
+    } else {
+        out.set_item("flux_X", py.None())?;
+    }
+    if let Some(flux_y) = rows.flux_y {
+        out.set_item("flux_y", flux_y.into_pyarray(py))?;
+    } else {
+        out.set_item("flux_y", py.None())?;
+    }
+    if let Some(flux_row_index) = rows.flux_row_index {
+        out.set_item("flux_row_index", flux_row_index.into_pyarray(py))?;
+    } else {
+        out.set_item("flux_row_index", py.None())?;
+    }
+    Ok(out.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (coords, directions, velocities, psi6_abs, mask, x_centers, theta_centers, r_centers, lx, theta_period, sigma, gamma, u0))]
+/// Python wrapper for Burn Gaussian mechanical coarse-grained fields and current tensors.
+fn build_mechanical_fields(
+    py: Python<'_>,
+    coords: PyReadonlyArray3<'_, f64>,
+    directions: PyReadonlyArray3<'_, f64>,
+    velocities: PyReadonlyArray3<'_, f64>,
+    psi6_abs: PyReadonlyArray2<'_, f64>,
+    mask: PyReadonlyArray2<'_, bool>,
+    x_centers: PyReadonlyArray1<'_, f64>,
+    theta_centers: PyReadonlyArray1<'_, f64>,
+    r_centers: PyReadonlyArray1<'_, f64>,
+    lx: f64,
+    theta_period: f64,
+    sigma: f64,
+    gamma: f64,
+    u0: f64,
+) -> PyResult<Py<PyDict>> {
+    let coords = coords.as_array().to_owned();
+    let directions = directions.as_array().to_owned();
+    let velocities = velocities.as_array().to_owned();
+    let psi6_abs = psi6_abs.as_array().to_owned();
+    let mask = mask.as_array().to_owned();
+    let x_centers = x_centers.as_array().to_owned();
+    let theta_centers = theta_centers.as_array().to_owned();
+    let r_centers = r_centers.as_array().to_owned();
+    let fields = py
+        .detach(|| {
+            coarse_grain_burn::build_mechanical_fields(
+                coords.view(),
+                directions.view(),
+                velocities.view(),
+                psi6_abs.view(),
+                mask.view(),
+                x_centers.view(),
+                theta_centers.view(),
+                r_centers.view(),
+                lx,
+                theta_period,
+                sigma,
+                gamma,
+                u0,
+            )
+        })
+        .map_err(to_py_err)?;
+    let out = PyDict::new(py);
+    out.set_item("rho", fields.rho.into_pyarray(py))?;
+    out.set_item("P", fields.p.into_pyarray(py))?;
+    out.set_item("Q", fields.q.into_pyarray(py))?;
+    out.set_item("A", fields.a.into_pyarray(py))?;
+    out.set_item("psi6_sq", fields.hexatic_order.into_pyarray(py))?;
+    out.set_item("J_rho", fields.j_rho.into_pyarray(py))?;
+    out.set_item("J_P", fields.j_p.into_pyarray(py))?;
+    out.set_item("J_Q", fields.j_q.into_pyarray(py))?;
+    Ok(out.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (p, j_rho, j_p, gamma, u0))]
+/// Convert filtered currents into mechanical closure targets.
+fn build_mechanical_targets(
+    py: Python<'_>,
+    p: PyReadonlyArrayDyn<'_, f64>,
+    j_rho: PyReadonlyArrayDyn<'_, f64>,
+    j_p: PyReadonlyArrayDyn<'_, f64>,
+    gamma: f64,
+    u0: f64,
+) -> PyResult<Py<PyDict>> {
+    let p = p
+        .as_array()
+        .into_dimensionality::<Ix5>()
+        .map_err(|_| to_py_err(CoreError::Shape("P must have rank 5".to_string())))?;
+    let j_rho = j_rho
+        .as_array()
+        .into_dimensionality::<Ix5>()
+        .map_err(|_| to_py_err(CoreError::Shape("J_rho must have rank 5".to_string())))?;
+    let j_p = j_p
+        .as_array()
+        .into_dimensionality::<Ix6>()
+        .map_err(|_| to_py_err(CoreError::Shape("J_P must have rank 6".to_string())))?;
+    let targets = mechanics::build_targets(p, j_rho, j_p, gamma, u0).map_err(to_py_err)?;
+    let out = PyDict::new(py);
+    out.set_item("Y_rho", targets.y_rho.into_pyarray(py))?;
+    out.set_item("Y_P", targets.y_p.into_pyarray(py))?;
+    Ok(out.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (target, library, sample_indices))]
+/// Sample target/library tensor components into regression rows and metadata.
+fn sample_component_rows(
+    py: Python<'_>,
+    target: PyReadonlyArrayDyn<'_, f64>,
+    library: PyReadonlyArrayDyn<'_, f64>,
+    sample_indices: PyReadonlyArray2<'_, i64>,
+) -> PyResult<Py<PyDict>> {
+    let (rows, row_index) = fitting::sample_component_rows(
+        target.as_array(),
+        library.as_array(),
+        sample_indices.as_array(),
+    )
+    .map_err(to_py_err)?;
+    let out = PyDict::new(py);
+    out.set_item("rows", rows.into_pyarray(py))?;
+    out.set_item("row_index", row_index.into_pyarray(py))?;
+    Ok(out.unbind())
+}
+
+#[pymodule]
+/// Register the Python module functions exposed by the compiled extension.
+fn _rho_fitting_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(version, m)?)?;
+    m.add_function(wrap_pyfunction!(numerical_constants, m)?)?;
+    m.add_function(wrap_pyfunction!(sample_grid_rows, m)?)?;
+    m.add_function(wrap_pyfunction!(finite_grid_mask, m)?)?;
+    m.add_function(wrap_pyfunction!(build_alignment_tensor, m)?)?;
+    m.add_function(wrap_pyfunction!(contract_alignment_gradient, m)?)?;
+    m.add_function(wrap_pyfunction!(estimate_ubar, m)?)?;
+    m.add_function(wrap_pyfunction!(build_p_alignment, m)?)?;
+    m.add_function(wrap_pyfunction!(scale_by_scalar, m)?)?;
+    m.add_function(wrap_pyfunction!(project_flux_directions, m)?)?;
+    m.add_function(wrap_pyfunction!(weighted_linear_combination, m)?)?;
+    m.add_function(wrap_pyfunction!(temporal_power_spectrum, m)?)?;
+    m.add_class::<PyTemporalOperators>()?;
+    m.add_class::<PyRadialTransfer>()?;
+    m.add_class::<PyCylindricalSpectralOperators>()?;
+    m.add_function(wrap_pyfunction!(barycentric_matrix, m)?)?;
+    m.add_function(wrap_pyfunction!(transfer_radial, m)?)?;
+    m.add_function(wrap_pyfunction!(fit_constrained_lasso, m)?)?;
+    m.add_function(wrap_pyfunction!(run_pde_validation, m)?)?;
+    m.add_function(wrap_pyfunction!(particle_active_direction, m)?)?;
+    m.add_function(wrap_pyfunction!(cartesian_to_cylindrical, m)?)?;
+    m.add_function(wrap_pyfunction!(particle_directions, m)?)?;
+    m.add_function(wrap_pyfunction!(particle_surface_velocities, m)?)?;
+    m.add_function(wrap_pyfunction!(assemble_regression_rows, m)?)?;
+    m.add_function(wrap_pyfunction!(build_mechanical_fields, m)?)?;
+    m.add_function(wrap_pyfunction!(build_mechanical_targets, m)?)?;
+    m.add_function(wrap_pyfunction!(sample_component_rows, m)?)?;
+    Ok(())
+}

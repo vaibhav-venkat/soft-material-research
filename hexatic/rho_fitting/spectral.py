@@ -1,4 +1,4 @@
-"""Shared Shenfun cylindrical spectral operators for rho fitting."""
+"""Shared Rust cylindrical spectral operators for rho fitting."""
 
 from __future__ import annotations
 
@@ -6,7 +6,8 @@ from dataclasses import dataclass
 from functools import lru_cache
 
 import numpy as np
-from scipy.fft import dct, idct
+
+from . import _rho_fitting_core, _rho_fitting_core_import_error
 
 
 Array = np.ndarray
@@ -14,11 +15,7 @@ Array = np.ndarray
 
 @dataclass
 class CylindricalSpectralOperators:
-    """Spectral operators on physical ``(x, theta, r)`` component arrays.
-
-    Cached moments are expressed in the orthonormal ``(x, e_theta, e_r)`` frame.
-    Shenfun internally uses the equivalent curvilinear map ``(r, theta, x)``.
-    """
+    """Rust spectral operators on physical ``(x, theta, r)`` arrays."""
 
     lx: float
     theta_period: float
@@ -30,22 +27,20 @@ class CylindricalSpectralOperators:
         assert self.r_min > 0.0 and self.r_max > self.r_min
         nx, ntheta, nr = self.shape
         assert nx > 1 and ntheta > 1 and nr > 1
-        import sympy as sp
-        from shenfun import FunctionSpace, TensorProductSpace, comm
-
-        # Shenfun maps coordinate symbols by x/y/z position, so retain these names.
-        radial, theta, axial = sp.symbols("x y z", real=True, positive=True)
-        radial_space = FunctionSpace(nr, "Chebyshev", domain=(self.r_min, self.r_max))
-        theta_space = FunctionSpace(ntheta, "F", dtype="D", domain=(0.0, self.theta_period))
-        axial_space = FunctionSpace(nx, "F", dtype="d", domain=(0.0, self.lx))
-        self.space = TensorProductSpace(
-            comm,
-            (radial_space, theta_space, axial_space),
-            coordinates=((radial, theta, axial), (axial, radial * sp.cos(theta), radial * sp.sin(theta))),
+        if _rho_fitting_core is None:
+            raise ImportError(
+                f"rho-fitting Rust core is unavailable: {_rho_fitting_core_import_error}"
+            )
+        self._core = _rho_fitting_core.CylindricalSpectralOperators(
+            float(self.lx),
+            float(self.theta_period),
+            float(self.r_min),
+            float(self.r_max),
+            int(nx),
+            int(ntheta),
+            int(nr),
         )
-        mesh = self.space.local_mesh(True)
-        self.r = np.asarray(mesh[0][:, 0, 0], dtype=np.float64)
-        self._r3 = self.r[None, None, :]
+        self.r = np.asarray(self._core.radial_nodes())
 
     @property
     def spectral_shape(self) -> tuple[int, int, int]:
@@ -55,131 +50,107 @@ class CylindricalSpectralOperators:
         return self.r.copy()
 
     def derivative(self, values: Array, axis: int) -> Array:
-        """Return a Shenfun spectral coordinate derivative for one scalar field."""
-        from shenfun import Array as ShenArray
-        from shenfun import Dx, Function, project
-
+        """Return a coordinate derivative using the legacy ``(r,theta,x)`` axis id."""
         assert values.shape == self.shape
-        # Shenfun transform order is (r, theta, x); repository order is (x, theta, r).
-        physical = np.ascontiguousarray(np.transpose(values, (2, 1, 0)), dtype=np.float64)
-        coefficients = Function(self.space)
-        self.space.forward(physical, coefficients)
-        derivative_hat = project(Dx(coefficients, axis, 1), self.space)
-        derivative = ShenArray(self.space)
-        self.space.backward(derivative_hat, derivative)
-        return np.ascontiguousarray(np.transpose(np.asarray(derivative), (2, 1, 0)))
+        assert axis in {0, 1, 2}
+        direction = {0: 2, 1: 1, 2: 0}[axis]
+        return np.asarray(
+            self._core.derivative(
+                np.ascontiguousarray(values, dtype=np.float64), direction
+            )
+        )
 
     def gradient_scalar(self, values: Array) -> Array:
-        out = np.empty(values.shape + (3,), dtype=np.float64)
-        out[..., 0] = self.derivative(values, 2)
-        out[..., 1] = self.derivative(values, 1) / self._r3
-        out[..., 2] = self.derivative(values, 0)
-        return out
+        return np.asarray(
+            self._core.gradient(np.ascontiguousarray(values, dtype=np.float64))
+        )
 
     def gradient_scalar_frames(self, values: Array, *, label: str = "gradient") -> Array:
         """Differentiate a complete ``(T, Nx, Ntheta, Nr)`` batch with one plan."""
         assert values.ndim == 4 and values.shape[1:] == self.shape
         print(f"[rho_fitting.spectral] {label}: frames=0/{values.shape[0]}", flush=True)
-        out = np.empty(values.shape + (3,), dtype=np.float64)
-        for frame in range(values.shape[0]):
-            out[frame] = self.gradient_scalar(values[frame])
-            _progress(label, frame + 1, values.shape[0])
+        out = np.asarray(
+            self._core.gradient(
+                np.ascontiguousarray(values, dtype=np.float64), grid_offset=1
+            )
+        )
+        _progress(label, values.shape[0], values.shape[0])
         return out
 
     def divergence(self, values: Array) -> Array:
         """Return divergence of a physical-frame flux with direction axis ``-1``."""
-        assert values.shape[:3] == self.shape and values.shape[3] == 3
-        trailing = values.shape[4:]
-        out = np.empty(self.shape + trailing, dtype=np.float64)
-        for index in np.ndindex(trailing):
-            field = values[(slice(None), slice(None), slice(None), slice(None)) + index]
-            out[(slice(None), slice(None), slice(None)) + index] = (
-                self.derivative(field[..., 0], 2)
-                + self.derivative(field[..., 1], 1) / self._r3
-                + self.derivative(self._r3 * field[..., 2], 0) / self._r3
-            )
-        return out
+        return np.asarray(
+            self._core.divergence(np.ascontiguousarray(values, dtype=np.float64))
+        )
 
     def divergence_frames(self, values: Array, *, label: str = "divergence") -> Array:
         """Diverge a complete time batch while reusing the spatial transform plan."""
         assert values.ndim >= 5 and values.shape[1:4] == self.shape
         print(f"[rho_fitting.spectral] {label}: frames=0/{values.shape[0]}", flush=True)
-        out = np.empty(values.shape[:4] + values.shape[5:], dtype=np.float64)
-        for frame in range(values.shape[0]):
-            out[frame] = self.divergence(values[frame])
-            _progress(label, frame + 1, values.shape[0])
+        out = np.asarray(
+            self._core.divergence(
+                np.ascontiguousarray(values, dtype=np.float64), grid_offset=1
+            )
+        )
+        _progress(label, values.shape[0], values.shape[0])
         return out
 
     def laplacian_scalar(self, values: Array) -> Array:
-        dr = self.derivative(values, 0)
-        return (
-            self.derivative(self.derivative(values, 2), 2)
-            + self.derivative(dr, 0)
-            + dr / self._r3
-            + self.derivative(self.derivative(values, 1), 1) / (self._r3 * self._r3)
+        return np.asarray(
+            self._core.laplacian(np.ascontiguousarray(values, dtype=np.float64))
         )
 
     def gradient_vector(self, values: Array) -> Array:
-        assert values.shape == self.shape + (3,)
-        out = np.empty(self.shape + (3, 3), dtype=np.float64)
-        for component in range(3):
-            out[..., :, component] = self.gradient_scalar(values[..., component])
-        return out
+        return np.asarray(
+            self._core.gradient(np.ascontiguousarray(values, dtype=np.float64))
+        )
 
     def laplacian_vector(self, values: Array) -> Array:
-        out = np.empty_like(values, dtype=np.float64)
-        for component in range(3):
-            out[..., component] = self.laplacian_scalar(values[..., component])
-        return out
+        return np.asarray(
+            self._core.laplacian(np.ascontiguousarray(values, dtype=np.float64))
+        )
 
     def gradient_rank2(self, values: Array) -> Array:
-        assert values.shape == self.shape + (3, 3)
-        out = np.empty(self.shape + (3, 3, 3), dtype=np.float64)
-        for row in range(3):
-            for col in range(3):
-                out[..., :, row, col] = self.gradient_scalar(values[..., row, col])
-        return out
+        return np.asarray(
+            self._core.gradient(np.ascontiguousarray(values, dtype=np.float64))
+        )
 
     def filter_two_thirds(self, values: Array) -> Array:
         """Apply the agreed 2/3 modal cutoff over every spatial axis."""
-        coefficients = np.fft.fftn(dct(values, axis=2, norm="ortho"), axes=(0, 1))
-        for axis in (0, 1):
-            size = values.shape[axis]
-            modes = np.abs(np.fft.fftfreq(size) * size)
-            sl = [slice(None)] * coefficients.ndim
-            sl[axis] = modes > size / 3.0
-            coefficients[tuple(sl)] = 0.0
-        radial_cutoff = (2 * values.shape[2]) // 3
-        coefficients[:, :, radial_cutoff:, ...] = 0.0
-        filtered = idct(np.fft.ifftn(coefficients, axes=(0, 1)).real, axis=2, norm="ortho")
-        return np.asarray(filtered, dtype=np.float64)
+        return np.asarray(
+            self._core.filter_two_thirds(
+                np.ascontiguousarray(values, dtype=np.float64)
+            )
+        )
 
 
 def barycentric_matrix(source: Array, target: Array) -> Array:
-    """Return the degree-N barycentric interpolation matrix from source to target."""
+    """Return the Rust-built degree-N barycentric interpolation matrix."""
     source = np.asarray(source, dtype=np.float64)
     target = np.asarray(target, dtype=np.float64)
     assert source.ndim == target.ndim == 1 and source.size >= 2
-    weights = np.ones(source.size, dtype=np.float64)
-    for index in range(source.size):
-        weights[index] = 1.0 / np.prod(source[index] - np.delete(source, index))
-    matrix = np.empty((target.size, source.size), dtype=np.float64)
-    for row, point in enumerate(target):
-        exact = np.flatnonzero(np.isclose(point, source, rtol=0.0, atol=1.0e-13))
-        if exact.size:
-            matrix[row] = 0.0
-            matrix[row, exact[0]] = 1.0
-        else:
-            values = weights / (point - source)
-            matrix[row] = values / np.sum(values)
-    return matrix
+    from . import _rho_fitting_core
+
+    assert _rho_fitting_core is not None, "rho-fitting Rust core is unavailable"
+    return np.asarray(
+        _rho_fitting_core.barycentric_matrix(
+            np.ascontiguousarray(source), np.ascontiguousarray(target)
+        )
+    )
 
 
 def transfer_radial(values: Array, matrix: Array, axis: int) -> Array:
-    """Apply a precomputed radial interpolation matrix along one array axis."""
-    moved = np.moveaxis(values, axis, -1)
-    assert moved.shape[-1] == matrix.shape[1]
-    return np.moveaxis(np.einsum("...j,ij->...i", moved, matrix), -1, axis)
+    """Apply a precomputed radial interpolation matrix in Rust."""
+    from . import _rho_fitting_core
+
+    assert _rho_fitting_core is not None, "rho-fitting Rust core is unavailable"
+    return np.asarray(
+        _rho_fitting_core.transfer_radial(
+            np.ascontiguousarray(values, dtype=np.float64),
+            np.ascontiguousarray(matrix, dtype=np.float64),
+            int(axis),
+        )
+    )
 
 
 def _progress(label: str, completed: int, total: int) -> None:
@@ -198,5 +169,5 @@ def cached_cylindrical_operators(
     ntheta: int,
     nr: int,
 ) -> CylindricalSpectralOperators:
-    """Return one reusable Shenfun plan per cylindrical grid geometry."""
+    """Return one reusable native spectral plan per cylindrical grid geometry."""
     return CylindricalSpectralOperators(lx, theta_period, r_min, r_max, (nx, ntheta, nr))

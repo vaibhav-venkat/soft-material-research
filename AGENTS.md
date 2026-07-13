@@ -83,7 +83,7 @@ Important Python modules:
 
 ## Rust Numerical Core
 
-`rust/rho_fitting_core` is a PyO3/maturin extension exposed as `hexatic.rho_fitting._rho_fitting_core`. It is no longer just a small candidate-library helper. Its responsibilities are:
+`packages/rho-fitting-core` is the PyO3/maturin adapter exposed as `hexatic.rho_fitting._rho_fitting_core`. The reusable implementation is split across the Rust workspace crates `rho-fitting-types`, `rho-fitting-numerics`, and `rho-fitting-gpu`. It is no longer just a small candidate-library helper. Their responsibilities are:
 
 - GPU Gaussian deposition of 3D cylindrical mechanical fields through Burn (`coarse_grain_burn/`), with Metal/WGPU and CUDA feature variants;
 - construction and validation of `rho`, `P`, `Q`, `A`, `psi6_sq`, and all current tensors;
@@ -125,8 +125,8 @@ pixi run python -m compileall hexatic/unwrapped_analysis hexatic/rho_fitting
 pixi run ty check hexatic/rho_fitting
 
 # Rust extension checks/builds
-pixi run cargo check --manifest-path rust/rho_fitting_core/Cargo.toml
-pixi run cargo check --manifest-path rust/rho_fitting_core/Cargo.toml --features gpu-metal
+pixi run cargo check --workspace
+pixi run cargo check --workspace --all-features
 pixi run rho-fitting-build
 
 # Cached rho-fitting and PDE workflows (can be expensive)

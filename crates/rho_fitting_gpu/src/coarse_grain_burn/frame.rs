@@ -1,7 +1,7 @@
 use ndarray::{ArrayView2, ArrayView3};
 
 use super::grid::Grid3;
-use crate::mechanics::{relative_mass_error, MechanicalFieldSet, MechanicalFrame};
+use rho_fitting_types::mechanics::{relative_mass_error, MechanicalFieldSet, MechanicalFrame};
 
 pub(super) type FrameFields = MechanicalFrame;
 
@@ -18,7 +18,7 @@ pub(super) fn print_conservation(label: &str, mass: &[f64], expected: usize) {
     let total: f64 = mass.iter().sum();
     let rel_error = relative_mass_error(mass, expected);
     println!(
-        "[rho_fitting] GPU {label} mass conservation: total={:.6} expected={} rel_error={:.3e}",
+        "[rho_fitting] Burn {label} mass conservation: total={:.6} expected={} rel_error={:.3e}",
         total, expected, rel_error
     );
 }

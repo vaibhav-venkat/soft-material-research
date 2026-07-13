@@ -7,7 +7,7 @@ from tempfile import NamedTemporaryFile
 
 import numpy as np
 
-from .regression import StabilityResult
+from .regression import SparseRegressionResult
 
 
 def write_report(path: Path, lines: list[str], overwrite: bool = False) -> None:
@@ -36,7 +36,7 @@ def density_report_lines(
     grid_shape: tuple[int, int],
     sigma: float,
     cheb_cutoff: int,
-    fit: StabilityResult,
+    fit: SparseRegressionResult,
     warnings: tuple[str, ...] = (),
 ) -> list[str]:
     """Build markdown report lines for the scalar density regression workflow."""
@@ -55,7 +55,7 @@ def density_report_lines(
         "## Fit",
         f"- rmse: {fit.rmse:.8g}",
         f"- r2: {fit.r2:.8g}",
-        f"- tau_index: {fit.tau_index if fit.tau_index is not None else 'none'}",
+        f"- selected lambda: {fit.lambda_values[fit.lambda_index] if fit.lambda_index is not None else 'none'}",
         "",
     ]
     if warnings:

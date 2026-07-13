@@ -1,6 +1,6 @@
 use ndarray::{ArrayViewD, IxDyn};
 
-use crate::{CoreError, CoreResult};
+use rho_fitting_types::{CoreError, CoreResult};
 
 /// Require a dynamic ndarray view to match an exact shape.
 pub fn require_shape(array: ArrayViewD<'_, f64>, shape: &[usize]) -> CoreResult<()> {

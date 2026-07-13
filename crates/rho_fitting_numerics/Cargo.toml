@@ -1,0 +1,21 @@
+[package]
+name = "rho-fitting-numerics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Pure Rust numerical algorithms used by rho fitting"
+
+[lints]
+workspace = true
+
+[dependencies]
+clarabel.workspace = true
+faer.workspace = true
+ndarray.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true
+rayon.workspace = true
+rho-fitting-types = { path = "../rho_fitting_types" }
+rustfft.workspace = true
+

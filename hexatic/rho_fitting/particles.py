@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import numpy as np
 
+from . import _rho_fitting_core, _rho_fitting_core_import_error
 from .config import RhoFittingConfig
-from .geometry import minimum_image, surface_lengths, tangential_particle_vectors
+from .geometry import surface_lengths
 from .io import ActiveMatterArrays, load_gsd_orientations, validate_step_alignment
 
 
@@ -32,11 +33,19 @@ def particle_tangent_directions(
         gsd = load_gsd_orientations(config.paths.gsd_path)
         validate_step_alignment(active, gsd)
         orientation = gsd.orientation
-    return tangential_particle_vectors(
-        active.coords,
-        direction_cylindrical=active.direction_cylindrical,
-        active_direction=active.active_direction,
-        orientation=orientation,
+    if _rho_fitting_core is None:
+        raise ImportError(f"rho-fitting Rust core is unavailable: {_rho_fitting_core_import_error}")
+    return np.ascontiguousarray(
+        _rho_fitting_core.particle_directions(
+            np.ascontiguousarray(active.coords, dtype=np.float64),
+            None
+            if active.direction_cylindrical is None
+            else np.ascontiguousarray(active.direction_cylindrical, dtype=np.float64),
+            None
+            if active.active_direction is None
+            else np.ascontiguousarray(active.active_direction, dtype=np.float64),
+            None if orientation is None else np.ascontiguousarray(orientation, dtype=np.float64),
+        )
     )
 
 
@@ -57,20 +66,19 @@ def particle_surface_velocities(
         End frames use one-sided two-frame differences; all angular and axial
         displacements use minimum-image wrapping.
     """
-    coords = np.asarray(active.coords, dtype=np.float64)
+    coords = np.ascontiguousarray(active.coords, dtype=np.float64)
     assert coords.shape[0] >= 2, "at least two frames are required for surface velocities"
     assert config.settings is not None, "rho fitting settings were not initialized"
-    velocities = np.zeros((*coords.shape[:2], 3), dtype=np.float64)
-
     lx, _ = surface_lengths(active.x_edges, active.theta_edges, active.radius)
-    times = (np.asarray(active.steps, dtype=np.float64) - float(active.steps[0])) * config.settings.timestep
-    for frame in range(coords.shape[0]):
-        left = max(0, frame - 1)
-        right = min(coords.shape[0] - 1, frame + 1)
-        dt = times[right] - times[left]
-        assert dt > 0.0, "steps must increase over time"
-        velocities[frame, :, 0] = minimum_image(coords[right, :, 0] - coords[left, :, 0], lx) / dt
-        local_radius = 0.5 * (coords[right, :, 2] + coords[left, :, 2])
-        velocities[frame, :, 1] = local_radius * minimum_image(coords[right, :, 1] - coords[left, :, 1], 2.0 * np.pi) / dt
-        velocities[frame, :, 2] = (coords[right, :, 2] - coords[left, :, 2]) / dt
-    return np.ascontiguousarray(velocities)
+    theta_period = float(active.theta_edges[-1] - active.theta_edges[0])
+    if _rho_fitting_core is None:
+        raise ImportError(f"rho-fitting Rust core is unavailable: {_rho_fitting_core_import_error}")
+    return np.ascontiguousarray(
+        _rho_fitting_core.particle_surface_velocities(
+            coords,
+            np.ascontiguousarray(active.steps, dtype=np.int64),
+            float(config.settings.timestep),
+            float(lx),
+            theta_period,
+        )
+    )

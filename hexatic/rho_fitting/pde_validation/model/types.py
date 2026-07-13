@@ -7,13 +7,16 @@ from typing import Any
 
 from numpy.typing import NDArray
 
+from hexatic.rho_fitting.constants import (
+    P_RELAXATION_COEFFICIENT,
+    Q_RELAXATION_COEFFICIENT,
+    VALIDATION_BOUND_SCALE,
+)
+
 
 Array = NDArray[Any]
 D = 3
 COMPONENTS = 13
-P_RELAXATION_COEFFICIENT = 2.0
-Q_RELAXATION_COEFFICIENT = 0.6642702159746572
-VALIDATION_BOUND_SCALE = 10.0
 FILTERED_EULER_SIGMA_SCALE = 0.1
 BILATERAL_SPATIAL_SIGMA_CELLS = 0.6
 BILATERAL_RANGE_SCALE = 0.75
@@ -40,8 +43,7 @@ class ValidationOptions:
     """Solver, filtering, frame-count, and validation-mode controls for PDE rollouts."""
 
     max_frames: int | None = None
-    solver: str = "imex-rk"
+    solver: str = "rk4"
     dt: float | None = None
-    filter_sigma: float | None = None
     mode: str = "full"
     ubar_source: str = "cached"

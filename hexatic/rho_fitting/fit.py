@@ -11,8 +11,9 @@ import numpy as np
 from numpy.typing import NDArray
 
 from . import _rho_fitting_core, _rho_fitting_core_import_error
-from .basis import ChebyshevTimeResult, chebyshev_filter_and_derivative, temporal_power_spectrum
+from .basis import chebyshev_filter_fields
 from .config import NumericalSettings, RhoFittingConfig, radius_from_case_id
+from .field_types import MechanicalRawFields, MechanicalSpectralFields, MechanicalTargets
 from .geometry import surface_lengths
 from .io import ActiveMatterArrays, load_active_matter_npz
 from .library import mechanical_labels
@@ -20,7 +21,7 @@ from .outputs import mechanical_report_lines, write_mechanical_outputs
 from .particles import particle_surface_velocities, particle_tangent_directions
 from .spectral import CylindricalSpectralOperators, barycentric_matrix, cached_cylindrical_operators, transfer_radial
 from .plots import write_temporal_power_plots
-from .regression import StabilityResult, stability_selection
+from .regression import SparseRegressionResult, fit_sparse_regression
 
 Array: TypeAlias = NDArray[Any]
 
@@ -42,9 +43,9 @@ class MechanicalFitPayload(TypedDict):
     """Mechanical fit matrices, row indices, libraries, and fitted model results."""
 
     sample_indices: Array
-    Y_rho_fit: StabilityResult
-    Y_P_fit: StabilityResult
-    Y_Q_fit: StabilityResult
+    Y_rho_fit: SparseRegressionResult
+    Y_P_fit: SparseRegressionResult
+    Y_Q_fit: SparseRegressionResult
     Y_rho_rows: Array
     Y_P_rows: Array
     Y_Q_rows: Array
@@ -127,13 +128,13 @@ def run(config: RhoFittingConfig) -> RhoFittingResult:
         _log(f"loaded cached mechanical fields from {_mechanical_cache_path(config)}")
     else:
         coarse = coarse_grain_active_fields(active, config)
-        _log(f"mechanical fields coarse-grained rho shape={coarse['rho'].shape}")
+        _log(f"mechanical fields coarse-grained rho shape={coarse.rho.shape}")
         spectral = spectral_active_fields(active, coarse, config)
         if config.make_plots and not config.correlations_only:
             for path in write_temporal_power_plots(
                 config.output_dir,
                 config.case_id,
-                spectral["temporal_power"],
+                spectral.temporal_power,
                 settings.cheb_cutoff,
             ):
                 _log(f"temporal power plot written {path}")
@@ -154,7 +155,7 @@ def run(config: RhoFittingConfig) -> RhoFittingResult:
         )
 
     fit_payload = fit_mechanical(active, spectral, config)
-    output_payload = cast(Mapping[str, np.ndarray | StabilityResult], fit_payload)
+    output_payload = cast(Mapping[str, np.ndarray | SparseRegressionResult], fit_payload)
     output_config = _overwrite_config(config) if config.fit_only else config
     cache_path, report_path = write_mechanical_outputs(active, coarse, spectral, output_payload, output_config)
     active_terms = tuple(
@@ -229,7 +230,7 @@ def radial_grid(active: ActiveMatterArrays, settings: NumericalSettings) -> tupl
 def _load_mechanical_fit_cache(
     active: ActiveMatterArrays,
     config: RhoFittingConfig,
-) -> tuple[dict[str, Array], dict[str, Array]]:
+) -> tuple[MechanicalRawFields, MechanicalSpectralFields]:
     """Load raw and filtered mechanical fields from an existing fit cache.
 
     Parameters:
@@ -237,8 +238,7 @@ def _load_mechanical_fit_cache(
         config: Run configuration whose output directory and case id locate the cache.
 
     Returns:
-        ``(coarse, spectral)`` dictionaries matching the outputs normally produced by
-        coarse-graining and Chebyshev filtering.
+        Typed raw and filtered field bundles matching the normal workflow outputs.
 
     Edge cases:
         The cache must contain both raw and filtered fields; missing keys are reported
@@ -277,48 +277,63 @@ def _load_mechanical_fit_cache(
         )
         missing = [name for name in required if name not in cache.files]
         assert not missing, f"fit-only cache is missing fields: {', '.join(missing)}"
-        coarse = {
-            "rho": np.asarray(cache["raw_rho"]),
-            "P": np.asarray(cache["raw_P"]),
-            "Q": np.asarray(cache["raw_Q"]),
-            "A": np.asarray(cache["raw_A"]),
-            "psi6_sq": np.asarray(cache["raw_psi6_sq"]),
-            "J_rho": np.asarray(cache["raw_J_rho"]),
-            "J_P": np.asarray(cache["raw_J_P"]),
-            "J_Q": np.asarray(cache["raw_J_Q"]),
-            "r_edges": np.asarray(cache["r_edges"]),
-            "r_centers": np.asarray(cache["r_centers"]),
-        }
-        coarse["J_density"] = coarse["J_rho"]
-        spectral = {name: np.asarray(cache[name]) for name in required if not name.startswith("raw_")}
+        coarse = MechanicalRawFields(
+            rho=np.asarray(cache["raw_rho"]),
+            P=np.asarray(cache["raw_P"]),
+            Q=np.asarray(cache["raw_Q"]),
+            A=np.asarray(cache["raw_A"]),
+            psi6_sq=np.asarray(cache["raw_psi6_sq"]),
+            J_rho=np.asarray(cache["raw_J_rho"]),
+            J_P=np.asarray(cache["raw_J_P"]),
+            J_Q=np.asarray(cache["raw_J_Q"]),
+            r_edges=np.asarray(cache["r_edges"]),
+            r_centers=np.asarray(cache["r_centers"]),
+        )
+        spectral = MechanicalSpectralFields(
+            rho=np.asarray(cache["rho"]),
+            P=np.asarray(cache["P"]),
+            Q=np.asarray(cache["Q"]),
+            A=np.asarray(cache["A"]),
+            psi6_sq=np.asarray(cache["psi6_sq"]),
+            J_rho=np.asarray(cache["J_rho"]),
+            J_P=np.asarray(cache["J_P"]),
+            J_Q=np.asarray(cache["J_Q"]),
+            Y_rho=np.asarray(cache["Y_rho"]),
+            Y_P=np.asarray(cache["Y_P"]),
+            Y_Q=np.asarray(cache["Y_Q"]),
+            partial_t_rho=np.asarray(cache["partial_t_rho"]),
+            temporal_power=np.asarray(cache["temporal_power"]),
+            cheb_times=np.asarray(cache["cheb_times"]),
+            cheb_scaled_times=np.asarray(cache["cheb_scaled_times"]),
+        )
     _validate_cached_fields(active, coarse, spectral, config)
     return coarse, spectral
 
 
 def _validate_cached_fields(
     active: ActiveMatterArrays,
-    coarse: dict[str, Array],
-    spectral: dict[str, Array],
+    coarse: MechanicalRawFields,
+    spectral: MechanicalSpectralFields,
     config: RhoFittingConfig,
 ) -> None:
     """Validate cached mechanical field shapes against the active input grid."""
     settings = _settings(config)
     _, r_centers = radial_grid(active, settings)
     grid_shape = (active.coords.shape[0], active.x_centers.size, active.theta_centers.size, r_centers.size)
-    assert np.allclose(coarse["r_centers"], r_centers), "cached radial centers do not match current settings"
-    assert coarse["rho"].shape == grid_shape, "cached raw rho shape does not match active grid"
-    assert spectral["rho"].shape == grid_shape, "cached rho shape does not match active grid"
-    assert spectral["P"].shape == grid_shape + (3,), "cached P must use 3D orientation axes"
-    assert spectral["Q"].shape == grid_shape + (3, 3), "cached Q must use 3D orientation axes"
-    assert spectral["A"].shape == grid_shape + (3, 3), "cached A must use 3D orientation axes"
-    assert spectral["J_rho"].shape == grid_shape + (3,), "cached J_rho must use 3D cylinder-basis flux axes"
-    assert spectral["J_P"].shape == grid_shape + (3, 3), "cached J_P must use 3D flux and 3D moment axes"
-    assert spectral["J_Q"].shape == grid_shape + (3, 3, 3), "cached J_Q must use 3D flux and 3D moment axes"
-    assert spectral["psi6_sq"].shape == grid_shape, "cached psi6_sq shape does not match active grid"
-    assert spectral["Y_rho"].shape == grid_shape + (3,), "cached Y_rho shape is invalid"
-    assert spectral["Y_P"].shape == grid_shape + (3, 3), "cached Y_P shape is invalid"
-    assert spectral["Y_Q"].shape == grid_shape + (3, 3, 3), "cached Y_Q shape is invalid"
-    assert int(np.asarray(spectral["cheb_times"]).shape[0]) == active.steps.size, "cached time axis length is invalid"
+    assert np.allclose(coarse.r_centers, r_centers), "cached radial centers do not match current settings"
+    assert coarse.rho.shape == grid_shape, "cached raw rho shape does not match active grid"
+    assert spectral.rho.shape == grid_shape, "cached rho shape does not match active grid"
+    assert spectral.P.shape == grid_shape + (3,), "cached P must use 3D orientation axes"
+    assert spectral.Q.shape == grid_shape + (3, 3), "cached Q must use 3D orientation axes"
+    assert spectral.A.shape == grid_shape + (3, 3), "cached A must use 3D orientation axes"
+    assert spectral.J_rho.shape == grid_shape + (3,), "cached J_rho must use 3D cylinder-basis flux axes"
+    assert spectral.J_P.shape == grid_shape + (3, 3), "cached J_P must use 3D flux and 3D moment axes"
+    assert spectral.J_Q.shape == grid_shape + (3, 3, 3), "cached J_Q must use 3D flux and 3D moment axes"
+    assert spectral.psi6_sq.shape == grid_shape, "cached psi6_sq shape does not match active grid"
+    assert spectral.Y_rho.shape == grid_shape + (3,), "cached Y_rho shape is invalid"
+    assert spectral.Y_P.shape == grid_shape + (3, 3), "cached Y_P shape is invalid"
+    assert spectral.Y_Q.shape == grid_shape + (3, 3, 3), "cached Y_Q shape is invalid"
+    assert int(np.asarray(spectral.cheb_times).shape[0]) == active.steps.size, "cached time axis length is invalid"
     assert settings.cheb_cutoff > 0, "cheb_cutoff must be positive"
 
 
@@ -340,7 +355,7 @@ def _core() -> Any:
 def coarse_grain_active_fields(
     active: ActiveMatterArrays,
     config: RhoFittingConfig,
-) -> dict[str, Array]:
+) -> MechanicalRawFields:
     """Build raw coarse-grained density, moments, currents, and mechanical fields.
 
     Parameters:
@@ -348,8 +363,7 @@ def coarse_grain_active_fields(
         config: Numerical settings and paths for hexatic order and fallback orientations.
 
     Returns:
-        Dictionary of raw grid fields including ``rho``, ``P``, ``Q``, ``A``, ``psi6_sq``,
-        and current tensors with surface flux axes.
+        A typed raw field bundle with canonical grid and component axes.
 
     Examples:
         ``coarse = coarse_grain_active_fields(active, config)``
@@ -383,17 +397,24 @@ def coarse_grain_active_fields(
         float(settings.gamma),
         float(settings.u0),
     )
-    out = {name: np.asarray(value) for name, value in fields.items()}
-    out["J_density"] = out["J_rho"]
-    out["r_edges"] = r_edges
-    out["r_centers"] = r_centers
-    return out
+    return MechanicalRawFields(
+        rho=np.asarray(fields["rho"]),
+        P=np.asarray(fields["P"]),
+        Q=np.asarray(fields["Q"]),
+        A=np.asarray(fields["A"]),
+        psi6_sq=np.asarray(fields["psi6_sq"]),
+        J_rho=np.asarray(fields["J_rho"]),
+        J_P=np.asarray(fields["J_P"]),
+        J_Q=np.asarray(fields["J_Q"]),
+        r_edges=r_edges,
+        r_centers=r_centers,
+    )
 
 def spectral_active_fields(
     active: ActiveMatterArrays,
-    coarse: dict[str, Array],
+    coarse: MechanicalRawFields,
     config: RhoFittingConfig,
-) -> dict[str, Array]:
+) -> MechanicalSpectralFields:
     """Filter raw coarse fields over time and build spectral targets/libraries.
 
     Parameters:
@@ -402,8 +423,7 @@ def spectral_active_fields(
         config: Numerical settings controlling Chebyshev filtering and physical constants.
 
     Returns:
-        Dictionary of filtered fields, mechanical targets ``Y_*``, density flux candidates,
-        ``partial_t_rho``, and Chebyshev diagnostic arrays.
+        A typed bundle of filtered fields, mechanical targets, and Chebyshev diagnostics.
 
     Edge cases:
         Negative filtered density is only logged as a warning because polynomial filtering
@@ -411,83 +431,71 @@ def spectral_active_fields(
     """
     core = _core()
     settings = _settings(config)
-    rho_time = chebyshev_filter_and_derivative(
-        coarse["rho"],
+    # Process rho first because it needs a derivative, then largest tensors first so
+    # their temporary float64 workspaces are freed before smaller filtered results accumulate.
+    time_results = chebyshev_filter_fields(
+        (
+            coarse.rho,
+            coarse.J_Q,
+            coarse.Q,
+            coarse.A,
+            coarse.J_P,
+            coarse.P,
+            coarse.J_rho,
+            coarse.psi6_sq,
+        ),
         active.steps,
         settings.timestep,
         settings.cheb_cutoff,
     )
-    coefficients = [rho_time.coefficients]
-    p_time = _filter_coarse_field("P", coarse, active, settings, rho_time)
-    q_time = _filter_coarse_field("Q", coarse, active, settings, rho_time)
-    a_time = _filter_coarse_field("A", coarse, active, settings, rho_time)
-    j_rho_time = _filter_coarse_field("J_rho", coarse, active, settings, rho_time)
-    j_p_time = _filter_coarse_field("J_P", coarse, active, settings, rho_time)
-    j_q_time = _filter_coarse_field("J_Q", coarse, active, settings, rho_time)
-    psi6_sq_time = _filter_coarse_field("psi6_sq", coarse, active, settings, rho_time)
-    coefficients.extend(
-        (
-            p_time.coefficients,
-            q_time.coefficients,
-            a_time.coefficients,
-            j_rho_time.coefficients,
-            j_p_time.coefficients,
-            j_q_time.coefficients,
-            psi6_sq_time.coefficients,
-        )
-    )
-    targets = core.build_mechanical_targets(
+    (
+        rho_time,
+        j_q_time,
+        q_time,
+        a_time,
+        j_p_time,
+        p_time,
+        j_rho_time,
+        psi6_sq_time,
+    ) = time_results
+    temporal_power = sum((result.power for result in time_results), start=np.zeros_like(rho_time.power))
+    target_payload = core.build_mechanical_targets(
         np.ascontiguousarray(p_time.filtered, dtype=np.float64),
         np.ascontiguousarray(j_rho_time.filtered, dtype=np.float64),
         np.ascontiguousarray(j_p_time.filtered, dtype=np.float64),
-        np.ascontiguousarray(j_q_time.filtered, dtype=np.float64),
         float(settings.gamma),
         float(settings.u0),
+    )
+    targets = MechanicalTargets(
+        Y_rho=np.asarray(target_payload["Y_rho"]),
+        Y_P=np.asarray(target_payload["Y_P"]),
+        Y_Q=j_q_time.filtered,
     )
     min_rho = float(np.min(rho_time.filtered))
     if min_rho < -1.0e-8:
         _log(f"warning: filtered rho has negative values; min={min_rho:.6g}")
-    return {
-        "rho": rho_time.filtered,
-        "P": p_time.filtered,
-        "Q": q_time.filtered,
-        "A": a_time.filtered,
-        "psi6_sq": psi6_sq_time.filtered,
-        "J_density": j_rho_time.filtered,
-        "J_rho": j_rho_time.filtered,
-        "J_P": j_p_time.filtered,
-        "J_Q": j_q_time.filtered,
-        "Y_rho": np.asarray(targets["Y_rho"]),
-        "Y_P": np.asarray(targets["Y_P"]),
-        "Y_Q": np.asarray(targets["Y_Q"]),
-        "partial_t_rho": rho_time.derivative,
-        "temporal_power": temporal_power_spectrum(*coefficients),
-        "cheb_times": rho_time.times,
-        "cheb_scaled_times": rho_time.scaled_times,
-    }
-
-
-def _filter_coarse_field(
-    name: str,
-    coarse: dict[str, Array],
-    active: ActiveMatterArrays,
-    settings: NumericalSettings,
-    reference: ChebyshevTimeResult,
-) -> ChebyshevTimeResult:
-    """Filter one coarse field and assert it shares the reference time grid."""
-    result = chebyshev_filter_and_derivative(
-        coarse[name],
-        active.steps,
-        settings.timestep,
-        settings.cheb_cutoff,
+    return MechanicalSpectralFields(
+        rho=rho_time.filtered,
+        P=p_time.filtered,
+        Q=q_time.filtered,
+        A=a_time.filtered,
+        psi6_sq=psi6_sq_time.filtered,
+        J_rho=j_rho_time.filtered,
+        J_P=j_p_time.filtered,
+        J_Q=j_q_time.filtered,
+        Y_rho=targets.Y_rho,
+        Y_P=targets.Y_P,
+        Y_Q=targets.Y_Q,
+        partial_t_rho=np.asarray(rho_time.derivative),
+        temporal_power=temporal_power,
+        cheb_times=rho_time.times,
+        cheb_scaled_times=rho_time.scaled_times,
     )
-    _validate_temporal_alignment(reference, result)
-    return result
 
 
 def fit_mechanical(
     active: ActiveMatterArrays,
-    spectral: dict[str, Array],
+    spectral: MechanicalSpectralFields,
     config: RhoFittingConfig,
 ) -> MechanicalFitPayload:
     """Fit divergence-aware closures for density, P, and Q mechanical flux targets.
@@ -540,7 +548,7 @@ def fit_mechanical(
 
 def print_mechanical_correlations(
     active: ActiveMatterArrays,
-    spectral: dict[str, Array],
+    spectral: MechanicalSpectralFields,
     config: RhoFittingConfig,
 ) -> Array:
     """Print raw target-feature correlations for each mechanical library."""
@@ -552,7 +560,10 @@ def print_mechanical_correlations(
         ("Y_Q", Y_Q_NAMES),
     ):
         fields = _target_design_fields(target_name, spectral, geometry)
-        y, X, _row_index = _sample_divergence_design(fields, sample_indices)
+        assembled = _assemble_regression_rows(fields, sample_indices, 0.0)
+        y = assembled["divergence_y"]
+        X = assembled["divergence_X"]
+        assert y is not None and X is not None
         labels = mechanical_labels(names)
         _log(f"{target_name} correlation rows={X.shape[0]} terms={', '.join(names)}")
         _log("raw feature correlations with target")
@@ -561,19 +572,18 @@ def print_mechanical_correlations(
     return sample_indices
 
 
-def _mechanical_sample_indices(spectral: dict[str, Array], config: RhoFittingConfig) -> Array:
+def _mechanical_sample_indices(spectral: MechanicalSpectralFields, config: RhoFittingConfig) -> Array:
     """Sample valid ``(time, x, theta, r)`` grid indices for mechanical regression."""
     settings = _settings(config)
     valid_mask = _mechanical_valid_mask(spectral)
-    flat_valid = np.flatnonzero(valid_mask.reshape(-1))
-    assert flat_valid.size > 0, "no valid rows to sample"
-    rng = np.random.default_rng(settings.seed)
-    if settings.replace:
-        chosen = rng.choice(flat_valid, size=settings.nd, replace=True)
-    else:
-        chosen = rng.choice(flat_valid, size=min(settings.nd, flat_valid.size), replace=False)
-    unraveled = np.unravel_index(chosen, valid_mask.shape)
-    sample_indices = np.stack(unraveled, axis=1).astype(np.int64, copy=False)
+    sample_indices = np.asarray(
+        _core().sample_grid_rows(
+            np.ascontiguousarray(valid_mask, dtype=bool),
+            int(settings.nd),
+            int(settings.seed),
+            bool(settings.replace),
+        )
+    )
     _validate_sample_count(settings.nd, sample_indices.shape[0], settings.replace)
     return sample_indices
 
@@ -592,11 +602,11 @@ def _cylindrical_geometry(
 
 def _fit_divergence_primary_target(
     target_name: str,
-    spectral: dict[str, Array],
+    spectral: MechanicalSpectralFields,
     sample_indices: Array,
     config: RhoFittingConfig,
     geometry: tuple[float, float, Array],
-) -> tuple[StabilityResult, Array, Array]:
+) -> tuple[SparseRegressionResult, Array, Array]:
     """Fit one mechanical target with divergence rows as the primary evaluation target.
 
     Parameters:
@@ -617,24 +627,31 @@ def _fit_divergence_primary_target(
     settings = _settings(config)
     names = _target_names(target_name)
     fields = _target_design_fields(target_name, spectral, geometry)
-    y_div, X_div, row_index = _sample_divergence_design(fields, sample_indices)
-    y_fit = y_div
-    X_fit = X_div
-    y_flux: Array | None = None
-    X_flux: Array | None = None
     flux_weight = float(settings.mechanical_flux_weight)
-    if flux_weight > 0.0:
-        y_flux, X_flux = _sample_flux_design(fields, sample_indices)
-        y_fit = np.concatenate((y_div, flux_weight * y_flux))
-        X_fit = np.vstack((X_div, flux_weight * X_flux))
-    rows = np.column_stack((y_div, X_div))
+    assembled = _assemble_regression_rows(fields, sample_indices, flux_weight)
+    y_div = assembled["divergence_y"]
+    X_div = assembled["divergence_X"]
+    row_index = assembled["row_index"]
+    y_fit = assembled["y"]
+    X_fit = assembled["X"]
+    y_flux = assembled["flux_y"]
+    X_flux = assembled["flux_X"]
+    rows = assembled["divergence_rows"]
+    assert (
+        y_div is not None
+        and X_div is not None
+        and row_index is not None
+        and y_fit is not None
+        and X_fit is not None
+        and rows is not None
+    )
     labels = mechanical_labels(names)
     _log(
         f"{target_name} fit rows={X_fit.shape[0]} divergence_rows={X_div.shape[0]} "
         f"flux_rows={0 if X_flux is None else X_flux.shape[0]} "
         f"flux_weight={flux_weight:.6g} terms={', '.join(names)}"
     )
-    fit = stability_selection(
+    fit = fit_sparse_regression(
         X_fit,
         y_fit,
         names,
@@ -668,13 +685,13 @@ def _target_names(target_name: str) -> tuple[str, ...]:
 
 def _target_design_fields(
     target_name: str,
-    spectral: dict[str, Array],
+    spectral: MechanicalSpectralFields,
     geometry: tuple[float, float, Array],
 ) -> TargetDesignFields:
     """Build each target/candidate flux and divergence exactly once."""
     lx, theta_period, r_centers = geometry
     _log(f"{target_name}: building reusable spectral flux/divergence fields")
-    target_flux = spectral[target_name]
+    target_flux = getattr(spectral, target_name)
     candidate_fluxes = tuple(_candidate_flux_terms(target_name, spectral, lx, theta_period, r_centers))
     target_divergence = _divergence_cylindrical_flux(target_flux, lx, theta_period, r_centers)
     candidate_divergences = tuple(
@@ -684,47 +701,63 @@ def _target_design_fields(
     return TargetDesignFields(target_flux, candidate_fluxes, target_divergence, candidate_divergences)
 
 
-def _sample_divergence_design(fields: TargetDesignFields, sample_indices: Array) -> tuple[Array, Array, Array]:
-    """Sample divergence target rows and candidate divergence columns."""
-    y = _sample_field_components(fields.target_divergence, sample_indices)
-    row_index = _component_row_index(sample_indices, fields.target_divergence.shape[4:])
-    columns = [
-        _sample_field_components(term, sample_indices)
-        for term in fields.candidate_divergences
-    ]
-    X = np.stack(columns, axis=1)
-    finite = np.isfinite(y) & np.all(np.isfinite(X), axis=1)
-    return y[finite], X[finite], row_index[finite]
-
-
-def _sample_flux_design(fields: TargetDesignFields, sample_indices: Array) -> tuple[Array, Array]:
-    """Sample target flux components and candidate flux columns without saving them."""
-    y = _sample_field_components(fields.target_flux, sample_indices)
-    columns = [
-        _sample_field_components(term, sample_indices)
-        for term in fields.candidate_fluxes
-    ]
-    X = np.stack(columns, axis=1)
-    finite = np.isfinite(y) & np.all(np.isfinite(X), axis=1)
-    return y[finite], X[finite]
+def _assemble_regression_rows(
+    fields: TargetDesignFields,
+    sample_indices: Array,
+    flux_weight: float,
+) -> dict[str, Array | None]:
+    """Assemble finite divergence/flux regression rows in the Rust core."""
+    core = _core()
+    divergence_library = np.ascontiguousarray(
+        np.stack(fields.candidate_divergences, axis=0),
+        dtype=np.float64,
+    )
+    target_flux: Array | None = None
+    flux_library: Array | None = None
+    if flux_weight > 0.0:
+        target_flux = np.ascontiguousarray(fields.target_flux, dtype=np.float64)
+        flux_library = np.ascontiguousarray(
+            np.stack(fields.candidate_fluxes, axis=0),
+            dtype=np.float64,
+        )
+    payload = core.assemble_regression_rows(
+        np.ascontiguousarray(fields.target_divergence, dtype=np.float64),
+        divergence_library,
+        np.ascontiguousarray(sample_indices, dtype=np.int64),
+        target_flux,
+        flux_library,
+        flux_weight,
+    )
+    return {name: np.asarray(value) if value is not None else None for name, value in payload.items()}
 
 
 def _candidate_flux_terms(
     target_name: str,
-    spectral: dict[str, Array],
+    spectral: MechanicalSpectralFields,
     lx: float,
     theta_period: float,
     r_centers: Array,
 ) -> list[Array]:
     """Return flux-space candidate fields for one target."""
-    rho = spectral["rho"]
-    p = spectral["P"]
-    q = spectral["Q"]
-    a = spectral["A"]
-    psi6_sq = spectral["psi6_sq"]
+    rho = spectral.rho
+    p = spectral.P
+    q = spectral.Q
+    psi6_sq = spectral.psi6_sq
+    core = _core()
+    a = np.asarray(
+        core.build_alignment_tensor(
+            np.ascontiguousarray(rho, dtype=np.float64),
+            np.ascontiguousarray(q, dtype=np.float64),
+        )
+    )
     if target_name == "Y_rho":
         grad_rho = _gradient_cylindrical_scalar(rho, lx, theta_period, r_centers)
-        a_grad_rho = np.einsum("...ka,...a->...k", a, grad_rho)
+        a_grad_rho = np.asarray(
+            core.contract_alignment_gradient(
+                np.ascontiguousarray(a, dtype=np.float64),
+                np.ascontiguousarray(grad_rho, dtype=np.float64),
+            )
+        )
         return [
             grad_rho,
             a_grad_rho,
@@ -732,30 +765,36 @@ def _candidate_flux_terms(
         ]
     if target_name == "Y_P":
         grad_p = _gradient_cylindrical_vector(p, lx, theta_period, r_centers)
-        return [a, psi6_sq[..., None, None] * a, grad_p]
+        psi6_a = np.asarray(
+            core.scale_by_scalar(
+                np.ascontiguousarray(psi6_sq, dtype=np.float64),
+                np.ascontiguousarray(a, dtype=np.float64),
+            )
+        )
+        return [a, psi6_a, grad_p]
     if target_name == "Y_Q":
         grad_q = _gradient_cylindrical_rank2(q, lx, theta_period, r_centers)
-        ubar = _estimate_ubar(spectral["Y_P"], a)
-        ubar_p_alpha = ubar[..., None, None, None] * _p_dot_alpha_traceless(p)
+        ubar = np.asarray(
+            core.estimate_ubar(
+                np.ascontiguousarray(spectral.Y_P, dtype=np.float64),
+                np.ascontiguousarray(a, dtype=np.float64),
+            )
+        )
+        p_alignment = np.asarray(
+            core.build_p_alignment(np.ascontiguousarray(p, dtype=np.float64))
+        )
+        ubar_p_alpha = np.asarray(
+            core.scale_by_scalar(
+                np.ascontiguousarray(ubar, dtype=np.float64),
+                np.ascontiguousarray(p_alignment, dtype=np.float64),
+            )
+        )
         return [
-            _project_flux_directions(ubar_p_alpha, "tangential"),
-            _project_flux_directions(ubar_p_alpha, "radial"),
-            _project_flux_directions(grad_q, "radial"),
+            np.asarray(core.project_flux_directions(ubar_p_alpha, 0)),
+            np.asarray(core.project_flux_directions(ubar_p_alpha, 1)),
+            np.asarray(core.project_flux_directions(np.ascontiguousarray(grad_q), 1)),
         ]
     raise AssertionError(f"unknown mechanical target: {target_name}")
-
-
-def _project_flux_directions(values: Array, mode: str) -> Array:
-    """Project a cylindrical flux tensor onto tangential or radial flux directions."""
-    out = np.zeros_like(values, dtype=np.float64)
-    if mode == "tangential":
-        out[..., 0, :, :] = values[..., 0, :, :]
-        out[..., 1, :, :] = values[..., 1, :, :]
-    elif mode == "radial":
-        out[..., 2, :, :] = values[..., 2, :, :]
-    else:
-        raise AssertionError(f"unknown flux projection mode: {mode}")
-    return out
 
 
 def _gradient_cylindrical_scalar(values: Array, lx: float, theta_period: float, r_centers: Array) -> Array:
@@ -816,24 +855,6 @@ def _laplacian_cylindrical_rank2(values: Array, lx: float, theta_period: float, 
     return out
 
 
-def _estimate_ubar(y_p: Array, a: Array) -> Array:
-    """Project measured/fitted P flux onto all three rows of A."""
-    denominator = np.sum(a * a, axis=(-2, -1))
-    numerator = np.sum(y_p * a, axis=(-2, -1))
-    return np.divide(numerator, denominator, out=np.zeros_like(numerator), where=denominator > 0.0)
-
-
-def _p_dot_alpha_traceless(p: Array) -> Array:
-    """Build symmetric traceless P-alignment flux tensor over all 3 directions."""
-    out = np.zeros(p.shape[:-1] + (3, 3, 3), dtype=np.float64)
-    identity = np.eye(3, dtype=np.float64)
-    for k in range(3):
-        for a in range(3):
-            for b in range(3):
-                out[..., k, a, b] = p[..., a] * float(k == b) + p[..., b] * float(k == a) - (2.0 / 3.0) * p[..., k] * identity[a, b]
-    return out
-
-
 def _grad_p_symmetric_traceless(p: Array, lx: float, theta_period: float, r_centers: Array) -> Array:
     """Build symmetric traceless gradient-of-P tensor over all 3 directions."""
     grad_p = _gradient_cylindrical_vector(p, lx, theta_period, r_centers)
@@ -856,7 +877,7 @@ def _radial_spacing(r_centers: Array) -> float:
 
 
 def _spectral_operators(values: Array, lx: float, theta_period: float, r_centers: Array) -> CylindricalSpectralOperators:
-    """Create the shared annular Shenfun operator for a time-indexed grid."""
+    """Create the shared native annular spectral operator for a time-indexed grid."""
     dr = _radial_spacing(r_centers)
     return cached_cylindrical_operators(
         lx,
@@ -873,79 +894,9 @@ def _radial_transfer_matrices(
     r_centers: Array,
     operators: CylindricalSpectralOperators,
 ) -> tuple[Array, Array]:
-    """Return cached-grid to Shenfun-grid and reverse radial interpolation matrices."""
+    """Return cached-grid to spectral-grid and reverse radial interpolation matrices."""
     nodes = operators.radial_nodes()
     return barycentric_matrix(r_centers, nodes), barycentric_matrix(nodes, r_centers)
-
-
-def _sample_field_components(field: Array, sample_indices: Array) -> Array:
-    """Sample all non-grid components at sampled `(T,Nx,Ntheta,Nr)` rows."""
-    values = field[sample_indices[:, 0], sample_indices[:, 1], sample_indices[:, 2], sample_indices[:, 3]]
-    return np.asarray(values, dtype=np.float64).reshape(-1)
-
-
-def _component_row_index(sample_indices: Array, component_shape: tuple[int, ...]) -> Array:
-    """Build row metadata matching `_sample_field_components` flattening order."""
-    component_count = int(np.prod(component_shape, dtype=np.int64)) if component_shape else 1
-    rows = np.repeat(sample_indices, component_count, axis=0)
-    if not component_shape:
-        return rows
-    component_indices = np.array(np.unravel_index(np.arange(component_count), component_shape)).T
-    tiled = np.tile(component_indices, (sample_indices.shape[0], 1))
-    return np.hstack((rows, tiled.astype(np.int64, copy=False)))
-
-
-def _sample_component_matrix(
-    target: Array,
-    library: Array,
-    sample_indices: Array,
-) -> tuple[Array, Array, Array, Array]:
-    """Sample all tensor components at grid locations into ``[target, features...]`` rows."""
-    core = _core()
-    row_payload = core.sample_component_rows(
-        np.ascontiguousarray(target, dtype=np.float64),
-        np.ascontiguousarray(library, dtype=np.float64),
-        np.ascontiguousarray(sample_indices, dtype=np.int64),
-    )
-    rows = np.asarray(row_payload["rows"])
-    row_index = np.asarray(row_payload["row_index"])
-    y = rows[:, 0]
-    X = rows[:, 1:]
-    finite = np.isfinite(y) & np.all(np.isfinite(X), axis=1)
-    return rows[finite], row_index[finite], y[finite], X[finite]
-
-
-def _sample_divergence_matrix(
-    target: Array,
-    library: Array,
-    sample_indices: Array,
-    lx: float,
-    ly: float,
-) -> tuple[Array, Array]:
-    """Sample divergence of a flux target and all candidate flux terms."""
-    target_div = _divergence_surface_flux_field(target, lx, ly)
-    div_terms = np.asarray([_divergence_surface_flux_field(term, lx, ly) for term in library], dtype=np.float64)
-    if target_div.ndim == 3:
-        y_div = _sample_scalar(target_div, sample_indices)
-        X_div = np.stack([_sample_scalar(term, sample_indices) for term in div_terms], axis=1)
-    else:
-        _rows, _row_index, y_div, X_div = _sample_component_matrix(target_div, div_terms, sample_indices)
-    finite = np.isfinite(y_div) & np.all(np.isfinite(X_div), axis=1)
-    return y_div[finite], X_div[finite]
-
-
-def _divergence_surface_flux_field(field: Array, lx: float, ly: float) -> Array:
-    """Compute centered periodic divergence from the first two surface flux components."""
-    field = np.asarray(field, dtype=np.float64)
-    assert field.ndim >= 4 and field.shape[3] >= 2, "flux field must have shape (T,Nx,Ny,>=2,...)"
-    nx = field.shape[1]
-    ny = field.shape[2]
-    dx = lx / nx
-    dy = ly / ny
-    return (
-        (np.roll(field[:, :, :, 0, ...], -1, axis=1) - np.roll(field[:, :, :, 0, ...], 1, axis=1)) / (2.0 * dx)
-        + (np.roll(field[:, :, :, 1, ...], -1, axis=2) - np.roll(field[:, :, :, 1, ...], 1, axis=2)) / (2.0 * dy)
-    )
 
 
 def _raw_feature_correlations(X: Array, y: Array) -> Array:
@@ -968,14 +919,21 @@ def _format_correlation(value: float) -> str:
     return f"{value:.6g}"
 
 
-def _mechanical_valid_mask(spectral: dict[str, Array]) -> Array:
+def _mechanical_valid_mask(spectral: MechanicalSpectralFields) -> Array:
     """Return grid points where all mechanical target and candidate inputs are finite."""
-    valid = np.isfinite(spectral["rho"])
-    for name in ("P", "A", "J_rho", "J_P", "J_Q", "Y_rho", "Y_P", "Y_Q"):
-        axes = tuple(range(4, spectral[name].ndim))
-        valid &= np.all(np.isfinite(spectral[name]), axis=axes)
-    valid &= np.isfinite(spectral["psi6_sq"])
-    return valid
+    fields = [
+        spectral.rho,
+        spectral.P,
+        spectral.A,
+        spectral.J_rho,
+        spectral.J_P,
+        spectral.J_Q,
+        spectral.Y_rho,
+        spectral.Y_P,
+        spectral.Y_Q,
+        spectral.psi6_sq,
+    ]
+    return np.asarray(_core().finite_grid_mask(fields), dtype=bool)
 
 
 def _load_hexatic_abs_frames(path: Path, active: ActiveMatterArrays) -> Array:
@@ -1004,22 +962,6 @@ def _load_hexatic_abs_frames(path: Path, active: ActiveMatterArrays) -> Array:
     values[frame_indices, particle_indices] = table[:, 5]
     assert np.all(np.isfinite(values)), "hexatic order table is incomplete"
     return values
-
-
-def _validate_temporal_alignment(
-    rho_time: ChebyshevTimeResult,
-    j_time: ChebyshevTimeResult,
-) -> None:
-    """Assert that a filtered field uses the same time coordinates as rho."""
-    assert rho_time.filtered.shape == rho_time.derivative.shape
-    assert j_time.filtered.shape[:4] == rho_time.filtered.shape
-    assert np.array_equal(rho_time.times, j_time.times)
-    assert np.array_equal(rho_time.scaled_times, j_time.scaled_times)
-
-
-def _sample_scalar(field: Array, sample_indices: Array) -> Array:
-    """Sample scalar field values at ``(time, x, theta, r)`` integer indices."""
-    return field[sample_indices[:, 0], sample_indices[:, 1], sample_indices[:, 2], sample_indices[:, 3]]
 
 
 def _validate_sample_count(requested: int, actual: int, replace: bool) -> None:

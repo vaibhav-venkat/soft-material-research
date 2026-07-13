@@ -1,4 +1,4 @@
-use crate::mechanics::CylindricalGrid;
+use rho_fitting_types::mechanics::CylindricalGrid;
 
 pub(super) struct Grid3 {
     pub(super) nx: usize,
