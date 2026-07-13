@@ -130,7 +130,7 @@ fn mechanical_gaussian_device<B: Backend>(
         coords,
         directions,
         velocities,
-        psi6_abs,
+        hexatic_order: psi6_abs,
         mask,
     } = particles;
     let (frames, particles, _) = coords.dim();
@@ -246,11 +246,15 @@ fn deposit_gaussian_mechanical_frame<B: Backend>(
             .slice([start..start + chunk, 0..1]);
         norm = norm + (weights * volume_tensor).sum_dim(0).reshape([particles]);
     }
-    let norm = norm + EPS;
-    // A second evaluation is required for exact per-particle discrete normalization,
-    // but write every result directly into one device allocation. Retaining all chunk
-    // tensors before concatenation caused peak memory to approach twice the output size.
-    let mut packed = Tensor::<B, 2>::zeros([grid.len(), PACKED_FEATURES], device);
+    // Materialize the normalization before the deposition pass. Without this barrier,
+    // fused backends retain the complete first-pass graph (including every
+    // grid-by-particle weight chunk) until the final frame readback.
+    let normalized = tensor_vector(norm + EPS)?;
+    let norm = tensor2::<B>(normalized, [1, particles], device);
+
+    // Read each packed grid chunk directly into the host-side frame accumulator.
+    // Building one slice-assigned device tensor retains every chunk's computation
+    // graph and creates the largest allocation only at final readback.
     for start in (0..grid.len()).step_by(GAUSSIAN_GRID_CHUNK) {
         let chunk = (grid.len() - start).min(GAUSSIAN_GRID_CHUNK);
         let weights = gaussian_weights::<B>(
@@ -268,11 +272,10 @@ fn deposit_gaussian_mechanical_frame<B: Backend>(
             .volumes
             .clone()
             .slice([start..start + chunk, 0..1]);
-        let mass_weights = weights * volume_tensor / norm.clone().reshape([1, particles]);
+        let mass_weights = weights * volume_tensor / norm.clone();
         let chunk_fields = mass_weights.matmul(particle_features.clone());
-        packed = packed.slice_assign([start..start + chunk, 0..PACKED_FEATURES], chunk_fields);
+        write_packed_chunk(fields, tensor_matrix(chunk_fields)?, start, chunk)?;
     }
-    write_packed_frame(fields, tensor_matrix(packed)?, grid.len())?;
     Ok(())
 }
 
@@ -311,6 +314,14 @@ fn tensor2<B: Backend>(values: Vec<f32>, shape: [usize; 2], device: &B::Device) 
 }
 
 fn tensor_matrix<B: Backend>(tensor: Tensor<B, 2>) -> CoreResult<Vec<f32>> {
+    tensor
+        .try_into_data()
+        .map_err(|error| CoreError::InvalidInput(format!("Burn readback failed: {error}")))?
+        .to_vec::<f32>()
+        .map_err(|error| CoreError::InvalidInput(format!("Burn data conversion failed: {error}")))
+}
+
+fn tensor_vector<B: Backend>(tensor: Tensor<B, 1>) -> CoreResult<Vec<f32>> {
     tensor
         .try_into_data()
         .map_err(|error| CoreError::InvalidInput(format!("Burn readback failed: {error}")))?
@@ -371,20 +382,22 @@ fn packed_particle_features(inputs: &GaussianFrameInputs<'_>) -> Vec<f32> {
     output
 }
 
-fn write_packed_frame(
+fn write_packed_chunk(
     fields: &mut MechanicalFrame,
     values: Vec<f32>,
-    grid_len: usize,
+    start: usize,
+    chunk: usize,
 ) -> CoreResult<()> {
-    if values.len() != grid_len * PACKED_FEATURES {
+    if values.len() != chunk * PACKED_FEATURES {
         return Err(CoreError::Shape(
             "packed mechanical readback has an unexpected shape".to_string(),
         ));
     }
-    for cell in 0..grid_len {
-        let row = &values[cell * PACKED_FEATURES..(cell + 1) * PACKED_FEATURES];
+    for offset in 0..chunk {
+        let cell = start + offset;
+        let row = &values[offset * PACKED_FEATURES..(offset + 1) * PACKED_FEATURES];
         fields.mass[cell] = row[0] as f64;
-        fields.psi6_mass[cell] = row[1] as f64;
+        fields.hexatic_mass[cell] = row[1] as f64;
         for component in 0..3 {
             fields.p_mass[component][cell] = row[2 + component] as f64;
             fields.j_rho_mass[component][cell] = row[14 + component] as f64;

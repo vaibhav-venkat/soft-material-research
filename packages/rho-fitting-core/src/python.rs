@@ -1,4 +1,4 @@
-use ndarray::{Array4, ArrayD, Ix5, Ix6, IxDyn};
+use ndarray::{Ix5, Ix6};
 use numpy::{
     IntoPyArray, PyReadonlyArray1, PyReadonlyArray2, PyReadonlyArray3, PyReadonlyArrayDyn,
 };
@@ -10,7 +10,7 @@ use crate::coarse_grain_burn;
 use crate::constants;
 use crate::fitting;
 use crate::interpolation;
-use crate::mechanics::{self, CurrentQField};
+use crate::mechanics;
 use crate::particles;
 use crate::pde;
 use crate::regression;
@@ -21,58 +21,6 @@ use crate::{CoreError, CoreResult};
 fn to_py_err(error: CoreError) -> PyErr {
     // Convert Rust core errors into Python ValueError exceptions.
     PyValueError::new_err(error.to_string())
-}
-
-fn rank3_field_to_dynamic(field: &CurrentQField) -> ArrayD<f64> {
-    let (frames, nx, ntheta, nr) = field.dim();
-    let mut out = ArrayD::zeros(IxDyn(&[frames, nx, ntheta, nr, 3, 3, 3]));
-    for t in 0..frames {
-        for ix in 0..nx {
-            for itheta in 0..ntheta {
-                for ir in 0..nr {
-                    for flux in 0..3 {
-                        for row in 0..3 {
-                            for col in 0..3 {
-                                out[[t, ix, itheta, ir, flux, row, col]] =
-                                    field[[t, ix, itheta, ir]][flux][row][col];
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    out
-}
-
-fn rank3_field_from_dynamic(
-    field: ndarray::ArrayViewD<'_, f64>,
-    name: &str,
-) -> CoreResult<CurrentQField> {
-    if field.ndim() != 7 || field.shape()[4..] != [3, 3, 3] {
-        return Err(CoreError::Shape(format!(
-            "{name} must have shape (T,Nx,Ntheta,Nr,3,3,3)"
-        )));
-    }
-    let shape = field.shape();
-    let mut out = Array4::from_elem((shape[0], shape[1], shape[2], shape[3]), [[[0.0; 3]; 3]; 3]);
-    for t in 0..shape[0] {
-        for ix in 0..shape[1] {
-            for itheta in 0..shape[2] {
-                for ir in 0..shape[3] {
-                    for flux in 0..3 {
-                        for row in 0..3 {
-                            for col in 0..3 {
-                                out[[t, ix, itheta, ir]][flux][row][col] =
-                                    field[[t, ix, itheta, ir, flux, row, col]];
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    Ok(out)
 }
 
 #[pyfunction]
@@ -796,10 +744,10 @@ fn build_mechanical_fields(
     out.set_item("P", fields.p.into_pyarray(py))?;
     out.set_item("Q", fields.q.into_pyarray(py))?;
     out.set_item("A", fields.a.into_pyarray(py))?;
-    out.set_item("psi6_sq", fields.psi6_sq.into_pyarray(py))?;
+    out.set_item("psi6_sq", fields.hexatic_order.into_pyarray(py))?;
     out.set_item("J_rho", fields.j_rho.into_pyarray(py))?;
     out.set_item("J_P", fields.j_p.into_pyarray(py))?;
-    out.set_item("J_Q", rank3_field_to_dynamic(&fields.j_q).into_pyarray(py))?;
+    out.set_item("J_Q", fields.j_q.into_pyarray(py))?;
     Ok(out.unbind())
 }
 
@@ -827,13 +775,12 @@ fn build_mechanical_targets(
         .as_array()
         .into_dimensionality::<Ix6>()
         .map_err(|_| to_py_err(CoreError::Shape("J_P must have rank 6".to_string())))?;
-    let j_q = rank3_field_from_dynamic(j_q.as_array(), "J_Q").map_err(to_py_err)?;
     let targets =
-        mechanics::build_targets(p, j_rho, j_p, j_q.view(), gamma, u0).map_err(to_py_err)?;
+        mechanics::build_targets(p, j_rho, j_p, j_q.as_array(), gamma, u0).map_err(to_py_err)?;
     let out = PyDict::new(py);
     out.set_item("Y_rho", targets.y_rho.into_pyarray(py))?;
     out.set_item("Y_P", targets.y_p.into_pyarray(py))?;
-    out.set_item("Y_Q", rank3_field_to_dynamic(&targets.y_q).into_pyarray(py))?;
+    out.set_item("Y_Q", targets.y_q.into_pyarray(py))?;
     Ok(out.unbind())
 }
 

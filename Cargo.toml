@@ -36,5 +36,5 @@ unsafe_code = "warn"
 all = "warn"
 
 [profile.release]
-lto = "thin"
 codegen-units = 1
+strip = "none"

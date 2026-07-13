@@ -1,18 +1,17 @@
-use ndarray::{Array4, Array5, Array6};
+use ndarray::{Array4, Array5, Array6, ArrayD};
 
 pub const COMPONENT_COUNT: usize = 3;
 
-/// A rank-three tensor in the canonical `(x, e_theta, e_r)` frame.
-pub type Rank3Tensor = [[[f64; COMPONENT_COUNT]; COMPONENT_COUNT]; COMPONENT_COUNT];
-pub type CurrentQField = Array4<Rank3Tensor>;
+/// Dynamic ndarray with canonical shape `(T, Nx, Ntheta, Nr, 3, 3, 3)`.
+pub type CurrentQField = ArrayD<f64>;
 
-/// All particle arrays passed to mechanical deposition, with names replacing positional tuples.
+/// All particle arrays passed to mechanical deposition
 #[derive(Clone)]
 pub struct ParticleFieldSet<'a> {
     pub coords: ndarray::ArrayView3<'a, f64>,
     pub directions: ndarray::ArrayView3<'a, f64>,
     pub velocities: ndarray::ArrayView3<'a, f64>,
-    pub psi6_abs: ndarray::ArrayView2<'a, f64>,
+    pub hexatic_order: ndarray::ArrayView2<'a, f64>,
     pub mask: ndarray::ArrayView2<'a, bool>,
 }
 
@@ -22,7 +21,7 @@ pub struct MechanicalFieldSet {
     pub p: Array5<f64>,
     pub q: Array6<f64>,
     pub a: Array6<f64>,
-    pub psi6_sq: Array4<f64>,
+    pub hexatic_order: Array4<f64>,
     pub j_rho: Array5<f64>,
     pub j_p: Array6<f64>,
     pub j_q: CurrentQField,
