@@ -41,6 +41,7 @@ fn numerical_constants(py: Python<'_>) -> PyResult<Py<PyDict>> {
         constants::Q_RELAXATION_COEFFICIENT,
     )?;
     out.set_item("default_pde_dt_max", constants::DEFAULT_PDE_DT_MAX)?;
+    out.set_item("validation_bound_scale", constants::VALIDATION_BOUND_SCALE)?;
     out.set_item("regression_tolerance", constants::REGRESSION_TOLERANCE)?;
     Ok(out.unbind())
 }

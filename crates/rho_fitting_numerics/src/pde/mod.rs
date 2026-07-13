@@ -3,7 +3,9 @@ use ndarray::{ArrayD, ArrayView1, ArrayViewD, Axis, IxDyn};
 use crate::fitting;
 use crate::interpolation::RadialTransfer;
 use crate::spectral::CylindricalSpectralOperators;
-use rho_fitting_types::constants::{P_RELAXATION_COEFFICIENT, Q_RELAXATION_COEFFICIENT};
+use rho_fitting_types::constants::{
+    P_RELAXATION_COEFFICIENT, Q_RELAXATION_COEFFICIENT, VALIDATION_BOUND_SCALE,
+};
 use rho_fitting_types::{CoreError, CoreResult};
 
 pub struct ValidationResult {
@@ -76,12 +78,16 @@ pub fn run_validation(
     )?;
     let to_spectral = RadialTransfer::new(r_centers, operators.radial_nodes.view())?;
     let to_cache = RadialTransfer::new(operators.radial_nodes.view(), r_centers)?;
+    let bounds = StateBounds::from_cache(rho_cache.clone(), p_cache.clone(), q_cache.clone())?;
     let frame = |values: ArrayViewD<'_, f64>, index: usize| {
         values.index_axis(Axis(0), index).to_owned().into_dyn()
     };
-    let mut rho = to_spectral.apply(frame(rho_cache.clone(), 0).view(), 2)?;
-    let mut p = to_spectral.apply(frame(p_cache.clone(), 0).view(), 2)?;
-    let mut q = to_spectral.apply(frame(q_cache.clone(), 0).view(), 2)?;
+    let initial = bounds.project(State {
+        rho: to_spectral.apply(frame(rho_cache.clone(), 0).view(), 2)?,
+        p: to_spectral.apply(frame(p_cache.clone(), 0).view(), 2)?,
+        q: to_spectral.apply(frame(q_cache.clone(), 0).view(), 2)?,
+    });
+    let (mut rho, mut p, mut q) = (initial.rho, initial.p, initial.q);
     let psi6 = to_spectral.apply(frame(psi6_cache, 0).view(), 2)?;
     let mut rho_output = ArrayD::zeros(IxDyn(&[frames, nx, ntheta, nr]));
     let mut p_output = ArrayD::zeros(IxDyn(&[frames, nx, ntheta, nr, 3]));
@@ -134,7 +140,7 @@ pub fn run_validation(
                 mode,
                 ubar_source,
             )?;
-            let stage2 = state.add_scaled(&k1, 0.5 * dt)?;
+            let stage2 = bounds.project(state.add_scaled(&k1, 0.5 * dt)?);
             let k2 = rollout_rhs(
                 &stage2,
                 weight + 0.5 / steps as f64,
@@ -152,7 +158,7 @@ pub fn run_validation(
                 mode,
                 ubar_source,
             )?;
-            let stage3 = state.add_scaled(&k2, 0.5 * dt)?;
+            let stage3 = bounds.project(state.add_scaled(&k2, 0.5 * dt)?);
             let k3 = rollout_rhs(
                 &stage3,
                 weight + 0.5 / steps as f64,
@@ -170,7 +176,7 @@ pub fn run_validation(
                 mode,
                 ubar_source,
             )?;
-            let stage4 = state.add_scaled(&k3, dt)?;
+            let stage4 = bounds.project(state.add_scaled(&k3, dt)?);
             let k4 = rollout_rhs(
                 &stage4,
                 weight + 1.0 / steps as f64,
@@ -188,7 +194,7 @@ pub fn run_validation(
                 mode,
                 ubar_source,
             )?;
-            let next = state.rk4(&k1, &k2, &k3, &k4, dt)?;
+            let next = bounds.project(state.rk4(&k1, &k2, &k3, &k4, dt)?);
             let next_weight = weight + 1.0 / steps as f64;
             rho = if mode == 0 || mode == 1 {
                 next.rho
@@ -208,6 +214,8 @@ pub fn run_validation(
             rho = operators.filter_two_thirds(rho.view(), 0)?;
             p = operators.filter_two_thirds(p.view(), 0)?;
             q = operators.filter_two_thirds(q.view(), 0)?;
+            let projected = bounds.project(State { rho, p, q });
+            (rho, p, q) = (projected.rho, projected.p, projected.q);
             if !rho
                 .iter()
                 .chain(p.iter())
@@ -277,6 +285,83 @@ impl State {
             q: combine(&self.q, &k1.q, &k2.q, &k3.q, &k4.q)?,
         })
     }
+}
+
+struct StateBounds {
+    rho_min: f64,
+    rho_max: f64,
+    p_limit: f64,
+    q_limit: f64,
+}
+
+impl StateBounds {
+    fn from_cache(
+        rho: ArrayViewD<'_, f64>,
+        p: ArrayViewD<'_, f64>,
+        q: ArrayViewD<'_, f64>,
+    ) -> CoreResult<Self> {
+        let (rho_data_min, rho_data_max) = finite_range(rho)?;
+        let rho_span = (rho_data_max - rho_data_min)
+            .max(rho_data_max.abs())
+            .max(rho_data_min.abs())
+            .max(1.0);
+        let (_, p_max) = finite_abs_range(p)?;
+        let (_, q_max) = finite_abs_range(q)?;
+        Ok(Self {
+            rho_min: rho_data_min - VALIDATION_BOUND_SCALE * rho_span,
+            rho_max: rho_data_max + VALIDATION_BOUND_SCALE * rho_span,
+            p_limit: (VALIDATION_BOUND_SCALE * p_max).max(1.0),
+            q_limit: (VALIDATION_BOUND_SCALE * q_max).max(1.0),
+        })
+    }
+
+    fn project(&self, mut state: State) -> State {
+        // The fitted closure can leave the data-supported regime very quickly. Keep
+        // every RK stage inside the same validation envelope used by the former
+        // Python solver so an unstable fit yields poor metrics instead of NaNs.
+        project_array(&mut state.rho, self.rho_min, self.rho_max, self.rho_min);
+        project_array(&mut state.p, -self.p_limit, self.p_limit, 0.0);
+        project_array(&mut state.q, -self.q_limit, self.q_limit, 0.0);
+        state
+    }
+}
+
+fn finite_range(values: ArrayViewD<'_, f64>) -> CoreResult<(f64, f64)> {
+    let mut minimum = f64::INFINITY;
+    let mut maximum = f64::NEG_INFINITY;
+    for &value in values.iter().filter(|value| value.is_finite()) {
+        minimum = minimum.min(value);
+        maximum = maximum.max(value);
+    }
+    if minimum.is_finite() && maximum.is_finite() {
+        Ok((minimum, maximum))
+    } else {
+        Err(CoreError::InvalidInput(
+            "PDE validation field contains no finite values".to_string(),
+        ))
+    }
+}
+
+fn finite_abs_range(values: ArrayViewD<'_, f64>) -> CoreResult<(f64, f64)> {
+    let (minimum, maximum) = finite_range(values)?;
+    Ok((
+        minimum.abs().min(maximum.abs()),
+        minimum.abs().max(maximum.abs()),
+    ))
+}
+
+fn project_array(values: &mut ArrayD<f64>, minimum: f64, maximum: f64, nan_value: f64) {
+    values.mapv_inplace(|value| {
+        if value.is_nan() {
+            nan_value
+        } else if value == f64::INFINITY {
+            maximum
+        } else if value == f64::NEG_INFINITY {
+            minimum
+        } else {
+            value.clamp(minimum, maximum)
+        }
+    });
 }
 
 #[allow(clippy::too_many_arguments)]

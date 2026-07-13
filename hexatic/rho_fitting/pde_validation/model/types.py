@@ -7,13 +7,16 @@ from typing import Any
 
 from numpy.typing import NDArray
 
-from hexatic.rho_fitting.constants import P_RELAXATION_COEFFICIENT, Q_RELAXATION_COEFFICIENT
+from hexatic.rho_fitting.constants import (
+    P_RELAXATION_COEFFICIENT,
+    Q_RELAXATION_COEFFICIENT,
+    VALIDATION_BOUND_SCALE,
+)
 
 
 Array = NDArray[Any]
 D = 3
 COMPONENTS = 13
-VALIDATION_BOUND_SCALE = 10.0
 FILTERED_EULER_SIGMA_SCALE = 0.1
 BILATERAL_SPATIAL_SIGMA_CELLS = 0.6
 BILATERAL_RANGE_SCALE = 0.75
