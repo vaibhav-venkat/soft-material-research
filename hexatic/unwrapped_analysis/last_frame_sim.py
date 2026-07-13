@@ -25,6 +25,7 @@ def _ensure_can_write(path: Path, overwrite: bool) -> None:
 
 
 def _inner_particle_tags(case: UnwrappedCase) -> np.ndarray:
+    """Select movable tags once from the source trajectory's final frame."""
     with gsd.hoomd.open(name=str(case.trajectory_gsd), mode="r") as trajectory:
         if len(trajectory) == 0:
             raise ValueError(f"Trajectory contains no frames: {case.trajectory_gsd}")
@@ -58,6 +59,18 @@ def run_case(
     sim = hoomd.Simulation(device=device, seed=case.seed)
     sim.create_state_from_gsd(filename=str(case.trajectory_gsd), frame=-1)
 
+    shell_tags = np.setdiff1d(
+        np.arange(sim.state.N_particles, dtype=np.uint32),
+        inner_tags,
+        assume_unique=True,
+    )
+    snapshot = sim.state.get_snapshot()
+    if snapshot.communicator.rank == 0:
+        snapshot.particles.velocity[shell_tags, 0] = 1.0
+    sim.state.set_snapshot(snapshot)
+
+    # Tags is intentionally static: particles remain integrated even if they later
+    # enter the shell region, while particles initially in the shell stay frozen.
     inner = hoomd.filter.Tags(inner_tags)
     integrator = hoomd.md.Integrator(dt=simulation.timestep)
     integrator.methods.append(hoomd.md.methods.OverdampedViscous(filter=inner))
@@ -116,7 +129,7 @@ def run_case(
     n_particles = sim.state.N_particles
     print(
         f"case={case.case_id} source={case.trajectory_gsd} "
-        f"inner={inner_tags.size} shell={n_particles - inner_tags.size} "
+        f"inner={inner_tags.size} shell={shell_tags.size} "
         f"shell_delta={analysis.shell_delta:.12g} steps={RUN_STEPS} "
         f"write_period={case.trajectory_write_period} output={output_gsd}"
     )
