@@ -10,15 +10,11 @@ import numpy as np
 
 from hexatic.constants import cylinder
 
-from .cases import ANALYSIS_DIR, GSD_DIR, UnwrappedCase, ensure_output_dirs, get_case
+from .cases import GSD_DIR, UnwrappedCase, ensure_output_dirs, get_case
 
 
 def _output_gsd(case: UnwrappedCase) -> Path:
     return GSD_DIR / f"trajectory_{case.case_id}_last_frame.gsd"
-
-
-def _com_plot(case: UnwrappedCase) -> Path:
-    return ANALYSIS_DIR / "output" / f"{case.case_id}_last_frame_inner_com.png"
 
 
 def _ensure_can_write(path: Path, overwrite: bool) -> None:
@@ -122,42 +118,6 @@ def _write_refilled_initial_frame(case: UnwrappedCase, output_gsd: Path) -> tupl
     return n_shell, n_inner
 
 
-def _plot_inner_center_of_mass(case: UnwrappedCase, trajectory_gsd: Path) -> Path:
-    import matplotlib.pyplot as plt
-
-    simulation = cylinder.SIMULATION
-    with gsd.hoomd.open(name=str(trajectory_gsd), mode="r") as trajectory:
-        first_velocity = np.asarray(trajectory[0].particles.velocity)
-        inner_tags = np.flatnonzero(
-            first_velocity[:, 0] != simulation.shell_velocity_x_marker
-        )
-        steps = np.empty(len(trajectory), dtype=np.int64)
-        center_of_mass = np.empty((len(trajectory), 3), dtype=np.float64)
-        for frame_index, frame in enumerate(trajectory):
-            positions = np.asarray(frame.particles.position)[inner_tags]
-            images = np.asarray(frame.particles.image)[inner_tags]
-            box_lengths = np.asarray(frame.configuration.box[:3])
-            center_of_mass[frame_index] = np.mean(
-                positions + images * box_lengths,
-                axis=0,
-            )
-            steps[frame_index] = frame.configuration.step
-
-    elapsed_time = (steps - steps[0]) * simulation.timestep
-    output = _com_plot(case)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    figure, axis = plt.subplots()
-    for component, label in enumerate(("x", "y", "z")):
-        axis.plot(elapsed_time, center_of_mass[:, component], marker=".", label=label)
-    axis.set_xlabel("elapsed simulation time")
-    axis.set_ylabel("inner-particle center of mass")
-    axis.legend()
-    figure.tight_layout()
-    figure.savefig(output)
-    plt.close(figure)
-    return output
-
-
 def run_case(
     case: UnwrappedCase,
     run_steps: int = cylinder.SIMULATION.last_frame_run_steps,
@@ -241,16 +201,11 @@ def run_case(
     )
     sim.operations += rot_diff
 
-    logger = hoomd.logging.Logger(categories=["particle"])
-    logger.add(lj, quantities=["forces", "virials"])
-    logger.add(lj_wall, quantities=["forces", "virials"])
-
     gsd_writer = hoomd.write.GSD(
         filename=str(output_gsd),
         trigger=hoomd.trigger.Periodic(case.trajectory_write_period),
         mode="ab",
         dynamic=["property", "particles/orientation"],
-        logger=logger,
     )
     sim.operations.writers.append(gsd_writer)
 
@@ -261,8 +216,6 @@ def run_case(
         f"device={device_name} output={output_gsd}"
     )
     sim.run(run_steps)
-    plot_path = _plot_inner_center_of_mass(case, output_gsd)
-    print(f"inner_center_of_mass_plot={plot_path}")
 
 
 def _parse_args() -> argparse.Namespace:
