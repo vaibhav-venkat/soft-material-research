@@ -15,7 +15,6 @@ from .cases import ANALYSIS_DIR, GSD_DIR, HEXATIC_OUTPUT_DIR, UnwrappedCase, get
 from .plot_last_frame_com import _read_inherited_chunk
 
 
-DEFAULT_RADIAL_BINS = 50
 DEFAULT_LOG_EVERY = 1
 
 
@@ -89,19 +88,21 @@ def hexatic_order_frame(
 def calculate_radial_hexatic(
     case: UnwrappedCase,
     trajectory_gsd: Path,
-    radial_bins: int,
     frame_stride: int,
     log_every: int,
 ) -> dict[str, np.ndarray]:
-    if radial_bins <= 0:
-        raise ValueError("radial_bins must be positive")
     if frame_stride <= 0:
         raise ValueError("frame_stride must be positive")
     if log_every <= 0:
         raise ValueError("log_every must be positive")
 
     analysis = cylinder.ANALYSIS
-    radial_edges = np.linspace(0.0, case.wall_radius, radial_bins + 1)
+    radial_edges = np.arange(
+        0.0,
+        case.wall_radius + analysis.particle_diameter,
+        analysis.particle_diameter,
+    )
+    radial_bins = radial_edges.size - 1
     radial_centers = 0.5 * (radial_edges[:-1] + radial_edges[1:])
     started = time.monotonic()
 
@@ -227,7 +228,6 @@ def run(
     trajectory_gsd: Path | None = None,
     result_npz: Path | None = None,
     plot_png: Path | None = None,
-    radial_bins: int = DEFAULT_RADIAL_BINS,
     frame_stride: int = 1,
     log_every: int = DEFAULT_LOG_EVERY,
     overwrite: bool = False,
@@ -245,7 +245,6 @@ def run(
     result = calculate_radial_hexatic(
         case,
         trajectory_gsd,
-        radial_bins=radial_bins,
         frame_stride=frame_stride,
         log_every=log_every,
     )
@@ -265,7 +264,6 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--trajectory", type=Path, default=None)
     parser.add_argument("--result", type=Path, default=None)
     parser.add_argument("--output", type=Path, default=None)
-    parser.add_argument("--radial-bins", type=int, default=DEFAULT_RADIAL_BINS)
     parser.add_argument("--frame-stride", type=int, default=1)
     parser.add_argument("--log-every", type=int, default=DEFAULT_LOG_EVERY)
     parser.add_argument("--overwrite", action="store_true")
@@ -279,7 +277,6 @@ def main() -> None:
         trajectory_gsd=args.trajectory,
         result_npz=args.result,
         plot_png=args.output,
-        radial_bins=args.radial_bins,
         frame_stride=args.frame_stride,
         log_every=args.log_every,
         overwrite=args.overwrite,
