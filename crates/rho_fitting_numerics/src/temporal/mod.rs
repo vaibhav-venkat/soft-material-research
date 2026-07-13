@@ -64,6 +64,13 @@ pub struct TemporalFieldResult {
     pub coefficients: ArrayD<f64>,
 }
 
+/// Memory-bounded result used by the production fitting pipeline.
+pub struct CompactTemporalFieldResult {
+    pub filtered: ArrayD<f64>,
+    pub derivative: Option<ArrayD<f64>>,
+    pub power: Array1<f64>,
+}
+
 impl TemporalOperators {
     pub fn new(steps: ArrayView1<'_, i64>, timestep: f64, cutoff: usize) -> CoreResult<Self> {
         if steps.is_empty() {
@@ -232,6 +239,103 @@ impl TemporalOperators {
             filtered,
             derivative,
             coefficients,
+        })
+    }
+
+    /// Filter one field without materializing cleaned samples or full diagnostic coefficients.
+    pub fn apply_compact(
+        &self,
+        values: ArrayViewD<'_, f64>,
+        include_derivative: bool,
+    ) -> CoreResult<CompactTemporalFieldResult> {
+        if values.ndim() == 0 || values.shape()[0] != self.times.len() {
+            return Err(CoreError::Shape(format!(
+                "values must have frame axis of length {}; got {:?}",
+                self.times.len(),
+                values.shape()
+            )));
+        }
+        let shape = values.shape().to_vec();
+        let columns = shape[1..].iter().product::<usize>().max(1);
+        let frames = self.times.len();
+        let cleaned = cleaned_columns(values, &self.times);
+        let mut fit_coefficients = vec![0.0; self.cutoff * columns];
+        fit_coefficients
+            .par_chunks_mut(self.cutoff)
+            .enumerate()
+            .for_each(|(column, output)| {
+                for mode in 0..self.cutoff {
+                    output[mode] = (0..frames)
+                        .map(|frame| {
+                            self.fit_operator[[mode, frame]] * cleaned[column * frames + frame]
+                        })
+                        .sum();
+                }
+            });
+
+        let mut filtered = vec![0.0; frames * columns];
+        filtered
+            .par_chunks_mut(columns)
+            .enumerate()
+            .for_each(|(frame, output)| {
+                for column in 0..columns {
+                    output[column] = (0..self.cutoff)
+                        .map(|mode| {
+                            self.evaluation_operator[[frame, mode]]
+                                * fit_coefficients[column * self.cutoff + mode]
+                        })
+                        .sum();
+                }
+            });
+
+        let derivative = if include_derivative {
+            let mut values = vec![0.0; frames * columns];
+            values
+                .par_chunks_mut(columns)
+                .enumerate()
+                .for_each(|(frame, output)| {
+                    for column in 0..columns {
+                        output[column] = (0..frames)
+                            .map(|source| {
+                                self.derivative_operator[[frame, source]]
+                                    * cleaned[column * frames + source]
+                            })
+                            .sum();
+                    }
+                });
+            Some(
+                ArrayD::from_shape_vec(IxDyn(&shape), values).map_err(|error| {
+                    CoreError::InvalidInput(format!("derivative field assembly failed: {error}"))
+                })?,
+            )
+        } else {
+            None
+        };
+
+        let power = Array1::from_vec(
+            (0..frames)
+                .into_par_iter()
+                .map(|mode| {
+                    (0..columns)
+                        .map(|column| {
+                            let coefficient = (0..frames)
+                                .map(|frame| {
+                                    self.diagnostic_operator[[mode, frame]]
+                                        * cleaned[column * frames + frame]
+                                })
+                                .sum::<f64>();
+                            coefficient * coefficient
+                        })
+                        .sum::<f64>()
+                })
+                .collect(),
+        );
+        Ok(CompactTemporalFieldResult {
+            filtered: ArrayD::from_shape_vec(IxDyn(&shape), filtered).map_err(|error| {
+                CoreError::InvalidInput(format!("filtered field assembly failed: {error}"))
+            })?,
+            derivative,
+            power,
         })
     }
 

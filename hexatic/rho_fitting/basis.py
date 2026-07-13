@@ -21,6 +21,18 @@ class ChebyshevTimeResult:
     cutoff: int
 
 
+@dataclass(frozen=True)
+class CompactChebyshevTimeResult:
+    """Memory-bounded filtered field with optional derivative and reduced mode power."""
+
+    filtered: np.ndarray
+    derivative: np.ndarray | None
+    power: np.ndarray
+    times: np.ndarray
+    scaled_times: np.ndarray
+    cutoff: int
+
+
 def temporal_power_spectrum(*coefficients: np.ndarray) -> np.ndarray:
     """Compute Chebyshev-mode power in Rust over all non-time axes."""
     assert coefficients, "at least one coefficient array is required"
@@ -87,12 +99,11 @@ def chebyshev_filter_fields(
     steps: np.ndarray,
     timestep: float,
     cutoff: int,
-) -> tuple[ChebyshevTimeResult, ...]:
-    """Filter multiple fields with one precomputed temporal operator set."""
+) -> tuple[CompactChebyshevTimeResult, ...]:
+    """Filter fields sequentially without retaining full coefficient or cleaned arrays."""
     assert values, "at least one field is required"
-    arrays = tuple(np.ascontiguousarray(value, dtype=np.float64) for value in values)
-    frame_count = arrays[0].shape[0]
-    assert all(value.ndim >= 1 and value.shape[0] == frame_count for value in arrays)
+    frame_count = values[0].shape[0]
+    assert all(value.ndim >= 1 and value.shape[0] == frame_count for value in values)
     cutoff = validate_cheb_cutoff(cutoff, frame_count)
     if _rho_fitting_core is None:
         raise ImportError(f"rho-fitting Rust core is unavailable: {_rho_fitting_core_import_error}")
@@ -101,16 +112,25 @@ def chebyshev_filter_fields(
         float(timestep),
         int(cutoff),
     )
-    payloads = operators.apply_many(list(arrays))
     scaled_times = np.asarray(operators.scaled_times())
-    results: list[ChebyshevTimeResult] = []
-    for array, payload in zip(arrays, payloads, strict=True):
+    times = np.asarray(operators.times())
+    results: list[CompactChebyshevTimeResult] = []
+    for index, value in enumerate(values):
+        print(
+            f"[rho_fitting.temporal] field={index + 1}/{len(values)} shape={value.shape}",
+            flush=True,
+        )
+        array = np.ascontiguousarray(value, dtype=np.float64)
+        payload = operators.apply_compact(array, index == 0)
+        derivative_payload = payload["derivative"]
         results.append(
-            ChebyshevTimeResult(
+            CompactChebyshevTimeResult(
                 filtered=np.ascontiguousarray(np.asarray(payload["filtered"])),
-                derivative=np.ascontiguousarray(np.asarray(payload["derivative"])),
-                coefficients=np.ascontiguousarray(np.asarray(payload["coefficients"])),
-                times=np.asarray(operators.times()),
+                derivative=None
+                if derivative_payload is None
+                else np.ascontiguousarray(np.asarray(derivative_payload)),
+                power=np.asarray(payload["power"]),
+                times=times,
                 scaled_times=scaled_times,
                 cutoff=cutoff,
             )

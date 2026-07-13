@@ -11,7 +11,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from . import _rho_fitting_core, _rho_fitting_core_import_error
-from .basis import chebyshev_filter_fields, temporal_power_spectrum
+from .basis import chebyshev_filter_fields
 from .config import NumericalSettings, RhoFittingConfig, radius_from_case_id
 from .field_types import MechanicalRawFields, MechanicalSpectralFields, MechanicalTargets
 from .geometry import surface_lengths
@@ -431,15 +431,17 @@ def spectral_active_fields(
     """
     core = _core()
     settings = _settings(config)
+    # Process rho first because it needs a derivative, then largest tensors first so
+    # their temporary float64 workspaces are freed before smaller filtered results accumulate.
     time_results = chebyshev_filter_fields(
         (
             coarse.rho,
-            coarse.P,
+            coarse.J_Q,
             coarse.Q,
             coarse.A,
-            coarse.J_rho,
             coarse.J_P,
-            coarse.J_Q,
+            coarse.P,
+            coarse.J_rho,
             coarse.psi6_sq,
         ),
         active.steps,
@@ -448,38 +450,26 @@ def spectral_active_fields(
     )
     (
         rho_time,
-        p_time,
+        j_q_time,
         q_time,
         a_time,
-        j_rho_time,
         j_p_time,
-        j_q_time,
+        p_time,
+        j_rho_time,
         psi6_sq_time,
     ) = time_results
-    coefficients = [rho_time.coefficients]
-    coefficients.extend(
-        (
-            p_time.coefficients,
-            q_time.coefficients,
-            a_time.coefficients,
-            j_rho_time.coefficients,
-            j_p_time.coefficients,
-            j_q_time.coefficients,
-            psi6_sq_time.coefficients,
-        )
-    )
+    temporal_power = sum((result.power for result in time_results), start=np.zeros_like(rho_time.power))
     target_payload = core.build_mechanical_targets(
         np.ascontiguousarray(p_time.filtered, dtype=np.float64),
         np.ascontiguousarray(j_rho_time.filtered, dtype=np.float64),
         np.ascontiguousarray(j_p_time.filtered, dtype=np.float64),
-        np.ascontiguousarray(j_q_time.filtered, dtype=np.float64),
         float(settings.gamma),
         float(settings.u0),
     )
     targets = MechanicalTargets(
         Y_rho=np.asarray(target_payload["Y_rho"]),
         Y_P=np.asarray(target_payload["Y_P"]),
-        Y_Q=np.asarray(target_payload["Y_Q"]),
+        Y_Q=j_q_time.filtered,
     )
     min_rho = float(np.min(rho_time.filtered))
     if min_rho < -1.0e-8:
@@ -496,8 +486,8 @@ def spectral_active_fields(
         Y_rho=targets.Y_rho,
         Y_P=targets.Y_P,
         Y_Q=targets.Y_Q,
-        partial_t_rho=rho_time.derivative,
-        temporal_power=temporal_power_spectrum(*coefficients),
+        partial_t_rho=np.asarray(rho_time.derivative),
+        temporal_power=temporal_power,
         cheb_times=rho_time.times,
         cheb_scaled_times=rho_time.scaled_times,
     )

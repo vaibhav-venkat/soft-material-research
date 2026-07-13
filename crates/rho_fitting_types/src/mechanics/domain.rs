@@ -1,7 +1,7 @@
 use crate::{CoreError, CoreResult};
 use ndarray::{
     Array1, Array4, Array5, Array6, ArrayD, ArrayView1, ArrayView2, ArrayView3, ArrayView5,
-    ArrayView6, ArrayViewD, IxDyn,
+    ArrayView6, IxDyn,
 };
 
 use crate::fields::ParticleFieldSet;
@@ -248,7 +248,7 @@ impl MechanicalFieldSet {
                 PHYSICAL_COMPONENT_COUNT,
                 PHYSICAL_COMPONENT_COUNT,
             )),
-            hexatic_order: Array4::from_elem((frames, nx, ntheta, nr), f64::NAN),
+            hexatic_order: Array4::from_elem((frames, nx, ntheta, nr), f32::NAN),
             j_rho: Array5::zeros((frames, nx, ntheta, nr, PHYSICAL_COMPONENT_COUNT)),
             j_p: Array6::zeros((
                 frames,
@@ -301,34 +301,34 @@ impl MechanicalFrame {
                     let volume = grid.cell_volumes[flat];
                     let mass = self.mass[flat];
                     let density = mass / volume;
-                    fields.rho[[frame, ix, itheta, ir]] = density;
+                    fields.rho[[frame, ix, itheta, ir]] = density as f32;
                     if mass <= 1.0e-12 {
                         continue;
                     }
                     let psi = self.hexatic_mass[flat] / mass;
                     // TODO: Make the value just psi, not psi^2. Update it across the report and all conventions as well.
-                    fields.hexatic_order[[frame, ix, itheta, ir]] = psi * psi;
+                    fields.hexatic_order[[frame, ix, itheta, ir]] = (psi * psi) as f32;
                     for component in PhysicalComponent::ALL {
                         let index = component.index();
                         fields.p[[frame, ix, itheta, ir, index]] =
-                            self.p_mass[index][flat] / volume;
+                            (self.p_mass[index][flat] / volume) as f32;
                         fields.j_rho[[frame, ix, itheta, ir, index]] =
-                            self.j_rho_mass[index][flat] / volume;
+                            (self.j_rho_mass[index][flat] / volume) as f32;
                     }
                     for (tensor_index, (row, col)) in TENSOR_COMPONENTS.into_iter().enumerate() {
                         let row_index = row.index();
                         let col_index = col.index();
                         let q_value = self.q_mass[tensor_index][flat] / volume;
-                        fields.q[[frame, ix, itheta, ir, row_index, col_index]] = q_value;
+                        fields.q[[frame, ix, itheta, ir, row_index, col_index]] = q_value as f32;
                         // TODO: Add d = 3 to the constants.rs, and use it instead of 3.0
                         fields.a[[frame, ix, itheta, ir, row_index, col_index]] =
-                            q_value + if row == col { density / 3.0 } else { 0.0 };
+                            (q_value + if row == col { density / 3.0 } else { 0.0 }) as f32;
                         for flux in PhysicalComponent::ALL {
                             let flux_index = flux.index();
                             fields.j_p[[frame, ix, itheta, ir, flux_index, row_index]] =
-                                self.j_p_mass[flux_index * 3 + row_index][flat] / volume;
+                                (self.j_p_mass[flux_index * 3 + row_index][flat] / volume) as f32;
                             fields.j_q[[frame, ix, itheta, ir, flux_index, row_index, col_index]] =
-                                self.j_q_mass[flux_index * 9 + tensor_index][flat] / volume;
+                                (self.j_q_mass[flux_index * 9 + tensor_index][flat] / volume) as f32;
                         }
                     }
                 }
@@ -340,14 +340,12 @@ impl MechanicalFrame {
 pub struct MechanicalTargets {
     pub y_rho: Array5<f64>,
     pub y_p: Array6<f64>,
-    pub y_q: CurrentQField,
 }
 
 pub fn build_targets(
     p: ArrayView5<'_, f64>,
     j_rho: ArrayView5<'_, f64>,
     j_p: ArrayView6<'_, f64>,
-    j_q: ArrayViewD<'_, f64>,
     gamma: f64,
     u0: f64,
 ) -> CoreResult<MechanicalTargets> {
@@ -367,11 +365,6 @@ pub fn build_targets(
             "J_P must have shape (T,Nx,Ntheta,Nr,3,3)".to_string(),
         ));
     }
-    if j_q.shape() != [shape[0], shape[1], shape[2], shape[3], 3, 3, 3] {
-        return Err(CoreError::Shape(
-            "J_Q must have shape (T,Nx,Ntheta,Nr,3,3,3)".to_string(),
-        ));
-    }
     if !(gamma.is_finite() && u0.is_finite() && u0 != 0.0) {
         return Err(CoreError::InvalidInput(
             "gamma must be finite and u0 must be nonzero".to_string(),
@@ -381,6 +374,5 @@ pub fn build_targets(
     Ok(MechanicalTargets {
         y_rho,
         y_p: j_p.to_owned() / u0,
-        y_q: j_q.to_owned(),
     })
 }

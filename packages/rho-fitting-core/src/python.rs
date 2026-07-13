@@ -535,6 +535,30 @@ impl PyTemporalOperators {
         Ok(out.unbind())
     }
 
+    /// Memory-bounded production path: one field, optional derivative, reduced power.
+    fn apply_compact(
+        &self,
+        py: Python<'_>,
+        values: PyReadonlyArrayDyn<'_, f64>,
+        include_derivative: bool,
+    ) -> PyResult<Py<PyDict>> {
+        // Intentionally retain the GIL here so the borrowed NumPy allocation can be
+        // read directly. Copying a canonical J_Q input before detaching costs ~2.3 GiB.
+        let result = self
+            .inner
+            .apply_compact(values.as_array(), include_derivative)
+            .map_err(to_py_err)?;
+        let out = PyDict::new(py);
+        out.set_item("filtered", result.filtered.into_pyarray(py))?;
+        if let Some(derivative) = result.derivative {
+            out.set_item("derivative", derivative.into_pyarray(py))?;
+        } else {
+            out.set_item("derivative", py.None())?;
+        }
+        out.set_item("power", result.power.into_pyarray(py))?;
+        Ok(out.unbind())
+    }
+
     /// Return scaled time coordinates used by the Chebyshev fit.
     fn scaled_times(&self, py: Python<'_>) -> Py<PyAny> {
         self.inner
@@ -752,14 +776,13 @@ fn build_mechanical_fields(
 }
 
 #[pyfunction]
-#[pyo3(signature = (p, j_rho, j_p, j_q, gamma, u0))]
+#[pyo3(signature = (p, j_rho, j_p, gamma, u0))]
 /// Convert filtered currents into mechanical closure targets.
 fn build_mechanical_targets(
     py: Python<'_>,
     p: PyReadonlyArrayDyn<'_, f64>,
     j_rho: PyReadonlyArrayDyn<'_, f64>,
     j_p: PyReadonlyArrayDyn<'_, f64>,
-    j_q: PyReadonlyArrayDyn<'_, f64>,
     gamma: f64,
     u0: f64,
 ) -> PyResult<Py<PyDict>> {
@@ -775,12 +798,10 @@ fn build_mechanical_targets(
         .as_array()
         .into_dimensionality::<Ix6>()
         .map_err(|_| to_py_err(CoreError::Shape("J_P must have rank 6".to_string())))?;
-    let targets =
-        mechanics::build_targets(p, j_rho, j_p, j_q.as_array(), gamma, u0).map_err(to_py_err)?;
+    let targets = mechanics::build_targets(p, j_rho, j_p, gamma, u0).map_err(to_py_err)?;
     let out = PyDict::new(py);
     out.set_item("Y_rho", targets.y_rho.into_pyarray(py))?;
     out.set_item("Y_P", targets.y_p.into_pyarray(py))?;
-    out.set_item("Y_Q", targets.y_q.into_pyarray(py))?;
     Ok(out.unbind())
 }
 
