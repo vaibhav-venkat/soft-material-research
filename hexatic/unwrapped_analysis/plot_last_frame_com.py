@@ -12,6 +12,9 @@ from hexatic.constants import cylinder
 from .cases import ANALYSIS_DIR, GSD_DIR, UnwrappedCase, get_case
 
 
+LEGACY_SHELL_VELOCITY_X_MARKER = 1.0
+
+
 def _trajectory_gsd(case: UnwrappedCase) -> Path:
     return GSD_DIR / f"trajectory_{case.case_id}_last_frame.gsd"
 
@@ -43,46 +46,64 @@ def _box_vectors(box: np.ndarray) -> np.ndarray:
     )
 
 
+def _particle_images(
+    trajectory: gsd.fl.GSDFile,
+    frame: int,
+    shape: tuple[int, ...],
+) -> np.ndarray:
+    if trajectory.chunk_exists(frame=frame, name="particles/image"):
+        return np.asarray(trajectory.read_chunk(frame=frame, name="particles/image"))
+    if trajectory.chunk_exists(frame=0, name="particles/image"):
+        return np.asarray(trajectory.read_chunk(frame=0, name="particles/image"))
+    return np.zeros(shape, dtype=np.int32)
+
+
 def inner_center_of_mass(trajectory_gsd: Path) -> tuple[np.ndarray, np.ndarray]:
     simulation = cylinder.SIMULATION
     with gsd.fl.open(name=str(trajectory_gsd), mode="r") as trajectory:
         if trajectory.nframes == 0:
             raise ValueError(f"Trajectory contains no frames: {trajectory_gsd}")
 
-        initial_typeid = _read_inherited_chunk(
-            trajectory,
-            0,
-            "particles/typeid",
-        )
-        inner_tags = np.flatnonzero(
-            initial_typeid == simulation.center_particle_type_id
-        )
+        if trajectory.chunk_exists(frame=0, name="particles/typeid"):
+            initial_typeid = np.asarray(
+                trajectory.read_chunk(frame=0, name="particles/typeid")
+            )
+            inner_tags = np.flatnonzero(
+                initial_typeid == simulation.center_particle_type_id
+            )
+        else:
+            initial_velocity = _read_inherited_chunk(
+                trajectory,
+                0,
+                "particles/velocity",
+            )
+            inner_tags = np.flatnonzero(
+                initial_velocity[:, 0] != LEGACY_SHELL_VELOCITY_X_MARKER
+            )
         if inner_tags.size == 0:
             raise ValueError("The initial frame contains no marked inner particles")
 
         steps = np.empty(trajectory.nframes, dtype=np.int64)
         center_of_mass = np.empty((trajectory.nframes, 3), dtype=np.float64)
         for frame_index in range(trajectory.nframes):
-            position = _read_inherited_chunk(
+            all_positions = _read_inherited_chunk(
                 trajectory,
                 frame_index,
                 "particles/position",
-            )[inner_tags]
+            )
+            position = all_positions[inner_tags]
             box = _read_inherited_chunk(
                 trajectory,
                 frame_index,
                 "configuration/box",
             )
-            if trajectory.chunk_exists(frame=frame_index, name="particles/image"):
-                image = np.asarray(
-                    trajectory.read_chunk(frame=frame_index, name="particles/image")
-                )[inner_tags]
-            else:
-                image = np.zeros_like(position, dtype=np.int32)
-            # HOOMD image flags make the axial coordinate continuous when a
-            # particle crosses the periodic x boundary.
-            unwrapped_position = position + image @ _box_vectors(box)
+            image = _particle_images(
+                trajectory,
+                frame_index,
+                all_positions.shape,
+            )[inner_tags]
             # Cylindrical convention: position = (x, r sin(theta), r cos(theta)).
+            unwrapped_position = position + image @ _box_vectors(box)
             theta = np.arctan2(position[:, 1], position[:, 2])
             center_of_mass[frame_index, 0] = np.mean(unwrapped_position[:, 0])
             center_of_mass[frame_index, 1] = np.mean(
@@ -95,7 +116,6 @@ def inner_center_of_mass(trajectory_gsd: Path) -> tuple[np.ndarray, np.ndarray]:
                 "configuration/step",
             ).reshape(-1)[0]
 
-    center_of_mass[:, 2] = np.unwrap(center_of_mass[:, 2])
     elapsed_time = (steps - steps[0]) * simulation.timestep
     return elapsed_time, center_of_mass
 
