@@ -30,6 +30,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--require-gpu", action="store_true")
     parser.add_argument("--run-steps", type=int, default=None)
     parser.add_argument("--trajectory-write-period", type=int, default=None)
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Override the simulation seed for every selected Big-Lx case.",
+    )
     parser.add_argument("--pocket-radius", type=float, default=LOCAL_POCKET_RADIUS)
     parser.add_argument("--gaussian-cutoff-multiplier", type=float, default=5.0)
     parser.add_argument("--particle-block-size", type=int, default=2048)
@@ -61,6 +67,7 @@ def main() -> None:
         device=args.simulation_device,
         run_steps=args.run_steps,
         trajectory_write_period=args.trajectory_write_period,
+        seed=args.seed,
     )
     analysis_args = SimpleNamespace(
         **common,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import json
 from pathlib import Path
 
@@ -184,7 +185,8 @@ def run_case(
         f"case={case.case_id} C={case.circumference:.12g} R={case.radius:.12g} "
         f"Lx={case.lx:.12g} multiplier={case.lx_multiplier} "
         f"N={case.n_particles} rho_volume={case.volume_density:.12g} "
-        f"steps={steps} write_period={write_period} device={device_name}"
+        f"steps={steps} write_period={write_period} seed={case.seed} "
+        f"device={device_name}"
     )
     sim.run(steps)
 
@@ -200,6 +202,7 @@ def run_case(
             "status": "complete",
             "frame_count": frame_count,
             "final_step": final_step,
+            "seed": case.seed,
             "trajectory_gsd": str(paths.trajectory_gsd),
         },
     )
@@ -214,13 +217,22 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--device", choices=("gpu", "cpu"), default="gpu")
     parser.add_argument("--gpu-id", type=int, default=None)
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Override the case's default simulation seed.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = _parse_args()
+    case = get_case(args.case)
+    if args.seed is not None:
+        case = replace(case, seed=args.seed)
     run_case(
-        get_case(args.case),
+        case,
         output_root=args.output_root,
         run_steps=args.run_steps,
         trajectory_write_period=args.trajectory_write_period,

@@ -30,6 +30,8 @@ def simulation_jobs(args: argparse.Namespace) -> tuple[ScheduledJob, ...]:
             command.extend(
                 ("--trajectory-write-period", str(args.trajectory_write_period))
             )
+        if args.seed is not None:
+            command.extend(("--seed", str(args.seed)))
         if args.overwrite:
             command.append("--overwrite")
         jobs.append(
@@ -62,6 +64,12 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--device", choices=("gpu", "cpu"), default="gpu")
     parser.add_argument("--run-steps", type=int, default=None)
     parser.add_argument("--trajectory-write-period", type=int, default=None)
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Override the simulation seed for every selected Big-Lx case.",
+    )
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
 
