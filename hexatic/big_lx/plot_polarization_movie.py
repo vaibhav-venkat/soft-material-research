@@ -15,7 +15,7 @@ from matplotlib.colors import Normalize
 import numpy as np
 from safetensors.numpy import load_file
 
-from .cases import DEFAULT_OUTPUT_ROOT, BigLxCase, CasePaths, get_case
+from .cases import DEFAULT_OUTPUT_ROOT, CasePaths, get_case
 
 
 def _frame_numbers(
@@ -69,14 +69,11 @@ def _iter_frames(
         del tensors
 
 
-def _binned_vectors(
+def _particle_vectors(
     frame: dict[str, np.ndarray],
-    case: BigLxCase,
     *,
     quantity: str,
-    x_bins: int,
-    theta_bins: int,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     coords = np.asarray(frame["coords"], dtype=np.float32)
     polar = np.asarray(frame["polar_cylindrical"], dtype=np.float32)
     rho = np.asarray(frame["rho"], dtype=np.float32)
@@ -85,39 +82,17 @@ def _binned_vectors(
         & np.all(np.isfinite(polar), axis=1)
         & np.isfinite(rho)
     )
-    x = coords[valid, 0]
-    theta = np.mod(coords[valid, 1], 2.0 * np.pi)
-    polar = polar[valid]
-    rho = rho[valid]
-
-    x_ids = np.floor((x + 0.5 * case.lx) * x_bins / case.lx).astype(np.int64)
-    theta_ids = np.floor(theta * theta_bins / (2.0 * np.pi)).astype(np.int64)
-    x_ids = np.clip(x_ids, 0, x_bins - 1)
-    theta_ids = np.clip(theta_ids, 0, theta_bins - 1)
-    flat_ids = theta_ids * x_bins + x_ids
-    size = theta_bins * x_bins
-    counts = np.bincount(flat_ids, minlength=size).astype(np.int64)
-    polar_sums = np.stack(
-        [
-            np.bincount(flat_ids, weights=polar[:, index], minlength=size)
-            for index in range(3)
-        ],
-        axis=1,
-    )
     if quantity == "polarization":
-        denominator = np.bincount(flat_ids, weights=rho, minlength=size)
+        valid &= rho > np.finfo(np.float32).eps
+        vectors = np.divide(
+            polar[valid],
+            rho[valid, None],
+            out=np.zeros_like(polar[valid]),
+            where=rho[valid, None] > np.finfo(np.float32).eps,
+        )
     else:
-        denominator = counts.astype(np.float64)
-    vectors = np.divide(
-        polar_sums,
-        denominator[:, None],
-        out=np.zeros_like(polar_sums),
-        where=denominator[:, None] > np.finfo(np.float32).eps,
-    )
-    return (
-        vectors.reshape(theta_bins, x_bins, 3).astype(np.float32),
-        counts.reshape(theta_bins, x_bins),
-    )
+        vectors = polar[valid]
+    return coords[valid, 0], np.mod(coords[valid, 1], 2.0 * np.pi), vectors
 
 
 def _component_output_path(
@@ -150,16 +125,13 @@ def write_polarization_movies(
     fps: int = 20,
     dpi: int = 150,
     color_max: float | None = None,
-    x_bins: int | None = None,
-    theta_bins: int = 32,
-    arrow_stride: int = 4,
+    figure_width: float = 20.0,
+    figure_height: float = 10.0,
 ) -> tuple[Path, Path]:
     if stride < 1 or fps < 1 or dpi < 1:
         raise ValueError("stride, fps, and dpi must be positive")
-    if x_bins is not None and x_bins < 1:
-        raise ValueError("x-bins must be positive")
-    if theta_bins < 1 or arrow_stride < 1:
-        raise ValueError("theta-bins and arrow-stride must be positive")
+    if figure_width <= 0.0 or figure_height <= 0.0:
+        raise ValueError("figure-width and figure-height must be positive")
     if color_max is not None and color_max <= 0.0:
         raise ValueError("color-max must be positive")
     if quantity not in ("polarization", "polar-density"):
@@ -175,27 +147,6 @@ def write_polarization_movies(
 
     frames = _frame_numbers(manifest, start, stop, stride)
     selected = set(frames)
-    if x_bins is None:
-        # Approximately square physical bins until the cap keeps large-Lx
-        # movies reasonably sized. The vertical film length is exactly 2*pi*R.
-        x_bins = min(
-            512,
-            max(64, round(case.lx * theta_bins / case.circumference)),
-        )
-    x_centers = np.linspace(
-        -0.5 * case.lx + 0.5 * case.lx / x_bins,
-        0.5 * case.lx - 0.5 * case.lx / x_bins,
-        x_bins,
-    )
-    y_centers = case.radius * np.linspace(
-        np.pi / theta_bins,
-        2.0 * np.pi - np.pi / theta_bins,
-        theta_bins,
-    )
-    arrow_x, arrow_y = np.meshgrid(
-        x_centers[::arrow_stride],
-        y_centers[::arrow_stride],
-    )
 
     # Saved cylindrical order is (x, radial, azimuthal), so Ptheta is index 2.
     movies = (
@@ -211,35 +162,30 @@ def write_polarization_movies(
         writer = PillowWriter(fps=fps)
         limit = color_max or (1.0 if quantity == "polarization" else None)
         norm = Normalize(vmin=0.0, vmax=limit)
-        fig, axis = plt.subplots(figsize=(16, 6))
+        fig, axis = plt.subplots(figsize=(figure_width, figure_height))
         rendered = 0
         try:
             with writer.saving(fig, str(output_path), dpi=dpi):
                 for frame_index, frame in _iter_frames(
                     paths.analysis_dir, manifest, selected
                 ):
-                    vectors, counts = _binned_vectors(
+                    particle_x, particle_theta, vectors = _particle_vectors(
                         frame,
-                        case,
                         quantity=quantity,
-                        x_bins=x_bins,
-                        theta_bins=theta_bins,
                     )
-                    occupied = counts > 0
-                    if not np.any(occupied):
+                    if not particle_x.size:
                         raise ValueError(
                             f"No plottable particles in frame {frame_index}"
                         )
-                    px_values = vectors[:, :, 0]
+                    px_values = vectors[:, 0]
                     if vector_mode == "in_film":
-                        py_values = vectors[:, :, 2]
+                        py_values = vectors[:, 2]
                         colors = np.hypot(px_values, py_values)
                     else:
                         py_values = np.zeros_like(px_values)
                         colors = np.abs(px_values)
-                    colors = np.ma.masked_where(~occupied, colors)
                     if norm.vmax is None:
-                        finite = colors.compressed()
+                        finite = colors[np.isfinite(colors)]
                         limit = (
                             float(np.percentile(finite, 99.5))
                             if finite.size
@@ -250,51 +196,37 @@ def write_polarization_movies(
                         norm.vmax = limit
 
                     axis.clear()
-                    image = axis.imshow(
-                        colors,
-                        origin="lower",
-                        extent=(
-                            -0.5 * case.lx,
-                            0.5 * case.lx,
-                            0.0,
-                            2.0 * np.pi * case.radius,
-                        ),
-                        aspect="auto",
-                        interpolation="nearest",
-                        cmap="viridis",
-                        norm=norm,
-                    )
-                    sampled_x = px_values[::arrow_stride, ::arrow_stride]
-                    sampled_y = py_values[::arrow_stride, ::arrow_stride]
-                    sampled_occupied = occupied[::arrow_stride, ::arrow_stride]
-                    sampled_norm = np.hypot(sampled_x, sampled_y)
-                    arrow_valid = sampled_occupied & (
-                        sampled_norm > np.finfo(np.float32).eps
-                    )
+                    sampled_norm = np.hypot(px_values, py_values)
+                    arrow_valid = sampled_norm > np.finfo(np.float32).eps
                     arrow_u = np.divide(
-                        sampled_x,
+                        px_values,
                         sampled_norm,
-                        out=np.zeros_like(sampled_x),
+                        out=np.zeros_like(px_values),
                         where=arrow_valid,
                     )
                     arrow_v = np.divide(
-                        sampled_y,
+                        py_values,
                         sampled_norm,
-                        out=np.zeros_like(sampled_y),
+                        out=np.zeros_like(py_values),
                         where=arrow_valid,
                     )
-                    axis.quiver(
-                        arrow_x[arrow_valid],
-                        arrow_y[arrow_valid],
+                    quiver = axis.quiver(
+                        particle_x[arrow_valid],
+                        case.radius * particle_theta[arrow_valid],
                         arrow_u[arrow_valid],
                         arrow_v[arrow_valid],
-                        color="white",
-                        alpha=0.85,
+                        colors[arrow_valid],
+                        cmap="viridis",
+                        norm=norm,
+                        alpha=0.95,
                         angles="uv",
                         scale_units="inches",
-                        scale=7.0,
-                        width=0.002,
-                        headwidth=3.5,
+                        scale=6.5,
+                        width=0.0012,
+                        headwidth=4.0,
+                        headlength=5.0,
+                        headaxislength=4.5,
+                        pivot="middle",
                     )
                     axis.set_xlim(-0.5 * case.lx, 0.5 * case.lx)
                     axis.set_ylim(0.0, 2.0 * np.pi * case.radius)
@@ -304,9 +236,8 @@ def write_polarization_movies(
                         f"{case.label}: {component_label} magnitude and direction "
                         f"(frame {frame_index}, step {int(frame['step'])})"
                     )
-                    axis.grid(alpha=0.15)
                     if rendered == 0:
-                        colorbar = fig.colorbar(image, ax=axis, pad=0.01)
+                        colorbar = fig.colorbar(quiver, ax=axis, pad=0.01)
                         suffix = "/rho" if quantity == "polarization" else ""
                         if vector_mode == "in_film":
                             colorbar.set_label(f"sqrt(Px^2 + Ptheta^2) {suffix}")
@@ -334,7 +265,7 @@ def write_polarization_movies(
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Render binned (Px, Ptheta) and Px direction GIFs on the unwrapped "
+            "Render per-particle (Px, Ptheta) and Px direction GIFs on the unwrapped "
             "film coordinate x versus R_case*theta."
         )
     )
@@ -357,9 +288,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--fps", type=int, default=20)
     parser.add_argument("--dpi", type=int, default=150)
     parser.add_argument("--color-max", type=float)
-    parser.add_argument("--x-bins", type=int)
-    parser.add_argument("--theta-bins", type=int, default=32)
-    parser.add_argument("--arrow-stride", type=int, default=4)
+    parser.add_argument("--figure-width", type=float, default=20.0)
+    parser.add_argument("--figure-height", type=float, default=10.0)
     return parser.parse_args()
 
 
@@ -376,9 +306,8 @@ def main() -> None:
         fps=args.fps,
         dpi=args.dpi,
         color_max=args.color_max,
-        x_bins=args.x_bins,
-        theta_bins=args.theta_bins,
-        arrow_stride=args.arrow_stride,
+        figure_width=args.figure_width,
+        figure_height=args.figure_height,
     )
 
 
