@@ -47,7 +47,6 @@ def _iter_frames(
         "coords",
         "rho",
         "polar_cylindrical",
-        "active_shell_mask",
     )
     for shard in manifest["shards"]:
         shard_start = int(shard["frame_start"])
@@ -81,7 +80,6 @@ def _plot_values(
     frame: dict[str, np.ndarray],
     *,
     quantity: str,
-    shell_only: bool,
     max_points: int,
     max_arrows: int,
 ) -> tuple[np.ndarray, ...]:
@@ -89,8 +87,6 @@ def _plot_values(
     polar = np.asarray(frame["polar_cylindrical"], dtype=np.float32)
     rho = np.asarray(frame["rho"], dtype=np.float32)
     valid = np.all(np.isfinite(coords), axis=1) & np.all(np.isfinite(polar), axis=1)
-    if shell_only:
-        valid &= np.asarray(frame["active_shell_mask"], dtype=np.bool_)
 
     if quantity == "polarization":
         valid &= np.isfinite(rho) & (rho > np.finfo(np.float32).eps)
@@ -141,7 +137,6 @@ def write_polarization_movie(
     fps: int = 20,
     dpi: int = 150,
     color_max: float | None = None,
-    shell_only: bool = True,
     max_points: int = 0,
     max_arrows: int = 1500,
 ) -> Path:
@@ -192,7 +187,6 @@ def write_polarization_movie(
                 values = _plot_values(
                     frame,
                     quantity=quantity,
-                    shell_only=shell_only,
                     max_points=max_points,
                     max_arrows=max_arrows,
                 )
@@ -284,11 +278,6 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--dpi", type=int, default=150)
     parser.add_argument("--color-max", type=float)
     parser.add_argument(
-        "--all-particles",
-        action="store_true",
-        help="Include particles outside the saved active-shell mask.",
-    )
-    parser.add_argument(
         "--max-points",
         type=int,
         default=0,
@@ -316,7 +305,6 @@ def main() -> None:
         fps=args.fps,
         dpi=args.dpi,
         color_max=args.color_max,
-        shell_only=not args.all_particles,
         max_points=args.max_points,
         max_arrows=args.max_arrows,
     )
