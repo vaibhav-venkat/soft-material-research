@@ -14,6 +14,9 @@ from matplotlib.animation import PillowWriter
 from matplotlib.colors import Normalize
 import numpy as np
 from safetensors.numpy import load_file
+from scipy.spatial import cKDTree
+
+from hexatic.constants import cylinder
 
 from .cases import DEFAULT_OUTPUT_ROOT, CasePaths, get_case
 
@@ -47,6 +50,7 @@ def _iter_frames(
         "coords",
         "rho",
         "polar_cylindrical",
+        "active_shell_mask",
     )
     for shard in manifest["shards"]:
         shard_start = int(shard["frame_start"])
@@ -72,13 +76,25 @@ def _iter_frames(
 def _particle_vectors(
     frame: dict[str, np.ndarray],
     *,
+    radius: float,
     quantity: str,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     coords = np.asarray(frame["coords"], dtype=np.float32)
     polar = np.asarray(frame["polar_cylindrical"], dtype=np.float32)
     rho = np.asarray(frame["rho"], dtype=np.float32)
+    stored_film = np.asarray(frame["active_shell_mask"], dtype=np.bool_)
+    if stored_film.shape != rho.shape:
+        raise ValueError("active_shell_mask must have the same shape as rho")
+    particle_diameter = float(cylinder.ANALYSIS.particle_diameter)
+    radial_tolerance = 1.0e-5 * particle_diameter
+    upper_boundary = (
+        (coords[:, 2] > radius - particle_diameter)
+        & np.isclose(coords[:, 2], radius, rtol=0.0, atol=radial_tolerance)
+    )
+    film = stored_film | upper_boundary
     valid = (
-        np.all(np.isfinite(coords), axis=1)
+        film
+        & np.all(np.isfinite(coords), axis=1)
         & np.all(np.isfinite(polar), axis=1)
         & np.isfinite(rho)
     )
@@ -93,6 +109,159 @@ def _particle_vectors(
     else:
         vectors = polar[valid]
     return coords[valid, 0], np.mod(coords[valid, 1], 2.0 * np.pi), vectors
+
+
+def _periodic_grid(
+    lx: float,
+    circumference: float,
+    target_spacing: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float, float]:
+    nx = max(1, int(np.ceil(lx / target_spacing)))
+    ntheta = max(1, int(np.ceil(circumference / target_spacing)))
+    dx = lx / nx
+    ds = circumference / ntheta
+    x_edges = np.linspace(-0.5 * lx, 0.5 * lx, nx + 1)
+    s_edges = np.linspace(0.0, circumference, ntheta + 1)
+    x = 0.5 * (x_edges[:-1] + x_edges[1:])
+    s = 0.5 * (s_edges[:-1] + s_edges[1:])
+    return x, s, x_edges, s_edges, dx, ds
+
+
+def _circle_offsets(radius: float, dx: float, ds: float) -> tuple[tuple[int, int], ...]:
+    sample_count = max(16, int(np.ceil(2.0 * np.pi * radius / min(dx, ds))))
+    offsets: list[tuple[int, int]] = []
+    seen: set[tuple[int, int]] = set()
+    for angle in np.linspace(0.0, 2.0 * np.pi, sample_count, endpoint=False):
+        offset = (
+            int(np.rint(radius * np.sin(angle) / ds)),
+            int(np.rint(radius * np.cos(angle) / dx)),
+        )
+        if offset not in seen:
+            offsets.append(offset)
+            seen.add(offset)
+    if len(offsets) < 8:
+        raise ValueError(
+            f"Winding circle at radius {radius:g} has only {len(offsets)} grid samples"
+        )
+    return tuple(offsets)
+
+
+def _interpolate_periodic_polarization(
+    particle_x: np.ndarray,
+    particle_s: np.ndarray,
+    particle_vectors: np.ndarray,
+    *,
+    grid_x: np.ndarray,
+    grid_s: np.ndarray,
+    lx: float,
+    circumference: float,
+    support_radius: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    shape = (len(grid_s), len(grid_x))
+    if len(particle_x) < 3:
+        return np.zeros((*shape, 2), dtype=np.float64), np.zeros(shape, dtype=np.bool_)
+
+    particle_points = np.column_stack(
+        (
+            np.mod(particle_x + 0.5 * lx, lx),
+            np.mod(particle_s, circumference),
+        )
+    )
+    grid_x_values, grid_s_values = np.meshgrid(
+        np.mod(grid_x + 0.5 * lx, lx),
+        grid_s,
+    )
+    grid_points = np.column_stack((grid_x_values.ravel(), grid_s_values.ravel()))
+    tree = cKDTree(particle_points, boxsize=(lx, circumference))
+    distances, indices = tree.query(grid_points, k=3, workers=-1)
+    supported = distances[:, 2] <= support_radius
+
+    distance_floor = np.finfo(np.float64).eps * max(lx, circumference)
+    weights = np.reciprocal(np.maximum(distances, distance_floor) ** 2)
+    interpolated = np.sum(
+        weights[:, :, None] * particle_vectors[indices],
+        axis=1,
+    ) / np.sum(weights, axis=1)[:, None]
+    finite = np.all(np.isfinite(interpolated), axis=1)
+    nonzero = np.linalg.norm(interpolated, axis=1) > np.finfo(np.float32).eps
+    valid = supported & finite & nonzero
+    return interpolated.reshape((*shape, 2)), valid.reshape(shape)
+
+
+def _winding_for_offsets(
+    angles: np.ndarray,
+    valid: np.ndarray,
+    offsets: tuple[tuple[int, int], ...],
+) -> tuple[np.ndarray, np.ndarray]:
+    sampled_angles = [
+        np.roll(angles, shift=(-ds_index, -x_index), axis=(0, 1))
+        for ds_index, x_index in offsets
+    ]
+    loop_valid = np.ones(valid.shape, dtype=np.bool_)
+    for ds_index, x_index in offsets:
+        loop_valid &= np.roll(
+            valid,
+            shift=(-ds_index, -x_index),
+            axis=(0, 1),
+        )
+
+    total_turn = np.zeros(angles.shape, dtype=np.float64)
+    for current, following in zip(
+        sampled_angles,
+        sampled_angles[1:] + sampled_angles[:1],
+    ):
+        difference = following - current
+        total_turn += np.arctan2(np.sin(difference), np.cos(difference))
+    charges = np.rint(total_turn / (2.0 * np.pi)).astype(np.int16)
+    return charges, loop_valid
+
+
+def _stable_winding(
+    particle_x: np.ndarray,
+    particle_theta: np.ndarray,
+    particle_vectors: np.ndarray,
+    *,
+    grid_x: np.ndarray,
+    grid_s: np.ndarray,
+    circle_offsets: tuple[tuple[tuple[int, int], ...], ...],
+    lx: float,
+    circumference: float,
+    radius: float,
+    support_radius: float,
+) -> np.ndarray:
+    polarization = particle_vectors[:, (0, 2)]
+    field, field_valid = _interpolate_periodic_polarization(
+        particle_x,
+        radius * particle_theta,
+        polarization,
+        grid_x=grid_x,
+        grid_s=grid_s,
+        lx=lx,
+        circumference=circumference,
+        support_radius=support_radius,
+    )
+    angles = np.arctan2(field[:, :, 1], field[:, :, 0])
+    radius_results = [
+        _winding_for_offsets(angles, field_valid, offsets)
+        for offsets in circle_offsets
+    ]
+
+    stable = np.zeros(field_valid.shape, dtype=np.int16)
+    best_count = np.zeros(field_valid.shape, dtype=np.int16)
+    ambiguous = np.zeros(field_valid.shape, dtype=np.bool_)
+    charges = np.stack([result[0] for result in radius_results])
+    valid = np.stack([result[1] for result in radius_results])
+    candidates = np.unique(charges[valid & (charges != 0)])
+    for candidate in candidates:
+        count = np.count_nonzero(valid & (charges == candidate), axis=0)
+        better = count > best_count
+        tied = (count == best_count) & (count >= 2) & (stable != candidate)
+        stable[better] = candidate
+        best_count[better] = count[better]
+        ambiguous[better] = False
+        ambiguous[tied] = True
+    stable[(best_count < 2) | ambiguous] = 0
+    return stable
 
 
 def _component_output_path(
@@ -127,6 +296,11 @@ def write_polarization_movies(
     color_max: float | None = None,
     figure_width: float = 20.0,
     figure_height: float = 10.0,
+    show_winding: bool = True,
+    winding_grid_spacing_d: float = 0.5,
+    winding_radii_d: tuple[float, ...] = (1.5, 2.0, 2.5),
+    winding_support_radius_d: float = 1.5,
+    winding_color_max: float = 1.0,
 ) -> tuple[Path, Path]:
     if stride < 1 or fps < 1 or dpi < 1:
         raise ValueError("stride, fps, and dpi must be positive")
@@ -134,6 +308,21 @@ def write_polarization_movies(
         raise ValueError("figure-width and figure-height must be positive")
     if color_max is not None and color_max <= 0.0:
         raise ValueError("color-max must be positive")
+    if winding_grid_spacing_d <= 0.0:
+        raise ValueError("winding-grid-spacing-d must be positive")
+    if len(winding_radii_d) < 2:
+        raise ValueError("winding-radii-d must contain at least two radii")
+    if any(radius <= 0.0 for radius in winding_radii_d):
+        raise ValueError("winding-radii-d values must be positive")
+    if any(
+        following <= current
+        for current, following in zip(winding_radii_d, winding_radii_d[1:])
+    ):
+        raise ValueError("winding-radii-d values must be strictly increasing")
+    if winding_support_radius_d <= 0.0:
+        raise ValueError("winding-support-radius-d must be positive")
+    if winding_color_max <= 0.0:
+        raise ValueError("winding-color-max must be positive")
     if quantity not in ("polarization", "polar-density"):
         raise ValueError("quantity must be 'polarization' or 'polar-density'")
     case = get_case(case_id)
@@ -147,6 +336,28 @@ def write_polarization_movies(
 
     frames = _frame_numbers(manifest, start, stop, stride)
     selected = set(frames)
+    particle_diameter = float(cylinder.ANALYSIS.particle_diameter)
+    (
+        winding_grid_x,
+        winding_grid_s,
+        winding_x_edges,
+        winding_s_edges,
+        winding_dx,
+        winding_ds,
+    ) = _periodic_grid(
+        case.lx,
+        case.circumference,
+        winding_grid_spacing_d * particle_diameter,
+    )
+    winding_circle_offsets = tuple(
+        _circle_offsets(radius_d * particle_diameter, winding_dx, winding_ds)
+        for radius_d in winding_radii_d
+    )
+    winding_norm = Normalize(
+        vmin=-winding_color_max,
+        vmax=winding_color_max,
+        clip=True,
+    )
 
     # Saved cylindrical order is (x, radial, azimuthal), so Ptheta is index 2.
     movies = (
@@ -171,6 +382,7 @@ def write_polarization_movies(
                 ):
                     particle_x, particle_theta, vectors = _particle_vectors(
                         frame,
+                        radius=case.radius,
                         quantity=quantity,
                     )
                     if not particle_x.size:
@@ -196,6 +408,46 @@ def write_polarization_movies(
                         norm.vmax = limit
 
                     axis.clear()
+                    winding_mesh = None
+                    if show_winding and vector_mode == "in_film":
+                        if quantity == "polarization":
+                            winding_x = particle_x
+                            winding_theta = particle_theta
+                            winding_vectors = vectors
+                        else:
+                            (
+                                winding_x,
+                                winding_theta,
+                                winding_vectors,
+                            ) = _particle_vectors(
+                                frame,
+                                radius=case.radius,
+                                quantity="polarization",
+                            )
+                        winding = _stable_winding(
+                            winding_x,
+                            winding_theta,
+                            winding_vectors,
+                            grid_x=winding_grid_x,
+                            grid_s=winding_grid_s,
+                            circle_offsets=winding_circle_offsets,
+                            lx=case.lx,
+                            circumference=case.circumference,
+                            radius=case.radius,
+                            support_radius=(
+                                winding_support_radius_d * particle_diameter
+                            ),
+                        )
+                        winding_mesh = axis.pcolormesh(
+                            winding_x_edges,
+                            winding_s_edges,
+                            np.ma.masked_equal(winding, 0),
+                            cmap="RdBu_r",
+                            norm=winding_norm,
+                            shading="flat",
+                            alpha=0.35,
+                            zorder=0,
+                        )
                     sampled_norm = np.hypot(px_values, py_values)
                     arrow_valid = sampled_norm > np.finfo(np.float32).eps
                     arrow_u = np.divide(
@@ -227,6 +479,7 @@ def write_polarization_movies(
                         headlength=5.0,
                         headaxislength=4.5,
                         pivot="middle",
+                        zorder=2,
                     )
                     axis.set_xlim(-0.5 * case.lx, 0.5 * case.lx)
                     axis.set_ylim(0.0, 2.0 * np.pi * case.radius)
@@ -243,6 +496,16 @@ def write_polarization_movies(
                             colorbar.set_label(f"sqrt(Px^2 + Ptheta^2) {suffix}")
                         else:
                             colorbar.set_label(f"abs(Px) {suffix}")
+                        if winding_mesh is not None:
+                            winding_colorbar = fig.colorbar(
+                                winding_mesh,
+                                ax=axis,
+                                pad=0.06,
+                            )
+                            winding_colorbar.set_label("winding number")
+                            winding_colorbar.set_ticks(
+                                (-winding_color_max, winding_color_max)
+                            )
                     fig.tight_layout()
                     writer.grab_frame()
                     rendered += 1
@@ -290,6 +553,21 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--color-max", type=float)
     parser.add_argument("--figure-width", type=float, default=20.0)
     parser.add_argument("--figure-height", type=float, default=10.0)
+    parser.add_argument(
+        "--no-winding",
+        action="store_true",
+        help="Disable the signed winding-number overlay on the Px/Ptheta movie.",
+    )
+    parser.add_argument("--winding-grid-spacing-d", type=float, default=0.5)
+    parser.add_argument(
+        "--winding-radii-d",
+        type=float,
+        nargs="+",
+        default=(1.5, 2.0, 2.5),
+        metavar="R_OVER_D",
+    )
+    parser.add_argument("--winding-support-radius-d", type=float, default=1.5)
+    parser.add_argument("--winding-color-max", type=float, default=1.0)
     return parser.parse_args()
 
 
@@ -308,6 +586,11 @@ def main() -> None:
         color_max=args.color_max,
         figure_width=args.figure_width,
         figure_height=args.figure_height,
+        show_winding=not args.no_winding,
+        winding_grid_spacing_d=args.winding_grid_spacing_d,
+        winding_radii_d=tuple(args.winding_radii_d),
+        winding_support_radius_d=args.winding_support_radius_d,
+        winding_color_max=args.winding_color_max,
     )
 
 
