@@ -12,7 +12,7 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 from matplotlib.animation import PillowWriter
-from matplotlib.colors import Normalize
+from matplotlib.colors import BoundaryNorm, ListedColormap, Normalize
 import numpy as np
 from safetensors.numpy import load_file
 from scipy.spatial import cKDTree
@@ -20,6 +20,13 @@ from scipy.spatial import cKDTree
 from hexatic.constants import cylinder
 
 from .cases import DEFAULT_OUTPUT_ROOT, CasePaths, get_case
+
+
+WINDING_NEGATIVE = -1
+WINDING_POSITIVE_OUTWARD = 1
+WINDING_POSITIVE_INWARD = 2
+WINDING_COLORMAP = ListedColormap(("#2166ac", "#d73027", "#f28e2b"))
+WINDING_NORM = BoundaryNorm((-1.5, -0.5, 1.5, 2.5), WINDING_COLORMAP.N)
 
 
 def _frame_numbers(
@@ -194,20 +201,42 @@ def _interpolate_periodic_polarization(
 
 def _winding_for_offsets(
     angles: np.ndarray,
+    field: np.ndarray,
     valid: np.ndarray,
     offsets: tuple[tuple[int, int], ...],
-) -> tuple[np.ndarray, np.ndarray]:
+    *,
+    dx: float,
+    ds: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     sampled_angles = [
         np.roll(angles, shift=(-ds_index, -x_index), axis=(0, 1))
         for ds_index, x_index in offsets
     ]
     loop_valid = np.ones(valid.shape, dtype=np.bool_)
+    radial_alignment = np.zeros(valid.shape, dtype=np.float64)
     for ds_index, x_index in offsets:
         loop_valid &= np.roll(
             valid,
             shift=(-ds_index, -x_index),
             axis=(0, 1),
         )
+        sampled_field = np.roll(
+            field,
+            shift=(-ds_index, -x_index),
+            axis=(0, 1),
+        )
+        sampled_norm = np.linalg.norm(sampled_field, axis=2)
+        radial_x = x_index * dx
+        radial_s = ds_index * ds
+        radial_norm = np.hypot(radial_x, radial_s)
+        radial_alignment += np.divide(
+            sampled_field[:, :, 0] * radial_x
+            + sampled_field[:, :, 1] * radial_s,
+            sampled_norm * radial_norm,
+            out=np.zeros(valid.shape, dtype=np.float64),
+            where=(sampled_norm > np.finfo(np.float32).eps) & (radial_norm > 0.0),
+        )
+    radial_alignment /= len(offsets)
 
     total_turn = np.zeros(angles.shape, dtype=np.float64)
     for current, following in zip(
@@ -217,7 +246,7 @@ def _winding_for_offsets(
         difference = following - current
         total_turn += np.arctan2(np.sin(difference), np.cos(difference))
     charges = np.rint(total_turn / (2.0 * np.pi)).astype(np.int16)
-    return charges, loop_valid
+    return charges, loop_valid, radial_alignment
 
 
 def _stable_winding(
@@ -232,6 +261,9 @@ def _stable_winding(
     circumference: float,
     radius: float,
     support_radius: float,
+    dx: float,
+    ds: float,
+    radial_threshold: float,
 ) -> np.ndarray:
     polarization = particle_vectors[:, (0, 2)]
     field, field_valid = _interpolate_periodic_polarization(
@@ -246,7 +278,14 @@ def _stable_winding(
     )
     angles = np.arctan2(field[:, :, 1], field[:, :, 0])
     radius_results = [
-        _winding_for_offsets(angles, field_valid, offsets)
+        _winding_for_offsets(
+            angles,
+            field,
+            field_valid,
+            offsets,
+            dx=dx,
+            ds=ds,
+        )
         for offsets in circle_offsets
     ]
 
@@ -255,6 +294,7 @@ def _stable_winding(
     ambiguous = np.zeros(field_valid.shape, dtype=np.bool_)
     charges = np.stack([result[0] for result in radius_results])
     valid = np.stack([result[1] for result in radius_results])
+    radial_alignment = np.stack([result[2] for result in radius_results])
     candidates = np.unique(charges[valid & (charges != 0)])
     for candidate in candidates:
         count = np.count_nonzero(valid & (charges == candidate), axis=0)
@@ -265,7 +305,25 @@ def _stable_winding(
         ambiguous[better] = False
         ambiguous[tied] = True
     stable[(best_count < 2) | ambiguous] = 0
-    return stable
+
+    classified = np.zeros(field_valid.shape, dtype=np.int8)
+    classified[stable == -1] = WINDING_NEGATIVE
+    stable_positive = stable == 1
+    outward_votes = np.count_nonzero(
+        valid & (charges == 1) & (radial_alignment >= radial_threshold),
+        axis=0,
+    )
+    inward_votes = np.count_nonzero(
+        valid & (charges == 1) & (radial_alignment <= -radial_threshold),
+        axis=0,
+    )
+    classified[
+        stable_positive & (outward_votes >= 2) & (outward_votes > inward_votes)
+    ] = WINDING_POSITIVE_OUTWARD
+    classified[
+        stable_positive & (inward_votes >= 2) & (inward_votes > outward_votes)
+    ] = WINDING_POSITIVE_INWARD
+    return classified
 
 
 def _component_output_path(
@@ -304,7 +362,7 @@ def write_polarization_movies(
     winding_grid_spacing_d: float = 0.5,
     winding_radii_d: tuple[float, ...] = (1.5, 2.0, 2.5),
     winding_support_radius_d: float = 1.5,
-    winding_color_max: float = 1.0,
+    winding_radial_threshold: float = 0.25,
 ) -> tuple[Path, Path]:
     if stride < 1 or fps < 1 or dpi < 1:
         raise ValueError("stride, fps, and dpi must be positive")
@@ -325,8 +383,8 @@ def write_polarization_movies(
         raise ValueError("winding-radii-d values must be strictly increasing")
     if winding_support_radius_d <= 0.0:
         raise ValueError("winding-support-radius-d must be positive")
-    if winding_color_max <= 0.0:
-        raise ValueError("winding-color-max must be positive")
+    if not 0.0 <= winding_radial_threshold < 1.0:
+        raise ValueError("winding-radial-threshold must be in [0, 1)")
     if quantity not in ("polarization", "polar-density"):
         raise ValueError("quantity must be 'polarization' or 'polar-density'")
     case = get_case(case_id)
@@ -361,12 +419,6 @@ def write_polarization_movies(
         _circle_offsets(radius_d * particle_diameter, winding_dx, winding_ds)
         for radius_d in winding_radii_d
     )
-    winding_norm = Normalize(
-        vmin=-winding_color_max,
-        vmax=winding_color_max,
-        clip=True,
-    )
-
     # Saved cylindrical order is (x, radial, azimuthal), so Ptheta is index 2.
     movies = (
         ("px_ptheta", r"$(P_x,P_\theta)$", "in_film"),
@@ -479,15 +531,18 @@ def write_polarization_movies(
                             support_radius=(
                                 winding_support_radius_d * particle_diameter
                             ),
+                            dx=winding_dx,
+                            ds=winding_ds,
+                            radial_threshold=winding_radial_threshold,
                         )
                         winding_mesh = axis.pcolormesh(
                             winding_x_edges,
                             winding_s_edges,
                             np.ma.masked_equal(winding, 0),
-                            cmap="RdBu_r",
-                            norm=winding_norm,
+                            cmap=WINDING_COLORMAP,
+                            norm=WINDING_NORM,
                             shading="flat",
-                            alpha=0.35,
+                            alpha=0.45,
                             zorder=0,
                         )
                     sampled_norm = np.hypot(px_values, py_values)
@@ -544,9 +599,10 @@ def write_polarization_movies(
                                 ax=axis,
                                 pad=0.06,
                             )
-                            winding_colorbar.set_label("winding number")
-                            winding_colorbar.set_ticks(
-                                (-winding_color_max, winding_color_max)
+                            winding_colorbar.set_label("winding classification")
+                            winding_colorbar.set_ticks((-1, 1, 2))
+                            winding_colorbar.set_ticklabels(
+                                ("-1", "+1 outward", "+1 inward")
                             )
                     fig.tight_layout()
                     writer.grab_frame()
@@ -609,7 +665,15 @@ def _parse_args() -> argparse.Namespace:
         metavar="R_OVER_D",
     )
     parser.add_argument("--winding-support-radius-d", type=float, default=1.5)
-    parser.add_argument("--winding-color-max", type=float, default=1.0)
+    parser.add_argument(
+        "--winding-radial-threshold",
+        type=float,
+        default=0.25,
+        help=(
+            "Minimum absolute mean radial alignment for classifying a +1 winding "
+            "as outward or inward."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -632,7 +696,7 @@ def main() -> None:
         winding_grid_spacing_d=args.winding_grid_spacing_d,
         winding_radii_d=tuple(args.winding_radii_d),
         winding_support_radius_d=args.winding_support_radius_d,
-        winding_color_max=args.winding_color_max,
+        winding_radial_threshold=args.winding_radial_threshold,
     )
 
 
