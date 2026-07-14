@@ -87,13 +87,13 @@ def _particle_vectors(
     if stored_film.shape != rho.shape:
         raise ValueError("active_shell_mask must have the same shape as rho")
     particle_diameter = float(cylinder.ANALYSIS.particle_diameter)
-    wall_clearance = (
-        float(cylinder.SIMULATION.wall_clearance_epsilon) * particle_diameter
-    )
-    radial_tolerance = 1.0e-5 * particle_diameter
+    radial_tolerance = max(
+        0.01,
+        float(cylinder.SIMULATION.wall_clearance_epsilon),
+    ) * particle_diameter
     upper_boundary = (
         (coords[:, 2] > radius - particle_diameter)
-        & (coords[:, 2] <= radius + wall_clearance + radial_tolerance)
+        & (coords[:, 2] <= radius + radial_tolerance)
     )
     film = stored_film | upper_boundary
     valid = (
@@ -341,8 +341,9 @@ def write_polarization_movies(
     frames = _frame_numbers(manifest, start, stop, stride)
     selected = set(frames)
     particle_diameter = float(cylinder.ANALYSIS.particle_diameter)
-    film_upper_radius = case.radius + (
-        float(cylinder.SIMULATION.wall_clearance_epsilon) + 1.0e-5
+    film_upper_radius = case.radius + max(
+        0.01,
+        float(cylinder.SIMULATION.wall_clearance_epsilon),
     ) * particle_diameter
     (
         winding_grid_x,
