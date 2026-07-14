@@ -10,7 +10,7 @@ import matplotlib
 matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
-from matplotlib.animation import FFMpegWriter, writers
+from matplotlib.animation import FFMpegWriter, PillowWriter, writers
 from matplotlib.colors import Normalize
 import numpy as np
 from safetensors.numpy import load_file
@@ -153,9 +153,6 @@ def write_polarization_movie(
         raise ValueError("color-max must be positive")
     if quantity not in ("polarization", "polar-density"):
         raise ValueError("quantity must be 'polarization' or 'polar-density'")
-    if not writers.is_available("ffmpeg"):
-        raise RuntimeError("Matplotlib cannot find ffmpeg; install ffmpeg in this environment")
-
     case = get_case(case_id)
     paths = CasePaths(case, output_root)
     manifest_path = paths.analysis_dir / "manifest.json"
@@ -168,13 +165,26 @@ def write_polarization_movie(
     frames = _frame_numbers(manifest, start, stop, stride)
     selected = set(frames)
     output_path = output or (
-        output_root / "movies" / f"{case_id}_{quantity.replace('-', '_')}.mp4"
+        output_root / "movies" / f"{case_id}_{quantity.replace('-', '_')}.gif"
     )
+    suffix = output_path.suffix.lower()
+    if suffix == ".gif":
+        writer = PillowWriter(fps=fps)
+    elif suffix == ".mp4":
+        if not writers.is_available("ffmpeg"):
+            raise RuntimeError(
+                "Matplotlib cannot find ffmpeg; use a .gif output or install ffmpeg"
+            )
+        writer = FFMpegWriter(
+            fps=fps,
+            metadata={"title": f"{case.label} polarization"},
+        )
+    else:
+        raise ValueError("Output filename must end in .gif or .mp4")
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     norm = Normalize(vmin=0.0, vmax=color_max or (1.0 if quantity == "polarization" else None))
     fig, axis = plt.subplots(figsize=(16, 6))
-    writer = FFMpegWriter(fps=fps, metadata={"title": f"{case.label} polarization"})
     rendered = 0
     try:
         with writer.saving(fig, str(output_path), dpi=dpi):
