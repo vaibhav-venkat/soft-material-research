@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from itertools import chain
 import json
 from pathlib import Path
 from typing import Iterator
@@ -340,6 +341,9 @@ def write_polarization_movies(
     frames = _frame_numbers(manifest, start, stop, stride)
     selected = set(frames)
     particle_diameter = float(cylinder.ANALYSIS.particle_diameter)
+    film_upper_radius = case.radius + (
+        float(cylinder.SIMULATION.wall_clearance_epsilon) + 1.0e-5
+    ) * particle_diameter
     (
         winding_grid_x,
         winding_grid_s,
@@ -379,10 +383,33 @@ def write_polarization_movies(
         fig, axis = plt.subplots(figsize=(figure_width, figure_height))
         rendered = 0
         try:
+            frame_iterator = _iter_frames(paths.analysis_dir, manifest, selected)
+            try:
+                first_frame = next(frame_iterator)
+            except StopIteration as error:
+                raise RuntimeError("No requested frames were found in the shards") from error
+            first_index, first_values = first_frame
+            first_x, _, _ = _particle_vectors(
+                first_values,
+                radius=case.radius,
+                quantity=quantity,
+            )
+            if not first_x.size:
+                radial = np.asarray(first_values["coords"], dtype=np.float32)[:, 2]
+                finite_radial = radial[np.isfinite(radial)]
+                observed = (
+                    f"[{float(np.min(finite_radial)):.6g}, "
+                    f"{float(np.max(finite_radial)):.6g}]"
+                    if finite_radial.size
+                    else "no finite radii"
+                )
+                raise ValueError(
+                    f"No plottable film particles in frame {first_index}; expected "
+                    f"{case.radius - particle_diameter:.6g} < r <= "
+                    f"{film_upper_radius:.6g}, observed r={observed}"
+                )
             with writer.saving(fig, str(output_path), dpi=dpi):
-                for frame_index, frame in _iter_frames(
-                    paths.analysis_dir, manifest, selected
-                ):
+                for frame_index, frame in chain((first_frame,), frame_iterator):
                     particle_x, particle_theta, vectors = _particle_vectors(
                         frame,
                         radius=case.radius,
@@ -400,7 +427,7 @@ def write_polarization_movies(
                         raise ValueError(
                             f"No plottable film particles in frame {frame_index}; "
                             f"expected {case.radius - particle_diameter:.6g} < r <= "
-                            f"{case.radius + wall_clearance + radial_tolerance:.6g}, "
+                            f"{film_upper_radius:.6g}, "
                             f"observed r={observed}"
                         )
                     px_values = vectors[:, 0]
