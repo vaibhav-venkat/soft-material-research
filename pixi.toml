@@ -2,7 +2,7 @@
 authors = ["Vaibhav Venkat <vaibhav@vaibhavvenkat.com>"]
 channels = ["conda-forge", "main", "r", "msys2"]
 name = "sap"
-platforms = ["osx-arm64", { platform = "linux-64", cuda = "12.9" }]
+platforms = ["osx-arm64", "linux-64"]
 version = "0.1.0"
 
 [tasks]
@@ -54,7 +54,7 @@ pysindy = { version = ">=2.1.0, <3", extras = ["miosr", "sbr", "cvxpy"] }
 desloppify = ">=1.0, <2"
 
 [feature.big-lx-cuda12]
-platforms = ["linux-64-cuda-12-9"]
+platforms = ["linux-64"]
 
 [feature.big-lx-cuda12.dependencies]
 hoomd = { version = "7.0.1.*", build = "*gpu*" }
@@ -62,6 +62,9 @@ cuda-version = "12.*"
 
 [feature.big-lx-cuda12.pypi-dependencies]
 jax = { version = ">=0.10.2,<0.11", extras = ["cuda12"] }
+
+[feature.big-lx-cuda12.system-requirements]
+cuda = "12.9"
 
 [environments]
 big-lx-cuda12 = ["big-lx-cuda12"]

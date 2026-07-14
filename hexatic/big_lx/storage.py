@@ -44,24 +44,34 @@ def save_safetensors_atomic(
     temporary.replace(path)
 
 
-def prepare_analysis_dir(output_dir: Path, overwrite: bool) -> bool:
+def prepare_analysis_dir(
+    output_dir: Path,
+    overwrite: bool,
+    resume: bool,
+) -> tuple[bool, dict[str, Any] | None]:
+    if overwrite and resume:
+        raise ValueError("--overwrite and --resume are mutually exclusive")
     manifest_path = output_dir / "manifest.json"
     if manifest_path.exists() and not overwrite:
         manifest = json.loads(manifest_path.read_text())
         if manifest.get("complete") is True:
             print(f"skipping completed analysis {output_dir.name}")
-            return False
+            return False, manifest
+        if resume:
+            return True, manifest
         raise FileExistsError(
-            f"Incomplete analysis output exists at {output_dir}; pass --overwrite to replace it"
+            f"Incomplete analysis output exists at {output_dir}; "
+            "pass --resume to continue it or --overwrite to replace it"
         )
     if output_dir.exists():
         if not overwrite:
             raise FileExistsError(
-                f"Analysis output exists at {output_dir}; pass --overwrite to replace it"
+                f"Analysis output exists at {output_dir} without a usable manifest; "
+                "pass --overwrite to replace it"
             )
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True)
-    return True
+    return True, None
 
 
 class FrameShardWriter:

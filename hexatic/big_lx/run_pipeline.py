@@ -35,6 +35,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--particle-block-size", type=int, default=2048)
     parser.add_argument("--target-shard-mib", type=int, default=256)
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--resume-analysis", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -43,6 +44,8 @@ def main() -> None:
     args = _parse_args()
     if args.require_gpu and args.simulation_device != "gpu":
         raise SystemExit("--require-gpu is incompatible with --simulation-device cpu")
+    if args.overwrite and args.resume_analysis:
+        raise SystemExit("--overwrite and --resume-analysis are mutually exclusive")
 
     common = {
         "all": args.all,
@@ -68,6 +71,7 @@ def main() -> None:
         gaussian_cutoff_multiplier=args.gaussian_cutoff_multiplier,
         particle_block_size=args.particle_block_size,
         target_shard_mib=args.target_shard_mib,
+        resume=args.resume_analysis,
     )
     print("[big_lx.pipeline] stage=simulation", flush=True)
     run_sweep(simulation_args)

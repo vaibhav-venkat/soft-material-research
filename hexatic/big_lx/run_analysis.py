@@ -38,6 +38,8 @@ def analysis_jobs(args: argparse.Namespace) -> tuple[ScheduledJob, ...]:
             command.append("--require-gpu")
         if args.overwrite:
             command.append("--overwrite")
+        if args.resume:
+            command.append("--resume")
         jobs.append(
             ScheduledJob(
                 case=case,
@@ -71,7 +73,9 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--gaussian-cutoff-multiplier", type=float, default=5.0)
     parser.add_argument("--particle-block-size", type=int, default=2048)
     parser.add_argument("--target-shard-mib", type=int, default=256)
-    parser.add_argument("--overwrite", action="store_true")
+    write_mode = parser.add_mutually_exclusive_group()
+    write_mode.add_argument("--overwrite", action="store_true")
+    write_mode.add_argument("--resume", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
 
 

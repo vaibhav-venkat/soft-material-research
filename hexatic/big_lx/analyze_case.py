@@ -274,6 +274,7 @@ def analyze_case(
     particle_block_size: int = 2048,
     target_shard_mib: int = 256,
     overwrite: bool = False,
+    resume: bool = False,
 ) -> None:
     if gaussian_cutoff_multiplier <= 0.0:
         raise ValueError("gaussian_cutoff_multiplier must be positive")
@@ -289,53 +290,93 @@ def analyze_case(
         )
     if not paths.trajectory_gsd.exists():
         raise FileNotFoundError(f"Missing trajectory: {paths.trajectory_gsd}")
-    if not prepare_analysis_dir(paths.analysis_dir, overwrite):
+    should_run, existing_manifest = prepare_analysis_dir(
+        paths.analysis_dir,
+        overwrite,
+        resume,
+    )
+    if not should_run:
         return
 
     backend = select_backend(backend_name, require_gpu=require_gpu)
-    manifest: dict[str, object] = {
-        "schema": "hexatic.big_lx.analysis.v1",
-        "case": case.as_metadata(),
-        "trajectory_gsd": str(paths.trajectory_gsd),
-        "backend": backend.name,
-        "device": backend.device_description,
-        "pocket_radius": pocket_radius,
-        "gaussian_cutoff_multiplier": gaussian_cutoff_multiplier,
-        "gaussian_cutoff": gaussian_cutoff_multiplier * pocket_radius,
-        "particle_block_size": particle_block_size,
-        "target_shard_mib": target_shard_mib,
-        "dtype": "float32",
-        "complete": False,
-        "shards": [],
-    }
-    write_json_atomic(paths.analysis_dir / "manifest.json", manifest)
+    if existing_manifest is None:
+        manifest: dict[str, object] = {
+            "schema": "hexatic.big_lx.analysis.v1",
+            "case": case.as_metadata(),
+            "trajectory_gsd": str(paths.trajectory_gsd),
+            "backend": backend.name,
+            "device": backend.device_description,
+            "pocket_radius": pocket_radius,
+            "gaussian_cutoff_multiplier": gaussian_cutoff_multiplier,
+            "gaussian_cutoff": gaussian_cutoff_multiplier * pocket_radius,
+            "particle_block_size": particle_block_size,
+            "target_shard_mib": target_shard_mib,
+            "dtype": "float32",
+            "complete": False,
+            "shards": [],
+        }
+        start_frame = 0
+        write_json_atomic(paths.analysis_dir / "manifest.json", manifest)
+    else:
+        manifest = existing_manifest
+        start_frame = _validate_resume_manifest(
+            manifest,
+            paths,
+            case,
+            backend,
+            pocket_radius=pocket_radius,
+            gaussian_cutoff_multiplier=gaussian_cutoff_multiplier,
+            particle_block_size=particle_block_size,
+            target_shard_mib=target_shard_mib,
+        )
+        manifest["resume_count"] = int(manifest.get("resume_count", 0)) + 1
+        manifest["resumed_from_frame"] = start_frame
+        manifest["device"] = backend.device_description
+        write_json_atomic(paths.analysis_dir / "manifest.json", manifest)
+        print(
+            f"[big_lx.analysis] resuming case={case.case_id} frame={start_frame}",
+            flush=True,
+        )
 
     with gsd.hoomd.open(name=str(paths.trajectory_gsd), mode="r") as source:
         if not len(source):
             raise ValueError(f"Trajectory contains no frames: {paths.trajectory_gsd}")
-        first_box = np.asarray(source[0].configuration.box, dtype=np.float32)
-        save_safetensors_atomic(
-            paths.analysis_dir / "static.safetensors",
-            {
-                "box": first_box,
-                "radius": np.asarray(case.radius, dtype=np.float32),
-                "circumference": np.asarray(case.circumference, dtype=np.float32),
-                "lx": np.asarray(case.lx, dtype=np.float32),
-                "pocket_radius": np.asarray(pocket_radius, dtype=np.float32),
-                "gaussian_cutoff": np.asarray(
-                    gaussian_cutoff_multiplier * pocket_radius, dtype=np.float32
-                ),
-            },
-            backend_name=backend.name,
-            metadata={"schema": "hexatic.big_lx.static.v1"},
-        )
+        if start_frame > len(source):
+            raise ValueError(
+                f"Resume frame {start_frame} exceeds trajectory length {len(source)}"
+            )
+        if start_frame and manifest["shards"][-1]["steps"][-1] != int(
+            source[start_frame - 1].configuration.step
+        ):
+            raise ValueError("Last saved shard step does not match the trajectory")
+        static_path = paths.analysis_dir / "static.safetensors"
+        if existing_manifest is None:
+            first_box = np.asarray(source[0].configuration.box, dtype=np.float32)
+            save_safetensors_atomic(
+                static_path,
+                {
+                    "box": first_box,
+                    "radius": np.asarray(case.radius, dtype=np.float32),
+                    "circumference": np.asarray(case.circumference, dtype=np.float32),
+                    "lx": np.asarray(case.lx, dtype=np.float32),
+                    "pocket_radius": np.asarray(pocket_radius, dtype=np.float32),
+                    "gaussian_cutoff": np.asarray(
+                        gaussian_cutoff_multiplier * pocket_radius, dtype=np.float32
+                    ),
+                },
+                backend_name=backend.name,
+                metadata={"schema": "hexatic.big_lx.static.v1"},
+            )
+        elif not static_path.exists():
+            raise FileNotFoundError(f"Missing static resume data: {static_path}")
         writer = FrameShardWriter(
             paths.analysis_dir,
             manifest,
             backend_name=backend.name,
             target_bytes=target_shard_mib * 1024 * 1024,
         )
-        for frame_index, frame in enumerate(source):
+        for frame_index in range(start_frame, len(source)):
+            frame = source[frame_index]
             print(
                 f"[big_lx.analysis] case={case.case_id} "
                 f"frame={frame_index + 1}/{len(source)} backend={backend.name}",
@@ -358,6 +399,60 @@ def analyze_case(
     write_json_atomic(paths.analysis_dir / "manifest.json", manifest)
 
 
+def _validate_resume_manifest(
+    manifest: dict[str, object],
+    paths: CasePaths,
+    case: BigLxCase,
+    backend: ArrayBackend,
+    *,
+    pocket_radius: float,
+    gaussian_cutoff_multiplier: float,
+    particle_block_size: int,
+    target_shard_mib: int,
+) -> int:
+    if manifest.get("schema") != "hexatic.big_lx.analysis.v1":
+        raise ValueError("Cannot resume an analysis with an incompatible schema")
+    case_payload = manifest.get("case")
+    if not isinstance(case_payload, dict) or case_payload.get("case_id") != case.case_id:
+        raise ValueError("Resume manifest case does not match the requested case")
+    expected = {
+        "backend": backend.name,
+        "pocket_radius": pocket_radius,
+        "gaussian_cutoff_multiplier": gaussian_cutoff_multiplier,
+        "particle_block_size": particle_block_size,
+        "target_shard_mib": target_shard_mib,
+        "dtype": "float32",
+    }
+    for name, value in expected.items():
+        if manifest.get(name) != value:
+            raise ValueError(
+                f"Cannot resume with changed {name}: "
+                f"manifest={manifest.get(name)!r}, requested={value!r}"
+            )
+    shards = manifest.get("shards")
+    if not isinstance(shards, list):
+        raise ValueError("Resume manifest has no shard list")
+    expected_start = 0
+    for shard in shards:
+        if not isinstance(shard, dict):
+            raise ValueError("Resume manifest contains an invalid shard entry")
+        start = shard.get("frame_start")
+        stop = shard.get("frame_stop")
+        filename = shard.get("file")
+        if start != expected_start or not isinstance(stop, int) or stop <= expected_start:
+            raise ValueError("Resume shards are not contiguous from frame zero")
+        if not isinstance(filename, str):
+            raise ValueError("Resume shard filename is invalid")
+        shard_path = paths.analysis_dir / filename
+        if not shard_path.is_file() or shard_path.stat().st_size == 0:
+            raise FileNotFoundError(f"Missing or empty resume shard: {shard_path}")
+        steps = shard.get("steps")
+        if not isinstance(steps, list) or len(steps) != stop - expected_start:
+            raise ValueError(f"Resume shard has invalid step metadata: {shard_path}")
+        expected_start = stop
+    return expected_start
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Analyze one big-Lx trajectory.")
     parser.add_argument("--case", required=True)
@@ -368,7 +463,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--gaussian-cutoff-multiplier", type=float, default=5.0)
     parser.add_argument("--particle-block-size", type=int, default=2048)
     parser.add_argument("--target-shard-mib", type=int, default=256)
-    parser.add_argument("--overwrite", action="store_true")
+    write_mode = parser.add_mutually_exclusive_group()
+    write_mode.add_argument("--overwrite", action="store_true")
+    write_mode.add_argument("--resume", action="store_true")
     return parser.parse_args()
 
 
@@ -384,6 +481,7 @@ def main() -> None:
         particle_block_size=args.particle_block_size,
         target_shard_mib=args.target_shard_mib,
         overwrite=args.overwrite,
+        resume=args.resume,
     )
 
 
