@@ -86,10 +86,13 @@ def _particle_vectors(
     if stored_film.shape != rho.shape:
         raise ValueError("active_shell_mask must have the same shape as rho")
     particle_diameter = float(cylinder.ANALYSIS.particle_diameter)
+    wall_clearance = (
+        float(cylinder.SIMULATION.wall_clearance_epsilon) * particle_diameter
+    )
     radial_tolerance = 1.0e-5 * particle_diameter
     upper_boundary = (
         (coords[:, 2] > radius - particle_diameter)
-        & np.isclose(coords[:, 2], radius, rtol=0.0, atol=radial_tolerance)
+        & (coords[:, 2] <= radius + wall_clearance + radial_tolerance)
     )
     film = stored_film | upper_boundary
     valid = (
@@ -386,8 +389,19 @@ def write_polarization_movies(
                         quantity=quantity,
                     )
                     if not particle_x.size:
+                        radial = np.asarray(frame["coords"], dtype=np.float32)[:, 2]
+                        finite_radial = radial[np.isfinite(radial)]
+                        observed = (
+                            f"[{float(np.min(finite_radial)):.6g}, "
+                            f"{float(np.max(finite_radial)):.6g}]"
+                            if finite_radial.size
+                            else "no finite radii"
+                        )
                         raise ValueError(
-                            f"No plottable particles in frame {frame_index}"
+                            f"No plottable film particles in frame {frame_index}; "
+                            f"expected {case.radius - particle_diameter:.6g} < r <= "
+                            f"{case.radius + wall_clearance + radial_tolerance:.6g}, "
+                            f"observed r={observed}"
                         )
                     px_values = vectors[:, 0]
                     if vector_mode == "in_film":
