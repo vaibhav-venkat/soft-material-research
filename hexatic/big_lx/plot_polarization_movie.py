@@ -10,7 +10,7 @@ import matplotlib
 matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
-from matplotlib.animation import FFMpegWriter, PillowWriter, writers
+from matplotlib.animation import PillowWriter
 from matplotlib.colors import Normalize
 import numpy as np
 from safetensors.numpy import load_file
@@ -81,8 +81,7 @@ def _plot_values(
     *,
     quantity: str,
     max_points: int,
-    max_arrows: int,
-) -> tuple[np.ndarray, ...]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     coords = np.asarray(frame["coords"], dtype=np.float32)
     polar = np.asarray(frame["polar_cylindrical"], dtype=np.float32)
     rho = np.asarray(frame["rho"], dtype=np.float32)
@@ -99,33 +98,33 @@ def _plot_values(
     else:
         vectors = polar
 
-    magnitude = np.linalg.norm(vectors, axis=1)
-    valid &= np.isfinite(magnitude)
+    valid &= np.all(np.isfinite(vectors), axis=1)
     indices = np.flatnonzero(valid)
     point_ids = _subsample(indices, max_points)
-
-    # Cylindrical component order is (x, radial, azimuthal). The requested movie
-    # deliberately ignores the azimuthal component when drawing arrows.
-    projected_norm = np.hypot(vectors[:, 0], vectors[:, 1])
-    arrow_ids = indices[projected_norm[indices] > np.finfo(np.float32).eps]
-    arrow_ids = _subsample(arrow_ids, max_arrows)
-    arrow_u = vectors[arrow_ids, 0] / projected_norm[arrow_ids]
-    arrow_v = vectors[arrow_ids, 1] / projected_norm[arrow_ids]
-
     x = coords[:, 0]
     r_theta = coords[:, 2] * coords[:, 1]
-    return (
-        x[point_ids],
-        r_theta[point_ids],
-        magnitude[point_ids],
-        x[arrow_ids],
-        r_theta[arrow_ids],
-        arrow_u,
-        arrow_v,
-    )
+    return x[point_ids], r_theta[point_ids], vectors[point_ids]
 
 
-def write_polarization_movie(
+def _component_output_path(
+    output: Path | None,
+    output_root: Path,
+    case_id: str,
+    quantity: str,
+    component_name: str,
+) -> Path:
+    if output is None:
+        base = output_root / "movies" / f"{case_id}_{quantity.replace('-', '_')}"
+    elif output.suffix.lower() == ".gif":
+        base = output.with_suffix("")
+    elif output.suffix:
+        raise ValueError("--output must end in .gif or have no filename suffix")
+    else:
+        base = output
+    return base.parent / f"{base.name}_{component_name}.gif"
+
+
+def write_polarization_movies(
     case_id: str,
     *,
     output_root: Path = DEFAULT_OUTPUT_ROOT,
@@ -138,12 +137,11 @@ def write_polarization_movie(
     dpi: int = 150,
     color_max: float | None = None,
     max_points: int = 0,
-    max_arrows: int = 1500,
-) -> Path:
+) -> tuple[Path, Path, Path]:
     if stride < 1 or fps < 1 or dpi < 1:
         raise ValueError("stride, fps, and dpi must be positive")
-    if max_points < 0 or max_arrows < 0:
-        raise ValueError("max-points and max-arrows cannot be negative")
+    if max_points < 0:
+        raise ValueError("max-points cannot be negative")
     if color_max is not None and color_max <= 0.0:
         raise ValueError("color-max must be positive")
     if quantity not in ("polarization", "polar-density"):
@@ -159,112 +157,107 @@ def write_polarization_movie(
 
     frames = _frame_numbers(manifest, start, stop, stride)
     selected = set(frames)
-    output_path = output or (
-        output_root / "movies" / f"{case_id}_{quantity.replace('-', '_')}.gif"
+    # Saved cylindrical order is (x, radial, azimuthal). Emit the requested
+    # display order Px, Ptheta, Pr while retaining the correct array indices.
+    components = (
+        ("px", 0, r"P_x"),
+        ("ptheta", 2, r"P_\theta"),
+        ("pr", 1, r"P_r"),
     )
-    suffix = output_path.suffix.lower()
-    if suffix == ".gif":
-        writer = PillowWriter(fps=fps)
-    elif suffix == ".mp4":
-        if not writers.is_available("ffmpeg"):
-            raise RuntimeError(
-                "Matplotlib cannot find ffmpeg; use a .gif output or install ffmpeg"
-            )
-        writer = FFMpegWriter(
-            fps=fps,
-            metadata={"title": f"{case.label} polarization"},
+    outputs: list[Path] = []
+    for component_name, component_index, component_label in components:
+        output_path = _component_output_path(
+            output, output_root, case_id, quantity, component_name
         )
-    else:
-        raise ValueError("Output filename must end in .gif or .mp4")
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    norm = Normalize(vmin=0.0, vmax=color_max or (1.0 if quantity == "polarization" else None))
-    fig, axis = plt.subplots(figsize=(16, 6))
-    rendered = 0
-    try:
-        with writer.saving(fig, str(output_path), dpi=dpi):
-            for frame_index, frame in _iter_frames(paths.analysis_dir, manifest, selected):
-                values = _plot_values(
-                    frame,
-                    quantity=quantity,
-                    max_points=max_points,
-                    max_arrows=max_arrows,
-                )
-                px, py, colors, qx, qy, qu, qv = values
-                if not px.size:
-                    raise ValueError(f"No plottable particles in frame {frame_index}")
-                if norm.vmax is None:
-                    finite = colors[np.isfinite(colors)]
-                    norm.vmax = float(np.percentile(finite, 99.5)) if finite.size else 1.0
-                    if norm.vmax <= 0.0:
-                        norm.vmax = 1.0
-
-                axis.clear()
-                scatter = axis.scatter(
-                    px,
-                    py,
-                    c=colors,
-                    s=3.0,
-                    cmap="viridis",
-                    norm=norm,
-                    linewidths=0,
-                )
-                if qx.size:
-                    axis.quiver(
-                        qx,
-                        qy,
-                        qu,
-                        qv,
-                        color="white",
-                        alpha=0.8,
-                        angles="xy",
-                        scale_units="inches",
-                        scale=7.0,
-                        width=0.002,
-                        headwidth=3.5,
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        writer = PillowWriter(fps=fps)
+        limit = color_max or (1.0 if quantity == "polarization" else None)
+        norm = Normalize(vmin=-limit if limit is not None else None, vmax=limit)
+        fig, axis = plt.subplots(figsize=(16, 6))
+        rendered = 0
+        try:
+            with writer.saving(fig, str(output_path), dpi=dpi):
+                for frame_index, frame in _iter_frames(
+                    paths.analysis_dir, manifest, selected
+                ):
+                    px, py, vectors = _plot_values(
+                        frame,
+                        quantity=quantity,
+                        max_points=max_points,
                     )
-                axis.set_xlim(-0.5 * case.lx, 0.5 * case.lx)
-                axis.set_ylim(0.0, case.circumference)
-                axis.set_xlabel("x")
-                axis.set_ylabel(r"$r\theta$")
-                axis.set_title(
-                    f"{case.label}: {quantity.replace('-', ' ')} "
-                    f"(frame {frame_index}, step {int(frame['step'])})"
-                )
-                axis.grid(alpha=0.15)
-                if rendered == 0:
-                    colorbar = fig.colorbar(scatter, ax=axis, pad=0.01)
-                    colorbar.set_label(
-                        r"$|\mathbf{P}|/\rho$"
-                        if quantity == "polarization"
-                        else r"$|\mathbf{P}|$"
+                    if not px.size:
+                        raise ValueError(
+                            f"No plottable particles in frame {frame_index}"
+                        )
+                    colors = vectors[:, component_index]
+                    if norm.vmax is None:
+                        finite = np.abs(colors[np.isfinite(colors)])
+                        limit = (
+                            float(np.percentile(finite, 99.5))
+                            if finite.size
+                            else 1.0
+                        )
+                        if limit <= 0.0:
+                            limit = 1.0
+                        norm.vmin = -limit
+                        norm.vmax = limit
+
+                    axis.clear()
+                    scatter = axis.scatter(
+                        px,
+                        py,
+                        c=colors,
+                        s=3.0,
+                        cmap="coolwarm",
+                        norm=norm,
+                        linewidths=0,
                     )
-                fig.tight_layout()
-                writer.grab_frame()
-                rendered += 1
-                print(
-                    f"[big_lx.movie] rendered frame {frame_index} "
-                    f"({rendered}/{len(frames)})",
-                    flush=True,
-                )
-    finally:
-        plt.close(fig)
-    if rendered != len(frames):
-        raise RuntimeError(f"Rendered {rendered} of {len(frames)} requested frames")
-    print(f"[big_lx.movie] wrote {output_path}", flush=True)
-    return output_path
+                    axis.set_xlim(-0.5 * case.lx, 0.5 * case.lx)
+                    axis.set_ylim(0.0, case.circumference)
+                    axis.set_xlabel("x")
+                    axis.set_ylabel(r"$r\theta$")
+                    axis.set_title(
+                        f"{case.label}: ${component_label}$ "
+                        f"(frame {frame_index}, step {int(frame['step'])})"
+                    )
+                    axis.grid(alpha=0.15)
+                    if rendered == 0:
+                        colorbar = fig.colorbar(scatter, ax=axis, pad=0.01)
+                        suffix = r"/\rho" if quantity == "polarization" else ""
+                        colorbar.set_label(f"${component_label}{suffix}$")
+                    fig.tight_layout()
+                    writer.grab_frame()
+                    rendered += 1
+                    print(
+                        f"[big_lx.movie] {component_name}: frame {frame_index} "
+                        f"({rendered}/{len(frames)})",
+                        flush=True,
+                    )
+        finally:
+            plt.close(fig)
+        if rendered != len(frames):
+            raise RuntimeError(
+                f"Rendered {rendered} of {len(frames)} requested frames"
+            )
+        outputs.append(output_path)
+        print(f"[big_lx.movie] wrote {output_path}", flush=True)
+    return outputs[0], outputs[1], outputs[2]
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Render an x versus r*theta movie of a big-Lx safetensors "
-            "polarization field."
+            "Render Px, Ptheta, and Pr GIFs on x versus r*theta from a "
+            "big-Lx safetensors polarization field."
         )
     )
     parser.add_argument("--case", required=True)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
-    parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--output",
+        type=Path,
+        help="Output filename prefix; a trailing .gif is removed before component names.",
+    )
     parser.add_argument(
         "--quantity",
         choices=("polarization", "polar-density"),
@@ -283,18 +276,12 @@ def _parse_args() -> argparse.Namespace:
         default=0,
         help="Maximum colored points per frame; 0 keeps all points.",
     )
-    parser.add_argument(
-        "--max-arrows",
-        type=int,
-        default=1500,
-        help="Maximum direction arrows per frame; 0 keeps all arrows.",
-    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = _parse_args()
-    write_polarization_movie(
+    write_polarization_movies(
         args.case,
         output_root=args.output_root,
         output=args.output,
@@ -306,7 +293,6 @@ def main() -> None:
         dpi=args.dpi,
         color_max=args.color_max,
         max_points=args.max_points,
-        max_arrows=args.max_arrows,
     )
 
 
