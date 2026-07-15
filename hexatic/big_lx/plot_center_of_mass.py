@@ -16,7 +16,7 @@ from safetensors.numpy import load_file
 
 from hexatic.constants import cylinder
 
-from .cases import DEFAULT_OUTPUT_ROOT, BigLxCase, CasePaths, get_case
+from .cases import DEFAULT_OUTPUT_ROOT, BigLxCase, CasePaths, all_cases
 
 
 @dataclass(frozen=True)
@@ -172,7 +172,6 @@ def center_of_mass_series(
 
 
 def plot_center_of_mass(
-    case: BigLxCase,
     *,
     output_root: Path = DEFAULT_OUTPUT_ROOT,
     output: Path | None = None,
@@ -181,43 +180,86 @@ def plot_center_of_mass(
     stride: int = 1,
     dpi: int = 180,
 ) -> Path:
-    paths = CasePaths(case, output_root)
-    series = center_of_mass_series(
-        case,
-        paths.analysis_dir,
-        start=start,
-        stop=stop,
-        stride=stride,
+    cases = all_cases()
+    series_by_case = {
+        case: center_of_mass_series(
+            case,
+            CasePaths(case, output_root).analysis_dir,
+            start=start,
+            stop=stop,
+            stride=stride,
+        )
+        for case in cases
+    }
+    circumferences = tuple(
+        sorted({case.circumference_diameters for case in cases})
     )
-    output_path = output or (
-        output_root / "plots" / f"{case.case_id}_x_com_velocity.png"
-    )
+    output_path = output or output_root / "plots" / "all_cases_x_com_velocity.png"
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    figure, axes = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
-    axes[0].plot(series.elapsed_time, series.x_center, color="tab:blue", linewidth=1.5)
-    axes[0].set_ylabel("unwrapped x center of mass")
-    axes[0].set_title(f"{case.label}: axial center of mass ({series.method})")
-    axes[0].grid(alpha=0.2)
-
-    axes[1].plot(
-        series.elapsed_time,
-        series.x_velocity,
-        color="tab:orange",
-        linewidth=1.5,
+    figure, axes = plt.subplots(
+        2,
+        len(circumferences),
+        figsize=(16, 9),
+        sharex="col",
+        squeeze=False,
     )
-    axes[1].axhline(0.0, color="black", linewidth=0.8, alpha=0.5)
-    axes[1].set_xlabel("elapsed simulation time")
-    axes[1].set_ylabel(r"$d\langle x\rangle/dt$")
-    axes[1].set_title("Axial center-of-mass velocity")
-    axes[1].grid(alpha=0.2)
+    colors = plt.colormaps["viridis"](
+        np.linspace(0.1, 0.9, len({case.lx_multiplier for case in cases}))
+    )
 
+    for column, circumference in enumerate(circumferences):
+        circumference_cases = sorted(
+            (
+                case
+                for case in cases
+                if case.circumference_diameters == circumference
+            ),
+            key=lambda case: case.lx_multiplier,
+        )
+        com_axis = axes[0, column]
+        velocity_axis = axes[1, column]
+        for color, case in zip(colors, circumference_cases, strict=True):
+            series = series_by_case[case]
+            label = f"Lx = {case.lx_multiplier}x"
+            com_axis.plot(
+                series.elapsed_time,
+                series.x_center,
+                color=color,
+                linewidth=1.5,
+                label=label,
+            )
+            velocity_axis.plot(
+                series.elapsed_time,
+                series.x_velocity,
+                color=color,
+                linewidth=1.5,
+                label=label,
+            )
+
+        circumference_label = f"C = {circumference:g}D"
+        com_axis.set_title(f"{circumference_label}: axial center of mass")
+        com_axis.set_ylabel("unwrapped x center of mass")
+        com_axis.grid(alpha=0.2)
+        com_axis.legend(title="Axial size")
+
+        velocity_axis.axhline(0.0, color="black", linewidth=0.8, alpha=0.5)
+        velocity_axis.set_title(f"{circumference_label}: axial COM velocity")
+        velocity_axis.set_xlabel("elapsed simulation time")
+        velocity_axis.set_ylabel(r"$d\langle x\rangle/dt$")
+        velocity_axis.grid(alpha=0.2)
+
+    figure.suptitle(
+        "Big-Lx axial center of mass and velocity "
+        f"({next(iter(series_by_case.values())).method})"
+    )
     figure.tight_layout()
     figure.savefig(output_path, dpi=dpi)
     plt.close(figure)
     print(
-        f"[big_lx.com] case={case.case_id} frames={series.frames.size} "
-        f"method={series.method} output={output_path}",
+        f"[big_lx.com] cases={len(series_by_case)} "
+        f"method={next(iter(series_by_case.values())).method} "
+        f"output={output_path}",
         flush=True,
     )
     return output_path
@@ -226,11 +268,10 @@ def plot_center_of_mass(
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Plot unwrapped axial center of mass and its velocity for one "
-            "big-Lx film case."
+            "Plot unwrapped axial center of mass and velocity for all big-Lx "
+            "film cases in one four-panel figure."
         )
     )
-    parser.add_argument("--case", required=True)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--start", type=int, default=0)
@@ -245,7 +286,6 @@ def main() -> None:
     if args.dpi < 1:
         raise ValueError("dpi must be positive")
     plot_center_of_mass(
-        get_case(args.case),
         output_root=args.output_root,
         output=args.output,
         start=args.start,
