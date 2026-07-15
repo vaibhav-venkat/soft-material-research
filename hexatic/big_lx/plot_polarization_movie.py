@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 from itertools import chain
 import json
 from pathlib import Path
@@ -15,6 +16,7 @@ from matplotlib.animation import PillowWriter
 from matplotlib.colors import BoundaryNorm, ListedColormap, Normalize
 import numpy as np
 from safetensors.numpy import load_file
+from scipy.ndimage import label
 from scipy.spatial import cKDTree
 
 from hexatic.constants import cylinder
@@ -27,6 +29,22 @@ WINDING_POSITIVE_OUTWARD = 1
 WINDING_POSITIVE_INWARD = 2
 WINDING_COLORMAP = ListedColormap(("#2166ac", "#d73027", "#f28e2b"))
 WINDING_NORM = BoundaryNorm((-1.5, -0.5, 1.5, 2.5), WINDING_COLORMAP.N)
+WINDING_CATEGORIES = (
+    (WINDING_NEGATIVE, "-1", "#2166ac"),
+    (WINDING_POSITIVE_OUTWARD, "+1 outward", "#d73027"),
+    (WINDING_POSITIVE_INWARD, "+1 inward", "#f28e2b"),
+)
+
+
+@dataclass(frozen=True)
+class WindingDiagnostics:
+    frames: np.ndarray
+    steps: np.ndarray
+    centers: np.ndarray
+    unwrapped_centers: np.ndarray
+    velocities: np.ndarray
+    counts: np.ndarray
+    total_charge: np.ndarray
 
 
 def _frame_numbers(
@@ -326,6 +344,166 @@ def _stable_winding(
     return classified
 
 
+def _periodic_mean(values: np.ndarray, period: float, origin: float = 0.0) -> float:
+    if not len(values):
+        return float("nan")
+    angles = 2.0 * np.pi * (np.asarray(values) - origin) / period
+    mean_angle = np.arctan2(np.mean(np.sin(angles)), np.mean(np.cos(angles)))
+    result = origin + np.mod(mean_angle, 2.0 * np.pi) * period / (2.0 * np.pi)
+    result = origin + np.mod(result - origin, period)
+    if np.isclose(result, origin + period, rtol=0.0, atol=1.0e-12 * period):
+        result = origin
+    return float(result)
+
+
+def _periodic_component_centers(
+    winding: np.ndarray,
+    category: int,
+    *,
+    grid_x: np.ndarray,
+    grid_s: np.ndarray,
+    lx: float,
+    circumference: float,
+) -> np.ndarray:
+    mask = winding == category
+    labels, count = label(mask, structure=np.ones((3, 3), dtype=np.int8))
+    if count == 0:
+        return np.empty((0, 2), dtype=np.float64)
+
+    parent = np.arange(count + 1, dtype=np.int32)
+
+    def find(value: int) -> int:
+        while parent[value] != value:
+            parent[value] = parent[parent[value]]
+            value = int(parent[value])
+        return value
+
+    def union(first: int, second: int) -> None:
+        if first == 0 or second == 0:
+            return
+        first_root = find(first)
+        second_root = find(second)
+        if first_root != second_root:
+            parent[second_root] = first_root
+
+    n_s, n_x = mask.shape
+    for s_index in range(n_s):
+        for offset in (-1, 0, 1):
+            union(
+                int(labels[s_index, 0]),
+                int(labels[(s_index + offset) % n_s, n_x - 1]),
+            )
+    for x_index in range(n_x):
+        for offset in (-1, 0, 1):
+            union(
+                int(labels[0, x_index]),
+                int(labels[n_s - 1, (x_index + offset) % n_x]),
+            )
+
+    groups: dict[int, list[tuple[int, int]]] = {}
+    for s_index, x_index in np.argwhere(mask):
+        root = find(int(labels[s_index, x_index]))
+        groups.setdefault(root, []).append((int(s_index), int(x_index)))
+
+    centers = np.empty((len(groups), 2), dtype=np.float64)
+    for row, cells in enumerate(groups.values()):
+        s_indices, x_indices = np.asarray(cells, dtype=np.int64).T
+        centers[row, 0] = _periodic_mean(
+            grid_x[x_indices],
+            lx,
+            origin=-0.5 * lx,
+        )
+        centers[row, 1] = _periodic_mean(grid_s[s_indices], circumference)
+    return centers
+
+
+def _unwrap_periodic_series(values: np.ndarray, period: float) -> np.ndarray:
+    result = np.full(values.shape, np.nan, dtype=np.float64)
+    for index, value in enumerate(values):
+        if not np.isfinite(value):
+            continue
+        if index == 0 or not np.isfinite(result[index - 1]):
+            result[index] = value
+            continue
+        previous_wrapped = np.mod(result[index - 1], period)
+        delta = np.mod(value - previous_wrapped + 0.5 * period, period) - 0.5 * period
+        result[index] = result[index - 1] + delta
+    return result
+
+
+def _build_winding_diagnostics(
+    frames: list[int],
+    steps: list[int],
+    winding_by_frame: dict[int, np.ndarray],
+    *,
+    grid_x: np.ndarray,
+    grid_s: np.ndarray,
+    lx: float,
+    circumference: float,
+) -> WindingDiagnostics:
+    frame_values = np.asarray(frames, dtype=np.int64)
+    step_values = np.asarray(steps, dtype=np.int64)
+    centers = np.full((len(frames), len(WINDING_CATEGORIES), 2), np.nan)
+    counts = np.zeros((len(frames), len(WINDING_CATEGORIES)), dtype=np.int64)
+
+    for frame_row, frame_index in enumerate(frames):
+        winding = winding_by_frame[frame_index]
+        for category_row, (category, _, _) in enumerate(WINDING_CATEGORIES):
+            component_centers = _periodic_component_centers(
+                winding,
+                category,
+                grid_x=grid_x,
+                grid_s=grid_s,
+                lx=lx,
+                circumference=circumference,
+            )
+            counts[frame_row, category_row] = len(component_centers)
+            if len(component_centers):
+                centers[frame_row, category_row, 0] = _periodic_mean(
+                    component_centers[:, 0],
+                    lx,
+                    origin=-0.5 * lx,
+                )
+                centers[frame_row, category_row, 1] = _periodic_mean(
+                    component_centers[:, 1],
+                    circumference,
+                )
+
+    unwrapped = centers.copy()
+    for category_row in range(len(WINDING_CATEGORIES)):
+        x_shifted = centers[:, category_row, 0] + 0.5 * lx
+        unwrapped[:, category_row, 0] = (
+            _unwrap_periodic_series(x_shifted, lx) - 0.5 * lx
+        )
+        unwrapped[:, category_row, 1] = _unwrap_periodic_series(
+            centers[:, category_row, 1],
+            circumference,
+        )
+
+    velocities = np.full(unwrapped.shape, np.nan, dtype=np.float64)
+    elapsed = np.diff(step_values).astype(np.float64) * float(
+        cylinder.SIMULATION.timestep
+    )
+    if np.any(elapsed <= 0.0):
+        raise ValueError("Selected frame steps must be strictly increasing")
+    for index in range(1, len(frames)):
+        finite = np.all(np.isfinite(unwrapped[index - 1 : index + 1]), axis=0)
+        velocities[index, finite] = (
+            unwrapped[index, finite] - unwrapped[index - 1, finite]
+        ) / elapsed[index - 1]
+
+    total_charge = counts[:, 1] + counts[:, 2] - counts[:, 0]
+    return WindingDiagnostics(
+        frames=frame_values,
+        steps=step_values,
+        centers=centers,
+        unwrapped_centers=unwrapped,
+        velocities=velocities,
+        counts=counts,
+        total_charge=total_charge,
+    )
+
+
 def _component_output_path(
     output: Path | None,
     output_root: Path,
@@ -344,11 +522,110 @@ def _component_output_path(
     return base.parent / f"{base.name}_{component_name}.gif"
 
 
+def _diagnostics_output_path(
+    output: Path | None,
+    diagnostics_output: Path | None,
+    output_root: Path,
+    case_id: str,
+    quantity: str,
+) -> Path:
+    if diagnostics_output is not None:
+        if diagnostics_output.suffix.lower() != ".png":
+            raise ValueError("--diagnostics-output must end in .png")
+        return diagnostics_output
+    if output is None:
+        return (
+            output_root
+            / "plots"
+            / f"{case_id}_{quantity.replace('-', '_')}_winding_diagnostics.png"
+        )
+    base = output.with_suffix("") if output.suffix.lower() == ".gif" else output
+    if base.suffix:
+        raise ValueError("--output must end in .gif or have no filename suffix")
+    return base.parent / f"{base.name}_winding_diagnostics.png"
+
+
+def _plot_winding_diagnostics(
+    diagnostics: WindingDiagnostics,
+    output_path: Path,
+    *,
+    case_label: str,
+    stride: int,
+    dpi: int,
+) -> None:
+    figure, axes = plt.subplots(3, 2, figsize=(16.0, 14.0), sharex=True)
+    for category_index, (_, label_text, color) in enumerate(WINDING_CATEGORIES):
+        axes[0, 0].plot(
+            diagnostics.steps,
+            diagnostics.unwrapped_centers[:, category_index, 0],
+            color=color,
+            label=label_text,
+        )
+        axes[0, 1].plot(
+            diagnostics.steps,
+            diagnostics.unwrapped_centers[:, category_index, 1],
+            color=color,
+            label=label_text,
+        )
+        axes[1, 0].plot(
+            diagnostics.steps,
+            diagnostics.velocities[:, category_index, 0],
+            color=color,
+            label=label_text,
+        )
+        axes[1, 1].plot(
+            diagnostics.steps,
+            diagnostics.velocities[:, category_index, 1],
+            color=color,
+            label=label_text,
+        )
+        axes[2, 0].plot(
+            diagnostics.steps,
+            diagnostics.counts[:, category_index],
+            color=color,
+            label=label_text,
+        )
+
+    axes[2, 1].plot(
+        diagnostics.steps,
+        diagnostics.total_charge,
+        color="black",
+        label=r"$N_{+1,\mathrm{out}}+N_{+1,\mathrm{in}}-N_{-1}$",
+    )
+    axes[2, 1].axhline(0.0, color="gray", linewidth=1.0, alpha=0.5)
+    axes[0, 0].set_ylabel("unwrapped x COM")
+    axes[0, 1].set_ylabel(r"unwrapped $R\theta$ COM")
+    axes[1, 0].set_ylabel(r"$v_{x,\mathrm{COM}}$")
+    axes[1, 1].set_ylabel(r"$v_{R\theta,\mathrm{COM}}$")
+    axes[2, 0].set_ylabel("component count")
+    axes[2, 1].set_ylabel("total winding charge")
+    axes[2, 0].set_xlabel("simulation step")
+    axes[2, 1].set_xlabel("simulation step")
+    axes[0, 0].set_title("Periodic center of mass: x")
+    axes[0, 1].set_title(r"Periodic center of mass: $R\theta$")
+    axes[1, 0].set_title("Center-of-mass velocity: x")
+    axes[1, 1].set_title(r"Center-of-mass velocity: $R\theta$")
+    axes[2, 0].set_title("Detected winding components")
+    axes[2, 1].set_title("Net total winding charge")
+    for axis in axes.ravel():
+        axis.grid(True, linestyle="--", alpha=0.3)
+        axis.legend(loc="best")
+    figure.suptitle(
+        f"{case_label}: winding diagnostics (frame stride {stride})",
+        fontsize=14,
+    )
+    figure.tight_layout(rect=(0.0, 0.0, 1.0, 0.97))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(output_path, dpi=dpi)
+    plt.close(figure)
+
+
 def write_polarization_movies(
     case_id: str,
     *,
     output_root: Path = DEFAULT_OUTPUT_ROOT,
     output: Path | None = None,
+    diagnostics_output: Path | None = None,
     quantity: str = "polarization",
     start: int = 0,
     stop: int | None = None,
@@ -363,7 +640,8 @@ def write_polarization_movies(
     winding_radii_d: tuple[float, ...] = (1.5, 2.0, 2.5),
     winding_support_radius_d: float = 1.5,
     winding_radial_threshold: float = 0.25,
-) -> tuple[Path, Path]:
+    skip_gifs: bool = False,
+) -> tuple[Path | None, Path | None, Path]:
     if stride < 1 or fps < 1 or dpi < 1:
         raise ValueError("stride, fps, and dpi must be positive")
     if figure_width <= 0.0 or figure_height <= 0.0:
@@ -419,6 +697,83 @@ def write_polarization_movies(
         _circle_offsets(radius_d * particle_diameter, winding_dx, winding_ds)
         for radius_d in winding_radii_d
     )
+
+    winding_by_frame: dict[int, np.ndarray] = {}
+    step_by_frame: dict[int, int] = {}
+    for rendered, (frame_index, frame) in enumerate(
+        _iter_frames(paths.analysis_dir, manifest, selected),
+        start=1,
+    ):
+        winding_x, winding_theta, winding_vectors = _particle_vectors(
+            frame,
+            radius=case.radius,
+            quantity="polarization",
+        )
+        if not len(winding_x):
+            radial = np.asarray(frame["coords"], dtype=np.float32)[:, 2]
+            finite_radial = radial[np.isfinite(radial)]
+            observed = (
+                f"[{float(np.min(finite_radial)):.6g}, "
+                f"{float(np.max(finite_radial)):.6g}]"
+                if finite_radial.size
+                else "no finite radii"
+            )
+            raise ValueError(
+                f"No plottable film particles in frame {frame_index}; expected "
+                f"{case.radius - particle_diameter:.6g} < r <= "
+                f"{film_upper_radius:.6g}, observed r={observed}"
+            )
+        winding_by_frame[frame_index] = _stable_winding(
+            winding_x,
+            winding_theta,
+            winding_vectors,
+            grid_x=winding_grid_x,
+            grid_s=winding_grid_s,
+            circle_offsets=winding_circle_offsets,
+            lx=case.lx,
+            circumference=case.circumference,
+            radius=case.radius,
+            support_radius=winding_support_radius_d * particle_diameter,
+            dx=winding_dx,
+            ds=winding_ds,
+            radial_threshold=winding_radial_threshold,
+        )
+        step_by_frame[frame_index] = int(frame["step"])
+        print(
+            f"[big_lx.winding] frame {frame_index} ({rendered}/{len(frames)})",
+            flush=True,
+        )
+    missing_frames = [frame for frame in frames if frame not in winding_by_frame]
+    if missing_frames:
+        raise RuntimeError(f"Missing requested winding frames: {missing_frames}")
+
+    diagnostics = _build_winding_diagnostics(
+        frames,
+        [step_by_frame[frame] for frame in frames],
+        winding_by_frame,
+        grid_x=winding_grid_x,
+        grid_s=winding_grid_s,
+        lx=case.lx,
+        circumference=case.circumference,
+    )
+    diagnostics_path = _diagnostics_output_path(
+        output,
+        diagnostics_output,
+        output_root,
+        case_id,
+        quantity,
+    )
+    _plot_winding_diagnostics(
+        diagnostics,
+        diagnostics_path,
+        case_label=case.label,
+        stride=stride,
+        dpi=max(dpi, 150),
+    )
+    print(f"[big_lx.winding] wrote {diagnostics_path}", flush=True)
+    if skip_gifs:
+        return None, None, diagnostics_path
+
     # Saved cylindrical order is (x, radial, azimuthal), so Ptheta is index 2.
     movies = (
         ("px_ptheta", r"$(P_x,P_\theta)$", "in_film"),
@@ -504,37 +859,7 @@ def write_polarization_movies(
                     axis.clear()
                     winding_mesh = None
                     if show_winding and vector_mode == "in_film":
-                        if quantity == "polarization":
-                            winding_x = particle_x
-                            winding_theta = particle_theta
-                            winding_vectors = vectors
-                        else:
-                            (
-                                winding_x,
-                                winding_theta,
-                                winding_vectors,
-                            ) = _particle_vectors(
-                                frame,
-                                radius=case.radius,
-                                quantity="polarization",
-                            )
-                        winding = _stable_winding(
-                            winding_x,
-                            winding_theta,
-                            winding_vectors,
-                            grid_x=winding_grid_x,
-                            grid_s=winding_grid_s,
-                            circle_offsets=winding_circle_offsets,
-                            lx=case.lx,
-                            circumference=case.circumference,
-                            radius=case.radius,
-                            support_radius=(
-                                winding_support_radius_d * particle_diameter
-                            ),
-                            dx=winding_dx,
-                            ds=winding_ds,
-                            radial_threshold=winding_radial_threshold,
-                        )
+                        winding = winding_by_frame[frame_index]
                         winding_mesh = axis.pcolormesh(
                             winding_x_edges,
                             winding_s_edges,
@@ -620,14 +945,14 @@ def write_polarization_movies(
             )
         outputs.append(output_path)
         print(f"[big_lx.movie] wrote {output_path}", flush=True)
-    return outputs[0], outputs[1]
+    return outputs[0], outputs[1], diagnostics_path
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Render per-particle (Px, Ptheta) and Px direction GIFs on the unwrapped "
-            "film coordinate x versus R_case*theta."
+            "Render polarization GIFs and winding COM, velocity, count, and total "
+            "charge diagnostics on the unwrapped film."
         )
     )
     parser.add_argument("--case", required=True)
@@ -636,6 +961,11 @@ def _parse_args() -> argparse.Namespace:
         "--output",
         type=Path,
         help="Output filename prefix; a trailing .gif is removed before component names.",
+    )
+    parser.add_argument(
+        "--diagnostics-output",
+        type=Path,
+        help="Optional .png path for the winding diagnostics figure.",
     )
     parser.add_argument(
         "--quantity",
@@ -651,6 +981,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--color-max", type=float)
     parser.add_argument("--figure-width", type=float, default=20.0)
     parser.add_argument("--figure-height", type=float, default=10.0)
+    parser.add_argument(
+        "--skip-gifs",
+        action="store_true",
+        help="Write only the winding diagnostics PNG and skip both GIFs.",
+    )
     parser.add_argument(
         "--no-winding",
         action="store_true",
@@ -683,6 +1018,7 @@ def main() -> None:
         args.case,
         output_root=args.output_root,
         output=args.output,
+        diagnostics_output=args.diagnostics_output,
         quantity=args.quantity,
         start=args.start,
         stop=args.stop,
@@ -697,6 +1033,7 @@ def main() -> None:
         winding_radii_d=tuple(args.winding_radii_d),
         winding_support_radius_d=args.winding_support_radius_d,
         winding_radial_threshold=args.winding_radial_threshold,
+        skip_gifs=args.skip_gifs,
     )
 
 
