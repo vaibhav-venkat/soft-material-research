@@ -13,7 +13,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from safetensors.numpy import load_file
-from scipy.fft import fft, fftfreq, fftshift, ifft
+from scipy.fft import fft, fftfreq, ifft
+from scipy.signal import find_peaks
+from scipy.signal.windows import hann
 
 from hexatic.constants import cylinder
 
@@ -35,6 +37,9 @@ class VelocitySpectrum:
     omega: np.ndarray
     real_coefficient: np.ndarray
     power: np.ndarray
+    peak_omega: np.ndarray
+    peak_period: np.ndarray
+    peak_power: np.ndarray
     denoised_velocity: np.ndarray
     noise_floor: float
     threshold: float
@@ -186,6 +191,9 @@ def velocity_spectrum(
     series: CenterOfMassSeries,
     *,
     noise_factor: float,
+    minimum_cycles: float,
+    peak_false_alarm_probability: float,
+    zoom_fraction: float,
 ) -> VelocitySpectrum:
     time_spacing = np.diff(series.elapsed_time)
     dt = float(time_spacing[0])
@@ -199,9 +207,61 @@ def velocity_spectrum(
     omega = 2.0 * np.pi * frequencies
 
     negative_indices = (-np.arange(coefficients.size)) % coefficients.size
-    negative_frequency_coefficients = coefficients[negative_indices]
-    power = np.real(coefficients * negative_frequency_coefficients)
-    power = np.maximum(power, 0.0)
+
+    window = hann(centered_velocity.size, sym=False)
+    windowed_mean = float(np.sum(centered_velocity * window) / np.sum(window))
+    windowed_velocity = (centered_velocity - windowed_mean) * window
+    windowed_coefficients = fft(windowed_velocity, norm="forward")
+    windowed_coefficients /= float(np.mean(window))
+    windowed_negative_coefficients = windowed_coefficients[negative_indices]
+    windowed_power = np.real(
+        windowed_coefficients * windowed_negative_coefficients
+    )
+    windowed_power = np.maximum(windowed_power, 0.0)
+
+    observation_time = float(series.elapsed_time[-1] - series.elapsed_time[0])
+    minimum_omega = 2.0 * np.pi * minimum_cycles / observation_time
+    nyquist_omega = np.pi / dt
+    maximum_omega = min(
+        nyquist_omega,
+        max(zoom_fraction * nyquist_omega, 4.0 * minimum_omega),
+    )
+    displayed = (omega >= minimum_omega) & (omega <= maximum_omega)
+    displayed_omega = omega[displayed]
+    displayed_coefficients = windowed_coefficients[displayed]
+    displayed_power = windowed_power[displayed]
+    if displayed_omega.size < 3:
+        raise ValueError(
+            "Too few positive-frequency bins remain after applying the "
+            "minimum-cycle and near-zero zoom limits"
+        )
+
+    coefficient_scale = float(np.max(np.abs(displayed_coefficients)))
+    power_scale = float(np.max(displayed_power))
+    normalized_real_coefficient = np.real(displayed_coefficients) / max(
+        coefficient_scale,
+        np.finfo(np.float64).tiny,
+    )
+    normalized_power = displayed_power / max(
+        power_scale,
+        np.finfo(np.float64).tiny,
+    )
+
+    noise_mean = float(np.median(displayed_power) / np.log(2.0))
+    independent_bins = displayed_power.size
+    false_alarm_multiplier = -np.log(
+        1.0
+        - (1.0 - peak_false_alarm_probability) ** (1.0 / independent_bins)
+    )
+    false_alarm_level = false_alarm_multiplier * noise_mean
+    peak_indices, _ = find_peaks(
+        displayed_power,
+        height=false_alarm_level,
+        prominence=noise_mean,
+    )
+    peak_omega = displayed_omega[peak_indices]
+    peak_period = 2.0 * np.pi / peak_omega
+    peak_power = normalized_power[peak_indices]
 
     absolute_omega = np.abs(omega)
     high_frequency = absolute_omega >= 0.75 * float(np.max(absolute_omega))
@@ -215,9 +275,12 @@ def velocity_spectrum(
     )
 
     return VelocitySpectrum(
-        omega=fftshift(omega),
-        real_coefficient=fftshift(np.real(coefficients)),
-        power=fftshift(power),
+        omega=displayed_omega,
+        real_coefficient=normalized_real_coefficient,
+        power=normalized_power,
+        peak_omega=peak_omega,
+        peak_period=peak_period,
+        peak_power=peak_power,
         denoised_velocity=np.asarray(denoised_velocity, dtype=np.float64),
         noise_floor=noise_floor,
         threshold=threshold,
@@ -229,6 +292,9 @@ def _plot_velocity_summary(
     *,
     output_path: Path,
     noise_factor: float,
+    minimum_cycles: float,
+    peak_false_alarm_probability: float,
+    zoom_fraction: float,
     dpi: int,
 ) -> None:
     cases = tuple(series_by_case)
@@ -249,7 +315,13 @@ def _plot_velocity_summary(
         )
     }
     spectrum_by_case = {
-        case: velocity_spectrum(series, noise_factor=noise_factor)
+        case: velocity_spectrum(
+            series,
+            noise_factor=noise_factor,
+            minimum_cycles=minimum_cycles,
+            peak_false_alarm_probability=peak_false_alarm_probability,
+            zoom_fraction=zoom_fraction,
+        )
         for case, series in series_by_case.items()
     }
 
@@ -303,6 +375,29 @@ def _plot_velocity_summary(
             linestyle=line_style,
             linewidth=1.1,
         )
+        power_axis.scatter(
+            spectrum.peak_omega,
+            spectrum.peak_power,
+            color=color,
+            marker="o",
+            s=24,
+            zorder=4,
+        )
+        for peak_omega, peak_period, peak_power in zip(
+            spectrum.peak_omega,
+            spectrum.peak_period,
+            spectrum.peak_power,
+            strict=True,
+        ):
+            power_axis.annotate(
+                f"T={peak_period:.2g}",
+                xy=(peak_omega, peak_power),
+                xytext=(4, 5),
+                textcoords="offset points",
+                color=color,
+                fontsize=7,
+                rotation=35,
+            )
         denoised_axis.plot(
             series.elapsed_time,
             series.x_velocity,
@@ -327,17 +422,21 @@ def _plot_velocity_summary(
     maximum_axis.legend()
 
     real_axis.axhline(0.0, color="black", linewidth=0.7, alpha=0.4)
-    real_axis.axvline(0.0, color="black", linewidth=0.7, alpha=0.4)
     real_axis.set_xlabel(r"angular frequency $\omega$")
-    real_axis.set_ylabel(r"$\mathrm{Re}\,V(\omega)$")
-    real_axis.set_title("Real part of the COM-velocity FFT")
+    real_axis.set_ylabel(r"normalized $\mathrm{Re}\,V(\omega)$")
+    real_axis.set_title("Hann-windowed real COM-velocity FFT")
     real_axis.grid(alpha=0.2)
     real_axis.legend(fontsize="small", ncol=2)
 
     power_axis.set_xlabel(r"angular frequency $\omega$")
-    power_axis.set_ylabel(r"$V(\omega)V(-\omega)$")
-    power_axis.set_title("COM-velocity Fourier magnitude")
-    power_axis.set_yscale("symlog", linthresh=1e-16)
+    power_axis.set_ylabel(r"normalized $V(\omega)V(-\omega)$")
+    power_axis.set_title(
+        "Positive-frequency Fourier magnitude "
+        f"(at least {minimum_cycles:g} cycles; "
+        f"FAP <= {100.0 * peak_false_alarm_probability:g}%)"
+    )
+    power_axis.set_yscale("log")
+    power_axis.set_ylim(1e-6, 1.5)
     power_axis.grid(alpha=0.2)
 
     denoised_axis.axhline(0.0, color="black", linewidth=0.7, alpha=0.4)
@@ -351,11 +450,23 @@ def _plot_velocity_summary(
 
     figure.suptitle(
         "Big-Lx COM-velocity maxima, Fourier spectra, and denoising\n"
-        "Color: Lx multiplier; solid: C=60D; dashed: C=60.5D"
+        "Positive frequencies near zero; each spectrum normalized independently; "
+        "color: Lx multiplier; solid: C=60D; dashed: C=60.5D"
     )
     figure.tight_layout()
     figure.savefig(output_path, dpi=dpi)
     plt.close(figure)
+
+    for case, spectrum in spectrum_by_case.items():
+        if spectrum.peak_period.size:
+            periods = ",".join(f"{period:.8g}" for period in spectrum.peak_period)
+        else:
+            periods = "none"
+        print(
+            f"[big_lx.fft] case={case.case_id} significant_periods={periods} "
+            f"false_alarm_probability={peak_false_alarm_probability:g}",
+            flush=True,
+        )
 
 
 def plot_center_of_mass(
@@ -368,6 +479,9 @@ def plot_center_of_mass(
     stride: int = 1,
     dpi: int = 180,
     fft_noise_factor: float = 4.0,
+    fft_minimum_cycles: float = 3.0,
+    fft_peak_false_alarm_probability: float = 0.01,
+    fft_zoom_fraction: float = 0.1,
 ) -> tuple[Path, Path]:
     cases = all_cases()
     series_by_case = {
@@ -453,6 +567,9 @@ def plot_center_of_mass(
         series_by_case,
         output_path=spectral_output_path,
         noise_factor=fft_noise_factor,
+        minimum_cycles=fft_minimum_cycles,
+        peak_false_alarm_probability=fft_peak_false_alarm_probability,
+        zoom_fraction=fft_zoom_fraction,
         dpi=dpi,
     )
     print(
@@ -468,7 +585,7 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Plot unwrapped axial center of mass and velocity for all big-Lx "
-            "film cases in one four-panel figure."
+            "film cases together with a four-panel Fourier summary."
         )
     )
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
@@ -479,6 +596,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--stride", type=int, default=1)
     parser.add_argument("--dpi", type=int, default=180)
     parser.add_argument("--fft-noise-factor", type=float, default=4.0)
+    parser.add_argument("--fft-minimum-cycles", type=float, default=3.0)
+    parser.add_argument(
+        "--fft-peak-false-alarm-probability",
+        type=float,
+        default=0.01,
+    )
+    parser.add_argument("--fft-zoom-fraction", type=float, default=0.1)
     return parser.parse_args()
 
 
@@ -488,6 +612,12 @@ def main() -> None:
         raise ValueError("dpi must be positive")
     if args.fft_noise_factor <= 0.0:
         raise ValueError("fft-noise-factor must be positive")
+    if args.fft_minimum_cycles <= 0.0:
+        raise ValueError("fft-minimum-cycles must be positive")
+    if not 0.0 < args.fft_peak_false_alarm_probability < 1.0:
+        raise ValueError("fft-peak-false-alarm-probability must be between 0 and 1")
+    if not 0.0 < args.fft_zoom_fraction <= 1.0:
+        raise ValueError("fft-zoom-fraction must be in (0, 1]")
     plot_center_of_mass(
         output_root=args.output_root,
         output=args.output,
@@ -497,6 +627,9 @@ def main() -> None:
         stride=args.stride,
         dpi=args.dpi,
         fft_noise_factor=args.fft_noise_factor,
+        fft_minimum_cycles=args.fft_minimum_cycles,
+        fft_peak_false_alarm_probability=args.fft_peak_false_alarm_probability,
+        fft_zoom_fraction=args.fft_zoom_fraction,
     )
 
 
