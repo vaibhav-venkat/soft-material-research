@@ -39,6 +39,7 @@ class VelocitySpectrum:
     peak_omega: np.ndarray
     peak_period: np.ndarray
     peak_power: np.ndarray
+    peak_r_squared: np.ndarray
 
 
 def _selected_frames(
@@ -219,6 +220,9 @@ def velocity_spectrum(
         nyquist_omega,
         max(zoom_fraction * nyquist_omega, 4.0 * minimum_omega),
     )
+    positive = omega > 0.0
+    positive_omega = omega[positive]
+    positive_power = windowed_power[positive]
     displayed = (omega >= minimum_omega) & (omega <= maximum_omega)
     displayed_omega = omega[displayed]
     displayed_power = windowed_power[displayed]
@@ -241,14 +245,23 @@ def velocity_spectrum(
         - (1.0 - peak_false_alarm_probability) ** (1.0 / independent_bins)
     )
     false_alarm_level = false_alarm_multiplier * noise_mean
-    peak_indices, _ = find_peaks(
-        displayed_power,
+    positive_peak_indices, _ = find_peaks(
+        positive_power,
         height=false_alarm_level,
         prominence=noise_mean,
     )
-    peak_omega = displayed_omega[peak_indices]
+    positive_peak_omega = positive_omega[positive_peak_indices]
+    eligible_peaks = (
+        (positive_peak_omega >= minimum_omega)
+        & (positive_peak_omega <= maximum_omega)
+    )
+    peak_omega = positive_peak_omega[eligible_peaks]
     peak_period = 2.0 * np.pi / peak_omega
-    peak_power = normalized_power[peak_indices]
+    peak_power = np.interp(peak_omega, displayed_omega, normalized_power)
+    peak_r_squared = np.asarray(
+        [_sinusoid_r_squared(series, value) for value in peak_omega],
+        dtype=np.float64,
+    )
 
     return VelocitySpectrum(
         omega=displayed_omega,
@@ -256,7 +269,27 @@ def velocity_spectrum(
         peak_omega=peak_omega,
         peak_period=peak_period,
         peak_power=peak_power,
+        peak_r_squared=peak_r_squared,
     )
+
+
+def _sinusoid_r_squared(series: CenterOfMassSeries, omega: float) -> float:
+    time = series.elapsed_time
+    velocity = series.x_velocity
+    design = np.column_stack(
+        (
+            np.ones(time.size, dtype=np.float64),
+            np.sin(omega * time),
+            np.cos(omega * time),
+        )
+    )
+    coefficients, _, _, _ = np.linalg.lstsq(design, velocity, rcond=None)
+    modeled_velocity = design @ coefficients
+    residual_sum_squares = float(np.sum((velocity - modeled_velocity) ** 2))
+    total_sum_squares = float(np.sum((velocity - np.mean(velocity)) ** 2))
+    if total_sum_squares == 0.0:
+        return float("nan")
+    return 1.0 - residual_sum_squares / total_sum_squares
 
 
 def _plot_velocity_summary(
@@ -374,6 +407,17 @@ def _plot_velocity_summary(
             f"false_alarm_probability={peak_false_alarm_probability:g}",
             flush=True,
         )
+        peak_scores = np.nan_to_num(spectrum.peak_r_squared, nan=-np.inf)
+        peak_order = np.argsort(peak_scores)[::-1]
+        for rank, peak_index in enumerate(peak_order, start=1):
+            print(
+                f"[big_lx.fft_peak] case={case.case_id} "
+                f"rank={rank} period={spectrum.peak_period[peak_index]:.8g} "
+                f"omega={spectrum.peak_omega[peak_index]:.8g} "
+                f"sinusoid_r_squared="
+                f"{spectrum.peak_r_squared[peak_index]:.8g}",
+                flush=True,
+            )
 
 
 def plot_center_of_mass(
