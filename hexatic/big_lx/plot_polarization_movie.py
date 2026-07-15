@@ -648,22 +648,21 @@ def _plot_winding_diagnostics(
     case_label: str,
     stride: int,
     smoothing_window: int,
-    lx: float,
-    circumference: float,
+    start_frame: int,
     dpi: int,
 ) -> None:
     figure, axes = plt.subplots(3, 2, figsize=(16.0, 14.0), sharex=True)
     for category_index, (_, label_text, color) in enumerate(WINDING_CATEGORIES):
         axes[0, 0].plot(
             diagnostics.steps,
-            diagnostics.smoothed_centers[:, category_index, 0],
+            diagnostics.unwrapped_centers[:, category_index, 0],
             color=color,
             label=label_text,
             linewidth=1.8,
         )
         axes[0, 1].plot(
             diagnostics.steps,
-            diagnostics.smoothed_centers[:, category_index, 1],
+            diagnostics.unwrapped_centers[:, category_index, 1],
             color=color,
             label=label_text,
             linewidth=1.8,
@@ -702,28 +701,27 @@ def _plot_winding_diagnostics(
         label=r"$N_{+1,\mathrm{out}}+N_{+1,\mathrm{in}}-N_{-1}$",
     )
     axes[2, 1].axhline(0.0, color="gray", linewidth=1.0, alpha=0.5)
-    axes[0, 0].set_ylabel("periodic x COM")
-    axes[0, 1].set_ylabel(r"periodic $R\theta$ COM")
+    axes[0, 0].set_ylabel("unwrapped x COM")
+    axes[0, 1].set_ylabel(r"unwrapped $R\theta$ COM")
     axes[1, 0].set_ylabel(r"$v_{x,\mathrm{COM}}$")
     axes[1, 1].set_ylabel(r"$v_{R\theta,\mathrm{COM}}$")
     axes[2, 0].set_ylabel("component count")
     axes[2, 1].set_ylabel("total winding charge")
     axes[2, 0].set_xlabel("simulation step")
     axes[2, 1].set_xlabel("simulation step")
-    axes[0, 0].set_title("Periodic center of mass: x")
-    axes[0, 1].set_title(r"Periodic center of mass: $R\theta$")
+    axes[0, 0].set_title("Unwrapped periodic center of mass: x")
+    axes[0, 1].set_title(r"Unwrapped periodic center of mass: $R\theta$")
     axes[1, 0].set_title("Center-of-mass velocity: x")
     axes[1, 1].set_title(r"Center-of-mass velocity: $R\theta$")
     axes[2, 0].set_title("Detected winding components")
     axes[2, 1].set_title("Net total winding charge")
-    axes[0, 0].set_ylim(-0.5 * lx, 0.5 * lx)
-    axes[0, 1].set_ylim(0.0, circumference)
     for axis in axes.ravel():
         axis.grid(True, linestyle="--", alpha=0.3)
         axis.legend(loc="best")
     figure.suptitle(
         f"{case_label}: winding diagnostics "
-        f"(frame stride {stride}, smoothing window {smoothing_window})",
+        f"(start frame {start_frame}, stride {stride}, "
+        f"smoothing window {smoothing_window})",
         fontsize=14,
     )
     figure.tight_layout(rect=(0.0, 0.0, 1.0, 0.97))
@@ -753,6 +751,7 @@ def write_polarization_movies(
     winding_support_radius_d: float = 1.5,
     winding_radial_threshold: float = 0.25,
     diagnostics_smoothing_window: int = 7,
+    diagnostics_start_strides: int = 10,
     skip_gifs: bool = False,
 ) -> tuple[Path | None, Path | None, Path]:
     if stride < 1 or fps < 1 or dpi < 1:
@@ -778,6 +777,8 @@ def write_polarization_movies(
         raise ValueError("winding-radial-threshold must be in [0, 1)")
     if diagnostics_smoothing_window < 1 or diagnostics_smoothing_window % 2 == 0:
         raise ValueError("diagnostics-smoothing-window must be a positive odd integer")
+    if diagnostics_start_strides < 0:
+        raise ValueError("diagnostics-start-strides must be non-negative")
     if quantity not in ("polarization", "polar-density"):
         raise ValueError("quantity must be 'polarization' or 'polar-density'")
     case = get_case(case_id)
@@ -790,7 +791,14 @@ def write_polarization_movies(
         raise ValueError(f"Unsupported analysis schema in {manifest_path}")
 
     frames = _frame_numbers(manifest, start, stop, stride)
-    selected = set(frames)
+    diagnostics_frames = frames[diagnostics_start_strides:]
+    if not diagnostics_frames:
+        raise ValueError(
+            "No diagnostics frames remain after discarding "
+            f"{diagnostics_start_strides} stride intervals"
+        )
+    winding_frames = diagnostics_frames if skip_gifs else frames
+    selected = set(winding_frames)
     particle_diameter = float(cylinder.ANALYSIS.particle_diameter)
     film_upper_radius = case.radius + max(
         0.01,
@@ -855,16 +863,19 @@ def write_polarization_movies(
         )
         step_by_frame[frame_index] = int(frame["step"])
         print(
-            f"[big_lx.winding] frame {frame_index} ({rendered}/{len(frames)})",
+            f"[big_lx.winding] frame {frame_index} "
+            f"({rendered}/{len(winding_frames)})",
             flush=True,
         )
-    missing_frames = [frame for frame in frames if frame not in winding_by_frame]
+    missing_frames = [
+        frame for frame in winding_frames if frame not in winding_by_frame
+    ]
     if missing_frames:
         raise RuntimeError(f"Missing requested winding frames: {missing_frames}")
 
     diagnostics = _build_winding_diagnostics(
-        frames,
-        [step_by_frame[frame] for frame in frames],
+        diagnostics_frames,
+        [step_by_frame[frame] for frame in diagnostics_frames],
         winding_by_frame,
         grid_x=winding_grid_x,
         grid_s=winding_grid_s,
@@ -885,8 +896,7 @@ def write_polarization_movies(
         case_label=case.label,
         stride=stride,
         smoothing_window=diagnostics_smoothing_window,
-        lx=case.lx,
-        circumference=case.circumference,
+        start_frame=diagnostics_frames[0],
         dpi=max(dpi, 150),
     )
     print(f"[big_lx.winding] wrote {diagnostics_path}", flush=True)
@@ -1134,6 +1144,15 @@ def _parse_args() -> argparse.Namespace:
         default=7,
         help="Positive odd rolling window in selected frames for COM and count trends.",
     )
+    parser.add_argument(
+        "--diagnostics-start-strides",
+        type=int,
+        default=10,
+        help=(
+            "Discard this many selected stride intervals before diagnostics; "
+            "default 10 means diagnostics begin at start + 10*stride."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -1159,6 +1178,7 @@ def main() -> None:
         winding_support_radius_d=args.winding_support_radius_d,
         winding_radial_threshold=args.winding_radial_threshold,
         diagnostics_smoothing_window=args.diagnostics_smoothing_window,
+        diagnostics_start_strides=args.diagnostics_start_strides,
         skip_gifs=args.skip_gifs,
     )
 
