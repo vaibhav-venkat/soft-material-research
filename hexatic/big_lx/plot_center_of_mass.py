@@ -13,7 +13,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from safetensors.numpy import load_file
-from scipy.fft import fft, fftfreq, ifft
+from scipy.fft import fft, fftfreq
 from scipy.signal import find_peaks
 from scipy.signal.windows import hann
 
@@ -35,14 +35,10 @@ class CenterOfMassSeries:
 @dataclass(frozen=True)
 class VelocitySpectrum:
     omega: np.ndarray
-    real_coefficient: np.ndarray
     power: np.ndarray
     peak_omega: np.ndarray
     peak_period: np.ndarray
     peak_power: np.ndarray
-    denoised_velocity: np.ndarray
-    noise_floor: float
-    threshold: float
 
 
 def _selected_frames(
@@ -190,7 +186,6 @@ def center_of_mass_series(
 def velocity_spectrum(
     series: CenterOfMassSeries,
     *,
-    noise_factor: float,
     minimum_cycles: float,
     peak_false_alarm_probability: float,
     zoom_fraction: float,
@@ -200,13 +195,11 @@ def velocity_spectrum(
     if not np.allclose(time_spacing, dt, rtol=1e-10, atol=1e-12):
         raise ValueError("FFT requires uniformly spaced trajectory samples")
 
-    velocity_mean = float(np.mean(series.x_velocity))
-    centered_velocity = series.x_velocity - velocity_mean
-    coefficients = fft(centered_velocity, norm="forward")
+    centered_velocity = series.x_velocity - float(np.mean(series.x_velocity))
     frequencies = fftfreq(centered_velocity.size, d=dt)
     omega = 2.0 * np.pi * frequencies
 
-    negative_indices = (-np.arange(coefficients.size)) % coefficients.size
+    negative_indices = (-np.arange(centered_velocity.size)) % centered_velocity.size
 
     window = hann(centered_velocity.size, sym=False)
     windowed_mean = float(np.sum(centered_velocity * window) / np.sum(window))
@@ -228,7 +221,6 @@ def velocity_spectrum(
     )
     displayed = (omega >= minimum_omega) & (omega <= maximum_omega)
     displayed_omega = omega[displayed]
-    displayed_coefficients = windowed_coefficients[displayed]
     displayed_power = windowed_power[displayed]
     if displayed_omega.size < 3:
         raise ValueError(
@@ -236,12 +228,7 @@ def velocity_spectrum(
             "minimum-cycle and near-zero zoom limits"
         )
 
-    coefficient_scale = float(np.max(np.abs(displayed_coefficients)))
     power_scale = float(np.max(displayed_power))
-    normalized_real_coefficient = np.real(displayed_coefficients) / max(
-        coefficient_scale,
-        np.finfo(np.float64).tiny,
-    )
     normalized_power = displayed_power / max(
         power_scale,
         np.finfo(np.float64).tiny,
@@ -263,27 +250,12 @@ def velocity_spectrum(
     peak_period = 2.0 * np.pi / peak_omega
     peak_power = normalized_power[peak_indices]
 
-    absolute_omega = np.abs(omega)
-    high_frequency = absolute_omega >= 0.75 * float(np.max(absolute_omega))
-    noise_floor = float(np.median(np.abs(coefficients[high_frequency])))
-    threshold = noise_factor * noise_floor
-    keep = np.abs(coefficients) >= threshold
-    keep |= keep[negative_indices]
-    filtered_coefficients = np.where(keep, coefficients, 0.0)
-    denoised_velocity = (
-        np.real(ifft(filtered_coefficients, norm="forward")) + velocity_mean
-    )
-
     return VelocitySpectrum(
         omega=displayed_omega,
-        real_coefficient=normalized_real_coefficient,
         power=normalized_power,
         peak_omega=peak_omega,
         peak_period=peak_period,
         peak_power=peak_power,
-        denoised_velocity=np.asarray(denoised_velocity, dtype=np.float64),
-        noise_floor=noise_floor,
-        threshold=threshold,
     )
 
 
@@ -291,33 +263,20 @@ def _plot_velocity_summary(
     series_by_case: dict[BigLxCase, CenterOfMassSeries],
     *,
     output_path: Path,
-    noise_factor: float,
     minimum_cycles: float,
     peak_false_alarm_probability: float,
     zoom_fraction: float,
     dpi: int,
 ) -> None:
     cases = tuple(series_by_case)
-    circumferences = tuple(
-        sorted({case.circumference_diameters for case in cases})
-    )
     multipliers = tuple(sorted({case.lx_multiplier for case in cases}))
     colors = plt.colormaps["viridis"](
         np.linspace(0.1, 0.9, len(multipliers))
     )
     color_by_multiplier = dict(zip(multipliers, colors, strict=True))
-    line_style_by_circumference = {
-        circumference: line_style
-        for circumference, line_style in zip(
-            circumferences,
-            ("-", "--"),
-            strict=True,
-        )
-    }
     spectrum_by_case = {
         case: velocity_spectrum(
             series,
-            noise_factor=noise_factor,
             minimum_cycles=minimum_cycles,
             peak_false_alarm_probability=peak_false_alarm_probability,
             zoom_fraction=zoom_fraction,
@@ -325,55 +284,29 @@ def _plot_velocity_summary(
         for case, series in series_by_case.items()
     }
 
-    figure, axes = plt.subplots(2, 2, figsize=(16, 10))
-    maximum_axis = axes[0, 0]
-    real_axis = axes[0, 1]
-    power_axis = axes[1, 0]
-    denoised_axis = axes[1, 1]
+    figure, axes = plt.subplots(3, 2, figsize=(16, 15), squeeze=False)
+    flattened_axes = axes.reshape(-1)
+    maximum_axis = flattened_axes[0]
+    sorted_cases = sorted(cases, key=lambda case: case.lx_multiplier)
+    maximum_axis.plot(
+        [case.lx_multiplier for case in sorted_cases],
+        [
+            float(np.max(np.abs(series_by_case[case].x_velocity)))
+            for case in sorted_cases
+        ],
+        color="tab:blue",
+        marker="o",
+        linewidth=1.8,
+    )
 
-    for circumference in circumferences:
-        circumference_cases = sorted(
-            (
-                case
-                for case in cases
-                if case.circumference_diameters == circumference
-            ),
-            key=lambda case: case.lx_multiplier,
-        )
-        maximum_axis.plot(
-            [case.lx_multiplier for case in circumference_cases],
-            [
-                float(np.max(np.abs(series_by_case[case].x_velocity)))
-                for case in circumference_cases
-            ],
-            marker="o",
-            linewidth=1.8,
-            label=f"C = {circumference:g}D",
-        )
-
-    for case in sorted(
-        cases,
-        key=lambda item: (item.circumference_diameters, item.lx_multiplier),
-    ):
-        series = series_by_case[case]
+    for power_axis, case in zip(flattened_axes[1:], sorted_cases, strict=True):
         spectrum = spectrum_by_case[case]
         color = color_by_multiplier[case.lx_multiplier]
-        line_style = line_style_by_circumference[case.circumference_diameters]
-        label = f"C={case.circumference_diameters:g}D, Lx={case.lx_multiplier}x"
-        real_axis.plot(
-            spectrum.omega,
-            spectrum.real_coefficient,
-            color=color,
-            linestyle=line_style,
-            linewidth=1.1,
-            label=label,
-        )
         power_axis.plot(
             spectrum.omega,
             spectrum.power,
             color=color,
-            linestyle=line_style,
-            linewidth=1.1,
+            linewidth=1.4,
         )
         power_axis.scatter(
             spectrum.peak_omega,
@@ -398,62 +331,36 @@ def _plot_velocity_summary(
                 fontsize=7,
                 rotation=35,
             )
-        denoised_axis.plot(
-            series.elapsed_time,
-            series.x_velocity,
-            color=color,
-            linestyle=line_style,
-            linewidth=0.7,
-            alpha=0.18,
-        )
-        denoised_axis.plot(
-            series.elapsed_time,
-            spectrum.denoised_velocity,
-            color=color,
-            linestyle=line_style,
-            linewidth=1.4,
-        )
+        if spectrum.peak_period.size == 0:
+            power_axis.text(
+                0.5,
+                0.9,
+                "No significant peak",
+                transform=power_axis.transAxes,
+                ha="center",
+                va="top",
+                fontsize=9,
+            )
+        power_axis.set_xlabel(r"angular frequency $\omega$")
+        power_axis.set_ylabel(r"normalized $V(\omega)V(-\omega)$")
+        power_axis.set_title(f"C = 60D, Lx = {case.lx_multiplier}x")
+        power_axis.set_yscale("log")
+        power_axis.set_ylim(1e-6, 1.5)
+        power_axis.grid(alpha=0.2)
 
     maximum_axis.set_xticks(multipliers)
     maximum_axis.set_xlabel(r"$L_x$ multiplier")
     maximum_axis.set_ylabel(r"$\max_t |v_x(t)|$")
-    maximum_axis.set_title("Maximum axial COM speed")
+    maximum_axis.set_title("C = 60D: maximum axial COM speed")
     maximum_axis.grid(alpha=0.2)
-    maximum_axis.legend()
-
-    real_axis.axhline(0.0, color="black", linewidth=0.7, alpha=0.4)
-    real_axis.set_xlabel(r"angular frequency $\omega$")
-    real_axis.set_ylabel(r"normalized $\mathrm{Re}\,V(\omega)$")
-    real_axis.set_title("Hann-windowed real COM-velocity FFT")
-    real_axis.grid(alpha=0.2)
-    real_axis.legend(fontsize="small", ncol=2)
-
-    power_axis.set_xlabel(r"angular frequency $\omega$")
-    power_axis.set_ylabel(r"normalized $V(\omega)V(-\omega)$")
-    power_axis.set_title(
-        "Positive-frequency Fourier magnitude "
-        f"(at least {minimum_cycles:g} cycles; "
-        f"FAP <= {100.0 * peak_false_alarm_probability:g}%)"
-    )
-    power_axis.set_yscale("log")
-    power_axis.set_ylim(1e-6, 1.5)
-    power_axis.grid(alpha=0.2)
-
-    denoised_axis.axhline(0.0, color="black", linewidth=0.7, alpha=0.4)
-    denoised_axis.set_xlabel("elapsed simulation time")
-    denoised_axis.set_ylabel(r"$v_x$")
-    denoised_axis.set_title(
-        "FFT/IFFT-denoised COM velocity "
-        f"(threshold = {noise_factor:g}x high-frequency noise floor)"
-    )
-    denoised_axis.grid(alpha=0.2)
 
     figure.suptitle(
-        "Big-Lx COM-velocity maxima, Fourier spectra, and denoising\n"
-        "Positive frequencies near zero; each spectrum normalized independently; "
-        "color: Lx multiplier; solid: C=60D; dashed: C=60.5D"
+        "C = 60D COM-velocity maxima and Hann-windowed Fourier magnitudes\n"
+        f"Positive frequencies near zero; each spectrum normalized independently; "
+        f"at least {minimum_cycles:g} cycles; "
+        f"FAP <= {100.0 * peak_false_alarm_probability:g}%"
     )
-    figure.tight_layout()
+    figure.tight_layout(rect=(0.0, 0.0, 1.0, 0.96))
     figure.savefig(output_path, dpi=dpi)
     plt.close(figure)
 
@@ -478,12 +385,13 @@ def plot_center_of_mass(
     stop: int | None = None,
     stride: int = 1,
     dpi: int = 180,
-    fft_noise_factor: float = 4.0,
     fft_minimum_cycles: float = 3.0,
     fft_peak_false_alarm_probability: float = 0.01,
     fft_zoom_fraction: float = 0.1,
 ) -> tuple[Path, Path]:
-    cases = all_cases()
+    cases = tuple(
+        case for case in all_cases() if case.circumference_diameters == 60.0
+    )
     series_by_case = {
         case: center_of_mass_series(
             case,
@@ -497,9 +405,9 @@ def plot_center_of_mass(
     circumferences = tuple(
         sorted({case.circumference_diameters for case in cases})
     )
-    output_path = output or output_root / "plots" / "all_cases_x_com_velocity.png"
+    output_path = output or output_root / "plots" / "circ_60D_x_com_velocity.png"
     spectral_output_path = spectral_output or (
-        output_root / "plots" / "all_cases_x_com_velocity_spectral.png"
+        output_root / "plots" / "circ_60D_x_com_velocity_spectral.png"
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     spectral_output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -566,7 +474,6 @@ def plot_center_of_mass(
     _plot_velocity_summary(
         series_by_case,
         output_path=spectral_output_path,
-        noise_factor=fft_noise_factor,
         minimum_cycles=fft_minimum_cycles,
         peak_false_alarm_probability=fft_peak_false_alarm_probability,
         zoom_fraction=fft_zoom_fraction,
@@ -584,8 +491,8 @@ def plot_center_of_mass(
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Plot unwrapped axial center of mass and velocity for all big-Lx "
-            "film cases together with a four-panel Fourier summary."
+            "Plot unwrapped axial center of mass and velocity for the C=60D "
+            "big-Lx cases together with a six-panel Fourier summary."
         )
     )
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
@@ -595,7 +502,6 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--stop", type=int)
     parser.add_argument("--stride", type=int, default=1)
     parser.add_argument("--dpi", type=int, default=180)
-    parser.add_argument("--fft-noise-factor", type=float, default=4.0)
     parser.add_argument("--fft-minimum-cycles", type=float, default=3.0)
     parser.add_argument(
         "--fft-peak-false-alarm-probability",
@@ -610,8 +516,6 @@ def main() -> None:
     args = _parse_args()
     if args.dpi < 1:
         raise ValueError("dpi must be positive")
-    if args.fft_noise_factor <= 0.0:
-        raise ValueError("fft-noise-factor must be positive")
     if args.fft_minimum_cycles <= 0.0:
         raise ValueError("fft-minimum-cycles must be positive")
     if not 0.0 < args.fft_peak_false_alarm_probability < 1.0:
@@ -626,7 +530,6 @@ def main() -> None:
         stop=args.stop,
         stride=args.stride,
         dpi=args.dpi,
-        fft_noise_factor=args.fft_noise_factor,
         fft_minimum_cycles=args.fft_minimum_cycles,
         fft_peak_false_alarm_probability=args.fft_peak_false_alarm_probability,
         fft_zoom_fraction=args.fft_zoom_fraction,
