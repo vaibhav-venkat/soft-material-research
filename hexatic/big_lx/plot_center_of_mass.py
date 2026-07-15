@@ -13,6 +13,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from safetensors.numpy import load_file
+from scipy.fft import fft, fftfreq, fftshift, ifft
 
 from hexatic.constants import cylinder
 
@@ -27,6 +28,16 @@ class CenterOfMassSeries:
     x_center: np.ndarray
     x_velocity: np.ndarray
     method: str
+
+
+@dataclass(frozen=True)
+class VelocitySpectrum:
+    omega: np.ndarray
+    real_coefficient: np.ndarray
+    power: np.ndarray
+    denoised_velocity: np.ndarray
+    noise_floor: float
+    threshold: float
 
 
 def _selected_frames(
@@ -171,15 +182,193 @@ def center_of_mass_series(
     )
 
 
+def velocity_spectrum(
+    series: CenterOfMassSeries,
+    *,
+    noise_factor: float,
+) -> VelocitySpectrum:
+    time_spacing = np.diff(series.elapsed_time)
+    dt = float(time_spacing[0])
+    if not np.allclose(time_spacing, dt, rtol=1e-10, atol=1e-12):
+        raise ValueError("FFT requires uniformly spaced trajectory samples")
+
+    velocity_mean = float(np.mean(series.x_velocity))
+    centered_velocity = series.x_velocity - velocity_mean
+    coefficients = fft(centered_velocity, norm="forward")
+    frequencies = fftfreq(centered_velocity.size, d=dt)
+    omega = 2.0 * np.pi * frequencies
+
+    negative_indices = (-np.arange(coefficients.size)) % coefficients.size
+    negative_frequency_coefficients = coefficients[negative_indices]
+    power = np.real(coefficients * negative_frequency_coefficients)
+    power = np.maximum(power, 0.0)
+
+    absolute_omega = np.abs(omega)
+    high_frequency = absolute_omega >= 0.75 * float(np.max(absolute_omega))
+    noise_floor = float(np.median(np.abs(coefficients[high_frequency])))
+    threshold = noise_factor * noise_floor
+    keep = np.abs(coefficients) >= threshold
+    keep |= keep[negative_indices]
+    filtered_coefficients = np.where(keep, coefficients, 0.0)
+    denoised_velocity = (
+        np.real(ifft(filtered_coefficients, norm="forward")) + velocity_mean
+    )
+
+    return VelocitySpectrum(
+        omega=fftshift(omega),
+        real_coefficient=fftshift(np.real(coefficients)),
+        power=fftshift(power),
+        denoised_velocity=np.asarray(denoised_velocity, dtype=np.float64),
+        noise_floor=noise_floor,
+        threshold=threshold,
+    )
+
+
+def _plot_velocity_summary(
+    series_by_case: dict[BigLxCase, CenterOfMassSeries],
+    *,
+    output_path: Path,
+    noise_factor: float,
+    dpi: int,
+) -> None:
+    cases = tuple(series_by_case)
+    circumferences = tuple(
+        sorted({case.circumference_diameters for case in cases})
+    )
+    multipliers = tuple(sorted({case.lx_multiplier for case in cases}))
+    colors = plt.colormaps["viridis"](
+        np.linspace(0.1, 0.9, len(multipliers))
+    )
+    color_by_multiplier = dict(zip(multipliers, colors, strict=True))
+    line_style_by_circumference = {
+        circumference: line_style
+        for circumference, line_style in zip(
+            circumferences,
+            ("-", "--"),
+            strict=True,
+        )
+    }
+    spectrum_by_case = {
+        case: velocity_spectrum(series, noise_factor=noise_factor)
+        for case, series in series_by_case.items()
+    }
+
+    figure, axes = plt.subplots(2, 2, figsize=(16, 10))
+    maximum_axis = axes[0, 0]
+    real_axis = axes[0, 1]
+    power_axis = axes[1, 0]
+    denoised_axis = axes[1, 1]
+
+    for circumference in circumferences:
+        circumference_cases = sorted(
+            (
+                case
+                for case in cases
+                if case.circumference_diameters == circumference
+            ),
+            key=lambda case: case.lx_multiplier,
+        )
+        maximum_axis.plot(
+            [case.lx_multiplier for case in circumference_cases],
+            [
+                float(np.max(np.abs(series_by_case[case].x_velocity)))
+                for case in circumference_cases
+            ],
+            marker="o",
+            linewidth=1.8,
+            label=f"C = {circumference:g}D",
+        )
+
+    for case in sorted(
+        cases,
+        key=lambda item: (item.circumference_diameters, item.lx_multiplier),
+    ):
+        series = series_by_case[case]
+        spectrum = spectrum_by_case[case]
+        color = color_by_multiplier[case.lx_multiplier]
+        line_style = line_style_by_circumference[case.circumference_diameters]
+        label = f"C={case.circumference_diameters:g}D, Lx={case.lx_multiplier}x"
+        real_axis.plot(
+            spectrum.omega,
+            spectrum.real_coefficient,
+            color=color,
+            linestyle=line_style,
+            linewidth=1.1,
+            label=label,
+        )
+        power_axis.plot(
+            spectrum.omega,
+            spectrum.power,
+            color=color,
+            linestyle=line_style,
+            linewidth=1.1,
+        )
+        denoised_axis.plot(
+            series.elapsed_time,
+            series.x_velocity,
+            color=color,
+            linestyle=line_style,
+            linewidth=0.7,
+            alpha=0.18,
+        )
+        denoised_axis.plot(
+            series.elapsed_time,
+            spectrum.denoised_velocity,
+            color=color,
+            linestyle=line_style,
+            linewidth=1.4,
+        )
+
+    maximum_axis.set_xticks(multipliers)
+    maximum_axis.set_xlabel(r"$L_x$ multiplier")
+    maximum_axis.set_ylabel(r"$\max_t |v_x(t)|$")
+    maximum_axis.set_title("Maximum axial COM speed")
+    maximum_axis.grid(alpha=0.2)
+    maximum_axis.legend()
+
+    real_axis.axhline(0.0, color="black", linewidth=0.7, alpha=0.4)
+    real_axis.axvline(0.0, color="black", linewidth=0.7, alpha=0.4)
+    real_axis.set_xlabel(r"angular frequency $\omega$")
+    real_axis.set_ylabel(r"$\mathrm{Re}\,V(\omega)$")
+    real_axis.set_title("Real part of the COM-velocity FFT")
+    real_axis.grid(alpha=0.2)
+    real_axis.legend(fontsize="small", ncol=2)
+
+    power_axis.set_xlabel(r"angular frequency $\omega$")
+    power_axis.set_ylabel(r"$V(\omega)V(-\omega)$")
+    power_axis.set_title("COM-velocity Fourier magnitude")
+    power_axis.set_yscale("symlog", linthresh=1e-16)
+    power_axis.grid(alpha=0.2)
+
+    denoised_axis.axhline(0.0, color="black", linewidth=0.7, alpha=0.4)
+    denoised_axis.set_xlabel("elapsed simulation time")
+    denoised_axis.set_ylabel(r"$v_x$")
+    denoised_axis.set_title(
+        "FFT/IFFT-denoised COM velocity "
+        f"(threshold = {noise_factor:g}x high-frequency noise floor)"
+    )
+    denoised_axis.grid(alpha=0.2)
+
+    figure.suptitle(
+        "Big-Lx COM-velocity maxima, Fourier spectra, and denoising\n"
+        "Color: Lx multiplier; solid: C=60D; dashed: C=60.5D"
+    )
+    figure.tight_layout()
+    figure.savefig(output_path, dpi=dpi)
+    plt.close(figure)
+
+
 def plot_center_of_mass(
     *,
     output_root: Path = DEFAULT_OUTPUT_ROOT,
     output: Path | None = None,
+    spectral_output: Path | None = None,
     start: int = 0,
     stop: int | None = None,
     stride: int = 1,
     dpi: int = 180,
-) -> Path:
+    fft_noise_factor: float = 4.0,
+) -> tuple[Path, Path]:
     cases = all_cases()
     series_by_case = {
         case: center_of_mass_series(
@@ -195,7 +384,11 @@ def plot_center_of_mass(
         sorted({case.circumference_diameters for case in cases})
     )
     output_path = output or output_root / "plots" / "all_cases_x_com_velocity.png"
+    spectral_output_path = spectral_output or (
+        output_root / "plots" / "all_cases_x_com_velocity_spectral.png"
+    )
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    spectral_output_path.parent.mkdir(parents=True, exist_ok=True)
 
     figure, axes = plt.subplots(
         2,
@@ -256,13 +449,19 @@ def plot_center_of_mass(
     figure.tight_layout()
     figure.savefig(output_path, dpi=dpi)
     plt.close(figure)
+    _plot_velocity_summary(
+        series_by_case,
+        output_path=spectral_output_path,
+        noise_factor=fft_noise_factor,
+        dpi=dpi,
+    )
     print(
         f"[big_lx.com] cases={len(series_by_case)} "
         f"method={next(iter(series_by_case.values())).method} "
-        f"output={output_path}",
+        f"output={output_path} spectral_output={spectral_output_path}",
         flush=True,
     )
-    return output_path
+    return output_path, spectral_output_path
 
 
 def _parse_args() -> argparse.Namespace:
@@ -274,10 +473,12 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--spectral-output", type=Path)
     parser.add_argument("--start", type=int, default=0)
     parser.add_argument("--stop", type=int)
     parser.add_argument("--stride", type=int, default=1)
     parser.add_argument("--dpi", type=int, default=180)
+    parser.add_argument("--fft-noise-factor", type=float, default=4.0)
     return parser.parse_args()
 
 
@@ -285,13 +486,17 @@ def main() -> None:
     args = _parse_args()
     if args.dpi < 1:
         raise ValueError("dpi must be positive")
+    if args.fft_noise_factor <= 0.0:
+        raise ValueError("fft-noise-factor must be positive")
     plot_center_of_mass(
         output_root=args.output_root,
         output=args.output,
+        spectral_output=args.spectral_output,
         start=args.start,
         stop=args.stop,
         stride=args.stride,
         dpi=args.dpi,
+        fft_noise_factor=args.fft_noise_factor,
     )
 
 
