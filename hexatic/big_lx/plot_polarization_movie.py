@@ -41,9 +41,12 @@ class WindingDiagnostics:
     frames: np.ndarray
     steps: np.ndarray
     centers: np.ndarray
+    smoothed_centers: np.ndarray
     unwrapped_centers: np.ndarray
+    coherence: np.ndarray
     velocities: np.ndarray
     counts: np.ndarray
+    smoothed_counts: np.ndarray
     total_charge: np.ndarray
 
 
@@ -347,13 +350,24 @@ def _stable_winding(
 def _periodic_mean(values: np.ndarray, period: float, origin: float = 0.0) -> float:
     if not len(values):
         return float("nan")
-    angles = 2.0 * np.pi * (np.asarray(values) - origin) / period
-    mean_angle = np.arctan2(np.mean(np.sin(angles)), np.mean(np.cos(angles)))
+    moment = _periodic_moment(values, period, origin)
+    mean_angle = np.angle(moment)
     result = origin + np.mod(mean_angle, 2.0 * np.pi) * period / (2.0 * np.pi)
     result = origin + np.mod(result - origin, period)
     if np.isclose(result, origin + period, rtol=0.0, atol=1.0e-12 * period):
         result = origin
     return float(result)
+
+
+def _periodic_moment(
+    values: np.ndarray,
+    period: float,
+    origin: float = 0.0,
+) -> complex:
+    if not len(values):
+        return complex(np.nan, np.nan)
+    angles = 2.0 * np.pi * (np.asarray(values) - origin) / period
+    return complex(np.mean(np.exp(1j * angles)))
 
 
 def _periodic_component_centers(
@@ -431,6 +445,39 @@ def _unwrap_periodic_series(values: np.ndarray, period: float) -> np.ndarray:
     return result
 
 
+def _rolling_mean(values: np.ndarray, window: int) -> np.ndarray:
+    array = np.asarray(values)
+    effective_window = min(window, len(array))
+    kernel = np.ones(effective_window, dtype=np.float64)
+    finite = np.isfinite(array)
+    numerator = np.convolve(np.where(finite, array, 0.0), kernel, mode="same")
+    denominator = np.convolve(finite.astype(np.float64), kernel, mode="same")
+    return np.divide(
+        numerator,
+        denominator,
+        out=np.full(array.shape, np.nan, dtype=array.dtype),
+        where=denominator > 0.0,
+    )
+
+
+def _finite_gradient(values: np.ndarray, time: np.ndarray) -> np.ndarray:
+    result = np.full(values.shape, np.nan, dtype=np.float64)
+    finite_indices = np.flatnonzero(np.isfinite(values))
+    if not len(finite_indices):
+        return result
+    split_points = np.flatnonzero(np.diff(finite_indices) > 1) + 1
+    for segment in np.split(finite_indices, split_points):
+        if len(segment) < 2:
+            continue
+        edge_order = 2 if len(segment) >= 3 else 1
+        result[segment] = np.gradient(
+            values[segment],
+            time[segment],
+            edge_order=edge_order,
+        )
+    return result
+
+
 def _build_winding_diagnostics(
     frames: list[int],
     steps: list[int],
@@ -440,10 +487,16 @@ def _build_winding_diagnostics(
     grid_s: np.ndarray,
     lx: float,
     circumference: float,
+    smoothing_window: int,
 ) -> WindingDiagnostics:
     frame_values = np.asarray(frames, dtype=np.int64)
     step_values = np.asarray(steps, dtype=np.int64)
     centers = np.full((len(frames), len(WINDING_CATEGORIES), 2), np.nan)
+    moments = np.full(
+        (len(frames), len(WINDING_CATEGORIES), 2),
+        complex(np.nan, np.nan),
+        dtype=np.complex128,
+    )
     counts = np.zeros((len(frames), len(WINDING_CATEGORIES)), dtype=np.int64)
 
     for frame_row, frame_index in enumerate(frames):
@@ -459,6 +512,15 @@ def _build_winding_diagnostics(
             )
             counts[frame_row, category_row] = len(component_centers)
             if len(component_centers):
+                moments[frame_row, category_row, 0] = _periodic_moment(
+                    component_centers[:, 0],
+                    lx,
+                    origin=-0.5 * lx,
+                )
+                moments[frame_row, category_row, 1] = _periodic_moment(
+                    component_centers[:, 1],
+                    circumference,
+                )
                 centers[frame_row, category_row, 0] = _periodic_mean(
                     component_centers[:, 0],
                     lx,
@@ -469,37 +531,71 @@ def _build_winding_diagnostics(
                     circumference,
                 )
 
-    unwrapped = centers.copy()
+    smoothed_moments = np.full(moments.shape, complex(np.nan, np.nan))
+    smoothed_centers = np.full(centers.shape, np.nan, dtype=np.float64)
+    coherence = np.abs(moments)
     for category_row in range(len(WINDING_CATEGORIES)):
-        x_shifted = centers[:, category_row, 0] + 0.5 * lx
+        for component in range(2):
+            smoothed_moments[:, category_row, component] = _rolling_mean(
+                moments[:, category_row, component],
+                smoothing_window,
+            )
+        x_angle = np.angle(smoothed_moments[:, category_row, 0])
+        s_angle = np.angle(smoothed_moments[:, category_row, 1])
+        smoothed_centers[:, category_row, 0] = (
+            -0.5 * lx + np.mod(x_angle, 2.0 * np.pi) * lx / (2.0 * np.pi)
+        )
+        smoothed_centers[:, category_row, 1] = (
+            np.mod(s_angle, 2.0 * np.pi) * circumference / (2.0 * np.pi)
+        )
+        invalid_x = ~np.isfinite(smoothed_moments[:, category_row, 0])
+        invalid_s = ~np.isfinite(smoothed_moments[:, category_row, 1])
+        smoothed_centers[invalid_x, category_row, 0] = np.nan
+        smoothed_centers[invalid_s, category_row, 1] = np.nan
+
+    unwrapped = smoothed_centers.copy()
+    for category_row in range(len(WINDING_CATEGORIES)):
         unwrapped[:, category_row, 0] = (
-            _unwrap_periodic_series(x_shifted, lx) - 0.5 * lx
+            _unwrap_periodic_series(
+                smoothed_centers[:, category_row, 0] + 0.5 * lx,
+                lx,
+            )
+            - 0.5 * lx
         )
         unwrapped[:, category_row, 1] = _unwrap_periodic_series(
-            centers[:, category_row, 1],
+            smoothed_centers[:, category_row, 1],
             circumference,
         )
 
-    velocities = np.full(unwrapped.shape, np.nan, dtype=np.float64)
-    elapsed = np.diff(step_values).astype(np.float64) * float(
-        cylinder.SIMULATION.timestep
-    )
-    if np.any(elapsed <= 0.0):
+    time = step_values.astype(np.float64) * float(cylinder.SIMULATION.timestep)
+    if np.any(np.diff(time) <= 0.0):
         raise ValueError("Selected frame steps must be strictly increasing")
-    for index in range(1, len(frames)):
-        finite = np.all(np.isfinite(unwrapped[index - 1 : index + 1]), axis=0)
-        velocities[index, finite] = (
-            unwrapped[index, finite] - unwrapped[index - 1, finite]
-        ) / elapsed[index - 1]
+    velocities = np.full(unwrapped.shape, np.nan, dtype=np.float64)
+    for category_row in range(len(WINDING_CATEGORIES)):
+        for component in range(2):
+            velocities[:, category_row, component] = _finite_gradient(
+                unwrapped[:, category_row, component],
+                time,
+            )
+
+    smoothed_counts = np.column_stack(
+        [
+            _rolling_mean(counts[:, category_row].astype(np.float64), smoothing_window)
+            for category_row in range(len(WINDING_CATEGORIES))
+        ]
+    )
 
     total_charge = counts[:, 1] + counts[:, 2] - counts[:, 0]
     return WindingDiagnostics(
         frames=frame_values,
         steps=step_values,
         centers=centers,
+        smoothed_centers=smoothed_centers,
         unwrapped_centers=unwrapped,
+        coherence=coherence,
         velocities=velocities,
         counts=counts,
+        smoothed_counts=smoothed_counts,
         total_charge=total_charge,
     )
 
@@ -551,21 +647,26 @@ def _plot_winding_diagnostics(
     *,
     case_label: str,
     stride: int,
+    smoothing_window: int,
+    lx: float,
+    circumference: float,
     dpi: int,
 ) -> None:
     figure, axes = plt.subplots(3, 2, figsize=(16.0, 14.0), sharex=True)
     for category_index, (_, label_text, color) in enumerate(WINDING_CATEGORIES):
-        axes[0, 0].plot(
+        axes[0, 0].scatter(
             diagnostics.steps,
-            diagnostics.unwrapped_centers[:, category_index, 0],
+            diagnostics.smoothed_centers[:, category_index, 0],
             color=color,
             label=label_text,
+            s=10.0,
         )
-        axes[0, 1].plot(
+        axes[0, 1].scatter(
             diagnostics.steps,
-            diagnostics.unwrapped_centers[:, category_index, 1],
+            diagnostics.smoothed_centers[:, category_index, 1],
             color=color,
             label=label_text,
+            s=10.0,
         )
         axes[1, 0].plot(
             diagnostics.steps,
@@ -583,7 +684,15 @@ def _plot_winding_diagnostics(
             diagnostics.steps,
             diagnostics.counts[:, category_index],
             color=color,
+            alpha=0.18,
+            linewidth=0.8,
+        )
+        axes[2, 0].plot(
+            diagnostics.steps,
+            diagnostics.smoothed_counts[:, category_index],
+            color=color,
             label=label_text,
+            linewidth=2.0,
         )
 
     axes[2, 1].plot(
@@ -593,8 +702,8 @@ def _plot_winding_diagnostics(
         label=r"$N_{+1,\mathrm{out}}+N_{+1,\mathrm{in}}-N_{-1}$",
     )
     axes[2, 1].axhline(0.0, color="gray", linewidth=1.0, alpha=0.5)
-    axes[0, 0].set_ylabel("unwrapped x COM")
-    axes[0, 1].set_ylabel(r"unwrapped $R\theta$ COM")
+    axes[0, 0].set_ylabel("periodic x COM")
+    axes[0, 1].set_ylabel(r"periodic $R\theta$ COM")
     axes[1, 0].set_ylabel(r"$v_{x,\mathrm{COM}}$")
     axes[1, 1].set_ylabel(r"$v_{R\theta,\mathrm{COM}}$")
     axes[2, 0].set_ylabel("component count")
@@ -607,11 +716,14 @@ def _plot_winding_diagnostics(
     axes[1, 1].set_title(r"Center-of-mass velocity: $R\theta$")
     axes[2, 0].set_title("Detected winding components")
     axes[2, 1].set_title("Net total winding charge")
+    axes[0, 0].set_ylim(-0.5 * lx, 0.5 * lx)
+    axes[0, 1].set_ylim(0.0, circumference)
     for axis in axes.ravel():
         axis.grid(True, linestyle="--", alpha=0.3)
         axis.legend(loc="best")
     figure.suptitle(
-        f"{case_label}: winding diagnostics (frame stride {stride})",
+        f"{case_label}: winding diagnostics "
+        f"(frame stride {stride}, smoothing window {smoothing_window})",
         fontsize=14,
     )
     figure.tight_layout(rect=(0.0, 0.0, 1.0, 0.97))
@@ -640,6 +752,7 @@ def write_polarization_movies(
     winding_radii_d: tuple[float, ...] = (1.5, 2.0, 2.5),
     winding_support_radius_d: float = 1.5,
     winding_radial_threshold: float = 0.25,
+    diagnostics_smoothing_window: int = 7,
     skip_gifs: bool = False,
 ) -> tuple[Path | None, Path | None, Path]:
     if stride < 1 or fps < 1 or dpi < 1:
@@ -663,6 +776,8 @@ def write_polarization_movies(
         raise ValueError("winding-support-radius-d must be positive")
     if not 0.0 <= winding_radial_threshold < 1.0:
         raise ValueError("winding-radial-threshold must be in [0, 1)")
+    if diagnostics_smoothing_window < 1 or diagnostics_smoothing_window % 2 == 0:
+        raise ValueError("diagnostics-smoothing-window must be a positive odd integer")
     if quantity not in ("polarization", "polar-density"):
         raise ValueError("quantity must be 'polarization' or 'polar-density'")
     case = get_case(case_id)
@@ -755,6 +870,7 @@ def write_polarization_movies(
         grid_s=winding_grid_s,
         lx=case.lx,
         circumference=case.circumference,
+        smoothing_window=diagnostics_smoothing_window,
     )
     diagnostics_path = _diagnostics_output_path(
         output,
@@ -768,6 +884,9 @@ def write_polarization_movies(
         diagnostics_path,
         case_label=case.label,
         stride=stride,
+        smoothing_window=diagnostics_smoothing_window,
+        lx=case.lx,
+        circumference=case.circumference,
         dpi=max(dpi, 150),
     )
     print(f"[big_lx.winding] wrote {diagnostics_path}", flush=True)
@@ -1009,6 +1128,12 @@ def _parse_args() -> argparse.Namespace:
             "as outward or inward."
         ),
     )
+    parser.add_argument(
+        "--diagnostics-smoothing-window",
+        type=int,
+        default=7,
+        help="Positive odd rolling window in selected frames for COM and count trends.",
+    )
     return parser.parse_args()
 
 
@@ -1033,6 +1158,7 @@ def main() -> None:
         winding_radii_d=tuple(args.winding_radii_d),
         winding_support_radius_d=args.winding_support_radius_d,
         winding_radial_threshold=args.winding_radial_threshold,
+        diagnostics_smoothing_window=args.diagnostics_smoothing_window,
         skip_gifs=args.skip_gifs,
     )
 
