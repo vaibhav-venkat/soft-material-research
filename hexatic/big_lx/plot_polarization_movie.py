@@ -654,19 +654,19 @@ def _plot_winding_diagnostics(
 ) -> None:
     figure, axes = plt.subplots(3, 2, figsize=(16.0, 14.0), sharex=True)
     for category_index, (_, label_text, color) in enumerate(WINDING_CATEGORIES):
-        axes[0, 0].scatter(
+        axes[0, 0].plot(
             diagnostics.steps,
             diagnostics.smoothed_centers[:, category_index, 0],
             color=color,
             label=label_text,
-            s=10.0,
+            linewidth=1.8,
         )
-        axes[0, 1].scatter(
+        axes[0, 1].plot(
             diagnostics.steps,
             diagnostics.smoothed_centers[:, category_index, 1],
             color=color,
             label=label_text,
-            s=10.0,
+            linewidth=1.8,
         )
         axes[1, 0].plot(
             diagnostics.steps,
