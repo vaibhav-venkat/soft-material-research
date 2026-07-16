@@ -92,7 +92,7 @@ def plot_velocity_laplace(
     figure = make_subplots(
         rows=1,
         cols=len(transforms),
-        specs=[[{"type": "surface"} for _ in transforms]],
+        specs=[[{"type": "xy"} for _ in transforms]],
         subplot_titles=[transform.case.label for transform in transforms],
         horizontal_spacing=0.04,
     )
@@ -101,23 +101,11 @@ def plot_velocity_laplace(
         start=1,
     ):
         figure.add_trace(
-            go.Surface(
+            go.Heatmap(
                 x=transform.r,
                 y=transform.omega,
                 z=log_magnitude,
-                surfacecolor=log_magnitude,
-                colorscale="Magma",
-                cmin=color_minimum,
-                cmax=color_maximum,
-                showscale=column == len(transforms),
-                colorbar=(
-                    {
-                        "title": {"text": "log10 |C_v-hat|"},
-                        "len": 0.75,
-                    }
-                    if column == len(transforms)
-                    else None
-                ),
+                coloraxis="coloraxis",
                 name=transform.case.label,
                 hovertemplate=(
                     "r=%{x:.5g}<br>omega=%{y:.5g}<br>"
@@ -127,20 +115,21 @@ def plot_velocity_laplace(
             row=1,
             col=column,
         )
-    figure.update_scenes(
-        xaxis_title="real part r",
-        yaxis_title="imaginary part omega",
-        zaxis_title="log10 |C_v-hat|",
-        aspectmode="cube",
-        camera={"eye": {"x": 1.55, "y": 1.55, "z": 1.15}},
-    )
+    figure.update_xaxes(title_text="real part r")
+    figure.update_yaxes(title_text="imaginary part omega")
     figure.update_layout(
         title=(
-            "Pearson velocity-correlation Laplace surface: "
+            "Pearson velocity-correlation Laplace heatmap: "
             "C_v-hat(r+i omega) = integral exp((r+i omega) tau) C_v(tau) d tau"
         ),
+        coloraxis={
+            "colorscale": "Magma",
+            "cmin": color_minimum,
+            "cmax": color_maximum,
+            "colorbar": {"title": {"text": "log10 |C_v-hat|"}},
+        },
         width=max(900, 720 * len(transforms)),
-        height=720,
+        height=620,
         margin={"l": 20, "r": 80, "t": 90, "b": 20},
     )
     figure.write_html(output, include_plotlyjs=True, full_html=True)
@@ -150,7 +139,7 @@ def plot_velocity_laplace(
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Write an interactive Plotly 3D surface of the finite-time complex "
+            "Write an interactive Plotly heatmap of the finite-time complex "
             "Laplace transform of the axial COM-velocity Pearson correlation."
         )
     )
@@ -158,7 +147,7 @@ def _parse_args() -> argparse.Namespace:
         "--case",
         action="append",
         required=True,
-        help="Big-Lx case ID; repeat to create multiple surface panels.",
+        help="Big-Lx case ID; repeat to create multiple heatmap panels.",
     )
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--output", type=Path)
