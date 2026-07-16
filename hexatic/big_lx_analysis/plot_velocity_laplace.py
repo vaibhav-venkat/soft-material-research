@@ -4,12 +4,9 @@ import argparse
 from dataclasses import dataclass
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
-
-import matplotlib.pyplot as plt
 import numpy as np
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from scipy.integrate import simpson
 
 from hexatic.big_lx.cases import DEFAULT_OUTPUT_ROOT, BigLxCase, CasePaths, get_case
@@ -68,13 +65,11 @@ def velocity_laplace_transform(
 def plot_velocity_laplace(
     transforms: list[VelocityLaplaceTransform],
     output: Path,
-    *,
-    dpi: int = 180,
 ) -> Path:
     if not transforms:
         raise ValueError("At least one Laplace transform is required")
-    if dpi < 1:
-        raise ValueError("dpi must be positive")
+    if output.suffix.lower() != ".html":
+        raise ValueError("Laplace surface output must use an .html suffix")
     output.parent.mkdir(parents=True, exist_ok=True)
 
     magnitudes = [np.abs(transform.values) for transform in transforms]
@@ -88,59 +83,76 @@ def plot_velocity_laplace(
     color_minimum = min(float(np.min(values)) for values in log_magnitudes)
     color_maximum = max(float(np.max(values)) for values in log_magnitudes)
 
-    figure, axes = plt.subplots(
-        1,
-        len(transforms),
-        figsize=(7 * len(transforms), 6),
-        squeeze=False,
-        sharex=True,
-        sharey=True,
+    figure = make_subplots(
+        rows=1,
+        cols=len(transforms),
+        specs=[[{"type": "surface"} for _ in transforms]],
+        subplot_titles=[transform.case.label for transform in transforms],
+        horizontal_spacing=0.04,
     )
-    image = None
-    for axis, transform, log_magnitude in zip(
-        axes[0], transforms, log_magnitudes, strict=True
+    for column, (transform, log_magnitude) in enumerate(
+        zip(transforms, log_magnitudes, strict=True),
+        start=1,
     ):
-        image = axis.pcolormesh(
-            transform.r,
-            transform.omega,
-            log_magnitude,
-            shading="auto",
-            cmap="magma",
-            vmin=color_minimum,
-            vmax=color_maximum,
-            rasterized=True,
+        figure.add_trace(
+            go.Surface(
+                x=transform.r,
+                y=transform.omega,
+                z=log_magnitude,
+                surfacecolor=log_magnitude,
+                colorscale="Magma",
+                cmin=color_minimum,
+                cmax=color_maximum,
+                showscale=column == len(transforms),
+                colorbar=(
+                    {
+                        "title": {"text": "log10 |v-hat|"},
+                        "len": 0.75,
+                    }
+                    if column == len(transforms)
+                    else None
+                ),
+                name=transform.case.label,
+                hovertemplate=(
+                    "r=%{x:.5g}<br>omega=%{y:.5g}<br>"
+                    "log10|v-hat|=%{z:.5g}<extra>%{fullData.name}</extra>"
+                ),
+            ),
+            row=1,
+            col=column,
         )
-        axis.axvline(0.0, color="white", linewidth=0.8, alpha=0.6)
-        axis.axhline(0.0, color="white", linewidth=0.8, alpha=0.6)
-        axis.set_title(transform.case.label)
-        axis.set_xlabel(r"real part $r$")
-    axes[0, 0].set_ylabel(r"imaginary part $\omega$")
-    if image is None:
-        raise RuntimeError("No Laplace heatmap was created")
-    colorbar = figure.colorbar(image, ax=axes[0].tolist(), pad=0.03)
-    colorbar.set_label(r"$\log_{10}|\hat v_x(r+i\omega)|$")
-    figure.suptitle(
-        r"Axial COM-velocity transform "
-        r"$\hat v_x(r+i\omega)=\int_0^T e^{(r+i\omega)t}v_x(t)\,dt$"
+    figure.update_scenes(
+        xaxis_title="real part r",
+        yaxis_title="imaginary part omega",
+        zaxis_title="log10 |v-hat|",
+        aspectmode="cube",
+        camera={"eye": {"x": 1.55, "y": 1.55, "z": 1.15}},
     )
-    figure.subplots_adjust(left=0.08, right=0.88, bottom=0.12, top=0.86, wspace=0.12)
-    figure.savefig(output, dpi=dpi)
-    plt.close(figure)
+    figure.update_layout(
+        title=(
+            "Axial COM-velocity Laplace surface: "
+            "v-hat(r+i omega) = integral exp((r+i omega)t) v_x(t) dt"
+        ),
+        width=max(900, 720 * len(transforms)),
+        height=720,
+        margin={"l": 20, "r": 80, "t": 90, "b": 20},
+    )
+    figure.write_html(output, include_plotlyjs=True, full_html=True)
     return output
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Plot the finite-time complex Laplace transform of axial Big-Lx "
-            "COM velocity using SciPy Simpson integration."
+            "Write an interactive Plotly 3D surface of the finite-time complex "
+            "Laplace transform of axial Big-Lx COM velocity."
         )
     )
     parser.add_argument(
         "--case",
         action="append",
         required=True,
-        help="Big-Lx case ID; repeat to create multiple heatmap panels.",
+        help="Big-Lx case ID; repeat to create multiple surface panels.",
     )
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--output", type=Path)
@@ -150,7 +162,6 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--omega-max", type=float)
     parser.add_argument("--r-points", type=int, default=161)
     parser.add_argument("--omega-points", type=int, default=241)
-    parser.add_argument("--dpi", type=int, default=180)
     return parser.parse_args()
 
 
@@ -191,9 +202,9 @@ def main() -> None:
     ]
     output = (
         args.output
-        or args.output_root / "plots" / "big_lx_velocity_laplace.png"
+        or args.output_root / "plots" / "big_lx_velocity_laplace.html"
     )
-    result = plot_velocity_laplace(transforms, output, dpi=args.dpi)
+    result = plot_velocity_laplace(transforms, output)
     print(
         f"[big_lx_analysis.laplace] cases={len(cases)} "
         f"r=[{r[0]:.8g}, {r[-1]:.8g}] "
