@@ -43,7 +43,7 @@ def analysis_jobs(args: argparse.Namespace) -> tuple[ScheduledJob, ...]:
                 command=tuple(command),
                 log_path=CasePaths(case, args.output_root).analysis_log,
                 preferred_gpu_id=(
-                    1 if case.kind == GeometryKind.PRISM_VOLUME else 0
+                    0 if case.kind == GeometryKind.PRISM_VOLUME else 1
                 ),
             )
         )
