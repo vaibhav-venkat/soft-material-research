@@ -27,6 +27,15 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--max-lag", type=int)
     parser.add_argument("--particle-block-size", type=int, default=4096)
     parser.add_argument(
+        "--psi6-correlation",
+        choices=("connected-magnitude", "magnitude"),
+        default="connected-magnitude",
+        help=(
+            "Hexatic observable: mean-subtracted magnitude correlation by default, "
+            "or the original raw magnitude overlap."
+        ),
+    )
+    parser.add_argument(
         "--absolute",
         action="store_true",
         help="Plot the absolute value of the normalized velocity correlation.",
@@ -48,6 +57,7 @@ def main() -> None:
             max_lag=args.max_lag,
             particle_block_size=args.particle_block_size,
             absolute=args.absolute,
+            psi6_correlation=args.psi6_correlation,
         )
         for case in cases
     ]
@@ -60,6 +70,7 @@ def main() -> None:
     )
     print(
         f"[big_lx_analysis] cases={len(cases)} absolute={args.absolute} "
+        f"psi6_correlation={args.psi6_correlation} "
         f"output={result}",
         flush=True,
     )

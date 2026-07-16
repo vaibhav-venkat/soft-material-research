@@ -28,6 +28,7 @@ class CorrelationSeries:
     psi6: np.ndarray
     time_origin_counts: np.ndarray
     psi6_pair_counts: np.ndarray
+    psi6_correlation: str
 
 
 class ShardRecord(TypedDict):
@@ -159,8 +160,18 @@ def _hexatic_correlation(
     masks: np.ndarray,
     max_lag: int,
     particle_block_size: int,
+    correlation: str,
 ) -> tuple[np.ndarray, np.ndarray]:
     frame_count, particle_count = magnitudes.shape
+    if correlation == "connected-magnitude":
+        valid_count = int(np.count_nonzero(masks))
+        if valid_count == 0:
+            raise ValueError("No shell-valid hexatic values are available")
+        mean_magnitude = float(np.sum(magnitudes, dtype=np.float64) / valid_count)
+    elif correlation == "magnitude":
+        mean_magnitude = 0.0
+    else:
+        raise ValueError(f"Unsupported psi6 correlation: {correlation}")
     fft_length = next_fast_len(2 * frame_count - 1)
     frequency_count = fft_length // 2 + 1
     numerator_spectrum = np.zeros(frequency_count, dtype=np.float64)
@@ -168,8 +179,16 @@ def _hexatic_correlation(
 
     for start in range(0, particle_count, particle_block_size):
         stop = min(start + particle_block_size, particle_count)
+        block_mask = masks[:, start:stop]
+        block_values = magnitudes[:, start:stop]
+        if correlation == "connected-magnitude":
+            block_values = np.where(
+                block_mask,
+                block_values - mean_magnitude,
+                0.0,
+            )
         value_transform = rfft(
-            magnitudes[:, start:stop],
+            block_values,
             n=fft_length,
             axis=0,
             workers=-1,
@@ -179,7 +198,7 @@ def _hexatic_correlation(
         )
         del value_transform
         mask_transform = rfft(
-            masks[:, start:stop].astype(np.float32),
+            block_mask.astype(np.float32),
             n=fft_length,
             axis=0,
             workers=-1,
@@ -212,6 +231,7 @@ def analyze_correlations(
     max_lag: int | None = None,
     particle_block_size: int = 4096,
     absolute: bool = False,
+    psi6_correlation: str = "connected-magnitude",
 ) -> CorrelationSeries:
     if min_origins < 1:
         raise ValueError("min_origins must be positive")
@@ -219,6 +239,10 @@ def analyze_correlations(
         raise ValueError("max_lag must be nonnegative")
     if particle_block_size < 1:
         raise ValueError("particle_block_size must be positive")
+    if psi6_correlation not in ("connected-magnitude", "magnitude"):
+        raise ValueError(
+            "psi6_correlation must be 'connected-magnitude' or 'magnitude'"
+        )
 
     analysis_dir = CasePaths(case, output_root).analysis_dir
     manifest = _load_manifest(analysis_dir, case)
@@ -253,6 +277,7 @@ def analyze_correlations(
         masks,
         selected_max_lag,
         particle_block_size,
+        psi6_correlation,
     )
     return CorrelationSeries(
         case=case,
@@ -262,6 +287,7 @@ def analyze_correlations(
         psi6=psi6,
         time_origin_counts=frame_count - lag_indices,
         psi6_pair_counts=psi6_pair_counts,
+        psi6_correlation=psi6_correlation,
     )
 
 
@@ -291,21 +317,32 @@ def plot_correlations(
             linewidth=1.7,
             label=rf"$C_v$: {label}",
         )
+        psi6_label = (
+            r"$C_{\delta|\psi_6|}$"
+            if series.psi6_correlation == "connected-magnitude"
+            else r"$C_{|\psi_6|}$"
+        )
         axis.plot(
             series.lag_times,
             series.psi6,
             color=color,
             linestyle="--",
             linewidth=1.7,
-            label=rf"$C_{{|\psi_6|}}$: {label}",
+            label=f"{psi6_label}: {label}",
         )
     axis.axhline(0.0, color="black", linewidth=0.8, alpha=0.45)
     axis.axhline(1.0, color="black", linewidth=0.8, alpha=0.3)
     axis.set_xlabel("lag time")
     axis.set_ylabel("normalized correlation")
     velocity_label = r"$|C_v|$" if absolute else r"$C_v$"
+    psi6_kinds = {series.psi6_correlation for series in series_by_case}
+    psi6_title = (
+        "connected hexatic-magnitude"
+        if psi6_kinds == {"connected-magnitude"}
+        else "hexatic-magnitude"
+    )
     axis.set_title(
-        f"Big-Lx axial COM velocity and hexatic-magnitude correlations ({velocity_label})"
+        f"Big-Lx axial COM velocity and {psi6_title} correlations ({velocity_label})"
     )
     axis.grid(alpha=0.2)
     axis.legend(loc="best")
