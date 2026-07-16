@@ -106,7 +106,7 @@ def _wall_force(case: ComparisonCase) -> hoomd.md.external.wall.LJ:
             )
         ]
     wall_pair = hoomd.md.external.wall.LJ(walls=walls)
-    wall_pair.params["A"] = {
+    parameters = {
         "sigma": cylinder.ANALYSIS.sigma,
         "epsilon": (
             cylinder.SIMULATION.interaction_epsilon_multiplier
@@ -116,6 +116,14 @@ def _wall_force(case: ComparisonCase) -> hoomd.md.external.wall.LJ:
         ),
         "r_cut": cylinder.ANALYSIS.wall_cutoff,
     }
+    if case.kind in {
+        GeometryKind.PRISM_SURFACE_AREA,
+        GeometryKind.SANDWICH_VOLUME,
+        GeometryKind.SANDWICH_SURFACE_AREA,
+        GeometryKind.TWO_DIMENSION,
+    }:
+        parameters["r_extrap"] = 0.98 * cylinder.ANALYSIS.wall_cutoff
+    wall_pair.params["A"] = parameters
     return wall_pair
 
 

@@ -99,6 +99,22 @@ class ComparisonCase:
         return self.radius * math.sqrt(math.pi)
 
     @property
+    def initial_span_y(self) -> float:
+        if self.kind == GeometryKind.PRISM_VOLUME:
+            return self.prism_side
+        if self.is_prism:
+            return self.transverse_span - 2.0 * self.wall_clearance
+        return self.transverse_span
+
+    @property
+    def initial_span_z(self) -> float:
+        if self.kind == GeometryKind.PRISM_VOLUME:
+            return self.prism_side
+        if self.is_prism or self.is_sandwich:
+            return self.transverse_span - 2.0 * self.wall_clearance
+        return 0.0
+
+    @property
     def wall_clearance(self) -> float:
         return (
             cylinder.ANALYSIS.wall_cutoff
@@ -212,6 +228,8 @@ class ComparisonCase:
                 "prism_wall_half_width": self.prism_wall_half_width,
                 "prism_box_width": self.prism_box_width,
                 "transverse_span": self.transverse_span,
+                "initial_span_y": self.initial_span_y,
+                "initial_span_z": self.initial_span_z,
                 "stored_box": self.stored_box,
                 "wall_to_wall_dimensions": self.stored_box,
                 "confinement_volume": (
@@ -225,6 +243,17 @@ class ComparisonCase:
                 "dimensions": self.dimensions,
                 "periodic_axes": self.periodic_axes,
                 "wall_faces": self.wall_faces,
+                "wall_r_extrap": (
+                    0.98 * cylinder.ANALYSIS.wall_cutoff
+                    if self.kind
+                    in {
+                        GeometryKind.PRISM_SURFACE_AREA,
+                        GeometryKind.SANDWICH_VOLUME,
+                        GeometryKind.SANDWICH_SURFACE_AREA,
+                        GeometryKind.TWO_DIMENSION,
+                    }
+                    else 0.0
+                ),
                 "particle_count_rule": (
                     "cylinder_surface_density"
                     if self.is_2d

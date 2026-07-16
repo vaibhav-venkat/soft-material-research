@@ -42,6 +42,23 @@ def validate_case(case) -> dict[str, object]:
         expected_imbalance = 1.0 / case.n_particles if case.n_particles % 2 else 0.0
         if float(np.linalg.norm(direction_mean)) > expected_imbalance + 1e-12:
             raise AssertionError("wall-normal orientations are unexpectedly imbalanced")
+        if case.is_prism:
+            initial_wall_distance = float(
+                min(
+                    np.min(case.prism_wall_half_width - np.abs(positions[:, 1])),
+                    np.min(case.prism_wall_half_width - np.abs(positions[:, 2])),
+                )
+            )
+        elif case.is_sandwich:
+            initial_wall_distance = float(
+                np.min(0.5 * case.transverse_span - np.abs(positions[:, 2]))
+            )
+        else:
+            initial_wall_distance = float(
+                np.min(0.5 * case.transverse_span - np.abs(positions[:, 1]))
+            )
+        if not case.is_2d and initial_wall_distance <= cylinder.ANALYSIS.wall_cutoff:
+            raise AssertionError("3D lattice starts inside the LJ wall-force region")
         if case.kind == GeometryKind.PRISM_SURFACE_AREA:
             area = 4.0 * case.transverse_span * case.lx
             if not math.isclose(area, case.circumference * case.lx, rel_tol=1e-12):
@@ -60,6 +77,7 @@ def validate_case(case) -> dict[str, object]:
             "dimensions": case.dimensions,
             "stored_box": case.stored_box,
             "minimum_pair_distance": minimum_distance,
+            "initial_wall_distance": initial_wall_distance,
             "orientation_alignment_min": float(np.min(alignment)),
             "direction_mean": direction_mean.tolist(),
             "center_of_mass": np.mean(positions, axis=0).tolist(),

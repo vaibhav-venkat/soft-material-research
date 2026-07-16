@@ -235,60 +235,83 @@ def _cell_centered_points(
 
 def _triangular_2d_points(case: ComparisonCase) -> np.ndarray:
     cutoff = cylinder.ANALYSIS.wall_cutoff
-    candidates: list[tuple[float, int, int]] = []
-    for nx in range(3, int(case.lx / cutoff) + 1, 2):
+    seam_gap = cutoff * 1.001
+    candidates: list[tuple[float, int, int, float]] = []
+    for nx in range(4, int(case.lx / cutoff) + 1, 2):
         for ny in range(3, 101, 2):
             size = nx * ny
-            if size < case.n_particles or (size - case.n_particles) % 2:
+            if size < case.n_particles - 1 or (size - (case.n_particles - 1)) % 2:
                 continue
             dx = case.lx / nx
-            dy = case.transverse_span / ny
+            dy = (case.transverse_span - seam_gap) / (ny - 1)
             diagonal = math.hypot(0.5 * dx, dy)
-            if min(dx, diagonal) <= cutoff:
+            if min(dx, diagonal, seam_gap) <= cutoff:
                 continue
-            score = (size - case.n_particles) / case.n_particles + abs(
+            score = (size - (case.n_particles - 1)) / case.n_particles + abs(
                 dy / dx - math.sqrt(3.0) / 2.0
             )
-            candidates.append((score, nx, ny))
+            candidates.append((score, nx, ny, dy))
     if not candidates:
         raise ValueError("could not construct a non-overlapping 2D triangular grid")
-    _, nx, ny = min(candidates)
+    _, nx, ny, dy = min(candidates)
     dx = case.lx / nx
-    dy = case.transverse_span / ny
     half_x = nx // 2
     half_y = ny // 2
-    points = []
-    indices = []
+    points: list[tuple[float, float]] = []
     for iy in range(ny):
         j = iy - half_y
         offset = 0.5 * (j & 1)
         for ix in range(nx):
-            i = ix - half_x
+            i = ix - half_x + 0.5
             x = ((i + offset) * dx + 0.5 * case.lx) % case.lx - 0.5 * case.lx
             points.append((x, j * dy))
-            indices.append((ix, iy))
+    values = np.asarray(points, dtype=np.float64)
 
-    def partner(index: tuple[int, int]) -> tuple[int, int]:
-        ix, iy = index
-        i = ix - half_x
-        j = iy - half_y
-        partner_i = -i - (j & 1)
-        return (partner_i + half_x) % nx, ny - 1 - iy
+    def key(point: np.ndarray) -> tuple[float, float]:
+        x = (float(point[0]) + 0.5 * case.lx) % case.lx - 0.5 * case.lx
+        return round(x, 10), round(float(point[1]), 10)
 
-    representatives = [index for index in indices if index < partner(index)]
-    remove_pairs = (nx * ny - case.n_particles) // 2
-    removed: set[tuple[int, int]] = set()
-    if remove_pairs:
-        selected = np.linspace(
-            0, len(representatives) - 1, remove_pairs, dtype=np.int64
+    lookup = {key(point): index for index, point in enumerate(values)}
+    partners = np.empty(len(values), dtype=np.int64)
+    for index, point in enumerate(values):
+        partner_index = lookup.get(key(-point))
+        if partner_index is None:
+            raise AssertionError("2D lattice lost an inversion partner")
+        partners[index] = partner_index
+    representatives = [index for index in range(len(values)) if index < partners[index]]
+    remove_pairs = (len(values) - (case.n_particles - 1)) // 2
+    forced = [
+        index
+        for index in representatives
+        if min(
+            np.linalg.norm(values[index]),
+            np.linalg.norm(values[partners[index]]),
         )
-        for selected_index in selected:
-            index = representatives[int(selected_index)]
-            removed.add(index)
-            removed.add(partner(index))
-    keep = np.asarray([index not in removed for index in indices], dtype=np.bool_)
-    result = np.asarray(points, dtype=np.float64)[keep]
-    result -= np.mean(result, axis=0, keepdims=True)
+        <= cutoff
+    ]
+    if len(forced) > remove_pairs:
+        raise ValueError("not enough 2D vacancies to insert the center particle")
+    remaining = [index for index in representatives if index not in set(forced)]
+    extra_count = remove_pairs - len(forced)
+    extra = (
+        [
+            remaining[int(index)]
+            for index in np.linspace(
+                0, len(remaining) - 1, extra_count, dtype=np.int64
+            )
+        ]
+        if extra_count
+        else []
+    )
+    removed = set(forced + extra)
+    removed.update(int(partners[index]) for index in tuple(removed))
+    result = values[
+        np.asarray([index not in removed for index in range(len(values))], dtype=np.bool_)
+    ]
+    result = np.concatenate((result, np.zeros((1, 2), dtype=np.float64)), axis=0)
+    result[:, 0] -= np.mean(result[:, 0])
+    if np.max(np.abs(result[:, 0])) >= 0.5 * case.lx:
+        raise AssertionError("centering the 2D lattice crossed the periodic seam")
     return result
 
 
@@ -325,7 +348,7 @@ def generate_planar_lattice(
         directions[:, 1] = _paired_wall_sign(positions[:, 1], positions[:, [0]])
     else:
         positions = _cell_centered_points(
-            (case.lx, case.transverse_span, case.transverse_span),
+            (case.lx, case.initial_span_y, case.initial_span_z),
             case.n_particles,
         )
         if case.is_prism:
