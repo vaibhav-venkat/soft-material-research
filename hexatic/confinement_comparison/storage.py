@@ -61,6 +61,11 @@ def prepare_analysis_dir(
         )
     if output_dir.exists():
         if not overwrite:
+            # A failure between creating the directory and writing the initial
+            # manifest can leave an empty directory behind. There is no analysis
+            # state to preserve or resume in that case, so initialize it normally.
+            if not any(output_dir.iterdir()):
+                return True, None
             raise FileExistsError(f"Analysis output already exists: {output_dir}")
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True)
