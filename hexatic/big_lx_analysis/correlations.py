@@ -297,13 +297,21 @@ def plot_correlations(
     *,
     dpi: int = 180,
     absolute: bool = False,
+    psi6_zoom_limits: tuple[float, float] = (0.9, 1.05),
 ) -> Path:
     if not series_by_case:
         raise ValueError("At least one correlation series is required")
     if dpi < 1:
         raise ValueError("dpi must be positive")
+    if psi6_zoom_limits[0] >= psi6_zoom_limits[1]:
+        raise ValueError("psi6 zoom minimum must be smaller than its maximum")
+    psi6_kinds = {series.psi6_correlation for series in series_by_case}
+    if len(psi6_kinds) != 1:
+        raise ValueError("All plotted cases must use the same psi6 correlation")
+    connected = psi6_kinds == {"connected-magnitude"}
     output.parent.mkdir(parents=True, exist_ok=True)
     figure, axis = plt.subplots(figsize=(11, 7))
+    psi6_axis = axis if connected else axis.twinx()
     colors = plt.colormaps["viridis"](
         np.linspace(0.1, 0.9, len(series_by_case))
     )
@@ -322,7 +330,7 @@ def plot_correlations(
             if series.psi6_correlation == "connected-magnitude"
             else r"$C_{|\psi_6|}$"
         )
-        axis.plot(
+        psi6_axis.plot(
             series.lag_times,
             series.psi6,
             color=color,
@@ -331,21 +339,34 @@ def plot_correlations(
             label=f"{psi6_label}: {label}",
         )
     axis.axhline(0.0, color="black", linewidth=0.8, alpha=0.45)
-    axis.axhline(1.0, color="black", linewidth=0.8, alpha=0.3)
+    if connected:
+        axis.axhline(1.0, color="black", linewidth=0.8, alpha=0.3)
+    else:
+        psi6_axis.axhline(1.0, color="black", linewidth=0.8, alpha=0.3)
+        psi6_axis.set_ylim(*psi6_zoom_limits)
+        psi6_axis.set_ylabel(r"normalized $|\psi_6|$ correlation")
     axis.set_xlabel("lag time")
-    axis.set_ylabel("normalized correlation")
+    axis.set_ylabel(
+        "normalized correlation"
+        if connected
+        else "normalized axial COM-velocity correlation"
+    )
     velocity_label = r"$|C_v|$" if absolute else r"$C_v$"
-    psi6_kinds = {series.psi6_correlation for series in series_by_case}
     psi6_title = (
         "connected hexatic-magnitude"
-        if psi6_kinds == {"connected-magnitude"}
-        else "hexatic-magnitude"
+        if connected
+        else "zoomed hexatic-magnitude"
     )
     axis.set_title(
         f"Big-Lx axial COM velocity and {psi6_title} correlations ({velocity_label})"
     )
     axis.grid(alpha=0.2)
-    axis.legend(loc="best")
+    handles, labels = axis.get_legend_handles_labels()
+    if not connected:
+        psi6_handles, psi6_labels = psi6_axis.get_legend_handles_labels()
+        handles += psi6_handles
+        labels += psi6_labels
+    axis.legend(handles, labels, loc="best")
     figure.tight_layout()
     figure.savefig(output, dpi=dpi)
     plt.close(figure)

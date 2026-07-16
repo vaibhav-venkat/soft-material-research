@@ -27,13 +27,21 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--max-lag", type=int)
     parser.add_argument("--particle-block-size", type=int, default=4096)
     parser.add_argument(
-        "--psi6-correlation",
-        choices=("connected-magnitude", "magnitude"),
-        default="connected-magnitude",
+        "--psi6-mode",
+        choices=("connected", "zoomed-magnitude"),
+        default="connected",
         help=(
-            "Hexatic observable: mean-subtracted magnitude correlation by default, "
-            "or the original raw magnitude overlap."
+            "Plot mean-subtracted magnitude fluctuations on the shared axis, or "
+            "raw magnitude correlations on a zoomed right-hand axis."
         ),
+    )
+    parser.add_argument(
+        "--psi6-zoom-limits",
+        type=float,
+        nargs=2,
+        metavar=("MIN", "MAX"),
+        default=(0.9, 1.05),
+        help="Right-axis limits used by --psi6-mode zoomed-magnitude.",
     )
     parser.add_argument(
         "--absolute",
@@ -48,7 +56,14 @@ def main() -> None:
     args = _parse_args()
     if len(set(args.case)) != len(args.case):
         raise SystemExit("Each --case value must be unique")
+    if args.psi6_zoom_limits[0] >= args.psi6_zoom_limits[1]:
+        raise SystemExit("--psi6-zoom-limits requires MIN < MAX")
     cases = [get_case(case_id) for case_id in args.case]
+    psi6_correlation = (
+        "connected-magnitude"
+        if args.psi6_mode == "connected"
+        else "magnitude"
+    )
     series = [
         analyze_correlations(
             case,
@@ -57,7 +72,7 @@ def main() -> None:
             max_lag=args.max_lag,
             particle_block_size=args.particle_block_size,
             absolute=args.absolute,
-            psi6_correlation=args.psi6_correlation,
+            psi6_correlation=psi6_correlation,
         )
         for case in cases
     ]
@@ -67,10 +82,11 @@ def main() -> None:
         output,
         dpi=args.dpi,
         absolute=args.absolute,
+        psi6_zoom_limits=tuple(args.psi6_zoom_limits),
     )
     print(
         f"[big_lx_analysis] cases={len(cases)} absolute={args.absolute} "
-        f"psi6_correlation={args.psi6_correlation} "
+        f"psi6_mode={args.psi6_mode} "
         f"output={result}",
         flush=True,
     )
