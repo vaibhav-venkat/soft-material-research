@@ -26,6 +26,7 @@ class CorrelationSeries:
     lag_indices: np.ndarray
     lag_times: np.ndarray
     velocity: np.ndarray
+    velocity_pearson: np.ndarray
     psi6_autocorrelation: np.ndarray
     psi6_pearson: np.ndarray
     time_origin_counts: np.ndarray
@@ -156,14 +157,14 @@ def _normalized_autocorrelation(values: np.ndarray, max_lag: int, name: str) -> 
     return result
 
 
-def _lagged_pearson(values: np.ndarray, max_lag: int) -> np.ndarray:
+def _lagged_pearson(values: np.ndarray, max_lag: int, name: str) -> np.ndarray:
     values = np.asarray(values, dtype=np.float64)
     result = np.empty(max_lag + 1, dtype=np.float64)
     result[0] = 1.0
     for lag in range(1, max_lag + 1):
         statistic = float(pearsonr(values[:-lag], values[lag:]).statistic)
         if not np.isfinite(statistic):
-            raise ValueError(f"Mean hexatic magnitude has zero variance at lag {lag}")
+            raise ValueError(f"{name} has zero variance at lag {lag}")
         result[lag] = statistic
     return np.clip(result, -1.0, 1.0)
 
@@ -211,17 +212,24 @@ def analyze_correlations(
     velocity = _normalized_autocorrelation(
         com.x_velocity, selected_max_lag, "Axial COM velocity"
     )
+    velocity_pearson = _lagged_pearson(
+        com.x_velocity, selected_max_lag, "Axial COM velocity"
+    )
     if absolute:
         velocity = np.abs(velocity)
+        velocity_pearson = np.abs(velocity_pearson)
     psi6_autocorrelation = _normalized_autocorrelation(
         mean_psi6, selected_max_lag, "Mean hexatic magnitude"
     )
-    psi6_pearson = _lagged_pearson(mean_psi6, selected_max_lag)
+    psi6_pearson = _lagged_pearson(
+        mean_psi6, selected_max_lag, "Mean hexatic magnitude"
+    )
     return CorrelationSeries(
         case=case,
         lag_indices=lag_indices,
         lag_times=lag_times,
         velocity=velocity,
+        velocity_pearson=velocity_pearson,
         psi6_autocorrelation=psi6_autocorrelation,
         psi6_pearson=psi6_pearson,
         time_origin_counts=frame_count - lag_indices,
@@ -272,8 +280,17 @@ def plot_correlations(
         )
         pearson_axis.plot(
             series.lag_times,
+            series.velocity_pearson,
+            color=color,
+            linestyle="-",
+            linewidth=1.7,
+            label=rf"$r_v$: {label}",
+        )
+        pearson_axis.plot(
+            series.lag_times,
             series.psi6_pearson,
             color=color,
+            linestyle="--",
             linewidth=1.7,
             label=rf"$r_{{|\psi_6|}}$: {label}",
         )
@@ -301,9 +318,10 @@ def plot_correlations(
     pearson_axis.axhline(1.0, color="black", linewidth=0.8, alpha=0.3)
     pearson_axis.set_ylim(-1.05, 1.05)
     pearson_axis.set_xlabel("lag time")
-    pearson_axis.set_ylabel(r"Pearson coefficient of mean $|\psi_6|$")
+    pearson_axis.set_ylabel("Pearson correlation coefficient")
     pearson_axis.set_title(
-        "Lag-specific shell-mean hexatic correlation (`scipy.stats.pearsonr`)"
+        "Lag-specific axial COM-velocity and shell-mean hexatic correlations "
+        "(`scipy.stats.pearsonr`)"
     )
     pearson_axis.grid(alpha=0.2)
     pearson_axis.legend(loc="best")
