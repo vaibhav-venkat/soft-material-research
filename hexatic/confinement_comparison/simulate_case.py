@@ -14,7 +14,7 @@ import numpy as np
 from hexatic.constants import cylinder
 
 from .cases import ComparisonCase, CasePaths, DEFAULT_OUTPUT_ROOT, GeometryKind, get_case
-from .geometry import generate_cylinder_film, generate_prism_lattice, stored_to_logical
+from .geometry import generate_cylinder_film, generate_planar_lattice, stored_to_logical
 
 
 class SimulationObjects(NamedTuple):
@@ -31,9 +31,9 @@ def _write_json_atomic(path: Path, payload: dict[str, object]) -> None:
 
 
 def _initial_arrays(case: ComparisonCase) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    if case.kind == GeometryKind.PRISM_VOLUME:
-        return generate_prism_lattice(case)
-    return generate_cylinder_film(case)
+    if case.is_cylinder:
+        return generate_cylinder_film(case)
+    return generate_planar_lattice(case)
 
 
 def write_initial_state(case: ComparisonCase, path: Path) -> dict[str, object]:
@@ -47,13 +47,18 @@ def write_initial_state(case: ComparisonCase, path: Path) -> dict[str, object]:
     frame.particles.diameter = np.full(
         n_particles, cylinder.ANALYSIS.particle_diameter, dtype=np.float32
     )
-    frame.particles.moment_inertia = np.ones((n_particles, 3), dtype=np.float32)
+    if case.is_2d:
+        moment_inertia = np.zeros((n_particles, 3), dtype=np.float32)
+        moment_inertia[:, 2] = 1.0
+    else:
+        moment_inertia = np.ones((n_particles, 3), dtype=np.float32)
+    frame.particles.moment_inertia = moment_inertia
     frame.particles.orientation = orientations.astype(np.float32)
     frame.particles.image = np.zeros((n_particles, 3), dtype=np.int32)
     frame.particles.typeid = np.zeros(n_particles, dtype=np.uint32)
     frame.particles.types = ["A"]
     frame.configuration.box = [*case.stored_box, 0, 0, 0]
-    frame.configuration.dimensions = 3
+    frame.configuration.dimensions = case.dimensions
     path.parent.mkdir(parents=True, exist_ok=True)
     with gsd.hoomd.open(name=str(path), mode="w") as target:
         target.append(frame)
@@ -71,13 +76,25 @@ def write_initial_state(case: ComparisonCase, path: Path) -> dict[str, object]:
 
 
 def _wall_force(case: ComparisonCase) -> hoomd.md.external.wall.LJ:
-    if case.kind == GeometryKind.PRISM_VOLUME:
+    if case.is_prism:
         half = case.prism_wall_half_width
         walls = [
             hoomd.wall.Plane(origin=(0, -half, 0), normal=(0, 1, 0)),
             hoomd.wall.Plane(origin=(0, half, 0), normal=(0, -1, 0)),
             hoomd.wall.Plane(origin=(0, 0, -half), normal=(0, 0, 1)),
             hoomd.wall.Plane(origin=(0, 0, half), normal=(0, 0, -1)),
+        ]
+    elif case.is_sandwich:
+        half = 0.5 * case.transverse_span
+        walls = [
+            hoomd.wall.Plane(origin=(0, 0, -half), normal=(0, 0, 1)),
+            hoomd.wall.Plane(origin=(0, 0, half), normal=(0, 0, -1)),
+        ]
+    elif case.is_2d:
+        half = 0.5 * case.transverse_span
+        walls = [
+            hoomd.wall.Plane(origin=(0, -half, 0), normal=(0, 1, 0)),
+            hoomd.wall.Plane(origin=(0, half, 0), normal=(0, -1, 0)),
         ]
     else:
         walls = [
@@ -121,7 +138,7 @@ def make_simulation(
     all_particles = hoomd.filter.All()
 
     manifold = None
-    if case.is_constrained:
+    if case.is_cylinder:
         manifold = hoomd.md.manifold.Cylinder(r=case.radius)
         method = hoomd.md.methods.rattle.OverdampedViscous(
             filter=all_particles,
@@ -288,11 +305,17 @@ def run_case(
             and np.all(np.isfinite(np.asarray(frame.particles.orientation)))
             for frame in trajectory
         )
+        planar_2d = not case.is_2d or all(
+            np.allclose(np.asarray(frame.particles.position)[:, 2], 0.0, atol=1e-7)
+            for frame in trajectory
+        )
     expected = steps // period
     if frame_count != expected:
         raise RuntimeError(f"expected {expected} trajectory frames, found {frame_count}")
     if not finite:
         raise RuntimeError(f"non-finite trajectory data in {paths.trajectory_gsd}")
+    if not planar_2d:
+        raise RuntimeError(f"2D trajectory contains nonzero z positions: {paths.trajectory_gsd}")
     metadata.update(status="complete", frame_count=frame_count, final_step=final_step)
     _write_json_atomic(paths.metadata_json, metadata)
     _write_json_atomic(

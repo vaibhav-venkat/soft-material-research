@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 from dataclasses import dataclass
 from enum import StrEnum
 import math
@@ -17,6 +18,10 @@ BASE_CASE_ID = "circ_60_5D_lx_1x"
 
 class GeometryKind(StrEnum):
     PRISM_VOLUME = "prism_volume"
+    PRISM_SURFACE_AREA = "prism_surface_area"
+    SANDWICH_VOLUME = "sandwich_volume"
+    SANDWICH_SURFACE_AREA = "sandwich_surface_area"
+    TWO_DIMENSION = "two_dimension"
     CYLINDER_RATTLE = "cylinder_rattle"
     CYLINDER_RATTLE_TANGENT = "cylinder_rattle_tangent"
 
@@ -34,6 +39,12 @@ class ComparisonCase:
     def label(self) -> str:
         labels = {
             GeometryKind.PRISM_VOLUME: "equal-volume square prism",
+            GeometryKind.PRISM_SURFACE_AREA: "equal-surface-area square prism",
+            GeometryKind.SANDWICH_VOLUME: "equal-volume two-wall sandwich",
+            GeometryKind.SANDWICH_SURFACE_AREA: (
+                "equal-surface-area two-wall sandwich"
+            ),
+            GeometryKind.TWO_DIMENSION: "two-dimensional two-wall channel",
             GeometryKind.CYLINDER_RATTLE: "cylinder surface (RATTLE)",
             GeometryKind.CYLINDER_RATTLE_TANGENT: (
                 "cylinder surface (RATTLE, tangent active force)"
@@ -55,10 +66,36 @@ class ComparisonCase:
 
     @property
     def n_particles(self) -> int:
-        return self.base.n_particles
+        if self.kind in {
+            GeometryKind.PRISM_VOLUME,
+            GeometryKind.SANDWICH_VOLUME,
+            GeometryKind.CYLINDER_RATTLE,
+            GeometryKind.CYLINDER_RATTLE_TANGENT,
+        }:
+            return self.base.n_particles
+        if self.kind == GeometryKind.TWO_DIMENSION:
+            return int(
+                round(self.base.surface_density * self.lx * self.transverse_span)
+            )
+        return int(
+            round(self.base.volume_density * self.lx * self.transverse_span**2)
+        )
 
     @property
     def prism_side(self) -> float:
+        if self.kind == GeometryKind.PRISM_SURFACE_AREA:
+            return 0.5 * math.pi * self.radius
+        return self.radius * math.sqrt(math.pi)
+
+    @property
+    def transverse_span(self) -> float:
+        if self.kind == GeometryKind.PRISM_SURFACE_AREA:
+            return 0.5 * math.pi * self.radius
+        if self.kind in {
+            GeometryKind.SANDWICH_SURFACE_AREA,
+            GeometryKind.TWO_DIMENSION,
+        }:
+            return math.pi * self.radius
         return self.radius * math.sqrt(math.pi)
 
     @property
@@ -71,6 +108,8 @@ class ComparisonCase:
 
     @property
     def prism_wall_half_width(self) -> float:
+        if self.kind == GeometryKind.PRISM_SURFACE_AREA:
+            return 0.5 * self.transverse_span
         return 0.5 * self.prism_side + self.wall_clearance
 
     @property
@@ -85,18 +124,74 @@ class ComparisonCase:
     def stored_box(self) -> tuple[float, float, float]:
         if self.kind == GeometryKind.PRISM_VOLUME:
             return self.lx, self.prism_box_width, self.prism_box_width
+        if self.kind == GeometryKind.PRISM_SURFACE_AREA:
+            return self.lx, self.transverse_span, self.transverse_span
+        if self.kind in {
+            GeometryKind.SANDWICH_VOLUME,
+            GeometryKind.SANDWICH_SURFACE_AREA,
+        }:
+            return self.lx, self.transverse_span, self.transverse_span
+        if self.kind == GeometryKind.TWO_DIMENSION:
+            return self.lx, self.transverse_span, 0.0
         # HOOMD's cylinder manifold is fixed along the stored z axis.
         return self.cylinder_box_width, self.cylinder_box_width, self.lx
 
     @property
     def logical_to_stored_axes(self) -> tuple[int, int, int]:
-        if self.kind == GeometryKind.PRISM_VOLUME:
+        if not self.is_cylinder:
             return 0, 1, 2
         return 1, 2, 0
 
     @property
     def is_constrained(self) -> bool:
-        return self.kind != GeometryKind.PRISM_VOLUME
+        return self.is_cylinder
+
+    @property
+    def is_cylinder(self) -> bool:
+        return self.kind in {
+            GeometryKind.CYLINDER_RATTLE,
+            GeometryKind.CYLINDER_RATTLE_TANGENT,
+        }
+
+    @property
+    def is_prism(self) -> bool:
+        return self.kind in {
+            GeometryKind.PRISM_VOLUME,
+            GeometryKind.PRISM_SURFACE_AREA,
+        }
+
+    @property
+    def is_sandwich(self) -> bool:
+        return self.kind in {
+            GeometryKind.SANDWICH_VOLUME,
+            GeometryKind.SANDWICH_SURFACE_AREA,
+        }
+
+    @property
+    def is_2d(self) -> bool:
+        return self.kind == GeometryKind.TWO_DIMENSION
+
+    @property
+    def dimensions(self) -> int:
+        return 2 if self.is_2d else 3
+
+    @property
+    def periodic_axes(self) -> tuple[str, ...]:
+        if self.is_cylinder:
+            return ("x", "theta")
+        if self.is_sandwich:
+            return ("x", "y")
+        return ("x",)
+
+    @property
+    def wall_faces(self) -> tuple[str, ...]:
+        if self.is_prism:
+            return ("+y", "-y", "+z", "-z")
+        if self.is_sandwich:
+            return ("+z", "-z")
+        if self.is_2d:
+            return ("+y", "-y")
+        return ("radial",)
 
     def as_metadata(self) -> dict[str, object]:
         metadata = self.base.as_metadata()
@@ -112,15 +207,52 @@ class ComparisonCase:
                 "expected_frame_count": self.run_steps
                 // self.trajectory_write_period,
                 "seed": self.seed,
+                "n_particles": self.n_particles,
                 "prism_side": self.prism_side,
                 "prism_wall_half_width": self.prism_wall_half_width,
                 "prism_box_width": self.prism_box_width,
+                "transverse_span": self.transverse_span,
                 "stored_box": self.stored_box,
+                "wall_to_wall_dimensions": self.stored_box,
+                "confinement_volume": (
+                    self.lx * self.transverse_span**2
+                    if not self.is_cylinder and not self.is_2d
+                    else None
+                ),
+                "confinement_area": (
+                    self.lx * self.transverse_span if self.is_2d else None
+                ),
+                "dimensions": self.dimensions,
+                "periodic_axes": self.periodic_axes,
+                "wall_faces": self.wall_faces,
+                "particle_count_rule": (
+                    "cylinder_surface_density"
+                    if self.is_2d
+                    else "cylinder_volume_density"
+                    if self.kind in {
+                        GeometryKind.PRISM_SURFACE_AREA,
+                        GeometryKind.SANDWICH_VOLUME,
+                        GeometryKind.SANDWICH_SURFACE_AREA,
+                    }
+                    else "base_case"
+                ),
+                "matching_rule": (
+                    "equal_surface_area"
+                    if self.kind
+                    in {
+                        GeometryKind.PRISM_SURFACE_AREA,
+                        GeometryKind.SANDWICH_SURFACE_AREA,
+                    }
+                    else "equal_volume"
+                    if self.kind
+                    in {GeometryKind.PRISM_VOLUME, GeometryKind.SANDWICH_VOLUME}
+                    else "cylinder_surface_density"
+                    if self.is_2d
+                    else "cylinder_manifold"
+                ),
                 "logical_to_stored_axes": self.logical_to_stored_axes,
                 "logical_axial_axis": "x",
-                "stored_axial_axis": "x"
-                if self.kind == GeometryKind.PRISM_VOLUME
-                else "z",
+                "stored_axial_axis": "z" if self.is_cylinder else "x",
             }
         )
         return metadata
@@ -182,7 +314,15 @@ class CasePaths:
 _BASE_CASE = get_big_lx_case(BASE_CASE_ID)
 SWEEP_CASES = tuple(
     ComparisonCase(case_id=kind.value, kind=kind, base=_BASE_CASE)
-    for kind in GeometryKind
+    for kind in (
+        GeometryKind.CYLINDER_RATTLE_TANGENT,
+        GeometryKind.CYLINDER_RATTLE,
+        GeometryKind.PRISM_VOLUME,
+        GeometryKind.PRISM_SURFACE_AREA,
+        GeometryKind.SANDWICH_SURFACE_AREA,
+        GeometryKind.SANDWICH_VOLUME,
+        GeometryKind.TWO_DIMENSION,
+    )
 )
 
 
@@ -199,8 +339,25 @@ def get_case(case_id: str) -> ComparisonCase:
 
 
 def select_cases(all_selected: bool, case_ids: list[str]) -> tuple[ComparisonCase, ...]:
+    if all_selected and case_ids:
+        raise SystemExit("--all cannot be combined with --sim/--case.")
     if all_selected:
         return all_cases()
     if case_ids:
         return tuple(get_case(case_id) for case_id in case_ids)
-    raise SystemExit("Select --all or one or more --case values.")
+    raise SystemExit("Select --all or one or more --sim values.")
+
+
+def add_case_selection_arguments(parser: argparse.ArgumentParser) -> None:
+    selection = parser.add_mutually_exclusive_group(required=True)
+    selection.add_argument("--all", action="store_true")
+    selection.add_argument(
+        "--sim",
+        "--case",
+        dest="case",
+        action="extend",
+        nargs="+",
+        choices=tuple(case.case_id for case in SWEEP_CASES),
+        default=[],
+        help="Run only the listed simulations; --case is a compatibility alias.",
+    )

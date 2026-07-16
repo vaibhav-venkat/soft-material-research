@@ -10,11 +10,11 @@ import gsd.hoomd
 import numpy as np
 
 from hexatic.big_lx.backend import ArrayBackend, select_backend
-from hexatic.big_lx.spatial import PeriodicXTree, exclude_self
 from hexatic.constants import cylinder
 
 from .cases import ComparisonCase, CasePaths, DEFAULT_OUTPUT_ROOT, GeometryKind, get_case
 from .geometry import stored_to_logical
+from .spatial import PeriodicTree, exclude_self
 from .storage import (
     FrameShardWriter,
     prepare_analysis_dir,
@@ -23,7 +23,6 @@ from .storage import (
 )
 
 LOCAL_POCKET_RADIUS = 2.0 * cylinder.ANALYSIS.particle_diameter
-FACE_NAMES = ("+y", "-y", "+z", "-z")
 
 
 def _logged_force(frame, name: str, n_particles: int) -> np.ndarray:
@@ -72,25 +71,65 @@ def _pad_neighbor_width(
     )
 
 
+def _analyze_2d_frame(
+    positions: np.ndarray,
+    directions: np.ndarray,
+    case: ComparisonCase,
+    backend: ArrayBackend,
+    *,
+    frame_index: int,
+    step: int,
+    pocket_radius: float,
+    gaussian_cutoff_multiplier: float,
+    particle_block_size: int,
+) -> dict[str, np.ndarray]:
+    polarization = np.zeros_like(directions, dtype=np.float32)
+    tree = PeriodicTree.build(positions, case)
+    cutoff = gaussian_cutoff_multiplier * pocket_radius
+    for start in range(0, len(positions), particle_block_size):
+        stop = min(start + particle_block_size, len(positions))
+        source_ids, bonds, valid = tree.radius_block(positions[start:stop], cutoff)
+        source_ids, bonds, valid = _pad_neighbor_width(source_ids, bonds, valid)
+        distances_sq = np.sum(bonds * bonds, axis=2, dtype=np.float32)
+        zeros = np.zeros((stop - start, source_ids.shape[1], 3), dtype=np.float32)
+        rho, polar, _, _ = backend.weighted_fields(
+            distances_sq,
+            valid,
+            directions[source_ids],
+            zeros,
+            zeros,
+            pocket_radius,
+        )
+        polarization[start:stop] = np.divide(
+            polar,
+            rho[:, None],
+            out=np.zeros_like(polar),
+            where=rho[:, None] > np.finfo(np.float32).eps,
+        )
+    return {
+        "frame_index": np.asarray(frame_index, dtype=np.int64),
+        "step": np.asarray(step, dtype=np.int64),
+        "coords": positions[:, :2].astype(np.float32),
+        "polarization": polarization[:, :2].astype(np.float32),
+    }
+
+
 def _mark_dislocations(
     positions: np.ndarray,
     charges: np.ndarray,
-    lx: float,
+    case: ComparisonCase,
 ) -> np.ndarray:
     result = np.zeros(len(positions), dtype=np.bool_)
     plus = np.flatnonzero(charges == 1)
     minus_mask = charges == -1
     if not len(plus) or not np.any(minus_mask):
         return result
-    tree = PeriodicXTree.build(positions, lx)
-    hits = tree.tree.query_ball_point(
-        positions[plus],
-        cylinder.ANALYSIS.dislocation_pair_distance,
-        workers=-1,
-        return_sorted=True,
+    tree = PeriodicTree.build(positions, case)
+    sources, _, valid = tree.radius_block(
+        positions[plus], cylinder.ANALYSIS.dislocation_pair_distance
     )
-    for plus_index, row in zip(plus, hits):
-        sources = tree.source_indices[np.asarray(row, dtype=np.int64)]
+    for plus_index, row, row_valid in zip(plus, sources, valid):
+        sources = row[row_valid]
         opposite = sources[minus_mask[sources]]
         if len(opposite):
             result[plus_index] = True
@@ -105,7 +144,7 @@ def _cylinder_surface_fields(
     particle_block_size: int,
 ) -> dict[str, np.ndarray]:
     n_particles = len(positions)
-    tree = PeriodicXTree.build(positions, case.lx)
+    tree = PeriodicTree.build(positions, case)
     _, bonds = tree.nearest_bonds(positions, cylinder.ANALYSIS.neighbors)
     psi_real, psi_imag = backend.hexatic(bonds, positions)
     counts = np.zeros(n_particles, dtype=np.int32)
@@ -135,15 +174,25 @@ def _cylinder_surface_fields(
         "psi_imag": np.asarray(psi_imag, dtype=np.float32),
         "neighbor_counts": counts,
         "disclination_charges": charges,
-        "dislocation_flags": _mark_dislocations(positions, charges, case.lx),
+        "dislocation_flags": _mark_dislocations(positions, charges, case),
         "translation_chirality": translation_chirality,
     }
 
 
-def _prism_face_geometry(
+def _wall_face_geometry(
     positions: np.ndarray,
     case: ComparisonCase,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    if case.is_sandwich:
+        distance_z = 0.5 * case.transverse_span - np.abs(positions[:, 2])
+        face_id = np.where(positions[:, 2] >= 0.0, 0, 1).astype(np.int8)
+        normals = np.zeros_like(positions, dtype=np.float32)
+        normals[:, 2] = np.where(face_id == 0, 1.0, -1.0)
+        tangents = np.zeros_like(normals)
+        tangents[:, 1] = normals[:, 2]
+        corner = np.zeros(len(positions), dtype=np.bool_)
+        return face_id, normals, tangents, distance_z.astype(np.float32), corner
+
     distance_y = 0.5 * case.prism_side - np.abs(positions[:, 1])
     distance_z = 0.5 * case.prism_side - np.abs(positions[:, 2])
     use_y = distance_y <= distance_z
@@ -182,13 +231,13 @@ def _face_components(
     ).astype(np.float32)
 
 
-def _prism_surface_fields(
+def _wall_surface_fields(
     positions: np.ndarray,
     case: ComparisonCase,
     particle_block_size: int,
 ) -> dict[str, np.ndarray]:
     del particle_block_size
-    face_id, normals, tangents, wall_distance, corner = _prism_face_geometry(
+    face_id, normals, tangents, wall_distance, corner = _wall_face_geometry(
         positions, case
     )
     surface = wall_distance <= cylinder.ANALYSIS.shell_delta
@@ -198,12 +247,12 @@ def _prism_surface_fields(
     psi_imag = np.zeros(n_particles, dtype=np.float32)
     counts = np.zeros(n_particles, dtype=np.int32)
     valid_result = np.zeros(n_particles, dtype=np.bool_)
-    for face in range(4):
+    for face in range(len(case.wall_faces)):
         face_indices = np.flatnonzero(valid_hexatic & (face_id == face))
         if len(face_indices) <= cylinder.ANALYSIS.neighbors:
             continue
         face_positions = positions[face_indices]
-        tree = PeriodicXTree.build(face_positions, case.lx)
+        tree = PeriodicTree.build(face_positions, case)
         source_ids, bonds = tree.nearest_bonds(
             face_positions, cylinder.ANALYSIS.neighbors
         )
@@ -213,13 +262,13 @@ def _prism_surface_fields(
         angles = np.arctan2(bond_tangent, bonds[:, :, 0])
         psi_real[face_indices] = np.mean(np.cos(6.0 * angles), axis=1)
         psi_imag[face_indices] = np.mean(np.sin(6.0 * angles), axis=1)
-        hits = tree.tree.query_ball_point(
-            face_positions,
-            cylinder.ANALYSIS.neighbor_count_radius,
-            workers=-1,
-            return_length=True,
+        source_ids, _, radius_valid = tree.radius_block(
+            face_positions, cylinder.ANALYSIS.neighbor_count_radius
         )
-        counts[face_indices] = np.asarray(hits, dtype=np.int32) - 1
+        local_ids = np.arange(len(face_positions), dtype=np.int64)
+        counts[face_indices] = np.count_nonzero(
+            exclude_self(source_ids, radius_valid, local_ids), axis=1
+        ).astype(np.int32)
         valid_result[face_indices] = True
     charges = np.zeros(n_particles, dtype=np.int8)
     charges[valid_result] = (
@@ -237,7 +286,7 @@ def _prism_surface_fields(
         "psi_imag": psi_imag,
         "neighbor_counts": counts,
         "disclination_charges": charges,
-        "dislocation_flags": _mark_dislocations(positions, charges, case.lx),
+        "dislocation_flags": _mark_dislocations(positions, charges, case),
     }
 
 
@@ -259,6 +308,18 @@ def analyze_frame(
     positions = stored_to_logical(stored_positions, case).astype(np.float32)
     orientation_stored = backend.directions(stored_orientation).astype(np.float32)
     orientation_direction = stored_to_logical(orientation_stored, case).astype(np.float32)
+    if case.is_2d:
+        return _analyze_2d_frame(
+            positions,
+            orientation_direction,
+            case,
+            backend,
+            frame_index=frame_index,
+            step=int(frame.configuration.step),
+            pocket_radius=pocket_radius,
+            gaussian_cutoff_multiplier=gaussian_cutoff_multiplier,
+            particle_block_size=particle_block_size,
+        )
     pair_force = stored_to_logical(
         _logged_force(frame, "pair", n_particles), case
     ).astype(np.float32)
@@ -286,7 +347,7 @@ def analyze_frame(
     orientation_p = np.zeros((n_particles, 3), dtype=np.float32)
     force_density = np.zeros((n_particles, 3), dtype=np.float32)
     flux = np.zeros((n_particles, 3), dtype=np.float32)
-    tree = PeriodicXTree.build(positions, case.lx)
+    tree = PeriodicTree.build(positions, case)
     cutoff = gaussian_cutoff_multiplier * pocket_radius
     for start in range(0, n_particles, particle_block_size):
         stop = min(start + particle_block_size, n_particles)
@@ -333,7 +394,7 @@ def analyze_frame(
         "flux_cartesian": flux,
         "velocity_cartesian": velocity,
     }
-    if case.is_constrained:
+    if case.is_cylinder:
         coords = backend.coordinates(positions).astype(np.float32)
         theta = coords[:, 1]
         result.update(
@@ -360,7 +421,7 @@ def analyze_frame(
             _cylinder_surface_fields(positions, case, backend, particle_block_size)
         )
     else:
-        surface = _prism_surface_fields(positions, case, particle_block_size)
+        surface = _wall_surface_fields(positions, case, particle_block_size)
         result.update(surface)
         result.update(
             {
@@ -458,7 +519,7 @@ def analyze_case(
             "cartesian_component_order": ["x", "y", "z"],
             "cylindrical_component_order": ["x", "radial", "azimuthal"],
             "face_component_order": ["axial", "in_face_tangent", "outward_normal"],
-            "face_names": list(FACE_NAMES),
+            "face_names": list(case.wall_faces),
             "complete": False,
             "shards": [],
         }
@@ -521,6 +582,10 @@ def analyze_case(
                     "radius": np.asarray(case.radius, dtype=np.float32),
                     "circumference": np.asarray(case.circumference, dtype=np.float32),
                     "prism_side": np.asarray(case.prism_side, dtype=np.float32),
+                    "transverse_span": np.asarray(
+                        case.transverse_span, dtype=np.float32
+                    ),
+                    "dimensions": np.asarray(case.dimensions, dtype=np.int32),
                     "logical_to_stored_axes": np.asarray(
                         case.logical_to_stored_axes, dtype=np.int32
                     ),

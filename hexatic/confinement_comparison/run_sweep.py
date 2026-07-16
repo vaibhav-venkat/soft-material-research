@@ -4,7 +4,13 @@ import argparse
 from pathlib import Path
 import sys
 
-from .cases import CasePaths, DEFAULT_OUTPUT_ROOT, GeometryKind, select_cases
+from .cases import (
+    CasePaths,
+    DEFAULT_OUTPUT_ROOT,
+    GeometryKind,
+    add_case_selection_arguments,
+    select_cases,
+)
 from .scheduler import ScheduledJob, parse_gpu_ids, run_jobs
 
 
@@ -38,7 +44,14 @@ def simulation_jobs(args: argparse.Namespace) -> tuple[ScheduledJob, ...]:
                 command=tuple(command),
                 log_path=CasePaths(case, args.output_root).simulation_log,
                 preferred_gpu_id=(
-                    1 if case.kind == GeometryKind.PRISM_VOLUME else 0
+                    0
+                    if case.kind
+                    in {GeometryKind.PRISM_SURFACE_AREA, GeometryKind.TWO_DIMENSION}
+                    else 1
+                    if case.is_sandwich
+                    else 1
+                    if case.kind == GeometryKind.PRISM_VOLUME
+                    else 0
                 ),
             )
         )
@@ -57,8 +70,7 @@ def run_sweep(args: argparse.Namespace) -> None:
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--all", action="store_true")
-    parser.add_argument("--case", action="append", default=[])
+    add_case_selection_arguments(parser)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--workers", type=int, default=3)
     parser.add_argument("--gpu-ids", default="0,1")

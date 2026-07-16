@@ -5,7 +5,13 @@ from pathlib import Path
 import sys
 
 from .analyze_case import LOCAL_POCKET_RADIUS
-from .cases import CasePaths, DEFAULT_OUTPUT_ROOT, GeometryKind, select_cases
+from .cases import (
+    CasePaths,
+    DEFAULT_OUTPUT_ROOT,
+    GeometryKind,
+    add_case_selection_arguments,
+    select_cases,
+)
 from .scheduler import ScheduledJob, parse_gpu_ids, run_jobs
 
 
@@ -43,7 +49,14 @@ def analysis_jobs(args: argparse.Namespace) -> tuple[ScheduledJob, ...]:
                 command=tuple(command),
                 log_path=CasePaths(case, args.output_root).analysis_log,
                 preferred_gpu_id=(
-                    0 if case.kind == GeometryKind.PRISM_VOLUME else 1
+                    0
+                    if case.kind
+                    in {GeometryKind.PRISM_SURFACE_AREA, GeometryKind.TWO_DIMENSION}
+                    else 1
+                    if case.is_sandwich
+                    else 0
+                    if case.kind == GeometryKind.PRISM_VOLUME
+                    else 1
                 ),
             )
         )
@@ -62,8 +75,7 @@ def run_analysis(args: argparse.Namespace) -> None:
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--all", action="store_true")
-    parser.add_argument("--case", action="append", default=[])
+    add_case_selection_arguments(parser)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--workers", type=int, default=3)
     parser.add_argument("--gpu-ids", default="0,1")

@@ -4,7 +4,7 @@ import argparse
 from pathlib import Path
 
 from .analyze_case import LOCAL_POCKET_RADIUS
-from .cases import DEFAULT_OUTPUT_ROOT
+from .cases import DEFAULT_OUTPUT_ROOT, add_case_selection_arguments
 from .run_analysis import run_analysis
 from .run_sweep import run_sweep
 
@@ -13,8 +13,7 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run confinement simulations, then analysis after a barrier."
     )
-    parser.add_argument("--all", action="store_true")
-    parser.add_argument("--case", action="append", default=[])
+    add_case_selection_arguments(parser)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--gpu-ids", default="0,1")
     parser.add_argument("--simulation-workers", type=int, default=3)

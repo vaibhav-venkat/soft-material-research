@@ -8,12 +8,18 @@ import gsd.hoomd
 import numpy as np
 
 from hexatic.big_lx.backend import select_backend
-from hexatic.big_lx.spatial import PeriodicXTree
 from hexatic.constants import cylinder
 
 from .analyze_case import _logged_force, _project_tangent
-from .cases import CasePaths, DEFAULT_OUTPUT_ROOT, GeometryKind, select_cases
+from .cases import (
+    CasePaths,
+    DEFAULT_OUTPUT_ROOT,
+    GeometryKind,
+    add_case_selection_arguments,
+    select_cases,
+)
 from .geometry import stored_to_logical
+from .spatial import PeriodicTree
 from .simulate_case import make_simulation, write_initial_state
 from .storage import write_json_atomic
 
@@ -89,9 +95,11 @@ def run_diagnostic(
                 )
                 tangency.append(float(np.max(np.abs(np.sum(effective * normals, axis=1)))))
                 direction_means.append(np.mean(effective, axis=0).tolist())
-            tree = PeriodicXTree.build(positions, case.lx)
-            distances, _ = tree.tree.query(positions, k=2, workers=-1)
-            minimum_distances.append(float(np.min(distances[:, 1])))
+            tree = PeriodicTree.build(positions, case)
+            _, bonds = tree.nearest_bonds(positions, 1)
+            minimum_distances.append(
+                float(np.min(np.linalg.norm(bonds[:, 0], axis=1)))
+            )
     if not finite:
         raise RuntimeError(f"non-finite diagnostic state for {case.case_id}")
     payload: dict[str, object] = {
@@ -118,8 +126,7 @@ def run_diagnostic(
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run two-frame CPU diagnostics.")
-    parser.add_argument("--all", action="store_true")
-    parser.add_argument("--case", action="append", default=[])
+    add_case_selection_arguments(parser)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--period", type=int, default=int(1e5))
     parser.add_argument("--seed", type=int, default=None)

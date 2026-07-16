@@ -8,6 +8,7 @@ from hexatic.big_lx.lattice import (
     generate_unwrapped_lattice,
     outward_normal_quaternions,
 )
+from hexatic.constants import cylinder
 
 from .cases import ComparisonCase, GeometryKind
 
@@ -18,7 +19,7 @@ def logical_to_stored(vectors: np.ndarray, case: ComparisonCase) -> np.ndarray:
 
 def stored_to_logical(vectors: np.ndarray, case: ComparisonCase) -> np.ndarray:
     values = np.asarray(vectors)
-    if case.kind == GeometryKind.PRISM_VOLUME:
+    if not case.is_cylinder:
         return values.copy()
     return values[..., (2, 0, 1)]
 
@@ -104,7 +105,9 @@ def _vacancy_indices(points: np.ndarray) -> set[tuple[int, int, int]]:
     return removed
 
 
-def generate_prism_lattice(case: ComparisonCase) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _legacy_prism_lattice(
+    case: ComparisonCase,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     if case.kind != GeometryKind.PRISM_VOLUME:
         raise ValueError("prism lattice requested for a cylindrical case")
     x = (np.arange(71, dtype=np.float64) + 0.5) * case.lx / 71.0 - 0.5 * case.lx
@@ -161,10 +164,191 @@ def generate_prism_lattice(case: ComparisonCase) -> tuple[np.ndarray, np.ndarray
     return positions, quaternions, directions
 
 
+def _balanced_grid_shape(spans: tuple[float, ...], n_particles: int) -> tuple[int, ...]:
+    dimensions = len(spans)
+    scale = (n_particles / math.prod(spans)) ** (1.0 / dimensions)
+    targets = tuple(max(1, int(round(span * scale))) for span in spans)
+    ranges = [range(max(1, target - 6), target + 7) for target in targets]
+    candidates: list[tuple[float, tuple[int, ...]]] = []
+    if dimensions == 2:
+        shapes = ((nx, ny) for nx in ranges[0] for ny in ranges[1])
+    else:
+        shapes = (
+            (nx, ny, nz)
+            for nx in ranges[0]
+            for ny in ranges[1]
+            for nz in ranges[2]
+        )
+    for shape in shapes:
+        size = math.prod(shape)
+        if size < n_particles or (size - n_particles) % 2:
+            continue
+        spacings = np.asarray(spans, dtype=np.float64) / np.asarray(shape)
+        anisotropy = float(np.var(np.log(spacings)))
+        score = (size - n_particles) / n_particles + anisotropy
+        candidates.append((score, shape))
+    if not candidates:
+        raise ValueError(f"could not construct a symmetric grid for N={n_particles}")
+    return min(candidates)[1]
+
+
+def _symmetric_keep_mask(shape: tuple[int, ...], n_particles: int) -> np.ndarray:
+    size = math.prod(shape)
+    remove_pairs = (size - n_particles) // 2
+    indices = list(np.ndindex(shape))
+
+    def partner(index: tuple[int, ...]) -> tuple[int, ...]:
+        return tuple(width - 1 - value for width, value in zip(shape, index))
+
+    representatives = [index for index in indices if index < partner(index)]
+    if remove_pairs > len(representatives):
+        raise ValueError("requested particle count is too small for the selected grid")
+    removed: set[tuple[int, ...]] = set()
+    if remove_pairs:
+        selected = np.linspace(
+            0,
+            len(representatives) - 1,
+            remove_pairs,
+            dtype=np.int64,
+        )
+        for selected_index in selected:
+            index = representatives[int(selected_index)]
+            removed.add(index)
+            removed.add(partner(index))
+    return np.asarray([index not in removed for index in indices], dtype=np.bool_)
+
+
+def _cell_centered_points(
+    spans: tuple[float, ...],
+    n_particles: int,
+) -> np.ndarray:
+    shape = _balanced_grid_shape(spans, n_particles)
+    axes = [
+        (np.arange(width, dtype=np.float64) + 0.5) * span / width - 0.5 * span
+        for span, width in zip(spans, shape)
+    ]
+    points = np.stack(np.meshgrid(*axes, indexing="ij"), axis=-1).reshape(
+        -1, len(spans)
+    )
+    return points[_symmetric_keep_mask(shape, n_particles)]
+
+
+def _triangular_2d_points(case: ComparisonCase) -> np.ndarray:
+    cutoff = cylinder.ANALYSIS.wall_cutoff
+    candidates: list[tuple[float, int, int]] = []
+    for nx in range(3, int(case.lx / cutoff) + 1, 2):
+        for ny in range(3, 101, 2):
+            size = nx * ny
+            if size < case.n_particles or (size - case.n_particles) % 2:
+                continue
+            dx = case.lx / nx
+            dy = case.transverse_span / ny
+            diagonal = math.hypot(0.5 * dx, dy)
+            if min(dx, diagonal) <= cutoff:
+                continue
+            score = (size - case.n_particles) / case.n_particles + abs(
+                dy / dx - math.sqrt(3.0) / 2.0
+            )
+            candidates.append((score, nx, ny))
+    if not candidates:
+        raise ValueError("could not construct a non-overlapping 2D triangular grid")
+    _, nx, ny = min(candidates)
+    dx = case.lx / nx
+    dy = case.transverse_span / ny
+    half_x = nx // 2
+    half_y = ny // 2
+    points = []
+    indices = []
+    for iy in range(ny):
+        j = iy - half_y
+        offset = 0.5 * (j & 1)
+        for ix in range(nx):
+            i = ix - half_x
+            x = ((i + offset) * dx + 0.5 * case.lx) % case.lx - 0.5 * case.lx
+            points.append((x, j * dy))
+            indices.append((ix, iy))
+
+    def partner(index: tuple[int, int]) -> tuple[int, int]:
+        ix, iy = index
+        i = ix - half_x
+        j = iy - half_y
+        partner_i = -i - (j & 1)
+        return (partner_i + half_x) % nx, ny - 1 - iy
+
+    representatives = [index for index in indices if index < partner(index)]
+    remove_pairs = (nx * ny - case.n_particles) // 2
+    removed: set[tuple[int, int]] = set()
+    if remove_pairs:
+        selected = np.linspace(
+            0, len(representatives) - 1, remove_pairs, dtype=np.int64
+        )
+        for selected_index in selected:
+            index = representatives[int(selected_index)]
+            removed.add(index)
+            removed.add(partner(index))
+    keep = np.asarray([index not in removed for index in indices], dtype=np.bool_)
+    result = np.asarray(points, dtype=np.float64)[keep]
+    result -= np.mean(result, axis=0, keepdims=True)
+    return result
+
+
+def _nearest_prism_directions(positions: np.ndarray) -> np.ndarray:
+    directions = np.zeros_like(positions)
+    use_y = np.abs(positions[:, 1]) >= np.abs(positions[:, 2])
+    directions[use_y, 1] = np.where(positions[use_y, 1] >= 0.0, 1.0, -1.0)
+    directions[~use_y, 2] = np.where(positions[~use_y, 2] >= 0.0, 1.0, -1.0)
+    return directions
+
+
+def _paired_wall_sign(coordinate: np.ndarray, tie_breakers: np.ndarray) -> np.ndarray:
+    sign = np.where(coordinate >= 0.0, 1.0, -1.0)
+    tied = np.isclose(coordinate, 0.0, atol=1e-14)
+    for values in np.asarray(tie_breakers).T:
+        unresolved = tied & ~np.isclose(values, 0.0, atol=1e-14)
+        sign[unresolved] = np.where(values[unresolved] >= 0.0, 1.0, -1.0)
+        tied[unresolved] = False
+    sign[tied] = 1.0
+    return sign
+
+
+def generate_planar_lattice(
+    case: ComparisonCase,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if case.is_cylinder:
+        raise ValueError("planar lattice requested for a cylindrical case")
+    if case.kind == GeometryKind.PRISM_VOLUME:
+        return _legacy_prism_lattice(case)
+    if case.is_2d:
+        points_2d = _triangular_2d_points(case)
+        positions = np.column_stack((points_2d, np.zeros(case.n_particles)))
+        directions = np.zeros_like(positions)
+        directions[:, 1] = _paired_wall_sign(positions[:, 1], positions[:, [0]])
+    else:
+        positions = _cell_centered_points(
+            (case.lx, case.transverse_span, case.transverse_span),
+            case.n_particles,
+        )
+        if case.is_prism:
+            directions = _nearest_prism_directions(positions)
+        else:
+            directions = np.zeros_like(positions)
+            directions[:, 2] = _paired_wall_sign(
+                positions[:, 2], positions[:, [0, 1]]
+            )
+    quaternions = quaternions_from_x_directions(directions)
+    return positions, quaternions, directions
+
+
+def generate_prism_lattice(case: ComparisonCase) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if not case.is_prism:
+        raise ValueError("prism lattice requested for a non-prism case")
+    return generate_planar_lattice(case)
+
+
 def generate_cylinder_film(
     case: ComparisonCase,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    if not case.is_constrained:
+    if not case.is_cylinder:
         raise ValueError("cylinder film requested for a prism case")
     logical_positions, theta = generate_unwrapped_lattice(case.base)
     logical_quaternions = outward_normal_quaternions(theta)
