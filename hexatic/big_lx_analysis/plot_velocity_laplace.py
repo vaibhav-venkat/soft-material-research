@@ -2,29 +2,54 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import json
 from pathlib import Path
 
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from safetensors import safe_open
 from scipy.integrate import simpson
 
-from hexatic.big_lx.cases import DEFAULT_OUTPUT_ROOT, BigLxCase, CasePaths, get_case
-from hexatic.big_lx.plot_center_of_mass import center_of_mass_series
+from hexatic.big_lx.cases import (
+    DEFAULT_OUTPUT_ROOT,
+    CasePaths as BigLxCasePaths,
+    get_case as get_big_lx_case,
+)
+from hexatic.confinement_comparison.cases import (
+    CasePaths as ConfinementCasePaths,
+    get_case as get_confinement_case,
+)
+from hexatic.constants import cylinder
 
 from .correlations import lagged_pearson
 
 
 @dataclass(frozen=True)
+class LaplaceCase:
+    case_id: str
+    label: str
+    lx: float
+    n_particles: int
+    analysis_dir: Path
+
+
+@dataclass(frozen=True)
+class AxialCenterSeries:
+    elapsed_time: np.ndarray
+    x_velocity: np.ndarray
+
+
+@dataclass(frozen=True)
 class VelocityCorrelationLaplaceTransform:
-    case: BigLxCase
+    case: LaplaceCase
     r: np.ndarray
     omega: np.ndarray
     values: np.ndarray
 
 
 def velocity_correlation_laplace_transform(
-    case: BigLxCase,
+    case: LaplaceCase,
     lag_times: np.ndarray,
     correlation: np.ndarray,
     *,
@@ -66,6 +91,126 @@ def velocity_correlation_laplace_transform(
         omega=np.asarray(omega, dtype=np.float64),
         values=values,
     )
+
+
+def _resolve_cases(
+    mode: str,
+    case_ids: list[str],
+    output_root: Path,
+) -> list[LaplaceCase]:
+    result: list[LaplaceCase] = []
+    for case_id in case_ids:
+        if mode == "big-lx":
+            case = get_big_lx_case(case_id)
+            analysis_dir = BigLxCasePaths(case, output_root).analysis_dir
+        elif mode == "confinement":
+            case = get_confinement_case(case_id)
+            analysis_dir = ConfinementCasePaths(case, output_root).analysis_dir
+        else:
+            raise ValueError(f"Unsupported analysis mode: {mode}")
+        result.append(
+            LaplaceCase(
+                case_id=case.case_id,
+                label=case.label,
+                lx=case.lx,
+                n_particles=case.n_particles,
+                analysis_dir=analysis_dir,
+            )
+        )
+    return result
+
+
+def _axial_center_series(case: LaplaceCase, mode: str) -> AxialCenterSeries:
+    manifest_path = case.analysis_dir / "manifest.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f"Missing analysis manifest: {manifest_path}")
+    manifest = json.loads(manifest_path.read_text())
+    expected_schema = (
+        "hexatic.big_lx.analysis.v1"
+        if mode == "big-lx"
+        else "hexatic.confinement_comparison.analysis.v1"
+    )
+    if manifest.get("schema") != expected_schema:
+        raise ValueError(f"Unsupported analysis schema in {manifest_path}")
+    if manifest.get("complete") is not True:
+        raise ValueError(f"Analysis is not marked complete: {manifest_path}")
+    case_payload = manifest.get("case")
+    if not isinstance(case_payload, dict) or case_payload.get("case_id") != case.case_id:
+        raise ValueError(f"Analysis manifest does not match case {case.case_id}")
+    shards = manifest.get("shards")
+    if not isinstance(shards, list) or not shards:
+        raise ValueError(f"Analysis manifest has no frame shards: {manifest_path}")
+
+    expected_start = 0
+    steps: list[int] = []
+    centers: list[float] = []
+    previous_wrapped: np.ndarray | None = None
+    unwrapped: np.ndarray | None = None
+    for shard in shards:
+        if not isinstance(shard, dict):
+            raise ValueError("Analysis manifest contains an invalid shard")
+        start = shard.get("frame_start")
+        stop = shard.get("frame_stop")
+        filename = shard.get("file")
+        if (
+            not isinstance(start, int)
+            or start != expected_start
+            or not isinstance(stop, int)
+            or stop <= start
+            or not isinstance(filename, str)
+        ):
+            raise ValueError("Analysis shards are not contiguous from frame zero")
+        shard_path = case.analysis_dir / filename
+        if not shard_path.is_file():
+            raise FileNotFoundError(f"Missing frame shard: {shard_path}")
+        with safe_open(shard_path, framework="numpy") as tensors:
+            keys = set(tensors.keys())
+            coordinate_name = "coords" if "coords" in keys else "position_cartesian"
+            if coordinate_name not in keys or "step" not in keys:
+                raise KeyError(
+                    f"{shard_path} lacks logical axial coordinates or step values"
+                )
+            coordinates = np.asarray(tensors.get_tensor(coordinate_name))
+            shard_steps = np.asarray(tensors.get_tensor("step")).reshape(-1)
+        frame_count = stop - start
+        if (
+            coordinates.ndim != 3
+            or coordinates.shape[:2] != (frame_count, case.n_particles)
+            or coordinates.shape[2] < 1
+            or shard_steps.shape != (frame_count,)
+        ):
+            raise ValueError(f"Frame tensor shape mismatch in {shard_path}")
+        for local_index in range(frame_count):
+            wrapped = np.asarray(coordinates[local_index, :, 0], dtype=np.float64)
+            if previous_wrapped is None:
+                unwrapped = wrapped.copy()
+            else:
+                displacement = wrapped - previous_wrapped
+                displacement -= case.lx * np.rint(displacement / case.lx)
+                unwrapped += displacement
+            previous_wrapped = wrapped.copy()
+            if unwrapped is None:
+                raise RuntimeError("Axial coordinate unwrapping was not initialized")
+            steps.append(int(shard_steps[local_index]))
+            centers.append(float(np.mean(unwrapped)))
+        expected_start = stop
+
+    declared_frames = manifest.get("frame_count")
+    if not isinstance(declared_frames, int) or declared_frames != expected_start:
+        raise ValueError("Manifest frame count does not match its shards")
+    step_array = np.asarray(steps, dtype=np.int64)
+    if step_array.size < 2 or np.any(np.diff(step_array) <= 0):
+        raise ValueError("Analysis steps must be strictly increasing")
+    elapsed_time = (
+        step_array.astype(np.float64) - float(step_array[0])
+    ) * cylinder.SIMULATION.timestep
+    edge_order = 2 if elapsed_time.size >= 3 else 1
+    velocity = np.gradient(
+        np.asarray(centers, dtype=np.float64),
+        elapsed_time,
+        edge_order=edge_order,
+    )
+    return AxialCenterSeries(elapsed_time=elapsed_time, x_velocity=velocity)
 
 
 def plot_velocity_laplace(
@@ -145,11 +290,26 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--case",
-        action="append",
+        "--cases",
+        dest="case",
+        action="extend",
+        nargs="+",
         required=True,
-        help="Big-Lx case ID; repeat to create multiple heatmap panels.",
+        help="Case IDs; pass one or more values to create heatmap panels.",
     )
-    parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
+    parser.add_argument(
+        "--mode",
+        choices=("big-lx", "confinement"),
+        default="big-lx",
+    )
+    parser.add_argument(
+        "--output-root",
+        "--output-dir",
+        "--output_dir",
+        dest="output_root",
+        type=Path,
+        default=DEFAULT_OUTPUT_ROOT,
+    )
     parser.add_argument("--output", type=Path)
     parser.add_argument("--r-min", type=float)
     parser.add_argument("--r-max", type=float, default=0.0)
@@ -172,9 +332,9 @@ def main() -> None:
         raise SystemExit("--min-origins must be at least two")
     if args.max_lag is not None and args.max_lag < 1:
         raise SystemExit("--max-lag must be positive")
-    cases = [get_case(case_id) for case_id in args.case]
+    cases = _resolve_cases(args.mode, args.case, args.output_root)
     series_by_case = [
-        center_of_mass_series(case, CasePaths(case, args.output_root).analysis_dir)
+        _axial_center_series(case, args.mode)
         for case in cases
     ]
     correlation_inputs: list[tuple[np.ndarray, np.ndarray]] = []
@@ -236,11 +396,13 @@ def main() -> None:
     ]
     output = (
         args.output
-        or args.output_root / "plots" / "big_lx_velocity_correlation_laplace.html"
+        or args.output_root
+        / "plots"
+        / f"{args.mode.replace('-', '_')}_velocity_correlation_laplace.html"
     )
     result = plot_velocity_laplace(transforms, output)
     print(
-        f"[big_lx_analysis.laplace] cases={len(cases)} "
+        f"[big_lx_analysis.laplace] mode={args.mode} cases={len(cases)} "
         f"r=[{r[0]:.8g}, {r[-1]:.8g}] "
         f"omega=[{omega[0]:.8g}, {omega[-1]:.8g}] output={result}",
         flush=True,
