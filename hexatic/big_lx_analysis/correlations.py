@@ -12,7 +12,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from safetensors import safe_open
-from scipy.fft import irfft, next_fast_len, rfft
+from scipy.signal import correlate
+from scipy.stats import pearsonr
 
 from hexatic.big_lx.cases import BigLxCase, CasePaths
 from hexatic.big_lx.plot_center_of_mass import center_of_mass_series
@@ -25,10 +26,10 @@ class CorrelationSeries:
     lag_indices: np.ndarray
     lag_times: np.ndarray
     velocity: np.ndarray
-    psi6: np.ndarray
+    psi6_autocorrelation: np.ndarray
+    psi6_pearson: np.ndarray
     time_origin_counts: np.ndarray
-    psi6_pair_counts: np.ndarray
-    psi6_correlation: str
+    shell_particle_counts: np.ndarray
 
 
 class ShardRecord(TypedDict):
@@ -79,11 +80,7 @@ def _validated_shards(
         if not path.is_file():
             raise FileNotFoundError(f"Missing frame shard: {path}")
         shards.append(
-            {
-                "file": filename,
-                "frame_start": start,
-                "frame_stop": stop,
-            }
+            {"file": filename, "frame_start": start, "frame_stop": stop}
         )
         expected_start = stop
     frame_count = manifest.get("frame_count")
@@ -94,7 +91,7 @@ def _validated_shards(
     return shards, frame_count
 
 
-def _load_hexatic_series(
+def _load_mean_hexatic_series(
     case: BigLxCase,
     analysis_dir: Path,
     manifest: dict[str, object],
@@ -102,15 +99,15 @@ def _load_hexatic_series(
     shards, frame_count = _validated_shards(analysis_dir, manifest)
     if frame_count < 2:
         raise ValueError("At least two analysis frames are required")
-    magnitudes = np.empty((frame_count, case.n_particles), dtype=np.float32)
-    masks = np.empty((frame_count, case.n_particles), dtype=np.bool_)
     steps = np.empty(frame_count, dtype=np.int64)
+    mean_magnitudes = np.empty(frame_count, dtype=np.float64)
+    shell_counts = np.empty(frame_count, dtype=np.int64)
     required = ("psi_real", "psi_imag", "hexatic_shell_mask", "step")
 
     for shard in shards:
         start = shard["frame_start"]
         stop = shard["frame_stop"]
-        path = analysis_dir / str(shard["file"])
+        path = analysis_dir / shard["file"]
         with safe_open(path, framework="numpy") as tensors:
             keys = set(tensors.keys())
             missing = [name for name in required if name not in keys]
@@ -118,8 +115,9 @@ def _load_hexatic_series(
                 raise KeyError(f"{path} is missing tensors: {', '.join(missing)}")
             real = np.asarray(tensors.get_tensor("psi_real"))
             imaginary = np.asarray(tensors.get_tensor("psi_imag"))
-            mask = np.asarray(tensors.get_tensor("hexatic_shell_mask"))
+            mask = np.asarray(tensors.get_tensor("hexatic_shell_mask"), dtype=np.bool_)
             shard_steps = np.asarray(tensors.get_tensor("step")).reshape(-1)
+
         expected_shape = (stop - start, case.n_particles)
         if real.shape != expected_shape or imaginary.shape != expected_shape:
             raise ValueError(f"Hexatic tensor shape mismatch in {path}")
@@ -127,100 +125,47 @@ def _load_hexatic_series(
             raise ValueError(f"Hexatic shell-mask shape mismatch in {path}")
         if shard_steps.shape != (stop - start,):
             raise ValueError(f"Step tensor shape mismatch in {path}")
-        np.hypot(real, imaginary, out=magnitudes[start:stop])
-        masks[start:stop] = mask.astype(np.bool_, copy=False)
-        magnitudes[start:stop] *= masks[start:stop]
+
+        magnitudes = np.hypot(real, imaginary)
+        counts = np.count_nonzero(mask, axis=1).astype(np.int64)
+        if np.any(counts == 0):
+            local_index = int(np.flatnonzero(counts == 0)[0])
+            raise ValueError(f"No shell-valid hexatic particles in frame {start + local_index}")
+        totals = np.sum(magnitudes, where=mask, axis=1, dtype=np.float64)
+        mean_magnitudes[start:stop] = totals / counts
+        shell_counts[start:stop] = counts
         steps[start:stop] = shard_steps.astype(np.int64, copy=False)
 
     if np.any(np.diff(steps) <= 0):
         raise ValueError("Trajectory steps must be strictly increasing")
-    return steps, magnitudes, masks
+    return steps, mean_magnitudes, shell_counts
 
 
-def _autocorrelation_sum(values: np.ndarray, fft_length: int) -> np.ndarray:
-    transformed = rfft(values, n=fft_length)
-    return irfft(np.conjugate(transformed) * transformed, n=fft_length)[: values.size]
-
-
-def _velocity_correlation(velocity: np.ndarray, max_lag: int) -> np.ndarray:
-    fft_length = next_fast_len(2 * velocity.size - 1)
-    sums = _autocorrelation_sum(np.asarray(velocity, dtype=np.float64), fft_length)
-    origins = velocity.size - np.arange(max_lag + 1, dtype=np.int64)
-    means = sums[: max_lag + 1] / origins
+def _normalized_autocorrelation(values: np.ndarray, max_lag: int, name: str) -> np.ndarray:
+    values = np.asarray(values, dtype=np.float64)
+    full = correlate(values, values, mode="full", method="fft")
+    start = values.size - 1
+    sums = full[start : start + max_lag + 1]
+    origins = values.size - np.arange(max_lag + 1, dtype=np.int64)
+    means = sums / origins
     normalization = float(means[0])
     if not np.isfinite(normalization) or normalization <= 0.0:
-        raise ValueError("Axial COM velocity has zero or invalid lag-zero power")
+        raise ValueError(f"{name} has zero or invalid lag-zero power")
     result = means / normalization
     result[0] = 1.0
     return result
 
 
-def _hexatic_correlation(
-    magnitudes: np.ndarray,
-    masks: np.ndarray,
-    max_lag: int,
-    particle_block_size: int,
-    correlation: str,
-) -> tuple[np.ndarray, np.ndarray]:
-    frame_count, particle_count = magnitudes.shape
-    if correlation == "connected-magnitude":
-        valid_count = int(np.count_nonzero(masks))
-        if valid_count == 0:
-            raise ValueError("No shell-valid hexatic values are available")
-        mean_magnitude = float(np.sum(magnitudes, dtype=np.float64) / valid_count)
-    elif correlation == "magnitude":
-        mean_magnitude = 0.0
-    else:
-        raise ValueError(f"Unsupported psi6 correlation: {correlation}")
-    fft_length = next_fast_len(2 * frame_count - 1)
-    frequency_count = fft_length // 2 + 1
-    numerator_spectrum = np.zeros(frequency_count, dtype=np.float64)
-    pair_count_spectrum = np.zeros(frequency_count, dtype=np.float64)
-
-    for start in range(0, particle_count, particle_block_size):
-        stop = min(start + particle_block_size, particle_count)
-        block_mask = masks[:, start:stop]
-        block_values = magnitudes[:, start:stop]
-        if correlation == "connected-magnitude":
-            block_values = np.where(
-                block_mask,
-                block_values - mean_magnitude,
-                0.0,
-            )
-        value_transform = rfft(
-            block_values,
-            n=fft_length,
-            axis=0,
-            workers=-1,
-        )
-        numerator_spectrum += np.sum(
-            np.real(np.conjugate(value_transform) * value_transform), axis=1
-        )
-        del value_transform
-        mask_transform = rfft(
-            block_mask.astype(np.float32),
-            n=fft_length,
-            axis=0,
-            workers=-1,
-        )
-        pair_count_spectrum += np.sum(
-            np.real(np.conjugate(mask_transform) * mask_transform), axis=1
-        )
-        del mask_transform
-
-    numerator = irfft(numerator_spectrum, n=fft_length)[: max_lag + 1]
-    pair_counts_float = irfft(pair_count_spectrum, n=fft_length)[: max_lag + 1]
-    pair_counts = np.rint(pair_counts_float).astype(np.int64)
-    if np.any(pair_counts <= 0):
-        first = int(np.flatnonzero(pair_counts <= 0)[0])
-        raise ValueError(f"No shell-valid particle pairs at lag {first}")
-    means = numerator / pair_counts
-    normalization = float(means[0])
-    if not np.isfinite(normalization) or normalization <= 0.0:
-        raise ValueError("Hexatic magnitude has zero or invalid lag-zero power")
-    result = means / normalization
+def _lagged_pearson(values: np.ndarray, max_lag: int) -> np.ndarray:
+    values = np.asarray(values, dtype=np.float64)
+    result = np.empty(max_lag + 1, dtype=np.float64)
     result[0] = 1.0
-    return result, pair_counts
+    for lag in range(1, max_lag + 1):
+        statistic = float(pearsonr(values[:-lag], values[lag:]).statistic)
+        if not np.isfinite(statistic):
+            raise ValueError(f"Mean hexatic magnitude has zero variance at lag {lag}")
+        result[lag] = statistic
+    return np.clip(result, -1.0, 1.0)
 
 
 def analyze_correlations(
@@ -229,24 +174,18 @@ def analyze_correlations(
     output_root: Path,
     min_origins: int = 10,
     max_lag: int | None = None,
-    particle_block_size: int = 4096,
     absolute: bool = False,
-    psi6_correlation: str = "connected-magnitude",
 ) -> CorrelationSeries:
-    if min_origins < 1:
-        raise ValueError("min_origins must be positive")
+    if min_origins < 2:
+        raise ValueError("min_origins must be at least two for Pearson correlation")
     if max_lag is not None and max_lag < 0:
         raise ValueError("max_lag must be nonnegative")
-    if particle_block_size < 1:
-        raise ValueError("particle_block_size must be positive")
-    if psi6_correlation not in ("connected-magnitude", "magnitude"):
-        raise ValueError(
-            "psi6_correlation must be 'connected-magnitude' or 'magnitude'"
-        )
 
     analysis_dir = CasePaths(case, output_root).analysis_dir
     manifest = _load_manifest(analysis_dir, case)
-    steps, magnitudes, masks = _load_hexatic_series(case, analysis_dir, manifest)
+    steps, mean_psi6, shell_counts = _load_mean_hexatic_series(
+        case, analysis_dir, manifest
+    )
     com = center_of_mass_series(case, analysis_dir)
     if not np.array_equal(steps, com.steps):
         raise ValueError("Hexatic and COM step arrays do not match")
@@ -269,25 +208,24 @@ def analyze_correlations(
         * float(step_spacing[0])
         * cylinder.SIMULATION.timestep
     )
-    velocity = _velocity_correlation(com.x_velocity, selected_max_lag)
+    velocity = _normalized_autocorrelation(
+        com.x_velocity, selected_max_lag, "Axial COM velocity"
+    )
     if absolute:
         velocity = np.abs(velocity)
-    psi6, psi6_pair_counts = _hexatic_correlation(
-        magnitudes,
-        masks,
-        selected_max_lag,
-        particle_block_size,
-        psi6_correlation,
+    psi6_autocorrelation = _normalized_autocorrelation(
+        mean_psi6, selected_max_lag, "Mean hexatic magnitude"
     )
+    psi6_pearson = _lagged_pearson(mean_psi6, selected_max_lag)
     return CorrelationSeries(
         case=case,
         lag_indices=lag_indices,
         lag_times=lag_times,
         velocity=velocity,
-        psi6=psi6,
+        psi6_autocorrelation=psi6_autocorrelation,
+        psi6_pearson=psi6_pearson,
         time_origin_counts=frame_count - lag_indices,
-        psi6_pair_counts=psi6_pair_counts,
-        psi6_correlation=psi6_correlation,
+        shell_particle_counts=shell_counts,
     )
 
 
@@ -297,27 +235,26 @@ def plot_correlations(
     *,
     dpi: int = 180,
     absolute: bool = False,
-    psi6_zoom_limits: tuple[float, float] = (0.9, 1.05),
 ) -> Path:
     if not series_by_case:
         raise ValueError("At least one correlation series is required")
     if dpi < 1:
         raise ValueError("dpi must be positive")
-    if psi6_zoom_limits[0] >= psi6_zoom_limits[1]:
-        raise ValueError("psi6 zoom minimum must be smaller than its maximum")
-    psi6_kinds = {series.psi6_correlation for series in series_by_case}
-    if len(psi6_kinds) != 1:
-        raise ValueError("All plotted cases must use the same psi6 correlation")
-    connected = psi6_kinds == {"connected-magnitude"}
     output.parent.mkdir(parents=True, exist_ok=True)
-    figure, axis = plt.subplots(figsize=(11, 7))
-    psi6_axis = axis if connected else axis.twinx()
+
+    figure, (autocorrelation_axis, pearson_axis) = plt.subplots(
+        2,
+        1,
+        figsize=(12, 11),
+        sharex=True,
+    )
+    magnitude_axis = autocorrelation_axis.twinx()
     colors = plt.colormaps["viridis"](
         np.linspace(0.1, 0.9, len(series_by_case))
     )
     for color, series in zip(colors, series_by_case, strict=True):
         label = series.case.label
-        axis.plot(
+        autocorrelation_axis.plot(
             series.lag_times,
             series.velocity,
             color=color,
@@ -325,48 +262,53 @@ def plot_correlations(
             linewidth=1.7,
             label=rf"$C_v$: {label}",
         )
-        psi6_label = (
-            r"$C_{\delta|\psi_6|}$"
-            if series.psi6_correlation == "connected-magnitude"
-            else r"$C_{|\psi_6|}$"
-        )
-        psi6_axis.plot(
+        magnitude_axis.plot(
             series.lag_times,
-            series.psi6,
+            series.psi6_autocorrelation,
             color=color,
             linestyle="--",
             linewidth=1.7,
-            label=f"{psi6_label}: {label}",
+            label=rf"$C_{{|\psi_6|}}$: {label}",
         )
-    axis.axhline(0.0, color="black", linewidth=0.8, alpha=0.45)
-    if connected:
-        axis.axhline(1.0, color="black", linewidth=0.8, alpha=0.3)
-    else:
-        psi6_axis.axhline(1.0, color="black", linewidth=0.8, alpha=0.3)
-        psi6_axis.set_ylim(*psi6_zoom_limits)
-        psi6_axis.set_ylabel(r"normalized $|\psi_6|$ correlation")
-    axis.set_xlabel("lag time")
-    axis.set_ylabel(
-        "normalized correlation"
-        if connected
-        else "normalized axial COM-velocity correlation"
-    )
+        pearson_axis.plot(
+            series.lag_times,
+            series.psi6_pearson,
+            color=color,
+            linewidth=1.7,
+            label=rf"$r_{{|\psi_6|}}$: {label}",
+        )
+
+    autocorrelation_axis.axhline(0.0, color="black", linewidth=0.8, alpha=0.45)
+    magnitude_axis.axhline(1.0, color="black", linewidth=0.8, alpha=0.3)
+    magnitude_axis.set_ylim(0.9, 1.05)
+    autocorrelation_axis.set_ylabel("normalized axial COM-velocity correlation")
+    magnitude_axis.set_ylabel(r"normalized $|\psi_6|$ autocorrelation")
     velocity_label = r"$|C_v|$" if absolute else r"$C_v$"
-    psi6_title = (
-        "connected hexatic-magnitude"
-        if connected
-        else "zoomed hexatic-magnitude"
+    autocorrelation_axis.set_title(
+        "Regular normalized autocorrelations "
+        rf"(`scipy.signal.correlate`, FFT; {velocity_label})"
     )
-    axis.set_title(
-        f"Big-Lx axial COM velocity and {psi6_title} correlations ({velocity_label})"
+    autocorrelation_axis.grid(alpha=0.2)
+    handles, labels = autocorrelation_axis.get_legend_handles_labels()
+    magnitude_handles, magnitude_labels = magnitude_axis.get_legend_handles_labels()
+    autocorrelation_axis.legend(
+        handles + magnitude_handles,
+        labels + magnitude_labels,
+        loc="best",
     )
-    axis.grid(alpha=0.2)
-    handles, labels = axis.get_legend_handles_labels()
-    if not connected:
-        psi6_handles, psi6_labels = psi6_axis.get_legend_handles_labels()
-        handles += psi6_handles
-        labels += psi6_labels
-    axis.legend(handles, labels, loc="best")
+
+    pearson_axis.axhline(0.0, color="black", linewidth=0.8, alpha=0.45)
+    pearson_axis.axhline(1.0, color="black", linewidth=0.8, alpha=0.3)
+    pearson_axis.set_ylim(-1.05, 1.05)
+    pearson_axis.set_xlabel("lag time")
+    pearson_axis.set_ylabel(r"Pearson coefficient of mean $|\psi_6|$")
+    pearson_axis.set_title(
+        "Lag-specific shell-mean hexatic correlation (`scipy.stats.pearsonr`)"
+    )
+    pearson_axis.grid(alpha=0.2)
+    pearson_axis.legend(loc="best")
+
+    figure.suptitle("Big-Lx velocity and hexatic-magnitude lag correlations")
     figure.tight_layout()
     figure.savefig(output, dpi=dpi)
     plt.close(figure)
