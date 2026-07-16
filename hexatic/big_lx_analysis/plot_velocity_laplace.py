@@ -10,31 +10,37 @@ from plotly.subplots import make_subplots
 from scipy.integrate import simpson
 
 from hexatic.big_lx.cases import DEFAULT_OUTPUT_ROOT, BigLxCase, CasePaths, get_case
-from hexatic.big_lx.plot_center_of_mass import (
-    CenterOfMassSeries,
-    center_of_mass_series,
-)
+from hexatic.big_lx.plot_center_of_mass import center_of_mass_series
+
+from .correlations import lagged_pearson
 
 
 @dataclass(frozen=True)
-class VelocityLaplaceTransform:
+class VelocityCorrelationLaplaceTransform:
     case: BigLxCase
     r: np.ndarray
     omega: np.ndarray
     values: np.ndarray
 
 
-def velocity_laplace_transform(
+def velocity_correlation_laplace_transform(
     case: BigLxCase,
-    series: CenterOfMassSeries,
+    lag_times: np.ndarray,
+    correlation: np.ndarray,
     *,
     r: np.ndarray,
     omega: np.ndarray,
-) -> VelocityLaplaceTransform:
-    time = np.asarray(series.elapsed_time, dtype=np.float64)
-    velocity = np.asarray(series.x_velocity, dtype=np.float64)
-    if time.ndim != 1 or velocity.shape != time.shape or time.size < 2:
-        raise ValueError("COM velocity and time must be matching one-dimensional series")
+) -> VelocityCorrelationLaplaceTransform:
+    time = np.asarray(lag_times, dtype=np.float64)
+    values_to_transform = np.asarray(correlation, dtype=np.float64)
+    if (
+        time.ndim != 1
+        or values_to_transform.shape != time.shape
+        or time.size < 2
+    ):
+        raise ValueError(
+            "Velocity correlation and lag time must be matching one-dimensional series"
+        )
     if np.any(np.diff(time) <= 0.0):
         raise ValueError("COM elapsed times must be strictly increasing")
     if r.ndim != 1 or omega.ndim != 1 or r.size < 2 or omega.size < 2:
@@ -48,13 +54,13 @@ def velocity_laplace_transform(
     oscillatory = np.exp(1j * omega[:, None] * time[None, :])
     values = np.empty((omega.size, r.size), dtype=np.complex128)
     for r_index, real_part in enumerate(r):
-        damped_velocity = np.exp(real_part * time) * velocity
+        damped_correlation = np.exp(real_part * time) * values_to_transform
         values[:, r_index] = simpson(
-            oscillatory * damped_velocity[None, :],
+            oscillatory * damped_correlation[None, :],
             x=time,
             axis=1,
         )
-    return VelocityLaplaceTransform(
+    return VelocityCorrelationLaplaceTransform(
         case=case,
         r=np.asarray(r, dtype=np.float64),
         omega=np.asarray(omega, dtype=np.float64),
@@ -63,7 +69,7 @@ def velocity_laplace_transform(
 
 
 def plot_velocity_laplace(
-    transforms: list[VelocityLaplaceTransform],
+    transforms: list[VelocityCorrelationLaplaceTransform],
     output: Path,
 ) -> Path:
     if not transforms:
@@ -106,7 +112,7 @@ def plot_velocity_laplace(
                 showscale=column == len(transforms),
                 colorbar=(
                     {
-                        "title": {"text": "log10 |v-hat|"},
+                        "title": {"text": "log10 |C_v-hat|"},
                         "len": 0.75,
                     }
                     if column == len(transforms)
@@ -115,7 +121,7 @@ def plot_velocity_laplace(
                 name=transform.case.label,
                 hovertemplate=(
                     "r=%{x:.5g}<br>omega=%{y:.5g}<br>"
-                    "log10|v-hat|=%{z:.5g}<extra>%{fullData.name}</extra>"
+                    "log10|C_v-hat|=%{z:.5g}<extra>%{fullData.name}</extra>"
                 ),
             ),
             row=1,
@@ -124,14 +130,14 @@ def plot_velocity_laplace(
     figure.update_scenes(
         xaxis_title="real part r",
         yaxis_title="imaginary part omega",
-        zaxis_title="log10 |v-hat|",
+        zaxis_title="log10 |C_v-hat|",
         aspectmode="cube",
         camera={"eye": {"x": 1.55, "y": 1.55, "z": 1.15}},
     )
     figure.update_layout(
         title=(
-            "Axial COM-velocity Laplace surface: "
-            "v-hat(r+i omega) = integral exp((r+i omega)t) v_x(t) dt"
+            "Pearson velocity-correlation Laplace surface: "
+            "C_v-hat(r+i omega) = integral exp((r+i omega) tau) C_v(tau) d tau"
         ),
         width=max(900, 720 * len(transforms)),
         height=720,
@@ -145,7 +151,7 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Write an interactive Plotly 3D surface of the finite-time complex "
-            "Laplace transform of axial Big-Lx COM velocity."
+            "Laplace transform of the axial COM-velocity Pearson correlation."
         )
     )
     parser.add_argument(
@@ -162,6 +168,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--omega-max", type=float)
     parser.add_argument("--r-points", type=int, default=161)
     parser.add_argument("--omega-points", type=int, default=241)
+    parser.add_argument("--min-origins", type=int, default=10)
+    parser.add_argument("--max-lag", type=int)
     return parser.parse_args()
 
 
@@ -171,17 +179,46 @@ def main() -> None:
         raise SystemExit("Each --case value must be unique")
     if args.r_points < 2 or args.omega_points < 2:
         raise SystemExit("--r-points and --omega-points must be at least two")
+    if args.min_origins < 2:
+        raise SystemExit("--min-origins must be at least two")
+    if args.max_lag is not None and args.max_lag < 1:
+        raise SystemExit("--max-lag must be positive")
     cases = [get_case(case_id) for case_id in args.case]
     series_by_case = [
         center_of_mass_series(case, CasePaths(case, args.output_root).analysis_dir)
         for case in cases
     ]
-    reference_duration = min(float(series.elapsed_time[-1]) for series in series_by_case)
+    correlation_inputs: list[tuple[np.ndarray, np.ndarray]] = []
+    for series in series_by_case:
+        frame_count = series.elapsed_time.size
+        if args.min_origins > frame_count:
+            raise ValueError(
+                f"min_origins={args.min_origins} exceeds {frame_count} frames"
+            )
+        maximum_lag = frame_count - args.min_origins
+        if args.max_lag is not None:
+            maximum_lag = min(maximum_lag, args.max_lag)
+        if maximum_lag < 1:
+            raise ValueError(
+                "The selected min-origins/max-lag settings leave no positive lag"
+            )
+        lag_indices = np.arange(maximum_lag + 1, dtype=np.int64)
+        time_spacing = np.diff(series.elapsed_time)
+        if not np.allclose(time_spacing, time_spacing[0], rtol=1e-10, atol=1e-12):
+            raise ValueError("Pearson correlation requires uniformly spaced samples")
+        lag_times = lag_indices.astype(np.float64) * float(time_spacing[0])
+        correlation = lagged_pearson(
+            series.x_velocity,
+            maximum_lag,
+            "Axial COM velocity",
+        )
+        correlation_inputs.append((lag_times, correlation))
+    reference_duration = min(float(times[-1]) for times, _ in correlation_inputs)
     if reference_duration <= 0.0:
         raise ValueError("COM trajectories must span positive simulation time")
     nyquist_limits = [
-        np.pi / float(np.min(np.diff(series.elapsed_time)))
-        for series in series_by_case
+        np.pi / float(np.min(np.diff(times)))
+        for times, _ in correlation_inputs
     ]
     default_omega_max = min(min(nyquist_limits), 20.0 * np.pi / reference_duration)
     r_min = args.r_min if args.r_min is not None else -10.0 / reference_duration
@@ -197,12 +234,20 @@ def main() -> None:
     r = np.linspace(r_min, args.r_max, args.r_points, dtype=np.float64)
     omega = np.linspace(omega_min, omega_max, args.omega_points, dtype=np.float64)
     transforms = [
-        velocity_laplace_transform(case, series, r=r, omega=omega)
-        for case, series in zip(cases, series_by_case, strict=True)
+        velocity_correlation_laplace_transform(
+            case,
+            lag_times,
+            correlation,
+            r=r,
+            omega=omega,
+        )
+        for case, (lag_times, correlation) in zip(
+            cases, correlation_inputs, strict=True
+        )
     ]
     output = (
         args.output
-        or args.output_root / "plots" / "big_lx_velocity_laplace.html"
+        or args.output_root / "plots" / "big_lx_velocity_correlation_laplace.html"
     )
     result = plot_velocity_laplace(transforms, output)
     print(

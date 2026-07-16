@@ -157,7 +157,7 @@ def _normalized_autocorrelation(values: np.ndarray, max_lag: int, name: str) -> 
     return result
 
 
-def _lagged_pearson(values: np.ndarray, max_lag: int, name: str) -> np.ndarray:
+def lagged_pearson(values: np.ndarray, max_lag: int, name: str) -> np.ndarray:
     values = np.asarray(values, dtype=np.float64)
     result = np.empty(max_lag + 1, dtype=np.float64)
     result[0] = 1.0
@@ -212,7 +212,7 @@ def analyze_correlations(
     velocity = _normalized_autocorrelation(
         com.x_velocity, selected_max_lag, "Axial COM velocity"
     )
-    velocity_pearson = _lagged_pearson(
+    velocity_pearson = lagged_pearson(
         com.x_velocity, selected_max_lag, "Axial COM velocity"
     )
     if absolute:
@@ -221,7 +221,7 @@ def analyze_correlations(
     psi6_autocorrelation = _normalized_autocorrelation(
         mean_psi6, selected_max_lag, "Mean hexatic magnitude"
     )
-    psi6_pearson = _lagged_pearson(
+    psi6_pearson = lagged_pearson(
         mean_psi6, selected_max_lag, "Mean hexatic magnitude"
     )
     return CorrelationSeries(
