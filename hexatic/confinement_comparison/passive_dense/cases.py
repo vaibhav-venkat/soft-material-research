@@ -12,6 +12,8 @@ from hexatic.constants import cylinder
 DEFAULT_OUTPUT_ROOT = Path(__file__).resolve().parent
 RUN_STEPS = int(1e8)
 TRAJECTORY_WRITE_PERIOD = int(1e5)
+VACANCY_RUN_FRAMES = 300
+VACANCY_RUN_STEPS = VACANCY_RUN_FRAMES * TRAJECTORY_WRITE_PERIOD
 BASE_CYLINDER_CASE_ID = "circ_60_5D_lx_1x"
 DENSE_2D_NX = 88
 DENSE_2D_NY = 60
@@ -22,6 +24,11 @@ PASSIVE_STIFFNESS_MULTIPLIER = 50.0
 class CaseKind(StrEnum):
     PASSIVE_CYLINDER = "passive_cylinder_60_5D"
     DENSE_2D = "dense_2d_60D"
+    DENSE_2D_CENTER_VACANCY = "dense_2d_60D_center_vacancy"
+    DENSE_2D_WALL_VACANCY = "dense_2d_60D_wall_vacancy"
+    DENSE_2D_OPPOSITE_WALL_VACANCIES = (
+        "dense_2d_60D_opposite_wall_vacancies"
+    )
 
 
 @dataclass(frozen=True)
@@ -39,7 +46,18 @@ class PassiveDenseCase:
 
     @property
     def is_dense_2d(self) -> bool:
-        return self.kind == CaseKind.DENSE_2D
+        return not self.is_passive_cylinder
+
+    @property
+    def vacancy_count(self) -> int:
+        if self.kind in {
+            CaseKind.DENSE_2D_CENTER_VACANCY,
+            CaseKind.DENSE_2D_WALL_VACANCY,
+        }:
+            return 1
+        if self.kind == CaseKind.DENSE_2D_OPPOSITE_WALL_VACANCIES:
+            return 2
+        return 0
 
     @property
     def lattice_spacing(self) -> float:
@@ -61,7 +79,7 @@ class PassiveDenseCase:
     def n_particles(self) -> int:
         if self.is_passive_cylinder:
             return self.base.n_particles
-        return DENSE_2D_NX * DENSE_2D_NY
+        return DENSE_2D_NX * DENSE_2D_NY - self.vacancy_count
 
     @property
     def lx(self) -> float:
@@ -91,7 +109,19 @@ class PassiveDenseCase:
     def label(self) -> str:
         if self.is_passive_cylinder:
             return "Passive Brownian hard-sphere approximation, twisted C = 60.5D"
-        return "Active dense 2D untwisted crystal, a = D"
+        labels = {
+            CaseKind.DENSE_2D: "Active dense 2D untwisted crystal, a = D",
+            CaseKind.DENSE_2D_CENTER_VACANCY: (
+                "Active dense 2D crystal with one center vacancy"
+            ),
+            CaseKind.DENSE_2D_WALL_VACANCY: (
+                "Active dense 2D crystal with one wall vacancy"
+            ),
+            CaseKind.DENSE_2D_OPPOSITE_WALL_VACANCIES: (
+                "Active dense 2D crystal with inversion-symmetric wall vacancies"
+            ),
+        }
+        return labels[self.kind]
 
     def as_metadata(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -135,6 +165,16 @@ class PassiveDenseCase:
                 dynamics="active_overdamped_viscous",
                 active_force=True,
                 initialization="exact_untwisted_triangular_patch",
+                vacancy_count=self.vacancy_count,
+                vacancy_rule=(
+                    "closest_to_origin"
+                    if self.kind == CaseKind.DENSE_2D_CENTER_VACANCY
+                    else "closest_to_positive_y_wall"
+                    if self.kind == CaseKind.DENSE_2D_WALL_VACANCY
+                    else "inversion_pair_near_opposite_walls"
+                    if self.kind == CaseKind.DENSE_2D_OPPOSITE_WALL_VACANCIES
+                    else "none"
+                ),
                 wall_r_extrap=0.98 * cylinder.ANALYSIS.wall_cutoff,
             )
         return payload
@@ -177,8 +217,28 @@ class CasePaths:
 
 _BASE_CASE = get_big_lx_case(BASE_CYLINDER_CASE_ID)
 SWEEP_CASES = tuple(
-    PassiveDenseCase(case_id=kind.value, kind=kind, base=_BASE_CASE)
-    for kind in (CaseKind.PASSIVE_CYLINDER, CaseKind.DENSE_2D)
+    PassiveDenseCase(
+        case_id=kind.value,
+        kind=kind,
+        base=_BASE_CASE,
+        run_steps=(
+            VACANCY_RUN_STEPS
+            if kind
+            in {
+                CaseKind.DENSE_2D_CENTER_VACANCY,
+                CaseKind.DENSE_2D_WALL_VACANCY,
+                CaseKind.DENSE_2D_OPPOSITE_WALL_VACANCIES,
+            }
+            else RUN_STEPS
+        ),
+    )
+    for kind in (
+        CaseKind.PASSIVE_CYLINDER,
+        CaseKind.DENSE_2D,
+        CaseKind.DENSE_2D_CENTER_VACANCY,
+        CaseKind.DENSE_2D_WALL_VACANCY,
+        CaseKind.DENSE_2D_OPPOSITE_WALL_VACANCIES,
+    )
 )
 
 

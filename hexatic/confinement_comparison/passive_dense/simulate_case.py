@@ -22,7 +22,7 @@ from .cases import (
     all_cases,
     get_case,
 )
-from .geometry import generate_initial_arrays
+from .geometry import dense_2d_vacancy_sites, generate_initial_arrays
 
 
 class SimulationObjects(NamedTuple):
@@ -69,11 +69,14 @@ def write_initial_state(case: PassiveDenseCase, path: Path) -> dict[str, object]
     with gsd.hoomd.open(name=str(path), mode="w") as target:
         target.append(frame)
 
-    return {
+    initial_metadata: dict[str, object] = {
         "initial_direction_mean": np.mean(directions, axis=0).tolist(),
         "initial_direction_norm_min": float(np.min(np.linalg.norm(directions, axis=1))),
         "initial_direction_norm_max": float(np.max(np.linalg.norm(directions, axis=1))),
     }
+    if case.is_dense_2d:
+        initial_metadata["vacancy_sites"] = dense_2d_vacancy_sites(case).tolist()
+    return initial_metadata
 
 
 def _pair_force(case: PassiveDenseCase) -> hoomd.md.pair.LJ:
