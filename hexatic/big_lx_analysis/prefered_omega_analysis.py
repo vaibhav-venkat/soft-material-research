@@ -1,0 +1,526 @@
+from __future__ import annotations
+
+import argparse
+from dataclasses import dataclass
+import json
+from pathlib import Path
+import warnings
+
+import matplotlib
+
+matplotlib.use("Agg")
+
+import matplotlib.pyplot as plt
+from matplotlib.ticker import ScalarFormatter
+import numpy as np
+from scipy.integrate import simpson
+
+from .correlations import lagged_pearson
+from .plot_velocity_laplace import AxialCenterSeries, LaplaceCase
+from .plot_velocity_laplace import _axial_center_series
+
+
+BIG_LX_SCHEMA = "hexatic.big_lx.analysis.v1"
+CONFINEMENT_SCHEMA = "hexatic.confinement_comparison.analysis.v1"
+LX_MULTIPLIERS = (1, 2, 4, 8, 16)
+CONFINEMENT_CASE_IDS = (
+    "prism_volume",
+    "prism_surface_area",
+    "sandwich_volume",
+    "sandwich_surface_area",
+    "two_dimension",
+    "cylinder_rattle",
+    "cylinder_rattle_tangent",
+)
+CONFINEMENT_MARKERS = {
+    "prism_volume": "s",
+    "prism_surface_area": "X",
+    "sandwich_volume": "D",
+    "sandwich_surface_area": "P",
+    "two_dimension": "^",
+    "cylinder_rattle": "v",
+    "cylinder_rattle_tangent": "*",
+}
+
+
+@dataclass(frozen=True)
+class DiscoveredCase:
+    case: LaplaceCase
+    mode: str
+    lx_multiplier: int
+    circumference_diameters: float | None
+    geometry_kind: str | None
+    manifest_path: Path
+
+
+@dataclass(frozen=True)
+class CorrelationInput:
+    discovered: DiscoveredCase
+    lag_times: np.ndarray
+    correlation: np.ndarray
+
+
+@dataclass(frozen=True)
+class PreferredOmega:
+    discovered: DiscoveredCase
+    omega: float
+    log10_magnitude: float
+    at_upper_boundary: bool
+
+
+def _numeric(payload: dict[str, object], name: str, manifest_path: Path) -> float:
+    value = payload.get(name)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"Missing numeric {name!r} in {manifest_path}")
+    result = float(value)
+    if not np.isfinite(result):
+        raise ValueError(f"Non-finite {name!r} in {manifest_path}")
+    return result
+
+
+def _integer(payload: dict[str, object], name: str, manifest_path: Path) -> int:
+    value = _numeric(payload, name, manifest_path)
+    result = int(value)
+    if float(result) != value:
+        raise ValueError(f"{name!r} must be an integer in {manifest_path}")
+    return result
+
+
+def _validate_manifest_index(
+    manifest: dict[str, object],
+    manifest_path: Path,
+) -> None:
+    if manifest.get("complete") is not True:
+        raise ValueError(f"Analysis is not marked complete: {manifest_path}")
+    shards = manifest.get("shards")
+    if not isinstance(shards, list) or not shards:
+        raise ValueError(f"Analysis manifest has no shards: {manifest_path}")
+
+    analysis_dir = manifest_path.parent.resolve()
+    expected_start = 0
+    for shard in shards:
+        if not isinstance(shard, dict):
+            raise ValueError(f"Invalid shard entry in {manifest_path}")
+        start = shard.get("frame_start")
+        stop = shard.get("frame_stop")
+        filename = shard.get("file")
+        if (
+            not isinstance(start, int)
+            or start != expected_start
+            or not isinstance(stop, int)
+            or stop <= start
+            or not isinstance(filename, str)
+        ):
+            raise ValueError(
+                f"Analysis shards are not contiguous from frame zero: {manifest_path}"
+            )
+        shard_path = (analysis_dir / filename).resolve()
+        try:
+            shard_path.relative_to(analysis_dir)
+        except ValueError as error:
+            raise ValueError(
+                f"Shard path escapes its analysis directory: {shard_path}"
+            ) from error
+        if not shard_path.is_file():
+            raise FileNotFoundError(f"Missing frame shard: {shard_path}")
+        expected_start = stop
+
+    frame_count = manifest.get("frame_count")
+    if not isinstance(frame_count, int) or frame_count != expected_start:
+        raise ValueError(f"Manifest frame count does not match shards: {manifest_path}")
+
+
+def _case_from_manifest(manifest_path: Path) -> DiscoveredCase | None:
+    manifest = json.loads(manifest_path.read_text())
+    schema = manifest.get("schema")
+    if schema not in {BIG_LX_SCHEMA, CONFINEMENT_SCHEMA}:
+        return None
+    _validate_manifest_index(manifest, manifest_path)
+
+    payload = manifest.get("case")
+    if not isinstance(payload, dict):
+        raise ValueError(f"Analysis manifest has no case metadata: {manifest_path}")
+    case_id = payload.get("case_id")
+    label = payload.get("label")
+    if not isinstance(case_id, str) or not case_id:
+        raise ValueError(f"Missing case ID in {manifest_path}")
+    if not isinstance(label, str) or not label:
+        label = case_id
+    lx = _numeric(payload, "lx", manifest_path)
+    n_particles = _integer(payload, "n_particles", manifest_path)
+    lx_multiplier = _integer(payload, "lx_multiplier", manifest_path)
+    if lx <= 0.0 or n_particles < 1:
+        raise ValueError(f"Invalid case geometry in {manifest_path}")
+    if lx_multiplier not in LX_MULTIPLIERS:
+        raise ValueError(
+            f"Unsupported Lx multiplier {lx_multiplier} in {manifest_path}"
+        )
+
+    if schema == BIG_LX_SCHEMA:
+        mode = "big-lx"
+        circumference_diameters = _numeric(
+            payload,
+            "circumference_diameters",
+            manifest_path,
+        )
+        geometry_kind = None
+    else:
+        mode = "confinement"
+        circumference_diameters = None
+        raw_geometry_kind = payload.get("geometry_kind")
+        if not isinstance(raw_geometry_kind, str):
+            raise ValueError(f"Missing confinement geometry in {manifest_path}")
+        if raw_geometry_kind not in CONFINEMENT_CASE_IDS:
+            return None
+        if case_id != raw_geometry_kind:
+            raise ValueError(
+                f"Confinement case ID and geometry disagree in {manifest_path}"
+            )
+        if lx_multiplier != 1:
+            raise ValueError(
+                f"Confinement case must use Lx multiplier 1: {manifest_path}"
+            )
+        geometry_kind = raw_geometry_kind
+
+    return DiscoveredCase(
+        case=LaplaceCase(
+            case_id=case_id,
+            label=label,
+            lx=lx,
+            n_particles=n_particles,
+            analysis_dir=manifest_path.parent,
+        ),
+        mode=mode,
+        lx_multiplier=lx_multiplier,
+        circumference_diameters=circumference_diameters,
+        geometry_kind=geometry_kind,
+        manifest_path=manifest_path,
+    )
+
+
+def scan_input_directories(input_dirs: list[Path]) -> list[DiscoveredCase]:
+    discovered: list[DiscoveredCase] = []
+    by_key: dict[tuple[str, str], DiscoveredCase] = {}
+    seen_roots: set[Path] = set()
+    for input_dir in input_dirs:
+        root = input_dir.resolve()
+        if root in seen_roots:
+            continue
+        seen_roots.add(root)
+        safetensors_root = root / "safetensors_output"
+        if not safetensors_root.is_dir():
+            raise FileNotFoundError(
+                f"Input directory has no safetensors_output directory: {root}"
+            )
+        for manifest_path in sorted(safetensors_root.glob("*/manifest.json")):
+            item = _case_from_manifest(manifest_path)
+            if item is None:
+                continue
+            key = (item.mode, item.case.case_id)
+            previous = by_key.get(key)
+            if previous is not None:
+                raise ValueError(
+                    f"Duplicate {item.mode} case {item.case.case_id!r}: "
+                    f"{previous.manifest_path} and {item.manifest_path}"
+                )
+            by_key[key] = item
+            discovered.append(item)
+    if not discovered:
+        raise ValueError("No eligible complete analysis cases were discovered")
+    return discovered
+
+
+def _correlation_input(
+    discovered: DiscoveredCase,
+    series: AxialCenterSeries,
+    *,
+    min_origins: int,
+    max_lag: int | None,
+) -> CorrelationInput:
+    frame_count = series.elapsed_time.size
+    if min_origins > frame_count:
+        raise ValueError(
+            f"min_origins={min_origins} exceeds {frame_count} frames for "
+            f"{discovered.case.case_id}"
+        )
+    selected_max_lag = frame_count - min_origins
+    if max_lag is not None:
+        selected_max_lag = min(selected_max_lag, max_lag)
+    if selected_max_lag < 1:
+        raise ValueError(
+            f"No positive lag remains for {discovered.case.case_id}"
+        )
+
+    spacing = np.diff(series.elapsed_time)
+    dt = float(spacing[0])
+    if not np.allclose(spacing, dt, rtol=1.0e-10, atol=1.0e-12):
+        raise ValueError(
+            f"Pearson correlation requires uniform samples for "
+            f"{discovered.case.case_id}"
+        )
+    lag_times = np.arange(selected_max_lag + 1, dtype=np.float64) * dt
+    correlation = lagged_pearson(
+        series.x_velocity,
+        selected_max_lag,
+        f"Axial COM velocity for {discovered.case.case_id}",
+    )
+    return CorrelationInput(
+        discovered=discovered,
+        lag_times=lag_times,
+        correlation=correlation,
+    )
+
+
+def _shared_positive_omega(
+    inputs: list[CorrelationInput],
+    *,
+    omega_max: float | None,
+    omega_points: int,
+) -> np.ndarray:
+    reference_duration = min(float(item.lag_times[-1]) for item in inputs)
+    if reference_duration <= 0.0:
+        raise ValueError("Correlation inputs must span positive lag time")
+    nyquist_limit = min(
+        np.pi / float(np.diff(item.lag_times)[0]) for item in inputs
+    )
+    default_maximum = min(nyquist_limit, 20.0 * np.pi / reference_duration)
+    maximum = default_maximum if omega_max is None else omega_max
+    if not np.isfinite(maximum) or maximum <= 0.0:
+        raise ValueError("--omega-max must be positive and finite")
+    if maximum > nyquist_limit * (1.0 + 1.0e-12):
+        raise ValueError(
+            f"--omega-max={maximum:g} exceeds the shared Nyquist limit "
+            f"{nyquist_limit:g}"
+        )
+
+    symmetric = np.linspace(-maximum, maximum, omega_points, dtype=np.float64)
+    positive = symmetric[symmetric > 0.0]
+    if positive.size < 2:
+        raise ValueError("--omega-points leaves fewer than two positive frequencies")
+    return positive
+
+
+def preferred_omega(
+    correlation_input: CorrelationInput,
+    omega: np.ndarray,
+) -> PreferredOmega:
+    time = correlation_input.lag_times
+    correlation = correlation_input.correlation
+    values = simpson(
+        np.exp(1j * omega[:, None] * time[None, :])
+        * correlation[None, :],
+        x=time,
+        axis=1,
+    )
+    magnitudes = np.abs(values)
+    if not np.all(np.isfinite(magnitudes)) or not np.any(magnitudes > 0.0):
+        raise ValueError(
+            f"Invalid r=0 transform for "
+            f"{correlation_input.discovered.case.case_id}"
+        )
+    log_magnitudes = np.log10(
+        np.maximum(magnitudes, np.finfo(np.float64).tiny)
+    )
+    peak_index = int(np.argmax(log_magnitudes))
+    at_upper_boundary = peak_index == omega.size - 1
+    if at_upper_boundary:
+        warnings.warn(
+            f"Preferred omega for "
+            f"{correlation_input.discovered.case.case_id} is at the upper "
+            "frequency boundary; consider increasing --omega-max if permitted "
+            "by the Nyquist limit",
+            stacklevel=2,
+        )
+    return PreferredOmega(
+        discovered=correlation_input.discovered,
+        omega=float(omega[peak_index]),
+        log10_magnitude=float(log_magnitudes[peak_index]),
+        at_upper_boundary=at_upper_boundary,
+    )
+
+
+def plot_preferred_omega(
+    results: list[PreferredOmega],
+    output: Path,
+    *,
+    dpi: int,
+) -> Path:
+    if not results:
+        raise ValueError("At least one preferred-omega result is required")
+    if output.suffix.lower() != ".png":
+        raise ValueError("Preferred-omega output must use a .png suffix")
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    figure, axis = plt.subplots(figsize=(12, 7.5))
+    regular = [result for result in results if result.discovered.mode == "big-lx"]
+    circumferences = sorted(
+        {
+            float(result.discovered.circumference_diameters)
+            for result in regular
+            if result.discovered.circumference_diameters is not None
+        }
+    )
+    regular_colors = (
+        plt.colormaps["tab10"](
+            np.linspace(0.0, 0.3, len(circumferences))
+        )
+        if circumferences
+        else np.empty((0, 4), dtype=np.float64)
+    )
+    for color, circumference in zip(
+        regular_colors,
+        circumferences,
+        strict=True,
+    ):
+        family = sorted(
+            (
+                result
+                for result in regular
+                if result.discovered.circumference_diameters == circumference
+            ),
+            key=lambda result: result.discovered.lx_multiplier,
+        )
+        axis.plot(
+            [result.discovered.lx_multiplier for result in family],
+            [result.omega for result in family],
+            color=color,
+            marker="o",
+            linewidth=1.7,
+            markersize=6,
+            label=f"regular cylinder, C = {circumference:g}D",
+        )
+
+    confinement = [
+        result for result in results if result.discovered.mode == "confinement"
+    ]
+    confinement_colors = (
+        plt.colormaps["Dark2"](
+            np.linspace(0.0, 1.0, len(confinement))
+        )
+        if confinement
+        else np.empty((0, 4), dtype=np.float64)
+    )
+    for color, result in zip(
+        confinement_colors,
+        sorted(confinement, key=lambda item: item.discovered.case.case_id),
+        strict=True,
+    ):
+        geometry = result.discovered.geometry_kind
+        if geometry is None:
+            raise RuntimeError("Confinement result has no geometry kind")
+        marker = CONFINEMENT_MARKERS[geometry]
+        axis.scatter(
+            [1],
+            [result.omega],
+            color=[color],
+            edgecolors="black",
+            linewidths=0.7,
+            marker=marker,
+            s=95 if marker != "*" else 140,
+            zorder=4,
+            label=result.discovered.case.label,
+        )
+
+    axis.set_xscale("log", base=2)
+    axis.set_xlim(0.85, 18.0)
+    axis.set_xticks(LX_MULTIPLIERS)
+    axis.xaxis.set_major_formatter(ScalarFormatter())
+    axis.set_xlabel(r"axial length multiplier $L_x/L_{x,1}$")
+    axis.set_ylabel(r"preferred positive angular frequency $\omega_*$")
+    axis.set_title(
+        r"Preferred frequency at $r=0$: "
+        r"$\arg\max_{\omega>0}\log_{10}|\widehat C_v(i\omega)|$"
+    )
+    axis.grid(alpha=0.22, which="both")
+    axis.legend(loc="best", fontsize=8.5)
+    figure.tight_layout()
+    figure.savefig(output, dpi=dpi)
+    plt.close(figure)
+    return output
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Scan Big-Lx and confinement analysis safetensors and plot the "
+            "preferred positive r=0 velocity-correlation frequency versus Lx."
+        )
+    )
+    parser.add_argument(
+        "--input-dir",
+        "--input_dir",
+        dest="input_dir",
+        action="append",
+        type=Path,
+        required=True,
+        help=(
+            "Production root containing safetensors_output/; repeat for "
+            "additional roots."
+        ),
+    )
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--dpi", type=int, default=180)
+    parser.add_argument("--min-origins", type=int, default=10)
+    parser.add_argument("--max-lag", type=int)
+    parser.add_argument("--omega-max", type=float)
+    parser.add_argument("--omega-points", type=int, default=241)
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = _parse_args()
+    if args.dpi < 1:
+        raise SystemExit("--dpi must be positive")
+    if args.min_origins < 2:
+        raise SystemExit("--min-origins must be at least two")
+    if args.max_lag is not None and args.max_lag < 1:
+        raise SystemExit("--max-lag must be positive")
+    if args.omega_points < 5:
+        raise SystemExit("--omega-points must be at least five")
+
+    discovered = scan_input_directories(args.input_dir)
+    correlation_inputs = [
+        _correlation_input(
+            item,
+            _axial_center_series(item.case, item.mode),
+            min_origins=args.min_origins,
+            max_lag=args.max_lag,
+        )
+        for item in discovered
+    ]
+    omega = _shared_positive_omega(
+        correlation_inputs,
+        omega_max=args.omega_max,
+        omega_points=args.omega_points,
+    )
+    results = [preferred_omega(item, omega) for item in correlation_inputs]
+    output = args.output or (
+        args.input_dir[0] / "plots" / "preferred_omega.png"
+    )
+    result_path = plot_preferred_omega(results, output, dpi=args.dpi)
+
+    for result in sorted(
+        results,
+        key=lambda item: (
+            item.discovered.lx_multiplier,
+            item.discovered.case.case_id,
+        ),
+    ):
+        print(
+            f"[preferred_omega.case] mode={result.discovered.mode} "
+            f"case={result.discovered.case.case_id} "
+            f"lx_multiplier={result.discovered.lx_multiplier} "
+            f"omega={result.omega:.8g} "
+            f"log10_magnitude={result.log10_magnitude:.8g} "
+            f"upper_boundary={result.at_upper_boundary}",
+            flush=True,
+        )
+    print(
+        f"[preferred_omega] cases={len(results)} "
+        f"omega=[{omega[0]:.8g}, {omega[-1]:.8g}] output={result_path}",
+        flush=True,
+    )
+
+
+if __name__ == "__main__":
+    main()
