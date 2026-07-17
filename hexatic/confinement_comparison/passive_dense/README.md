@@ -82,3 +82,42 @@ pixi run python -m hexatic.confinement_comparison.passive_dense.simulate_case \
 The preview is written to `initial/initial_dense_2d_60D.gsd`. A later
 production run using the same output root must pass `--overwrite` to replace
 the preview metadata and initial file.
+
+## GSD COM-velocity and Laplace analysis
+
+The GSD analysis scans every registered `gsd/trajectory_*.gsd` in a supplied
+passive-dense production root. It reads coordinates directly from each GSD,
+unwraps every particle independently along periodic x, computes the COM
+x-velocity, its lagged Pearson correlation, and the finite-time complex
+Laplace transform. Each trajectory retains its own complete frame and lag
+arrays; shorter cases are not used to truncate longer cases.
+
+```bash
+pixi run passive-dense-laplace \
+  --input-dir /mnt/drive3/vaibhav_data/passive_dense_production
+```
+
+To analyze only selected cases:
+
+```bash
+pixi run passive-dense-laplace \
+  --input-dir /mnt/drive3/vaibhav_data/passive_dense_production \
+  --case \
+    passive_cylinder_60_5D \
+    dense_2d_60D \
+    dense_2d_60D_center_vacancy \
+    dense_2d_60D_wall_vacancy \
+    dense_2d_60D_opposite_wall_vacancies
+```
+
+Outputs are written under `<input-dir>/gsd_laplace_analysis/`:
+
+- `velocity_correlation_laplace.html`: interactive `(r, omega)` heatmap panel
+  for every discovered trajectory;
+- `com_x_velocity.png`: full per-case unwrapped COM and x-velocity series;
+- `com_velocity_laplace.npz`: per-case frame, step, COM, velocity,
+  correlation, and complex-transform arrays without padding or truncation; and
+- `manifest.json`: source paths and the independent frame/lag count of every
+  case.
+
+Pass `--overwrite` when intentionally replacing an existing analysis.
