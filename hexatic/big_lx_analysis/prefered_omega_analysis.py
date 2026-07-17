@@ -14,6 +14,7 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import ScalarFormatter
 import numpy as np
 from scipy.integrate import simpson
+from scipy.optimize import least_squares
 
 from .correlations import lagged_pearson
 from .plot_velocity_laplace import AxialCenterSeries, LaplaceCase
@@ -59,15 +60,20 @@ class CorrelationInput:
     discovered: DiscoveredCase
     lag_times: np.ndarray
     correlation: np.ndarray
+    origin_counts: np.ndarray
 
 
 @dataclass(frozen=True)
-class PreferredCoordinate:
+class CaseEstimate:
     discovered: DiscoveredCase
     coordinate: float
-    log10_magnitude: float
+    score: float
     at_lower_boundary: bool
     at_upper_boundary: bool
+    fit_omega: float | None = None
+    fit_amplitude: float | None = None
+    fit_phase: float | None = None
+    fit_offset: float | None = None
 
 
 @dataclass(frozen=True)
@@ -285,6 +291,9 @@ def _correlation_input(
         discovered=discovered,
         lag_times=lag_times,
         correlation=correlation,
+        origin_counts=(
+            frame_count - np.arange(selected_max_lag + 1, dtype=np.int64)
+        ),
     )
 
 
@@ -320,7 +329,7 @@ def _shared_positive_omega(
 def preferred_omega(
     correlation_input: CorrelationInput,
     omega: np.ndarray,
-) -> PreferredCoordinate:
+) -> CaseEstimate:
     time = correlation_input.lag_times
     correlation = correlation_input.correlation
     values = simpson(
@@ -348,10 +357,10 @@ def preferred_omega(
             "by the Nyquist limit",
             stacklevel=2,
         )
-    return PreferredCoordinate(
+    return CaseEstimate(
         discovered=correlation_input.discovered,
         coordinate=float(omega[peak_index]),
-        log10_magnitude=float(log_magnitudes[peak_index]),
+        score=float(log_magnitudes[peak_index]),
         at_lower_boundary=False,
         at_upper_boundary=at_upper_boundary,
     )
@@ -390,7 +399,7 @@ def _shared_r(
 def preferred_r(
     correlation_input: CorrelationInput,
     r: np.ndarray,
-) -> PreferredCoordinate:
+) -> CaseEstimate:
     time = correlation_input.lag_times
     correlation = correlation_input.correlation
     values = simpson(
@@ -424,17 +433,146 @@ def preferred_r(
             f"interpreting it as an interior optimum. {detail}",
             stacklevel=2,
         )
-    return PreferredCoordinate(
+    return CaseEstimate(
         discovered=correlation_input.discovered,
         coordinate=float(r[peak_index]),
-        log10_magnitude=float(log_magnitudes[peak_index]),
+        score=float(log_magnitudes[peak_index]),
         at_lower_boundary=at_lower_boundary,
         at_upper_boundary=at_upper_boundary,
     )
 
 
+def _damped_cosine(
+    time: np.ndarray,
+    parameters: np.ndarray,
+) -> np.ndarray:
+    amplitude, tau_r, omega, phase, offset = parameters
+    return (
+        amplitude
+        * np.exp(-time / tau_r)
+        * np.cos(omega * time + phase)
+        + offset
+    )
+
+
+def fit_tau_r(
+    correlation_input: CorrelationInput,
+    omega_grid: np.ndarray,
+    *,
+    tau_max: float | None,
+) -> CaseEstimate:
+    time = correlation_input.lag_times
+    correlation = correlation_input.correlation
+    dt = float(time[1] - time[0])
+    duration = float(time[-1])
+    lower_tau = dt
+    upper_tau = 10.0 * duration if tau_max is None else tau_max
+    if not np.isfinite(upper_tau) or upper_tau <= lower_tau:
+        raise ValueError(
+            f"tau-max must exceed the lag spacing {lower_tau:g} for "
+            f"{correlation_input.discovered.case.case_id}"
+        )
+
+    initial_peak = preferred_omega(correlation_input, omega_grid).coordinate
+    nyquist = np.pi / dt
+    tail_count = max(3, correlation.size // 10)
+    initial_offset = float(np.clip(np.median(correlation[-tail_count:]), -0.5, 0.5))
+    initial_amplitude = float(
+        np.clip(np.max(np.abs(correlation - initial_offset)), 0.05, 2.0)
+    )
+    lower_bounds = np.asarray(
+        (0.0, lower_tau, 0.0, -np.pi, -1.0),
+        dtype=np.float64,
+    )
+    upper_bounds = np.asarray(
+        (2.5, upper_tau, nyquist, np.pi, 1.0),
+        dtype=np.float64,
+    )
+    weights = np.sqrt(
+        correlation_input.origin_counts.astype(np.float64)
+        / float(correlation_input.origin_counts[0])
+    )
+
+    def residual(parameters: np.ndarray) -> np.ndarray:
+        return weights * (_damped_cosine(time, parameters) - correlation)
+
+    omega_starts = np.unique(
+        np.clip(
+            np.asarray(
+                (0.5 * initial_peak, initial_peak, 1.5 * initial_peak),
+                dtype=np.float64,
+            ),
+            np.finfo(np.float64).eps,
+            nyquist * (1.0 - 1.0e-8),
+        )
+    )
+    tau_starts = np.clip(
+        np.asarray((duration / 10.0, duration / 3.0, duration), dtype=np.float64),
+        lower_tau * (1.0 + 1.0e-8),
+        upper_tau * (1.0 - 1.0e-8),
+    )
+    best = None
+    for initial_tau in np.unique(tau_starts):
+        for initial_omega in omega_starts:
+            fit = least_squares(
+                residual,
+                x0=np.asarray(
+                    (
+                        initial_amplitude,
+                        initial_tau,
+                        initial_omega,
+                        0.0,
+                        initial_offset,
+                    ),
+                    dtype=np.float64,
+                ),
+                bounds=(lower_bounds, upper_bounds),
+                loss="soft_l1",
+                f_scale=0.05,
+                x_scale="jac",
+                max_nfev=20_000,
+            )
+            if fit.success and np.all(np.isfinite(fit.x)):
+                if best is None or fit.cost < best.cost:
+                    best = fit
+    if best is None:
+        raise ValueError(
+            f"Damped-cosine fit failed for "
+            f"{correlation_input.discovered.case.case_id}"
+        )
+
+    amplitude, fitted_tau, fitted_omega, phase, offset = (
+        float(value) for value in best.x
+    )
+    prediction = _damped_cosine(time, best.x)
+    residual_sum = float(np.sum((correlation - prediction) ** 2))
+    total_sum = float(np.sum((correlation - np.mean(correlation)) ** 2))
+    r_squared = 1.0 - residual_sum / total_sum if total_sum > 0.0 else float("nan")
+    at_lower_boundary = fitted_tau <= lower_tau * (1.0 + 1.0e-4)
+    at_upper_boundary = fitted_tau >= upper_tau * (1.0 - 1.0e-4)
+    if at_lower_boundary or at_upper_boundary:
+        boundary = "lower" if at_lower_boundary else "upper"
+        warnings.warn(
+            f"Fitted tau_r for {correlation_input.discovered.case.case_id} "
+            f"is at the {boundary} fit boundary; treat the relaxation time as "
+            "unresolved and adjust --tau-max if it is at the upper boundary",
+            stacklevel=2,
+        )
+    return CaseEstimate(
+        discovered=correlation_input.discovered,
+        coordinate=fitted_tau,
+        score=r_squared,
+        at_lower_boundary=at_lower_boundary,
+        at_upper_boundary=at_upper_boundary,
+        fit_omega=fitted_omega,
+        fit_amplitude=amplitude,
+        fit_phase=phase,
+        fit_offset=offset,
+    )
+
+
 def summarize_regular_coordinates(
-    results: list[PreferredCoordinate],
+    results: list[CaseEstimate],
 ) -> list[RegularCoordinateSummary]:
     grouped: dict[tuple[float, int], list[float]] = {}
     for result in results:
@@ -466,7 +604,7 @@ def summarize_regular_coordinates(
 
 
 def plot_preferred_coordinate(
-    results: list[PreferredCoordinate],
+    results: list[CaseEstimate],
     output: Path,
     *,
     coordinate_name: str,
@@ -556,7 +694,14 @@ def plot_preferred_coordinate(
     axis.set_xticks(LX_MULTIPLIERS)
     axis.xaxis.set_major_formatter(ScalarFormatter())
     axis.set_xlabel(r"axial length multiplier $L_x/L_{x,1}$")
-    if coordinate_name == "r":
+    if coordinate_name == "tau_r":
+        axis.set_ylabel(r"fitted relaxation time $\tau_r$")
+        axis.set_title(
+            r"Damped-cosine relaxation time from "
+            r"$C_v(\tau)=A e^{-\tau/\tau_r}"
+            r"\cos(\omega_0\tau+\phi)+B$"
+        )
+    elif coordinate_name == "r":
         axis.axhline(0.0, color="black", linewidth=0.8, alpha=0.5)
         axis.set_ylabel(r"preferred real coordinate $r_*$")
         axis.set_title(
@@ -583,7 +728,8 @@ def _parse_args() -> argparse.Namespace:
             "Scan Big-Lx and confinement analysis safetensors and plot the "
             "preferred coordinate of the velocity-correlation transform "
             "versus Lx: positive omega at r=0 by default, or r at omega=0 "
-            "with --preferred-r. "
+            "with --preferred-r. Use --fit-tau-r to fit and plot the physical "
+            "damped-cosine relaxation time instead. "
             "Repeated Big-Lx cases are combined as seed replicates with "
             "mean and sample-standard-deviation error bars."
         )
@@ -604,7 +750,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--dpi", type=int, default=180)
     parser.add_argument("--min-origins", type=int, default=10)
     parser.add_argument("--max-lag", type=int)
-    parser.add_argument(
+    analysis_mode = parser.add_mutually_exclusive_group()
+    analysis_mode.add_argument(
         "--preferred-r",
         action="store_true",
         help=(
@@ -612,11 +759,27 @@ def _parse_args() -> argparse.Namespace:
             "omega=0 instead of the maximizing positive omega at r=0."
         ),
     )
+    analysis_mode.add_argument(
+        "--fit-tau-r",
+        action="store_true",
+        help=(
+            "Fit a robust damped cosine to C_v(tau) and plot its relaxation "
+            "time tau_r."
+        ),
+    )
     parser.add_argument("--omega-max", type=float)
     parser.add_argument("--omega-points", type=int, default=241)
     parser.add_argument("--r-min", type=float)
     parser.add_argument("--r-max", type=float, default=0.0)
     parser.add_argument("--r-points", type=int, default=241)
+    parser.add_argument(
+        "--tau-max",
+        type=float,
+        help=(
+            "Upper bound for fitted tau_r; defaults to ten times each case's "
+            "fitted lag duration."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -632,6 +795,8 @@ def main() -> None:
         raise SystemExit("--omega-points must be at least five")
     if args.r_points < 2:
         raise SystemExit("--r-points must be at least two")
+    if args.tau_max is not None and args.tau_max <= 0.0:
+        raise SystemExit("--tau-max must be positive")
 
     discovered = scan_input_directories(args.input_dir)
     correlation_inputs = [
@@ -643,7 +808,23 @@ def main() -> None:
         )
         for item in discovered
     ]
-    if args.preferred_r:
+    if args.fit_tau_r:
+        coordinate_name = "tau_r"
+        omega_grid = _shared_positive_omega(
+            correlation_inputs,
+            omega_max=args.omega_max,
+            omega_points=args.omega_points,
+        )
+        results = [
+            fit_tau_r(item, omega_grid, tau_max=args.tau_max)
+            for item in correlation_inputs
+        ]
+        coordinate = np.asarray(
+            [result.coordinate for result in results],
+            dtype=np.float64,
+        )
+        default_filename = "fitted_tau_r.png"
+    elif args.preferred_r:
         coordinate_name = "r"
         coordinate = _shared_r(
             correlation_inputs,
@@ -682,9 +863,14 @@ def main() -> None:
             f"case={result.discovered.case.case_id} "
             f"lx_multiplier={result.discovered.lx_multiplier} "
             f"{coordinate_name}={result.coordinate:.8g} "
-            f"log10_magnitude={result.log10_magnitude:.8g} "
+            f"{'r_squared' if coordinate_name == 'tau_r' else 'log10_magnitude'}="
+            f"{result.score:.8g} "
             f"lower_boundary={result.at_lower_boundary} "
             f"upper_boundary={result.at_upper_boundary} "
+            f"fit_omega={result.fit_omega} "
+            f"fit_amplitude={result.fit_amplitude} "
+            f"fit_phase={result.fit_phase} "
+            f"fit_offset={result.fit_offset} "
             f"manifest={result.discovered.manifest_path}",
             flush=True,
         )
@@ -700,7 +886,8 @@ def main() -> None:
         )
     print(
         f"[preferred_{coordinate_name}] cases={len(results)} "
-        f"{coordinate_name}=[{coordinate[0]:.8g}, {coordinate[-1]:.8g}] "
+        f"{coordinate_name}=[{np.min(coordinate):.8g}, "
+        f"{np.max(coordinate):.8g}] "
         f"output={result_path}",
         flush=True,
     )
