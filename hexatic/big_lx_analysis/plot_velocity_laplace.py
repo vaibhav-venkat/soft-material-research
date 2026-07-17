@@ -220,7 +220,7 @@ def plot_velocity_laplace(
     if not transforms:
         raise ValueError("At least one Laplace transform is required")
     if output.suffix.lower() != ".html":
-        raise ValueError("Laplace surface output must use an .html suffix")
+        raise ValueError("Laplace heatmap output must use an .html suffix")
     output.parent.mkdir(parents=True, exist_ok=True)
 
     magnitudes = [np.abs(transform.values) for transform in transforms]
