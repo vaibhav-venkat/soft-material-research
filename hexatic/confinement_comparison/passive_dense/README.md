@@ -121,3 +121,31 @@ Outputs are written under `<input-dir>/gsd_laplace_analysis/`:
   case.
 
 Pass `--overwrite` when intentionally replacing an existing analysis.
+
+## Standalone unwrapped COM and x-velocity plot
+
+Plot every trajectory found in the production root without running the
+Laplace analysis:
+
+```bash
+pixi run passive-dense-com \
+  --input-dir /mnt/drive3/vaibhav_data/passive_dense_production
+```
+
+Select any subset inclusively with `--case`:
+
+```bash
+pixi run passive-dense-com \
+  --input-dir /mnt/drive3/vaibhav_data/passive_dense_production \
+  --case \
+    dense_2d_60D \
+    dense_2d_60D_center_vacancy \
+    dense_2d_60D_wall_vacancy \
+    dense_2d_60D_opposite_wall_vacancies
+```
+
+The default output is
+`<input-dir>/gsd_com_analysis/com_x_velocity.png`. It contains separate
+unwrapped `x_COM` and `v_x,COM` panels, with every selected case plotted over
+its own complete time range. Use `--output path/to/name.png` to choose another
+filename and `--overwrite` to replace an existing plot.

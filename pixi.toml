@@ -39,6 +39,7 @@ passive-dense-validate = "python -um hexatic.confinement_comparison.passive_dens
 passive-dense-pipeline = "python -um hexatic.confinement_comparison.passive_dense.run_pipeline"
 passive-dense-dry-run = "python -um hexatic.confinement_comparison.passive_dense.run_pipeline --all --dry-run"
 passive-dense-laplace = "python -um hexatic.confinement_comparison.passive_dense.analyze_laplace"
+passive-dense-com = "python -um hexatic.confinement_comparison.passive_dense.plot_com"
 [dependencies]
 python = "3.13.*"
 hoomd = "7.0.1.*"
