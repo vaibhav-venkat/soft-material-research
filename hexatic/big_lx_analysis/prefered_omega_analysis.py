@@ -69,6 +69,15 @@ class PreferredOmega:
     at_upper_boundary: bool
 
 
+@dataclass(frozen=True)
+class RegularOmegaSummary:
+    circumference_diameters: float
+    lx_multiplier: int
+    mean_omega: float
+    std_omega: float
+    replicate_count: int
+
+
 def _numeric(payload: dict[str, object], name: str, manifest_path: Path) -> float:
     value = payload.get(name)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -206,7 +215,7 @@ def _case_from_manifest(manifest_path: Path) -> DiscoveredCase | None:
 
 def scan_input_directories(input_dirs: list[Path]) -> list[DiscoveredCase]:
     discovered: list[DiscoveredCase] = []
-    by_key: dict[tuple[str, str], DiscoveredCase] = {}
+    confinement_by_key: dict[tuple[str, str], DiscoveredCase] = {}
     seen_roots: set[Path] = set()
     for input_dir in input_dirs:
         root = input_dir.resolve()
@@ -223,13 +232,14 @@ def scan_input_directories(input_dirs: list[Path]) -> list[DiscoveredCase]:
             if item is None:
                 continue
             key = (item.mode, item.case.case_id)
-            previous = by_key.get(key)
-            if previous is not None:
-                raise ValueError(
-                    f"Duplicate {item.mode} case {item.case.case_id!r}: "
-                    f"{previous.manifest_path} and {item.manifest_path}"
-                )
-            by_key[key] = item
+            if item.mode == "confinement":
+                previous = confinement_by_key.get(key)
+                if previous is not None:
+                    raise ValueError(
+                        f"Duplicate confinement case {item.case.case_id!r}: "
+                        f"{previous.manifest_path} and {item.manifest_path}"
+                    )
+                confinement_by_key[key] = item
             discovered.append(item)
     if not discovered:
         raise ValueError("No eligible complete analysis cases were discovered")
@@ -345,6 +355,36 @@ def preferred_omega(
     )
 
 
+def summarize_regular_omega(
+    results: list[PreferredOmega],
+) -> list[RegularOmegaSummary]:
+    grouped: dict[tuple[float, int], list[float]] = {}
+    for result in results:
+        if result.discovered.mode != "big-lx":
+            continue
+        circumference = result.discovered.circumference_diameters
+        if circumference is None:
+            raise RuntimeError("Regular Big-Lx result has no circumference")
+        key = (circumference, result.discovered.lx_multiplier)
+        grouped.setdefault(key, []).append(result.omega)
+
+    summaries: list[RegularOmegaSummary] = []
+    for (circumference, lx_multiplier), values in sorted(grouped.items()):
+        omega = np.asarray(values, dtype=np.float64)
+        summaries.append(
+            RegularOmegaSummary(
+                circumference_diameters=circumference,
+                lx_multiplier=lx_multiplier,
+                mean_omega=float(np.mean(omega)),
+                std_omega=(
+                    float(np.std(omega, ddof=1)) if omega.size > 1 else 0.0
+                ),
+                replicate_count=int(omega.size),
+            )
+        )
+    return summaries
+
+
 def plot_preferred_omega(
     results: list[PreferredOmega],
     output: Path,
@@ -358,12 +398,11 @@ def plot_preferred_omega(
     output.parent.mkdir(parents=True, exist_ok=True)
 
     figure, axis = plt.subplots(figsize=(12, 7.5))
-    regular = [result for result in results if result.discovered.mode == "big-lx"]
+    regular = summarize_regular_omega(results)
     circumferences = sorted(
         {
-            float(result.discovered.circumference_diameters)
+            result.circumference_diameters
             for result in regular
-            if result.discovered.circumference_diameters is not None
         }
     )
     regular_colors = (
@@ -382,17 +421,21 @@ def plot_preferred_omega(
             (
                 result
                 for result in regular
-                if result.discovered.circumference_diameters == circumference
+                if result.circumference_diameters == circumference
             ),
-            key=lambda result: result.discovered.lx_multiplier,
+            key=lambda result: result.lx_multiplier,
         )
-        axis.plot(
-            [result.discovered.lx_multiplier for result in family],
-            [result.omega for result in family],
+        axis.errorbar(
+            [result.lx_multiplier for result in family],
+            [result.mean_omega for result in family],
+            yerr=[result.std_omega for result in family],
             color=color,
             marker="o",
             linewidth=1.7,
             markersize=6,
+            elinewidth=1.25,
+            capsize=5,
+            capthick=1.25,
             label=f"regular cylinder, C = {circumference:g}D",
         )
 
@@ -449,7 +492,9 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Scan Big-Lx and confinement analysis safetensors and plot the "
-            "preferred positive r=0 velocity-correlation frequency versus Lx."
+            "preferred positive r=0 velocity-correlation frequency versus Lx. "
+            "Repeated Big-Lx cases are combined as seed replicates with "
+            "mean and sample-standard-deviation error bars."
         )
     )
     parser.add_argument(
@@ -518,7 +563,18 @@ def main() -> None:
             f"lx_multiplier={result.discovered.lx_multiplier} "
             f"omega={result.omega:.8g} "
             f"log10_magnitude={result.log10_magnitude:.8g} "
-            f"upper_boundary={result.at_upper_boundary}",
+            f"upper_boundary={result.at_upper_boundary} "
+            f"manifest={result.discovered.manifest_path}",
+            flush=True,
+        )
+    for summary in summarize_regular_omega(results):
+        print(
+            f"[preferred_omega.regular_summary] "
+            f"circumference_diameters={summary.circumference_diameters:.8g} "
+            f"lx_multiplier={summary.lx_multiplier} "
+            f"replicates={summary.replicate_count} "
+            f"mean_omega={summary.mean_omega:.8g} "
+            f"std_omega={summary.std_omega:.8g}",
             flush=True,
         )
     print(
