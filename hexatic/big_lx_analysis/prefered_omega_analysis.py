@@ -61,6 +61,8 @@ class CorrelationInput:
     lag_times: np.ndarray
     correlation: np.ndarray
     origin_counts: np.ndarray
+    replicate_count: int
+    manifest_paths: tuple[Path, ...]
 
 
 @dataclass(frozen=True)
@@ -74,6 +76,8 @@ class CaseEstimate:
     fit_amplitude: float | None = None
     fit_phase: float | None = None
     fit_offset: float | None = None
+    replicate_count: int = 1
+    manifest_paths: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -294,7 +298,69 @@ def _correlation_input(
         origin_counts=(
             frame_count - np.arange(selected_max_lag + 1, dtype=np.int64)
         ),
+        replicate_count=1,
+        manifest_paths=(discovered.manifest_path,),
     )
+
+
+def average_big_lx_correlations(
+    inputs: list[CorrelationInput],
+) -> list[CorrelationInput]:
+    grouped: dict[tuple[str, str], list[CorrelationInput]] = {}
+    for item in inputs:
+        key = (item.discovered.mode, item.discovered.case.case_id)
+        grouped.setdefault(key, []).append(item)
+
+    averaged: list[CorrelationInput] = []
+    for group in grouped.values():
+        if group[0].discovered.mode != "big-lx" or len(group) == 1:
+            averaged.extend(group)
+            continue
+        spacing = [float(np.diff(item.lag_times)[0]) for item in group]
+        if not np.allclose(spacing, spacing[0], rtol=1.0e-10, atol=1.0e-12):
+            raise ValueError(
+                f"Seed replicates for {group[0].discovered.case.case_id} "
+                "have incompatible lag spacing"
+            )
+        common_size = min(item.lag_times.size for item in group)
+        reference_time = group[0].lag_times[:common_size]
+        for item in group[1:]:
+            if not np.allclose(
+                item.lag_times[:common_size],
+                reference_time,
+                rtol=1.0e-10,
+                atol=1.0e-12,
+            ):
+                raise ValueError(
+                    f"Seed replicates for {group[0].discovered.case.case_id} "
+                    "do not share a common lag grid"
+                )
+        averaged.append(
+            CorrelationInput(
+                discovered=group[0].discovered,
+                lag_times=reference_time,
+                correlation=np.mean(
+                    np.stack(
+                        [item.correlation[:common_size] for item in group],
+                        axis=0,
+                    ),
+                    axis=0,
+                ),
+                origin_counts=np.sum(
+                    np.stack(
+                        [item.origin_counts[:common_size] for item in group],
+                        axis=0,
+                    ),
+                    axis=0,
+                    dtype=np.int64,
+                ),
+                replicate_count=sum(item.replicate_count for item in group),
+                manifest_paths=tuple(
+                    path for item in group for path in item.manifest_paths
+                ),
+            )
+        )
+    return averaged
 
 
 def _shared_positive_omega(
@@ -446,7 +512,8 @@ def _damped_cosine(
     time: np.ndarray,
     parameters: np.ndarray,
 ) -> np.ndarray:
-    amplitude, rate, omega, phase, offset = parameters
+    amplitude, rate, omega, phase = parameters
+    offset = 1.0 - amplitude * np.cos(phase)
     return (
         amplitude
         * np.exp(-rate * time)
@@ -468,14 +535,14 @@ def fit_damped_cosine(
     tail_count = max(3, correlation.size // 10)
     initial_offset = float(np.clip(np.median(correlation[-tail_count:]), -0.5, 0.5))
     initial_amplitude = float(
-        np.clip(np.max(np.abs(correlation - initial_offset)), 0.05, 2.0)
+        np.clip(1.0 - initial_offset, 0.05, 2.0)
     )
     lower_bounds = np.asarray(
-        (0.0, 0.0, 0.0, -np.pi, -1.0),
+        (0.0, 0.0, 0.0, -0.5 * np.pi + 1.0e-6),
         dtype=np.float64,
     )
     upper_bounds = np.asarray(
-        (2.5, 1.0 / dt, nyquist, np.pi, 1.0),
+        (2.0, 1.0 / dt, nyquist, 0.5 * np.pi - 1.0e-6),
         dtype=np.float64,
     )
     weights = np.sqrt(
@@ -515,7 +582,6 @@ def fit_damped_cosine(
                         initial_rate,
                         initial_omega,
                         0.0,
-                        initial_offset,
                     ),
                     dtype=np.float64,
                 ),
@@ -534,9 +600,10 @@ def fit_damped_cosine(
             f"{correlation_input.discovered.case.case_id}"
         )
 
-    amplitude, fitted_rate, fitted_omega, phase, offset = (
+    amplitude, fitted_rate, fitted_omega, phase = (
         float(value) for value in best.x
     )
+    offset = 1.0 - amplitude * np.cos(phase)
     prediction = _damped_cosine(time, best.x)
     residual_sum = float(np.sum((correlation - prediction) ** 2))
     total_sum = float(np.sum((correlation - np.mean(correlation)) ** 2))
@@ -551,6 +618,13 @@ def fit_damped_cosine(
             "unresolved",
             stacklevel=2,
         )
+    if amplitude >= upper_bounds[0] * (1.0 - 1.0e-4):
+        warnings.warn(
+            f"Fitted amplitude A for "
+            f"{correlation_input.discovered.case.case_id} is at the upper "
+            "fit boundary; the single-mode model may be inadequate",
+            stacklevel=2,
+        )
     return CaseEstimate(
         discovered=correlation_input.discovered,
         coordinate=fitted_rate,
@@ -561,6 +635,8 @@ def fit_damped_cosine(
         fit_amplitude=amplitude,
         fit_phase=phase,
         fit_offset=offset,
+        replicate_count=correlation_input.replicate_count,
+        manifest_paths=correlation_input.manifest_paths,
     )
 
 
@@ -758,7 +834,8 @@ def _parse_args() -> argparse.Namespace:
         dest="fit_damped_cosine",
         action="store_true",
         help=(
-            "Fit C_v(t)=A exp(-r t) cos(omega t+c)+B, print the fitted "
+            "Average Big-Lx seed correlations, fit C_v(t)=A exp(-r t) "
+            "cos(omega t+c)+B subject to C_v(0)=1, print the fitted "
             "parameters, and do not create a plot."
         ),
     )
@@ -793,14 +870,15 @@ def main() -> None:
         for item in discovered
     ]
     if args.fit_damped_cosine:
+        fit_inputs = average_big_lx_correlations(correlation_inputs)
         omega_grid = _shared_positive_omega(
-            correlation_inputs,
+            fit_inputs,
             omega_max=args.omega_max,
             omega_points=args.omega_points,
         )
         results = [
             fit_damped_cosine(item, omega_grid)
-            for item in correlation_inputs
+            for item in fit_inputs
         ]
         for result in sorted(
             results,
@@ -817,6 +895,7 @@ def main() -> None:
                 f"mode={result.discovered.mode} "
                 f"case={result.discovered.case.case_id} "
                 f"lx_multiplier={result.discovered.lx_multiplier} "
+                f"replicates={result.replicate_count} "
                 f"A={result.fit_amplitude:.8g} "
                 f"r={rate:.8g} "
                 f"omega={result.fit_omega:.8g} "
@@ -826,18 +905,8 @@ def main() -> None:
                 f"r_squared={result.score:.8g} "
                 f"lower_boundary={result.at_lower_boundary} "
                 f"upper_boundary={result.at_upper_boundary} "
-                f"manifest={result.discovered.manifest_path}",
-                flush=True,
-            )
-        for summary in summarize_regular_coordinates(results):
-            print(
-                f"[damped_cosine_fit.regular_summary] "
-                f"circumference_diameters="
-                f"{summary.circumference_diameters:.8g} "
-                f"lx_multiplier={summary.lx_multiplier} "
-                f"replicates={summary.replicate_count} "
-                f"mean_r={summary.mean_coordinate:.8g} "
-                f"std_r={summary.std_coordinate:.8g}",
+                f"manifests="
+                f"{','.join(str(path) for path in result.manifest_paths)}",
                 flush=True,
             )
         return
