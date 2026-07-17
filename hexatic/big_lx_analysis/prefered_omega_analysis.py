@@ -377,7 +377,14 @@ def _shared_r(
         raise ValueError(
             "The requested positive --r-max overflows exp(r*t); reduce --r-max"
         )
-    return np.linspace(minimum, r_max, r_points, dtype=np.float64)
+    grid = np.linspace(minimum, r_max, r_points, dtype=np.float64)
+    negative = grid[grid < 0.0]
+    if negative.size < 2:
+        raise ValueError(
+            "The requested r grid must contain at least two strictly negative "
+            "values for --preferred-r"
+        )
+    return negative
 
 
 def preferred_r(
@@ -405,10 +412,16 @@ def preferred_r(
     at_upper_boundary = peak_index == r.size - 1
     if at_lower_boundary or at_upper_boundary:
         boundary = "lower" if at_lower_boundary else "upper"
+        detail = (
+            "The upper boundary is the available negative r closest to zero, "
+            "not r=0."
+            if at_upper_boundary
+            else "Use a more-negative --r-min to test whether the maximum is interior."
+        )
         warnings.warn(
             f"Preferred r for {correlation_input.discovered.case.case_id} "
             f"is at the {boundary} search boundary; expand the r range before "
-            "interpreting it as an interior optimum",
+            f"interpreting it as an interior optimum. {detail}",
             stacklevel=2,
         )
     return PreferredCoordinate(
@@ -548,7 +561,7 @@ def plot_preferred_coordinate(
         axis.set_ylabel(r"preferred real coordinate $r_*$")
         axis.set_title(
             r"Preferred real coordinate at $\omega=0$: "
-            r"$\arg\max_r\log_{10}|\widehat C_v(r)|$"
+            r"$\arg\max_{r<0}\log_{10}|\widehat C_v(r)|$"
         )
     else:
         axis.set_ylabel(r"preferred positive angular frequency $\omega_*$")
@@ -595,8 +608,8 @@ def _parse_args() -> argparse.Namespace:
         "--preferred-r",
         action="store_true",
         help=(
-            "Plot the maximizing real coordinate r at omega=0 instead of "
-            "the maximizing positive omega at r=0."
+            "Plot the maximizing strictly negative real coordinate r at "
+            "omega=0 instead of the maximizing positive omega at r=0."
         ),
     )
     parser.add_argument("--omega-max", type=float)
