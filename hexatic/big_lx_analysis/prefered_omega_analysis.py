@@ -22,6 +22,7 @@ from .plot_velocity_laplace import _axial_center_series
 
 BIG_LX_SCHEMA = "hexatic.big_lx.analysis.v1"
 CONFINEMENT_SCHEMA = "hexatic.confinement_comparison.analysis.v1"
+REGULAR_CIRCUMFERENCE_DIAMETERS = 60.5
 LX_MULTIPLIERS = (1, 2, 4, 8, 16)
 CONFINEMENT_CASE_IDS = (
     "prism_volume",
@@ -163,6 +164,11 @@ def _case_from_manifest(manifest_path: Path) -> DiscoveredCase | None:
             "circumference_diameters",
             manifest_path,
         )
+        if not np.isclose(
+            circumference_diameters,
+            REGULAR_CIRCUMFERENCE_DIAMETERS,
+        ):
+            return None
         geometry_kind = None
     else:
         mode = "confinement"
