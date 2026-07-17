@@ -62,19 +62,20 @@ class CorrelationInput:
 
 
 @dataclass(frozen=True)
-class PreferredOmega:
+class PreferredCoordinate:
     discovered: DiscoveredCase
-    omega: float
+    coordinate: float
     log10_magnitude: float
+    at_lower_boundary: bool
     at_upper_boundary: bool
 
 
 @dataclass(frozen=True)
-class RegularOmegaSummary:
+class RegularCoordinateSummary:
     circumference_diameters: float
     lx_multiplier: int
-    mean_omega: float
-    std_omega: float
+    mean_coordinate: float
+    std_coordinate: float
     replicate_count: int
 
 
@@ -319,7 +320,7 @@ def _shared_positive_omega(
 def preferred_omega(
     correlation_input: CorrelationInput,
     omega: np.ndarray,
-) -> PreferredOmega:
+) -> PreferredCoordinate:
     time = correlation_input.lag_times
     correlation = correlation_input.correlation
     values = simpson(
@@ -347,17 +348,81 @@ def preferred_omega(
             "by the Nyquist limit",
             stacklevel=2,
         )
-    return PreferredOmega(
+    return PreferredCoordinate(
         discovered=correlation_input.discovered,
-        omega=float(omega[peak_index]),
+        coordinate=float(omega[peak_index]),
         log10_magnitude=float(log_magnitudes[peak_index]),
+        at_lower_boundary=False,
         at_upper_boundary=at_upper_boundary,
     )
 
 
-def summarize_regular_omega(
-    results: list[PreferredOmega],
-) -> list[RegularOmegaSummary]:
+def _shared_r(
+    inputs: list[CorrelationInput],
+    *,
+    r_min: float | None,
+    r_max: float,
+    r_points: int,
+) -> np.ndarray:
+    reference_duration = min(float(item.lag_times[-1]) for item in inputs)
+    if reference_duration <= 0.0:
+        raise ValueError("Correlation inputs must span positive lag time")
+    minimum = -10.0 / reference_duration if r_min is None else r_min
+    if not np.isfinite(minimum) or not np.isfinite(r_max) or minimum >= r_max:
+        raise ValueError("The r range requires finite --r-min < --r-max")
+    maximum_exponent = r_max * max(
+        float(item.lag_times[-1]) for item in inputs
+    )
+    if maximum_exponent > 700.0:
+        raise ValueError(
+            "The requested positive --r-max overflows exp(r*t); reduce --r-max"
+        )
+    return np.linspace(minimum, r_max, r_points, dtype=np.float64)
+
+
+def preferred_r(
+    correlation_input: CorrelationInput,
+    r: np.ndarray,
+) -> PreferredCoordinate:
+    time = correlation_input.lag_times
+    correlation = correlation_input.correlation
+    values = simpson(
+        np.exp(r[:, None] * time[None, :]) * correlation[None, :],
+        x=time,
+        axis=1,
+    )
+    magnitudes = np.abs(values)
+    if not np.all(np.isfinite(magnitudes)) or not np.any(magnitudes > 0.0):
+        raise ValueError(
+            f"Invalid omega=0 transform for "
+            f"{correlation_input.discovered.case.case_id}"
+        )
+    log_magnitudes = np.log10(
+        np.maximum(magnitudes, np.finfo(np.float64).tiny)
+    )
+    peak_index = int(np.argmax(log_magnitudes))
+    at_lower_boundary = peak_index == 0
+    at_upper_boundary = peak_index == r.size - 1
+    if at_lower_boundary or at_upper_boundary:
+        boundary = "lower" if at_lower_boundary else "upper"
+        warnings.warn(
+            f"Preferred r for {correlation_input.discovered.case.case_id} "
+            f"is at the {boundary} search boundary; expand the r range before "
+            "interpreting it as an interior optimum",
+            stacklevel=2,
+        )
+    return PreferredCoordinate(
+        discovered=correlation_input.discovered,
+        coordinate=float(r[peak_index]),
+        log10_magnitude=float(log_magnitudes[peak_index]),
+        at_lower_boundary=at_lower_boundary,
+        at_upper_boundary=at_upper_boundary,
+    )
+
+
+def summarize_regular_coordinates(
+    results: list[PreferredCoordinate],
+) -> list[RegularCoordinateSummary]:
     grouped: dict[tuple[float, int], list[float]] = {}
     for result in results:
         if result.discovered.mode != "big-lx":
@@ -366,39 +431,42 @@ def summarize_regular_omega(
         if circumference is None:
             raise RuntimeError("Regular Big-Lx result has no circumference")
         key = (circumference, result.discovered.lx_multiplier)
-        grouped.setdefault(key, []).append(result.omega)
+        grouped.setdefault(key, []).append(result.coordinate)
 
-    summaries: list[RegularOmegaSummary] = []
+    summaries: list[RegularCoordinateSummary] = []
     for (circumference, lx_multiplier), values in sorted(grouped.items()):
-        omega = np.asarray(values, dtype=np.float64)
+        coordinates = np.asarray(values, dtype=np.float64)
         summaries.append(
-            RegularOmegaSummary(
+            RegularCoordinateSummary(
                 circumference_diameters=circumference,
                 lx_multiplier=lx_multiplier,
-                mean_omega=float(np.mean(omega)),
-                std_omega=(
-                    float(np.std(omega, ddof=1)) if omega.size > 1 else 0.0
+                mean_coordinate=float(np.mean(coordinates)),
+                std_coordinate=(
+                    float(np.std(coordinates, ddof=1))
+                    if coordinates.size > 1
+                    else 0.0
                 ),
-                replicate_count=int(omega.size),
+                replicate_count=int(coordinates.size),
             )
         )
     return summaries
 
 
-def plot_preferred_omega(
-    results: list[PreferredOmega],
+def plot_preferred_coordinate(
+    results: list[PreferredCoordinate],
     output: Path,
     *,
+    coordinate_name: str,
     dpi: int,
 ) -> Path:
     if not results:
-        raise ValueError("At least one preferred-omega result is required")
+        raise ValueError("At least one preferred-coordinate result is required")
     if output.suffix.lower() != ".png":
-        raise ValueError("Preferred-omega output must use a .png suffix")
+        raise ValueError("Preferred-coordinate output must use a .png suffix")
     output.parent.mkdir(parents=True, exist_ok=True)
 
     figure, axis = plt.subplots(figsize=(12, 7.5))
-    regular = summarize_regular_omega(results)
+    regular = summarize_regular_coordinates(results)
     circumferences = sorted(
         {
             result.circumference_diameters
@@ -427,8 +495,8 @@ def plot_preferred_omega(
         )
         axis.errorbar(
             [result.lx_multiplier for result in family],
-            [result.mean_omega for result in family],
-            yerr=[result.std_omega for result in family],
+            [result.mean_coordinate for result in family],
+            yerr=[result.std_coordinate for result in family],
             color=color,
             marker="o",
             linewidth=1.7,
@@ -460,7 +528,7 @@ def plot_preferred_omega(
         marker = CONFINEMENT_MARKERS[geometry]
         axis.scatter(
             [1],
-            [result.omega],
+            [result.coordinate],
             color=[color],
             edgecolors="black",
             linewidths=0.7,
@@ -475,11 +543,19 @@ def plot_preferred_omega(
     axis.set_xticks(LX_MULTIPLIERS)
     axis.xaxis.set_major_formatter(ScalarFormatter())
     axis.set_xlabel(r"axial length multiplier $L_x/L_{x,1}$")
-    axis.set_ylabel(r"preferred positive angular frequency $\omega_*$")
-    axis.set_title(
-        r"Preferred frequency at $r=0$: "
-        r"$\arg\max_{\omega>0}\log_{10}|\widehat C_v(i\omega)|$"
-    )
+    if coordinate_name == "r":
+        axis.axhline(0.0, color="black", linewidth=0.8, alpha=0.5)
+        axis.set_ylabel(r"preferred real coordinate $r_*$")
+        axis.set_title(
+            r"Preferred real coordinate at $\omega=0$: "
+            r"$\arg\max_r\log_{10}|\widehat C_v(r)|$"
+        )
+    else:
+        axis.set_ylabel(r"preferred positive angular frequency $\omega_*$")
+        axis.set_title(
+            r"Preferred frequency at $r=0$: "
+            r"$\arg\max_{\omega>0}\log_{10}|\widehat C_v(i\omega)|$"
+        )
     axis.grid(alpha=0.22, which="both")
     axis.legend(loc="best", fontsize=8.5)
     figure.tight_layout()
@@ -492,7 +568,9 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Scan Big-Lx and confinement analysis safetensors and plot the "
-            "preferred positive r=0 velocity-correlation frequency versus Lx. "
+            "preferred coordinate of the velocity-correlation transform "
+            "versus Lx: positive omega at r=0 by default, or r at omega=0 "
+            "with --preferred-r. "
             "Repeated Big-Lx cases are combined as seed replicates with "
             "mean and sample-standard-deviation error bars."
         )
@@ -513,8 +591,19 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--dpi", type=int, default=180)
     parser.add_argument("--min-origins", type=int, default=10)
     parser.add_argument("--max-lag", type=int)
+    parser.add_argument(
+        "--preferred-r",
+        action="store_true",
+        help=(
+            "Plot the maximizing real coordinate r at omega=0 instead of "
+            "the maximizing positive omega at r=0."
+        ),
+    )
     parser.add_argument("--omega-max", type=float)
     parser.add_argument("--omega-points", type=int, default=241)
+    parser.add_argument("--r-min", type=float)
+    parser.add_argument("--r-max", type=float, default=0.0)
+    parser.add_argument("--r-points", type=int, default=241)
     return parser.parse_args()
 
 
@@ -528,6 +617,8 @@ def main() -> None:
         raise SystemExit("--max-lag must be positive")
     if args.omega_points < 5:
         raise SystemExit("--omega-points must be at least five")
+    if args.r_points < 2:
+        raise SystemExit("--r-points must be at least two")
 
     discovered = scan_input_directories(args.input_dir)
     correlation_inputs = [
@@ -539,16 +630,32 @@ def main() -> None:
         )
         for item in discovered
     ]
-    omega = _shared_positive_omega(
-        correlation_inputs,
-        omega_max=args.omega_max,
-        omega_points=args.omega_points,
+    if args.preferred_r:
+        coordinate_name = "r"
+        coordinate = _shared_r(
+            correlation_inputs,
+            r_min=args.r_min,
+            r_max=args.r_max,
+            r_points=args.r_points,
+        )
+        results = [preferred_r(item, coordinate) for item in correlation_inputs]
+        default_filename = "preferred_r.png"
+    else:
+        coordinate_name = "omega"
+        coordinate = _shared_positive_omega(
+            correlation_inputs,
+            omega_max=args.omega_max,
+            omega_points=args.omega_points,
+        )
+        results = [preferred_omega(item, coordinate) for item in correlation_inputs]
+        default_filename = "preferred_omega.png"
+    output = args.output or args.input_dir[0] / "plots" / default_filename
+    result_path = plot_preferred_coordinate(
+        results,
+        output,
+        coordinate_name=coordinate_name,
+        dpi=args.dpi,
     )
-    results = [preferred_omega(item, omega) for item in correlation_inputs]
-    output = args.output or (
-        args.input_dir[0] / "plots" / "preferred_omega.png"
-    )
-    result_path = plot_preferred_omega(results, output, dpi=args.dpi)
 
     for result in sorted(
         results,
@@ -558,28 +665,30 @@ def main() -> None:
         ),
     ):
         print(
-            f"[preferred_omega.case] mode={result.discovered.mode} "
+            f"[preferred_{coordinate_name}.case] mode={result.discovered.mode} "
             f"case={result.discovered.case.case_id} "
             f"lx_multiplier={result.discovered.lx_multiplier} "
-            f"omega={result.omega:.8g} "
+            f"{coordinate_name}={result.coordinate:.8g} "
             f"log10_magnitude={result.log10_magnitude:.8g} "
+            f"lower_boundary={result.at_lower_boundary} "
             f"upper_boundary={result.at_upper_boundary} "
             f"manifest={result.discovered.manifest_path}",
             flush=True,
         )
-    for summary in summarize_regular_omega(results):
+    for summary in summarize_regular_coordinates(results):
         print(
-            f"[preferred_omega.regular_summary] "
+            f"[preferred_{coordinate_name}.regular_summary] "
             f"circumference_diameters={summary.circumference_diameters:.8g} "
             f"lx_multiplier={summary.lx_multiplier} "
             f"replicates={summary.replicate_count} "
-            f"mean_omega={summary.mean_omega:.8g} "
-            f"std_omega={summary.std_omega:.8g}",
+            f"mean_{coordinate_name}={summary.mean_coordinate:.8g} "
+            f"std_{coordinate_name}={summary.std_coordinate:.8g}",
             flush=True,
         )
     print(
-        f"[preferred_omega] cases={len(results)} "
-        f"omega=[{omega[0]:.8g}, {omega[-1]:.8g}] output={result_path}",
+        f"[preferred_{coordinate_name}] cases={len(results)} "
+        f"{coordinate_name}=[{coordinate[0]:.8g}, {coordinate[-1]:.8g}] "
+        f"output={result_path}",
         flush=True,
     )
 
