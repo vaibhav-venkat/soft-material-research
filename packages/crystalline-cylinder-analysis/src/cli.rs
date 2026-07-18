@@ -40,12 +40,39 @@ pub struct CommonArgs {
 pub enum AnalysisCommand {
     /// Validate manifests and mmap required tensors without running analysis.
     Inspect,
-    Com,
+    Com(ComArgs),
     Correlation(CorrelationArgs),
     Laplace(LaplaceArgs),
     Preferred(PreferredArgs),
     Fit(FitArgs),
     All(AllArgs),
+}
+
+/// Axial center-of-mass controls.
+#[derive(Clone, Copy, Debug, Args)]
+pub struct ComArgs {
+    /// Restrict big-Lx cases to one circumference; omit to include both.
+    #[arg(long, value_enum)]
+    pub circ: Option<BigLxCircumference>,
+}
+
+/// Supported big-Lx circumference families.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum BigLxCircumference {
+    #[value(name = "60D")]
+    D60,
+    #[value(name = "60.5D")]
+    D60Point5,
+}
+
+impl BigLxCircumference {
+    /// Return the circumference in particle diameters.
+    pub const fn diameters(self) -> f64 {
+        match self {
+            Self::D60 => 60.0,
+            Self::D60Point5 => 60.5,
+        }
+    }
 }
 
 /// Shared lag-correlation controls.

@@ -1,6 +1,6 @@
 //! Translation from CLI declarations to the reusable analysis pipeline.
 
-use crate::cli::{AnalysisCommand, Cli};
+use crate::cli::{AnalysisCommand, BigLxCircumference, Cli};
 use crate::plots::write_com_plot;
 use crystalline_cylinder_analysis::center_of_mass::{analyze_replica_com, ComConfig};
 use crystalline_cylinder_analysis::input::{
@@ -22,14 +22,28 @@ pub fn run(cli: Cli) {
 
     match command {
         AnalysisCommand::Inspect => inspect_inputs(&common.input_dir),
-        AnalysisCommand::Com => run_com(&backend, &common),
+        AnalysisCommand::Com(args) => run_com(&backend, &common, args.circ),
         command => panic!("{} not implemented", command_name(&command)),
     }
 }
 
-fn run_com(backend: &CpuAnalysisBackend, common: &crate::cli::CommonArgs) {
+fn run_com(
+    backend: &CpuAnalysisBackend,
+    common: &crate::cli::CommonArgs,
+    circumference: Option<BigLxCircumference>,
+) {
     let datasets = discover_datasets(&common.input_dir);
-    let groups = group_replicates(datasets);
+    let groups = group_replicates(datasets)
+        .into_iter()
+        .filter(|group| {
+            group.schema != CaseSchema::BigLx
+                || circumference.is_none_or(|selected| {
+                    group.case.circumference_diameters.map(f64::to_bits)
+                        == Some(selected.diameters().to_bits())
+                })
+        })
+        .collect::<Vec<_>>();
+    assert!(!groups.is_empty(), "no cases");
     let config = ComConfig {
         timestep: common.simulation_timestep,
     };
@@ -85,7 +99,7 @@ fn run_com(backend: &CpuAnalysisBackend, common: &crate::cli::CommonArgs) {
 pub fn command_name(command: &AnalysisCommand) -> &'static str {
     match command {
         AnalysisCommand::Inspect => "inspect",
-        AnalysisCommand::Com => "com",
+        AnalysisCommand::Com(_) => "com",
         AnalysisCommand::Correlation(_) => "correlation",
         AnalysisCommand::Laplace(_) => "laplace",
         AnalysisCommand::Preferred(_) => "preferred",
