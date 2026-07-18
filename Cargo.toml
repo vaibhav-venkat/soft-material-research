@@ -1,8 +1,10 @@
 [workspace]
 members = [
+    "crates/crystalline_cylinder_analysis",
     "crates/rho_fitting_types",
     "crates/rho_fitting_numerics",
     "crates/rho_fitting_gpu",
+    "packages/crystalline-cylinder-analysis",
     "packages/rho-fitting-core",
 ]
 resolver = "2"
@@ -11,18 +13,28 @@ resolver = "2"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-rust-version = "1.83"
+rust-version = "1.87"
 
 [workspace.dependencies]
+candle-core = { version = "0.11", default-features = false }
+clap = { version = "4", features = ["derive"] }
 clarabel = "0.11"
 faer = "0.22"
+kuva = { version = "0.4", features = ["embed_font"] }
 ndarray = "0.17"
+num-complex = "0.4"
 numpy = "0.29"
 pyo3 = "0.29"
 rand = "0.8"
 rand_chacha = "0.3"
 rayon = "1"
 rustfft = "6"
+safetensors = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tenferro-cpu = { version = "0.2", default-features = false, features = ["cpu-faer"] }
+tenferro-linalg = { version = "0.2", default-features = false, features = ["cpu-faer"] }
+tenferro-runtime = { version = "0.2", default-features = false, features = ["cpu-faer"] }
 thiserror = "2"
 burn = { version = "0.21", default-features = false, features = ["std", "flex", "fusion", "autotune"] }
 burn-cuda = { version = "0.21", default-features = false, features = ["std"] }
