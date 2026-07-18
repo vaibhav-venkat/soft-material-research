@@ -1,13 +1,14 @@
 //! Translation from CLI declarations to the reusable analysis pipeline.
 
-use crate::cli::{AnalysisCommand, BigLxCircumference, Cli};
-use crate::plots::write_com_plot;
+use crate::cli::{AnalysisCommand, BigLxCircumference, Cli, CorrelationArgs};
+use crate::plots::{write_com_plot, write_correlation_plot};
 use crystalline_cylinder_analysis::center_of_mass::{analyze_replica_com, ComConfig};
+use crystalline_cylinder_analysis::correlation::{analyze_correlation, CorrelationConfig};
 use crystalline_cylinder_analysis::input::{
     discover_datasets, group_replicates, inspect_dataset, DatasetShape,
 };
 use crystalline_cylinder_analysis::pipeline::CaseAnalysis;
-use crystalline_cylinder_analysis::replicates::average_com_series;
+use crystalline_cylinder_analysis::replicates::{average_com_series, average_correlations};
 use crystalline_cylinder_analysis::{CaseSchema, CpuAnalysisBackend};
 use rayon::prelude::*;
 
@@ -23,6 +24,7 @@ pub fn run(cli: Cli) {
     match command {
         AnalysisCommand::Inspect => inspect_inputs(&common.input_dir),
         AnalysisCommand::Com(args) => run_com(&backend, &common, args.circ),
+        AnalysisCommand::Correlation(args) => run_correlation(&backend, &common, args),
         command => panic!("{} not implemented", command_name(&command)),
     }
 }
@@ -33,16 +35,7 @@ fn run_com(
     circumference: Option<BigLxCircumference>,
 ) {
     let datasets = discover_datasets(&common.input_dir);
-    let groups = group_replicates(datasets)
-        .into_iter()
-        .filter(|group| {
-            group.schema != CaseSchema::BigLx
-                || circumference.is_none_or(|selected| {
-                    group.case.circumference_diameters.map(f64::to_bits)
-                        == Some(selected.diameters().to_bits())
-                })
-        })
-        .collect::<Vec<_>>();
+    let groups = select_circumference(group_replicates(datasets), circumference);
     assert!(!groups.is_empty(), "no cases");
     let config = ComConfig {
         timestep: common.simulation_timestep,
@@ -93,6 +86,92 @@ fn run_com(
         analyses.len(),
         written.display()
     );
+}
+
+fn run_correlation(
+    backend: &CpuAnalysisBackend,
+    common: &crate::cli::CommonArgs,
+    args: CorrelationArgs,
+) {
+    let datasets = discover_datasets(&common.input_dir);
+    let groups = select_circumference(group_replicates(datasets), args.circ);
+    assert!(!groups.is_empty(), "no cases");
+    let com_config = ComConfig {
+        timestep: common.simulation_timestep,
+    };
+    let correlation_config = CorrelationConfig {
+        min_origins: args.min_origins,
+        max_lag: args.max_lag,
+    };
+    let analyses = backend.install(|| {
+        groups
+            .into_par_iter()
+            .map(|group| {
+                let replicas = group
+                    .datasets
+                    .par_iter()
+                    .map(|dataset| {
+                        let com = analyze_replica_com(dataset, com_config);
+                        let correlation = analyze_correlation(backend, &com, correlation_config);
+                        (com, correlation)
+                    })
+                    .collect::<Vec<_>>();
+                let (com_replicas, correlation_replicas): (Vec<_>, Vec<_>) =
+                    replicas.into_iter().unzip();
+                CaseAnalysis {
+                    group,
+                    com: Some(average_com_series(&com_replicas)),
+                    correlation: Some(average_correlations(&correlation_replicas)),
+                    laplace: None,
+                    preferred: Vec::new(),
+                    fit: None,
+                }
+            })
+            .collect::<Vec<_>>()
+    });
+
+    for analysis in &analyses {
+        let correlation = analysis.correlation.as_ref().expect("no correlation");
+        eprintln!(
+            "[debug:correlation] case={} replicates={} lag_time={:?} pearson={:?} origins={:?}",
+            analysis.group.case.case_id,
+            correlation.replicate_count,
+            [correlation.lag_times.len()],
+            [correlation.pearson_mean.len()],
+            [correlation.origin_counts.len()]
+        );
+    }
+
+    let output_root = common
+        .output_dir
+        .clone()
+        .unwrap_or_else(|| common.input_dir[0].join("crystalline_cylinder_analysis_output"));
+    let output = output_root
+        .join("correlation")
+        .join("axial_velocity_pearson.svg");
+    assert!(!output.exists() || common.overwrite, "output exists");
+    let written = write_correlation_plot(&analyses, &output);
+    eprintln!(
+        "[crystalline-cylinder-analysis] command=correlation cases={} output={}",
+        analyses.len(),
+        written.display()
+    );
+}
+
+fn select_circumference(
+    groups: Vec<crystalline_cylinder_analysis::ReplicateGroup>,
+    circumference: Option<BigLxCircumference>,
+) -> Vec<crystalline_cylinder_analysis::ReplicateGroup> {
+    groups
+        .into_iter()
+        .filter(|group| {
+            group.schema != CaseSchema::BigLx
+                || circumference.is_none_or(|selected| {
+                    group.case.circumference_diameters.map(f64::to_bits)
+                        == Some(selected.diameters().to_bits())
+                })
+        })
+        .collect()
 }
 
 /// Return a stable name for each public subcommand.

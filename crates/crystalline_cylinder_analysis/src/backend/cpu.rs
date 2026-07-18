@@ -1,7 +1,9 @@
 //! Rayon and Tenferro CPU backend declaration.
 
 use crate::backend::AnalysisBackend;
+use crate::correlation::pearson;
 use crate::model::{CorrelationSeries, LaplaceGrid};
+use rayon::prelude::*;
 use tenferro_cpu::CpuContext;
 
 /// CPU backend backed by Rayon and Tenferro's faer provider.
@@ -34,8 +36,22 @@ impl CpuAnalysisBackend {
 }
 
 impl AnalysisBackend for CpuAnalysisBackend {
-    fn lagged_pearson(&self, _values: &[f64], _max_lag: usize) -> Vec<f64> {
-        todo!("compute stable lagged Pearson coefficients in parallel")
+    fn lagged_pearson(&self, values: &[f64], max_lag: usize) -> Vec<f64> {
+        assert!(values.len() >= 2, "short series");
+        assert!(max_lag <= values.len() - 2, "bad lag");
+        self.install(|| {
+            (0..=max_lag)
+                .into_par_iter()
+                .map(|lag| {
+                    if lag == 0 {
+                        let _ = pearson(values, values);
+                        1.0
+                    } else {
+                        pearson(&values[..values.len() - lag], &values[lag..])
+                    }
+                })
+                .collect()
+        })
     }
 
     fn laplace_grid(

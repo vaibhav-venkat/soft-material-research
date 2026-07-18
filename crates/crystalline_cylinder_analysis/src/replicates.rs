@@ -61,7 +61,55 @@ pub fn average_com_series(replicas: &[ComSeries]) -> ComSeries {
 
 /// Average compatible correlations and sum their time-origin counts.
 pub fn average_correlations(_replicas: &[CorrelationSeries]) -> CorrelationSeries {
-    todo!("validate lag grids and aggregate seed correlations")
+    let replicas = _replicas;
+    assert!(!replicas.is_empty(), "no replicas");
+    let common_length = replicas
+        .iter()
+        .map(|series| series.lag_times.len())
+        .min()
+        .unwrap_or(0);
+    assert!(common_length >= 1, "short correlations");
+    let lag_indices = replicas[0].lag_indices[..common_length].to_vec();
+    let lag_times = replicas[0].lag_times[..common_length].to_vec();
+    for replica in replicas {
+        assert!(
+            replica.lag_indices.len() >= common_length
+                && replica.pearson_mean.len() >= common_length
+                && replica.origin_counts.len() >= common_length,
+            "bad correlations"
+        );
+        assert_eq!(
+            &replica.lag_indices[..common_length],
+            lag_indices.as_slice(),
+            "bad lag grid"
+        );
+        for (&expected, &actual) in lag_times.iter().zip(&replica.lag_times[..common_length]) {
+            let tolerance = 1.0e-12_f64.max(1.0e-10 * expected.abs().max(actual.abs()));
+            assert!((expected - actual).abs() <= tolerance, "bad lag grid");
+        }
+    }
+    let (pearson_mean, pearson_std) = pointwise_mean_std(
+        replicas
+            .iter()
+            .map(|series| &series.pearson_mean[..common_length]),
+        common_length,
+    );
+    let origin_counts = (0..common_length)
+        .map(|index| {
+            replicas
+                .iter()
+                .map(|series| series.origin_counts[index])
+                .sum()
+        })
+        .collect();
+    CorrelationSeries {
+        lag_indices,
+        lag_times,
+        pearson_mean,
+        pearson_std,
+        origin_counts,
+        replicate_count: replicas.iter().map(|series| series.replicate_count).sum(),
+    }
 }
 
 fn pointwise_mean_std<'a>(
