@@ -2,7 +2,6 @@
 
 use std::path::PathBuf;
 
-/// Result type returned by crystalline-cylinder analysis operations.
 pub type AnalysisResult<T> = Result<T, AnalysisError>;
 
 /// Fail-fast errors produced by malformed inputs or invalid numerical states.
@@ -27,7 +26,7 @@ pub enum AnalysisError {
     #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error(transparent)]
-    Candle(#[from] candle_core::Error),
-    #[error(transparent)]
     Safetensors(#[from] safetensors::SafeTensorError),
+    #[error("invalid zero-copy tensor byte layout: {0}")]
+    ByteLayout(String),
 }

@@ -16,11 +16,12 @@ license = "MIT"
 rust-version = "1.87"
 
 [workspace.dependencies]
-candle-core = { version = "0.11", default-features = false }
+bytemuck = "1"
 clap = { version = "4", features = ["derive"] }
 clarabel = "0.11"
 faer = "0.22"
 kuva = { version = "0.4", features = ["embed_font"] }
+memmap2 = "0.9"
 ndarray = "0.17"
 num-complex = "0.4"
 numpy = "0.29"

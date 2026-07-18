@@ -38,6 +38,8 @@ pub struct CommonArgs {
 /// Available analysis stages.
 #[derive(Clone, Debug, Subcommand)]
 pub enum AnalysisCommand {
+    /// Validate manifests and mmap required tensors without running analysis.
+    Inspect,
     Com,
     Correlation(CorrelationArgs),
     Laplace(LaplaceArgs),

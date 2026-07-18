@@ -10,7 +10,8 @@ description = "Streaming Rust analysis for crystalline-cylinder trajectories"
 workspace = true
 
 [dependencies]
-candle-core.workspace = true
+bytemuck.workspace = true
+memmap2.workspace = true
 num-complex.workspace = true
 rayon.workspace = true
 safetensors.workspace = true

@@ -3,17 +3,42 @@
 use crate::backend::AnalysisBackend;
 use crate::error::AnalysisResult;
 use crate::model::{CorrelationSeries, LaplaceGrid};
+use tenferro_cpu::CpuContext;
 
 /// CPU backend backed by Rayon and Tenferro's faer provider.
 #[derive(Clone, Debug)]
 pub struct CpuAnalysisBackend {
-    pub thread_count: Option<usize>,
+    pub thread_count: usize,
+    context: CpuContext,
 }
 
 impl CpuAnalysisBackend {
     /// Construct a CPU backend with an optional thread limit.
-    pub fn new(_thread_count: Option<usize>) -> AnalysisResult<Self> {
-        todo!("initialize the Rayon and Tenferro CPU runtimes")
+    pub fn new(thread_count: Option<usize>) -> AnalysisResult<Self> {
+        let context = match thread_count {
+            Some(0) => {
+                return Err(crate::error::AnalysisError::InvalidConfiguration(
+                    "--threads must be at least one".to_owned(),
+                ));
+            }
+            Some(count) => CpuContext::with_threads(count),
+            None => CpuContext::try_from_env(),
+        }
+        .map_err(|error| {
+            crate::error::AnalysisError::InvalidConfiguration(format!(
+                "failed to initialize the Tenferro/Rayon CPU context: {error}"
+            ))
+        })?;
+
+        Ok(Self {
+            thread_count: context.num_threads(),
+            context,
+        })
+    }
+
+    /// Execute work inside the backend's configured Rayon pool.
+    pub fn install<R: Send>(&self, operation: impl FnOnce() -> R + Send) -> R {
+        self.context.install(operation)
     }
 }
 

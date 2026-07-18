@@ -502,7 +502,7 @@ checksum = "917fbbe1238d80ec1483c2c360ed9fa0146fdf57b2e66015c0824ccf5155276c"
 dependencies = [
  "burn-backend",
  "burn-std",
- "candle-core 0.10.2",
+ "candle-core",
  "derive-new",
 ]
 
@@ -933,32 +933,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "candle-core"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ecb245093b0f791b89d3420c3df9c6d49c60ab63ba54db896bf8a3baf486706"
-dependencies = [
- "byteorder",
- "float8",
- "gemm 0.19.0",
- "half",
- "libc",
- "libm",
- "memmap2",
- "num-traits",
- "num_cpus",
- "rand 0.9.4",
- "rand_distr 0.5.1",
- "rayon",
- "safetensors 0.8.0",
- "thiserror 2.0.18",
- "tokenizers",
- "yoke",
- "zerocopy",
- "zip 8.6.0",
-]
-
-[[package]]
 name = "caseless"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1378,7 +1352,8 @@ dependencies = [
 name = "crystalline-cylinder-analysis"
 version = "0.1.0"
 dependencies = [
- "candle-core 0.11.0",
+ "bytemuck",
+ "memmap2",
  "num-complex",
  "rayon",
  "safetensors 0.8.0",
@@ -7684,18 +7659,6 @@ name = "zip"
 version = "7.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c42e33efc22a0650c311c2ef19115ce232583abbe80850bc8b66509ebef02de0"
-dependencies = [
- "crc32fast",
- "indexmap",
- "memchr",
- "typed-path",
-]
-
-[[package]]
-name = "zip"
-version = "8.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d04a6b5381502aa6087c94c669499eb1602eb9c5e8198e534de571f7154809b"
 dependencies = [
  "crc32fast",
  "indexmap",
