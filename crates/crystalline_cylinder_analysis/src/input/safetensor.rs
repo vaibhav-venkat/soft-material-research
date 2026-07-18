@@ -16,18 +16,19 @@ use crate::error::{AnalysisError, AnalysisResult};
 pub enum TensorDtype {
     F32,
     F64,
+    I32,
     I64,
 }
 
 /// Borrowed tensor bytes and logical row-major shape.
 #[derive(Clone, Debug)]
-pub struct TensorSlice<'a> {
+pub struct SafetensorView<'a> {
     pub dtype: TensorDtype,
     pub shape: Vec<usize>,
     pub bytes: &'a [u8],
 }
 
-impl TensorSlice<'_> {
+impl SafetensorView<'_> {
     /// View an F32 tensor as native typed values without copying.
     pub fn as_f32(&self) -> AnalysisResult<&[f32]> {
         self.cast_values(TensorDtype::F32, "F32")
@@ -41,6 +42,11 @@ impl TensorSlice<'_> {
     /// View an I64 tensor as native typed values without copying.
     pub fn as_i64(&self) -> AnalysisResult<&[i64]> {
         self.cast_values(TensorDtype::I64, "I64")
+    }
+
+    /// View an I32 tensor as native typed values without copying.
+    pub fn as_i32(&self) -> AnalysisResult<&[i32]> {
+        self.cast_values(TensorDtype::I32, "I32")
     }
 
     fn cast_values<T: Pod>(&self, expected: TensorDtype, name: &str) -> AnalysisResult<&[T]> {
@@ -95,7 +101,7 @@ impl MappedShard {
     }
 
     /// Borrow one named tensor directly from the mapped file.
-    pub fn tensor<'a>(&'a self, name: &str) -> AnalysisResult<TensorSlice<'a>> {
+    pub fn tensor<'a>(&'a self, name: &str) -> AnalysisResult<SafetensorView<'a>> {
         let tensors = SafeTensors::deserialize(&self.mapping)?;
         let view = tensors
             .tensor(name)
@@ -107,16 +113,17 @@ impl MappedShard {
         let dtype = match view.dtype() {
             Dtype::F32 => TensorDtype::F32,
             Dtype::F64 => TensorDtype::F64,
+            Dtype::I32 => TensorDtype::I32,
             Dtype::I64 => TensorDtype::I64,
             other => {
                 return Err(AnalysisError::InvalidTensor {
                     path: self.path.clone(),
                     name: name.to_owned(),
-                    message: format!("unsupported dtype {other:?}; expected F32, F64, or I64"),
+                    message: format!("unsupported dtype {other:?}; expected F32, F64, I32, or I64"),
                 });
             }
         };
-        Ok(TensorSlice {
+        Ok(SafetensorView {
             dtype,
             shape: view.shape().to_vec(),
             bytes: view.data(),

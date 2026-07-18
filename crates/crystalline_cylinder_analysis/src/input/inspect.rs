@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use crate::error::{AnalysisError, AnalysisResult};
 use crate::model::{CaseSchema, DiscoveredDataset};
 
-use super::{resolve_shard_path, MappedShard, TensorDtype, TensorSlice};
+use super::{resolve_shard_path, MappedShard, SafetensorView, TensorDtype};
 
 /// Shape and dtype information for one mapped frame shard.
 #[derive(Clone, Debug)]
@@ -123,7 +123,7 @@ fn select_coordinate_name(
 fn validate_coordinate_tensor(
     path: &std::path::Path,
     name: &str,
-    tensor: &TensorSlice<'_>,
+    tensor: &SafetensorView<'_>,
     frames: usize,
     particles: usize,
 ) -> AnalysisResult<()> {
@@ -147,7 +147,7 @@ fn validate_coordinate_tensor(
     let finite = match tensor.dtype {
         TensorDtype::F32 => tensor.as_f32()?.iter().all(|value| value.is_finite()),
         TensorDtype::F64 => tensor.as_f64()?.iter().all(|value| value.is_finite()),
-        TensorDtype::I64 => false,
+        TensorDtype::I32 | TensorDtype::I64 => false,
     };
     if !finite {
         return Err(invalid_tensor(
@@ -161,12 +161,12 @@ fn validate_coordinate_tensor(
 
 fn validate_step_tensor(
     path: &std::path::Path,
-    tensor: &TensorSlice<'_>,
+    tensor: &SafetensorView<'_>,
     frames: usize,
     previous_step: &mut Option<i64>,
 ) -> AnalysisResult<()> {
-    if tensor.dtype != TensorDtype::I64 {
-        return Err(invalid_tensor(path, "step", "steps must be I64"));
+    if !matches!(tensor.dtype, TensorDtype::I32 | TensorDtype::I64) {
+        return Err(invalid_tensor(path, "step", "steps must be I32 or I64"));
     }
     if tensor.shape != [frames] {
         return Err(invalid_tensor(
@@ -175,7 +175,23 @@ fn validate_step_tensor(
             &format!("expected [{frames}], found {:?}", tensor.shape),
         ));
     }
-    for &step in tensor.as_i64()? {
+    match tensor.dtype {
+        TensorDtype::I32 => validate_steps(
+            path,
+            tensor.as_i32()?.iter().map(|&step| i64::from(step)),
+            previous_step,
+        ),
+        TensorDtype::I64 => validate_steps(path, tensor.as_i64()?.iter().copied(), previous_step),
+        TensorDtype::F32 | TensorDtype::F64 => unreachable!("step dtype checked above"),
+    }
+}
+
+fn validate_steps(
+    path: &std::path::Path,
+    steps: impl Iterator<Item = i64>,
+    previous_step: &mut Option<i64>,
+) -> AnalysisResult<()> {
+    for step in steps {
         if previous_step.is_some_and(|previous| step <= previous) {
             return Err(invalid_tensor(
                 path,
