@@ -13,11 +13,11 @@ use kuva::render::plots::Plot;
 
 /// Write mean Pearson curves and a separate replicate-deviation panel.
 pub fn write_correlation_plot(analyses: &[CaseAnalysis], output: &Path) -> PathBuf {
-    assert!(!analyses.is_empty(), "no correlations");
+    assert!(!analyses.is_empty(), "no correlations to plot");
     assert_eq!(
         output.extension().and_then(|suffix| suffix.to_str()),
         Some("svg"),
-        "bad output"
+        "correlation output must be SVG"
     );
     let colors = [
         "#4477AA", "#EE6677", "#228833", "#CCBB44", "#66CCEE", "#AA3377", "#BBBBBB", "#000000",
@@ -34,7 +34,10 @@ pub fn write_correlation_plot(analyses: &[CaseAnalysis], output: &Path) -> PathB
     mean_plots.push(Plot::Line(reference_line(maximum_lag, 1.0, true)));
 
     for (index, analysis) in analyses.iter().enumerate() {
-        let correlation = analysis.correlation.as_ref().expect("no correlation");
+        let correlation = analysis
+            .correlation
+            .as_ref()
+            .expect("analysis has no correlation");
         validate_series(correlation);
         let color = colors[index % colors.len()];
         let label = analysis
@@ -109,21 +112,33 @@ fn reference_line(maximum_lag: f64, value: f64, dashed: bool) -> LinePlot {
 
 fn validate_series(series: &crystalline_cylinder_analysis::CorrelationSeries) {
     let count = series.lag_times.len();
-    assert!(count >= 1, "short correlation");
-    assert_eq!(series.lag_indices.len(), count, "bad shape");
-    assert_eq!(series.pearson_mean.len(), count, "bad shape");
-    assert_eq!(series.pearson_std.len(), count, "bad shape");
-    assert_eq!(series.origin_counts.len(), count, "bad shape");
-    assert_eq!(series.pearson_mean[0], 1.0, "bad lag zero");
+    assert!(count >= 1, "correlation is empty");
+    assert_eq!(series.lag_indices.len(), count, "lag index length differs");
+    assert_eq!(
+        series.pearson_mean.len(),
+        count,
+        "Pearson mean length differs"
+    );
+    assert_eq!(
+        series.pearson_std.len(),
+        count,
+        "Pearson std length differs"
+    );
+    assert_eq!(
+        series.origin_counts.len(),
+        count,
+        "origin count length differs"
+    );
+    assert_eq!(series.pearson_mean[0], 1.0, "lag-zero Pearson is not one");
 }
 
 fn write_atomic(output: &Path, contents: &[u8]) {
-    let parent = output.parent().expect("bad output");
+    let parent = output.parent().expect("output has no parent");
     std::fs::create_dir_all(parent).expect("make output");
     let file_name = output
         .file_name()
         .and_then(|name| name.to_str())
-        .expect("bad output");
+        .expect("output filename is invalid");
     let temporary = parent.join(format!(".{file_name}.{}.tmp", std::process::id()));
     let mut file = OpenOptions::new()
         .write(true)

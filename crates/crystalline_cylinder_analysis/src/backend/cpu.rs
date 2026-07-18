@@ -17,11 +17,11 @@ impl CpuAnalysisBackend {
     /// Construct a CPU backend with an optional thread limit.
     pub fn new(thread_count: Option<usize>) -> Self {
         let context = match thread_count {
-            Some(0) => panic!("bad threads"),
+            Some(0) => panic!("thread count must be positive"),
             Some(count) => CpuContext::with_threads(count),
             None => CpuContext::try_from_env(),
         }
-        .expect("bad CPU");
+        .expect("CPU backend initialization failed");
 
         Self {
             thread_count: context.num_threads(),
@@ -37,8 +37,11 @@ impl CpuAnalysisBackend {
 
 impl AnalysisBackend for CpuAnalysisBackend {
     fn lagged_pearson(&self, values: &[f64], max_lag: usize) -> Vec<f64> {
-        assert!(values.len() >= 2, "short series");
-        assert!(max_lag <= values.len() - 2, "bad lag");
+        assert!(values.len() >= 2, "Pearson needs two samples");
+        assert!(
+            max_lag <= values.len() - 2,
+            "lag leaves fewer than two pairs"
+        );
         self.install(|| {
             (0..=max_lag)
                 .into_par_iter()

@@ -9,8 +9,11 @@ use crystalline_cylinder_analysis::input::{
 };
 use crystalline_cylinder_analysis::pipeline::CaseAnalysis;
 use crystalline_cylinder_analysis::replicates::{average_com_series, average_correlations};
-use crystalline_cylinder_analysis::{CaseSchema, CpuAnalysisBackend};
+use crystalline_cylinder_analysis::{
+    CaseSchema, ComSeries, CorrelationSeries, CpuAnalysisBackend, ReplicateGroup,
+};
 use rayon::prelude::*;
+use std::path::PathBuf;
 
 /// Validate a command, run the requested stages, and write their artifacts.
 pub fn run(cli: Cli) {
@@ -34,36 +37,17 @@ fn run_com(
     common: &crate::cli::CommonArgs,
     circumference: Option<BigLxCircumference>,
 ) {
-    let datasets = discover_datasets(&common.input_dir);
-    let groups = select_circumference(group_replicates(datasets), circumference);
-    assert!(!groups.is_empty(), "no cases");
-    let config = ComConfig {
-        timestep: common.simulation_timestep,
-    };
+    let groups = selected_groups(common, circumference);
+    let config = com_config(common);
     let analyses = backend.install(|| {
         groups
             .into_par_iter()
-            .map(|group| {
-                let replicas = group
-                    .datasets
-                    .par_iter()
-                    .map(|dataset| analyze_replica_com(dataset, config))
-                    .collect::<Vec<_>>();
-                let com = average_com_series(&replicas);
-                CaseAnalysis {
-                    group,
-                    com: Some(com),
-                    correlation: None,
-                    laplace: None,
-                    preferred: Vec::new(),
-                    fit: None,
-                }
-            })
+            .map(|group| analyze_group_com(group, config))
             .collect::<Vec<_>>()
     });
 
     for analysis in &analyses {
-        let com = analysis.com.as_ref().expect("no COM");
+        let com = analysis.com.as_ref().expect("analysis has no COM");
         eprintln!(
             "[debug:com] case={} replicates={} elapsed_time={:?} x_center={:?} x_velocity={:?}",
             analysis.group.case.case_id,
@@ -74,12 +58,8 @@ fn run_com(
         );
     }
 
-    let output_root = common
-        .output_dir
-        .clone()
-        .unwrap_or_else(|| common.input_dir[0].join("crystalline_cylinder_analysis_output"));
-    let output = output_root.join("com").join("axial_com_velocity.svg");
-    assert!(!output.exists() || common.overwrite, "output exists");
+    let output = output_path(common, "com", "axial_com_velocity.svg");
+    assert_output_available(&output, common.overwrite);
     let written = write_com_plot(&analyses, &output);
     eprintln!(
         "[crystalline-cylinder-analysis] command=com cases={} output={}",
@@ -93,12 +73,8 @@ fn run_correlation(
     common: &crate::cli::CommonArgs,
     args: CorrelationArgs,
 ) {
-    let datasets = discover_datasets(&common.input_dir);
-    let groups = select_circumference(group_replicates(datasets), args.circ);
-    assert!(!groups.is_empty(), "no cases");
-    let com_config = ComConfig {
-        timestep: common.simulation_timestep,
-    };
+    let groups = selected_groups(common, args.circ);
+    let com_config = com_config(common);
     let correlation_config = CorrelationConfig {
         min_origins: args.min_origins,
         max_lag: args.max_lag,
@@ -106,32 +82,15 @@ fn run_correlation(
     let analyses = backend.install(|| {
         groups
             .into_par_iter()
-            .map(|group| {
-                let replicas = group
-                    .datasets
-                    .par_iter()
-                    .map(|dataset| {
-                        let com = analyze_replica_com(dataset, com_config);
-                        let correlation = analyze_correlation(backend, &com, correlation_config);
-                        (com, correlation)
-                    })
-                    .collect::<Vec<_>>();
-                let (com_replicas, correlation_replicas): (Vec<_>, Vec<_>) =
-                    replicas.into_iter().unzip();
-                CaseAnalysis {
-                    group,
-                    com: Some(average_com_series(&com_replicas)),
-                    correlation: Some(average_correlations(&correlation_replicas)),
-                    laplace: None,
-                    preferred: Vec::new(),
-                    fit: None,
-                }
-            })
+            .map(|group| analyze_group_correlation(backend, group, com_config, correlation_config))
             .collect::<Vec<_>>()
     });
 
     for analysis in &analyses {
-        let correlation = analysis.correlation.as_ref().expect("no correlation");
+        let correlation = analysis
+            .correlation
+            .as_ref()
+            .expect("analysis has no correlation");
         eprintln!(
             "[debug:correlation] case={} replicates={} lag_time={:?} pearson={:?} origins={:?}",
             analysis.group.case.case_id,
@@ -142,14 +101,8 @@ fn run_correlation(
         );
     }
 
-    let output_root = common
-        .output_dir
-        .clone()
-        .unwrap_or_else(|| common.input_dir[0].join("crystalline_cylinder_analysis_output"));
-    let output = output_root
-        .join("correlation")
-        .join("axial_velocity_pearson.svg");
-    assert!(!output.exists() || common.overwrite, "output exists");
+    let output = output_path(common, "correlation", "axial_velocity_pearson.svg");
+    assert_output_available(&output, common.overwrite);
     let written = write_correlation_plot(&analyses, &output);
     eprintln!(
         "[crystalline-cylinder-analysis] command=correlation cases={} output={}",
@@ -158,10 +111,93 @@ fn run_correlation(
     );
 }
 
-fn select_circumference(
-    groups: Vec<crystalline_cylinder_analysis::ReplicateGroup>,
+fn selected_groups(
+    common: &crate::cli::CommonArgs,
     circumference: Option<BigLxCircumference>,
-) -> Vec<crystalline_cylinder_analysis::ReplicateGroup> {
+) -> Vec<ReplicateGroup> {
+    let groups = select_circumference(discover_replicate_groups(&common.input_dir), circumference);
+    assert!(!groups.is_empty(), "no matching cases");
+    groups
+}
+
+fn discover_replicate_groups(input_dirs: &[PathBuf]) -> Vec<ReplicateGroup> {
+    assert!(!input_dirs.is_empty(), "missing --input-dir");
+    group_replicates(discover_datasets(input_dirs))
+}
+
+fn com_config(common: &crate::cli::CommonArgs) -> ComConfig {
+    ComConfig {
+        timestep: common.simulation_timestep,
+    }
+}
+
+fn analyze_group_com(group: ReplicateGroup, config: ComConfig) -> CaseAnalysis {
+    let replicas = analyze_com_replicas(&group, config);
+    case_analysis(group, average_com_series(&replicas), None)
+}
+
+fn analyze_group_correlation(
+    backend: &CpuAnalysisBackend,
+    group: ReplicateGroup,
+    com_config: ComConfig,
+    correlation_config: CorrelationConfig,
+) -> CaseAnalysis {
+    let com_replicas = analyze_com_replicas(&group, com_config);
+    // Correlate each seed before aggregation: mean(C_v), never C_(mean v).
+    let correlation_replicas = com_replicas
+        .par_iter()
+        .map(|com| analyze_correlation(backend, com, correlation_config))
+        .collect::<Vec<_>>();
+    let com = average_com_series(&com_replicas);
+    let correlation = average_correlations(&correlation_replicas);
+    case_analysis(group, com, Some(correlation))
+}
+
+fn analyze_com_replicas(group: &ReplicateGroup, config: ComConfig) -> Vec<ComSeries> {
+    group
+        .datasets
+        .par_iter()
+        .map(|dataset| analyze_replica_com(dataset, config))
+        .collect()
+}
+
+fn case_analysis(
+    group: ReplicateGroup,
+    com: ComSeries,
+    correlation: Option<CorrelationSeries>,
+) -> CaseAnalysis {
+    CaseAnalysis {
+        group,
+        com: Some(com),
+        correlation,
+        laplace: None,
+        preferred: Vec::new(),
+        fit: None,
+    }
+}
+
+fn output_path(common: &crate::cli::CommonArgs, directory: &str, file: &str) -> PathBuf {
+    let root = common.output_dir.clone().unwrap_or_else(|| {
+        common
+            .input_dir
+            .first()
+            .expect("missing --input-dir")
+            .join("crystalline_cylinder_analysis_output")
+    });
+    root.join(directory).join(file)
+}
+
+fn assert_output_available(output: &std::path::Path, overwrite: bool) {
+    assert!(
+        !output.exists() || overwrite,
+        "output exists; use --overwrite"
+    );
+}
+
+fn select_circumference(
+    groups: Vec<ReplicateGroup>,
+    circumference: Option<BigLxCircumference>,
+) -> Vec<ReplicateGroup> {
     groups
         .into_iter()
         .filter(|group| {
@@ -187,10 +223,8 @@ pub fn command_name(command: &AnalysisCommand) -> &'static str {
     }
 }
 
-fn inspect_inputs(input_dirs: &[std::path::PathBuf]) {
-    let datasets = discover_datasets(input_dirs);
-    let groups = group_replicates(datasets);
-    for group in groups {
+fn inspect_inputs(input_dirs: &[PathBuf]) {
+    for group in discover_replicate_groups(input_dirs) {
         let schema = match group.schema {
             CaseSchema::BigLx => "big-lx",
             CaseSchema::Confinement => "confinement",

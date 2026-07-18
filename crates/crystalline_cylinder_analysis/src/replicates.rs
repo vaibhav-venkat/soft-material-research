@@ -4,27 +4,28 @@ use crate::model::{ComSeries, CorrelationSeries};
 
 /// Average compatible COM series on their common elapsed-time prefix.
 pub fn average_com_series(replicas: &[ComSeries]) -> ComSeries {
-    assert!(!replicas.is_empty(), "no replicas");
+    assert!(!replicas.is_empty(), "no COM replicas");
     for replica in replicas {
         let count = replica.elapsed_time.len();
         let aligned = replica.x_center_mean.len() == count
             && replica.x_center_std.len() == count
             && replica.x_velocity_mean.len() == count
             && replica.x_velocity_std.len() == count;
+        assert!(aligned, "COM replica arrays are misaligned");
         let finite = replica.elapsed_time.iter().all(|value| value.is_finite())
             && replica.x_center_mean.iter().all(|value| value.is_finite())
             && replica
                 .x_velocity_mean
                 .iter()
                 .all(|value| value.is_finite());
-        assert!(aligned && finite, "bad replicas");
+        assert!(finite, "COM replica contains non-finite values");
     }
     let common_length = replicas
         .iter()
         .map(|series| series.elapsed_time.len())
         .min()
         .unwrap_or(0);
-    assert!(common_length >= 2, "short replicas");
+    assert!(common_length >= 2, "COM replicas need two frames");
     let elapsed_time = replicas[0].elapsed_time[..common_length].to_vec();
     for replica in &replicas[1..] {
         for (index, (&expected, &actual)) in elapsed_time
@@ -34,7 +35,10 @@ pub fn average_com_series(replicas: &[ComSeries]) -> ComSeries {
         {
             let tolerance = 1.0e-12 * expected.abs().max(actual.abs()).max(1.0);
             let _ = index;
-            assert!((expected - actual).abs() <= tolerance, "bad time grid");
+            assert!(
+                (expected - actual).abs() <= tolerance,
+                "COM replica times differ"
+            );
         }
     }
     let (x_center_mean, x_center_std) = pointwise_mean_std(
@@ -60,15 +64,14 @@ pub fn average_com_series(replicas: &[ComSeries]) -> ComSeries {
 }
 
 /// Average compatible correlations and sum their time-origin counts.
-pub fn average_correlations(_replicas: &[CorrelationSeries]) -> CorrelationSeries {
-    let replicas = _replicas;
-    assert!(!replicas.is_empty(), "no replicas");
+pub fn average_correlations(replicas: &[CorrelationSeries]) -> CorrelationSeries {
+    assert!(!replicas.is_empty(), "no correlation replicas");
     let common_length = replicas
         .iter()
         .map(|series| series.lag_times.len())
         .min()
         .unwrap_or(0);
-    assert!(common_length >= 1, "short correlations");
+    assert!(common_length >= 1, "correlation replicas are empty");
     let lag_indices = replicas[0].lag_indices[..common_length].to_vec();
     let lag_times = replicas[0].lag_times[..common_length].to_vec();
     for replica in replicas {
@@ -76,16 +79,19 @@ pub fn average_correlations(_replicas: &[CorrelationSeries]) -> CorrelationSerie
             replica.lag_indices.len() >= common_length
                 && replica.pearson_mean.len() >= common_length
                 && replica.origin_counts.len() >= common_length,
-            "bad correlations"
+            "correlation arrays are misaligned"
         );
         assert_eq!(
             &replica.lag_indices[..common_length],
             lag_indices.as_slice(),
-            "bad lag grid"
+            "replicate lag indices differ"
         );
         for (&expected, &actual) in lag_times.iter().zip(&replica.lag_times[..common_length]) {
             let tolerance = 1.0e-12_f64.max(1.0e-10 * expected.abs().max(actual.abs()));
-            assert!((expected - actual).abs() <= tolerance, "bad lag grid");
+            assert!(
+                (expected - actual).abs() <= tolerance,
+                "replicate lag times differ"
+            );
         }
     }
     let (pearson_mean, pearson_std) = pointwise_mean_std(

@@ -12,10 +12,16 @@ pub struct CorrelationConfig {
 
 /// Compute one pairwise Pearson coefficient using stable accumulation.
 pub fn pearson(left: &[f64], right: &[f64]) -> f64 {
-    assert_eq!(left.len(), right.len(), "bad pairs");
-    assert!(left.len() >= 2, "short pairs");
-    assert!(left.iter().all(|value| value.is_finite()), "bad pairs");
-    assert!(right.iter().all(|value| value.is_finite()), "bad pairs");
+    assert_eq!(left.len(), right.len(), "Pearson lengths differ");
+    assert!(left.len() >= 2, "Pearson needs two pairs");
+    assert!(
+        left.iter().all(|value| value.is_finite()),
+        "left Pearson input is non-finite"
+    );
+    assert!(
+        right.iter().all(|value| value.is_finite()),
+        "right Pearson input is non-finite"
+    );
 
     let count = left.len() as f64;
     let left_mean = compensated_sum(left.iter().copied()) / count;
@@ -29,14 +35,14 @@ pub fn pearson(left: &[f64], right: &[f64]) -> f64 {
     let right_variance = compensated_sum(right.iter().map(|&y| (y - right_mean).powi(2)));
     assert!(
         left_variance.is_finite() && left_variance > 0.0,
-        "zero variance"
+        "left Pearson input is constant"
     );
     assert!(
         right_variance.is_finite() && right_variance > 0.0,
-        "zero variance"
+        "right Pearson input is constant"
     );
     let coefficient = covariance / (left_variance * right_variance).sqrt();
-    assert!(coefficient.is_finite(), "bad Pearson");
+    assert!(coefficient.is_finite(), "Pearson result is non-finite");
     coefficient.clamp(-1.0, 1.0)
 }
 
@@ -47,24 +53,37 @@ pub fn analyze_correlation<B: AnalysisBackend>(
     config: CorrelationConfig,
 ) -> CorrelationSeries {
     let frame_count = com.elapsed_time.len();
-    assert_eq!(com.x_velocity_mean.len(), frame_count, "bad velocity");
-    assert!(config.min_origins >= 2, "bad origins");
-    assert!(config.min_origins <= frame_count, "bad origins");
+    assert_eq!(
+        com.x_velocity_mean.len(),
+        frame_count,
+        "velocity/time lengths differ"
+    );
+    assert!(config.min_origins >= 2, "min origins must be at least two");
+    assert!(
+        config.min_origins <= frame_count,
+        "min origins exceeds frame count"
+    );
     assert!(
         com.elapsed_time.iter().all(|value| value.is_finite()),
-        "bad time"
+        "elapsed time is non-finite"
     );
     assert!(
         com.x_velocity_mean.iter().all(|value| value.is_finite()),
-        "bad velocity"
+        "COM velocity is non-finite"
     );
 
     let spacing = com.elapsed_time[1] - com.elapsed_time[0];
-    assert!(spacing.is_finite() && spacing > 0.0, "bad spacing");
+    assert!(
+        spacing.is_finite() && spacing > 0.0,
+        "time spacing must be positive"
+    );
     for pair in com.elapsed_time.windows(2) {
         let actual = pair[1] - pair[0];
         let tolerance = 1.0e-12_f64.max(1.0e-10 * spacing.abs().max(actual.abs()));
-        assert!((actual - spacing).abs() <= tolerance, "nonuniform time");
+        assert!(
+            (actual - spacing).abs() <= tolerance,
+            "correlation requires uniform time"
+        );
     }
 
     let available_maximum = frame_count - config.min_origins;
