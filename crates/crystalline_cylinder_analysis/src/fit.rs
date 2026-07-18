@@ -1,7 +1,6 @@
 //! Robust constrained fitting of the damped-cosine correlation model.
 
 use crate::backend::AnalysisBackend;
-use crate::error::AnalysisResult;
 use crate::model::{CorrelationSeries, DampedCosineFit};
 
 /// Numerical controls for bounded soft-L1 fitting.
@@ -29,6 +28,6 @@ pub fn fit_damped_cosine<B: AnalysisBackend>(
     _correlation: &CorrelationSeries,
     _omega_grid: &[f64],
     _config: FitConfig,
-) -> AnalysisResult<DampedCosineFit> {
+) -> DampedCosineFit {
     todo!("run bounded Levenberg-Marquardt and soft-L1 IRLS iterations")
 }

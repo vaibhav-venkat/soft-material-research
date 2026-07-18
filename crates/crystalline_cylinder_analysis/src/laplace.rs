@@ -1,7 +1,6 @@
 //! Complex Laplace transform and preferred-coordinate searches.
 
 use crate::backend::AnalysisBackend;
-use crate::error::AnalysisResult;
 use crate::model::{CorrelationSeries, LaplaceGrid, PreferredAxis, PreferredEstimate};
 
 /// Transform-grid controls.
@@ -19,7 +18,7 @@ pub struct LaplaceConfig {
 pub fn transform_axes(
     _correlations: &[CorrelationSeries],
     _config: LaplaceConfig,
-) -> AnalysisResult<(Vec<f64>, Vec<f64>)> {
+) -> (Vec<f64>, Vec<f64>) {
     todo!("derive duration- and Nyquist-limited shared axes")
 }
 
@@ -29,7 +28,7 @@ pub fn analyze_laplace<B: AnalysisBackend>(
     _correlation: &CorrelationSeries,
     _r: &[f64],
     _omega: &[f64],
-) -> AnalysisResult<LaplaceGrid> {
+) -> LaplaceGrid {
     todo!("dispatch a memory-bounded transform-grid evaluation")
 }
 
@@ -38,6 +37,6 @@ pub fn preferred_coordinate(
     _correlation: &CorrelationSeries,
     _axis: PreferredAxis,
     _coordinates: &[f64],
-) -> AnalysisResult<PreferredEstimate> {
+) -> PreferredEstimate {
     todo!("evaluate the r=0 or omega=0 transform and diagnose boundary maxima")
 }

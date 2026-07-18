@@ -1,7 +1,6 @@
 //! Rayon and Tenferro CPU backend declaration.
 
 use crate::backend::AnalysisBackend;
-use crate::error::AnalysisResult;
 use crate::model::{CorrelationSeries, LaplaceGrid};
 use tenferro_cpu::CpuContext;
 
@@ -14,26 +13,18 @@ pub struct CpuAnalysisBackend {
 
 impl CpuAnalysisBackend {
     /// Construct a CPU backend with an optional thread limit.
-    pub fn new(thread_count: Option<usize>) -> AnalysisResult<Self> {
+    pub fn new(thread_count: Option<usize>) -> Self {
         let context = match thread_count {
-            Some(0) => {
-                return Err(crate::error::AnalysisError::InvalidConfiguration(
-                    "--threads must be at least one".to_owned(),
-                ));
-            }
+            Some(0) => panic!("bad threads"),
             Some(count) => CpuContext::with_threads(count),
             None => CpuContext::try_from_env(),
         }
-        .map_err(|error| {
-            crate::error::AnalysisError::InvalidConfiguration(format!(
-                "failed to initialize the Tenferro/Rayon CPU context: {error}"
-            ))
-        })?;
+        .expect("bad CPU");
 
-        Ok(Self {
+        Self {
             thread_count: context.num_threads(),
             context,
-        })
+        }
     }
 
     /// Execute work inside the backend's configured Rayon pool.
@@ -43,7 +34,7 @@ impl CpuAnalysisBackend {
 }
 
 impl AnalysisBackend for CpuAnalysisBackend {
-    fn lagged_pearson(&self, _values: &[f64], _max_lag: usize) -> AnalysisResult<Vec<f64>> {
+    fn lagged_pearson(&self, _values: &[f64], _max_lag: usize) -> Vec<f64> {
         todo!("compute stable lagged Pearson coefficients in parallel")
     }
 
@@ -52,7 +43,7 @@ impl AnalysisBackend for CpuAnalysisBackend {
         _correlation: &CorrelationSeries,
         _r: &[f64],
         _omega: &[f64],
-    ) -> AnalysisResult<LaplaceGrid> {
+    ) -> LaplaceGrid {
         todo!("evaluate independent Laplace grid rows in parallel")
     }
 
@@ -63,7 +54,7 @@ impl AnalysisBackend for CpuAnalysisBackend {
         _columns: usize,
         _rhs: &[f64],
         _rank_tolerance: f64,
-    ) -> AnalysisResult<Vec<f64>> {
+    ) -> Vec<f64> {
         todo!("solve through tenferro-linalg SVD or pseudoinverse")
     }
 }

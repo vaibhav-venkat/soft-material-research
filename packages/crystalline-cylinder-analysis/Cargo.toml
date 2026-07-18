@@ -17,7 +17,7 @@ path = "src/main.rs"
 clap.workspace = true
 crystalline-cylinder-analysis = { path = "../../crates/crystalline_cylinder_analysis" }
 kuva.workspace = true
+rayon.workspace = true
 safetensors.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-thiserror.workspace = true

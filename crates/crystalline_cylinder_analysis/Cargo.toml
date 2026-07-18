@@ -12,6 +12,7 @@ workspace = true
 [dependencies]
 bytemuck.workspace = true
 memmap2.workspace = true
+ndarray.workspace = true
 num-complex.workspace = true
 rayon.workspace = true
 safetensors.workspace = true
@@ -20,4 +21,3 @@ serde_json.workspace = true
 tenferro-cpu.workspace = true
 tenferro-linalg.workspace = true
 tenferro-runtime.workspace = true
-thiserror.workspace = true

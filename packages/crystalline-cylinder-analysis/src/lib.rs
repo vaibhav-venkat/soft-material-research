@@ -2,6 +2,5 @@
 
 pub mod artifacts;
 pub mod cli;
-pub mod error;
 pub mod plots;
 pub mod run;

@@ -4,13 +4,12 @@ mod cpu;
 
 pub use cpu::CpuAnalysisBackend;
 
-use crate::error::AnalysisResult;
 use crate::model::{CorrelationSeries, LaplaceGrid};
 
 /// Backend operations that benefit from parallel or accelerated execution.
 pub trait AnalysisBackend: Send + Sync {
     /// Compute all requested lagged Pearson coefficients.
-    fn lagged_pearson(&self, values: &[f64], max_lag: usize) -> AnalysisResult<Vec<f64>>;
+    fn lagged_pearson(&self, values: &[f64], max_lag: usize) -> Vec<f64>;
 
     /// Evaluate the complex Laplace transform on the supplied grid.
     fn laplace_grid(
@@ -18,7 +17,7 @@ pub trait AnalysisBackend: Send + Sync {
         correlation: &CorrelationSeries,
         r: &[f64],
         omega: &[f64],
-    ) -> AnalysisResult<LaplaceGrid>;
+    ) -> LaplaceGrid;
 
     /// Solve a dense least-squares problem with a column-major result backend.
     fn linear_least_squares(
@@ -28,5 +27,5 @@ pub trait AnalysisBackend: Send + Sync {
         columns: usize,
         rhs: &[f64],
         rank_tolerance: f64,
-    ) -> AnalysisResult<Vec<f64>>;
+    ) -> Vec<f64>;
 }

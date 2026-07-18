@@ -2,7 +2,6 @@
 
 use std::path::PathBuf;
 
-use crate::error::{AnalysisError, AnalysisResult};
 use crate::model::{CaseSchema, DiscoveredDataset};
 
 use super::{resolve_shard_path, MappedShard, SafetensorView, TensorDtype};
@@ -29,7 +28,7 @@ pub struct DatasetShape {
 }
 
 /// Map and validate each shard in sequence
-pub fn inspect_dataset(dataset: &DiscoveredDataset) -> AnalysisResult<DatasetShape> {
+pub fn inspect_dataset(dataset: &DiscoveredDataset) -> DatasetShape {
     let mut summaries = Vec::with_capacity(dataset.manifest.shards.len());
     let mut aggregate_dtype = None;
     let mut aggregate_components = None;
@@ -37,11 +36,11 @@ pub fn inspect_dataset(dataset: &DiscoveredDataset) -> AnalysisResult<DatasetSha
     let mut coordinate_name = None;
 
     for shard_manifest in &dataset.manifest.shards {
-        let path = resolve_shard_path(&dataset.manifest_path, &shard_manifest.file)?;
-        let mapped = MappedShard::open(&path)?;
-        let selected_name = select_coordinate_name(dataset.schema, &mapped, &path)?;
-        let coordinates = mapped.tensor(selected_name)?;
-        let steps = mapped.tensor("step")?;
+        let path = resolve_shard_path(&dataset.manifest_path, &shard_manifest.file);
+        let mapped = MappedShard::open(&path);
+        let selected_name = select_coordinate_name(dataset.schema, &mapped);
+        let coordinates = mapped.tensor(selected_name);
+        let steps = mapped.tensor("step");
         let expected_frames = shard_manifest.frame_stop - shard_manifest.frame_start;
         validate_coordinate_tensor(
             &path,
@@ -49,31 +48,22 @@ pub fn inspect_dataset(dataset: &DiscoveredDataset) -> AnalysisResult<DatasetSha
             &coordinates,
             expected_frames,
             dataset.manifest.case.n_particles,
-        )?;
-        validate_step_tensor(&path, &steps, expected_frames, &mut previous_step)?;
+        );
+        validate_step_tensor(&steps, expected_frames, &mut previous_step);
 
         let components = coordinates.shape[2];
-        if aggregate_dtype.is_some_and(|dtype| dtype != coordinates.dtype) {
-            return Err(invalid_tensor(
-                &path,
-                selected_name,
-                "coordinate dtype changes between shards",
-            ));
-        }
-        if aggregate_components.is_some_and(|count| count != components) {
-            return Err(invalid_tensor(
-                &path,
-                selected_name,
-                "coordinate component count changes between shards",
-            ));
-        }
-        if coordinate_name.is_some_and(|name| name != selected_name) {
-            return Err(invalid_tensor(
-                &path,
-                selected_name,
-                "coordinate tensor name changes between shards",
-            ));
-        }
+        assert!(
+            aggregate_dtype.is_none_or(|dtype| dtype == coordinates.dtype),
+            "bad dtype"
+        );
+        assert!(
+            aggregate_components.is_none_or(|count| count == components),
+            "bad shape"
+        );
+        assert!(
+            coordinate_name.is_none_or(|name| name == selected_name),
+            "bad tensor"
+        );
         aggregate_dtype = Some(coordinates.dtype);
         aggregate_components = Some(components);
         coordinate_name = Some(selected_name);
@@ -87,36 +77,26 @@ pub fn inspect_dataset(dataset: &DiscoveredDataset) -> AnalysisResult<DatasetSha
         // `mapped` is dropped here before the next shard is opened.
     }
 
-    Ok(DatasetShape {
+    DatasetShape {
         case_id: dataset.manifest.case.case_id.clone(),
-        coordinate_name: coordinate_name.expect("a validated manifest has at least one shard"),
-        coordinate_dtype: aggregate_dtype.expect("a validated manifest has at least one shard"),
+        coordinate_name: coordinate_name.expect("no shard"),
+        coordinate_dtype: aggregate_dtype.expect("no shard"),
         coordinate_shape: vec![
             dataset.manifest.frame_count,
             dataset.manifest.case.n_particles,
-            aggregate_components.expect("a validated manifest has at least one shard"),
+            aggregate_components.expect("no shard"),
         ],
         step_shape: vec![dataset.manifest.frame_count],
         shards: summaries,
-    })
+    }
 }
 
-fn select_coordinate_name(
-    schema: CaseSchema,
-    mapped: &MappedShard,
-    path: &std::path::Path,
-) -> AnalysisResult<&'static str> {
+fn select_coordinate_name(schema: CaseSchema, mapped: &MappedShard) -> &'static str {
     match schema {
-        CaseSchema::BigLx if mapped.contains("coords") => Ok("coords"),
-        CaseSchema::Confinement if mapped.contains("coords") => Ok("coords"),
-        CaseSchema::Confinement if mapped.contains("position_cartesian") => {
-            Ok("position_cartesian")
-        }
-        _ => Err(invalid_tensor(
-            path,
-            "coords",
-            "required coordinate tensor is missing",
-        )),
+        CaseSchema::BigLx if mapped.contains("coords") => "coords",
+        CaseSchema::Confinement if mapped.contains("coords") => "coords",
+        CaseSchema::Confinement if mapped.contains("position_cartesian") => "position_cartesian",
+        _ => panic!("missing coords"),
     }
 }
 
@@ -126,88 +106,50 @@ fn validate_coordinate_tensor(
     tensor: &SafetensorView<'_>,
     frames: usize,
     particles: usize,
-) -> AnalysisResult<()> {
-    if !matches!(tensor.dtype, TensorDtype::F32 | TensorDtype::F64) {
-        return Err(invalid_tensor(path, name, "coordinates must be F32 or F64"));
-    }
-    if tensor.shape.len() != 3
-        || tensor.shape[0] != frames
-        || tensor.shape[1] != particles
-        || tensor.shape[2] == 0
-    {
-        return Err(invalid_tensor(
-            path,
-            name,
-            &format!(
-                "expected [{frames}, {particles}, components], found {:?}",
-                tensor.shape
-            ),
-        ));
-    }
+) {
+    let _ = (path, name);
+    assert!(
+        matches!(tensor.dtype, TensorDtype::F32 | TensorDtype::F64),
+        "bad dtype"
+    );
+    assert_eq!(tensor.shape.len(), 3, "bad shape");
+    assert_eq!(tensor.shape[0], frames, "bad shape");
+    assert_eq!(tensor.shape[1], particles, "bad shape");
+    assert_ne!(tensor.shape[2], 0, "bad shape");
     let finite = match tensor.dtype {
-        TensorDtype::F32 => tensor.as_f32()?.iter().all(|value| value.is_finite()),
-        TensorDtype::F64 => tensor.as_f64()?.iter().all(|value| value.is_finite()),
+        TensorDtype::F32 => tensor.as_f32().iter().all(|value| value.is_finite()),
+        TensorDtype::F64 => tensor.as_f64().iter().all(|value| value.is_finite()),
         TensorDtype::I32 | TensorDtype::I64 => false,
     };
-    if !finite {
-        return Err(invalid_tensor(
-            path,
-            name,
-            "coordinates contain non-finite values",
-        ));
-    }
-    Ok(())
+    assert!(finite, "bad coords");
 }
 
 fn validate_step_tensor(
-    path: &std::path::Path,
     tensor: &SafetensorView<'_>,
     frames: usize,
     previous_step: &mut Option<i64>,
-) -> AnalysisResult<()> {
-    if !matches!(tensor.dtype, TensorDtype::I32 | TensorDtype::I64) {
-        return Err(invalid_tensor(path, "step", "steps must be I32 or I64"));
-    }
-    if tensor.shape != [frames] {
-        return Err(invalid_tensor(
-            path,
-            "step",
-            &format!("expected [{frames}], found {:?}", tensor.shape),
-        ));
-    }
+) {
+    assert!(
+        matches!(tensor.dtype, TensorDtype::I32 | TensorDtype::I64),
+        "bad dtype"
+    );
+    assert_eq!(tensor.shape, [frames], "bad shape");
     match tensor.dtype {
         TensorDtype::I32 => validate_steps(
-            path,
-            tensor.as_i32()?.iter().map(|&step| i64::from(step)),
+            tensor.as_i32().iter().map(|&step| i64::from(step)),
             previous_step,
         ),
-        TensorDtype::I64 => validate_steps(path, tensor.as_i64()?.iter().copied(), previous_step),
+        TensorDtype::I64 => validate_steps(tensor.as_i64().iter().copied(), previous_step),
         TensorDtype::F32 | TensorDtype::F64 => unreachable!("step dtype checked above"),
     }
 }
 
-fn validate_steps(
-    path: &std::path::Path,
-    steps: impl Iterator<Item = i64>,
-    previous_step: &mut Option<i64>,
-) -> AnalysisResult<()> {
+fn validate_steps(steps: impl Iterator<Item = i64>, previous_step: &mut Option<i64>) {
     for step in steps {
-        if previous_step.is_some_and(|previous| step <= previous) {
-            return Err(invalid_tensor(
-                path,
-                "step",
-                "steps must be globally strictly increasing",
-            ));
-        }
+        assert!(
+            previous_step.is_none_or(|previous| step > previous),
+            "bad steps"
+        );
         *previous_step = Some(step);
-    }
-    Ok(())
-}
-
-fn invalid_tensor(path: &std::path::Path, name: &str, message: &str) -> AnalysisError {
-    AnalysisError::InvalidTensor {
-        path: path.to_path_buf(),
-        name: name.to_owned(),
-        message: message.to_owned(),
     }
 }

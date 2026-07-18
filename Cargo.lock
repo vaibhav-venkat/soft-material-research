@@ -1354,6 +1354,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "memmap2",
+ "ndarray 0.17.2",
  "num-complex",
  "rayon",
  "safetensors 0.8.0",
@@ -1362,7 +1363,6 @@ dependencies = [
  "tenferro-cpu",
  "tenferro-linalg",
  "tenferro-runtime",
- "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -1372,10 +1372,10 @@ dependencies = [
  "clap",
  "crystalline-cylinder-analysis",
  "kuva",
+ "rayon",
  "safetensors 0.8.0",
  "serde",
  "serde_json",
- "thiserror 2.0.18",
 ]
 
 [[package]]

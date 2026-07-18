@@ -1,7 +1,6 @@
 //! Lagged axial-velocity Pearson correlation.
 
 use crate::backend::AnalysisBackend;
-use crate::error::AnalysisResult;
 use crate::model::{ComSeries, CorrelationSeries};
 
 /// Controls the number of valid lag origins.
@@ -12,7 +11,7 @@ pub struct CorrelationConfig {
 }
 
 /// Compute one pairwise Pearson coefficient using stable accumulation.
-pub fn pearson(_left: &[f64], _right: &[f64]) -> AnalysisResult<f64> {
+pub fn pearson(_left: &[f64], _right: &[f64]) -> f64 {
     todo!("compute centered covariance and variances with compensated sums")
 }
 
@@ -21,6 +20,6 @@ pub fn analyze_correlation<B: AnalysisBackend>(
     _backend: &B,
     _com: &ComSeries,
     _config: CorrelationConfig,
-) -> AnalysisResult<CorrelationSeries> {
+) -> CorrelationSeries {
     todo!("validate uniform samples and dispatch all requested lags")
 }

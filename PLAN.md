@@ -14,7 +14,7 @@ V1 is CPU-only on macOS and Linux, parallelized with Rayon and using Tenferro’
 ## Workspace and Public Interfaces
 
 - Raise the workspace `rust-version` from 1.83 to 1.87 for Kuva 0.4 compatibility and update `Cargo.lock`.
-- Add shared dependencies for safetensors 0.8, memmap2, bytemuck, Tenferro runtime/CPU/linalg 0.2, Kuva 0.4 with embedded-font SVG support, Clap 4, Serde/JSON, `num-complex`, Rayon, and error handling.
+- Add shared dependencies for safetensors 0.8, memmap2, bytemuck, Tenferro runtime/CPU/linalg 0.2, Kuva 0.4 with embedded-font SVG support, Clap 4, Serde/JSON, `num-complex`, and Rayon. Use assertion-driven fail-fast validation instead of custom error enums.
 - Do not add `integrate`: its Simpson API evaluates a function at new points, whereas this workflow integrates sampled correlation values. Implement sampled Simpson quadrature directly.
 - Expose typed result structures including `CaseMetadata`, `ComSeries`, `CorrelationSeries`, `LaplaceGrid`, `PreferredEstimate`, and `DampedCosineFit`.
 - Use focused enums for manifest schema, analysis kind, preferred axis, and output artifact type. Provide an `AnalysisBackend` trait with a `CpuAnalysisBackend`; keep I/O and plotting outside the backend abstraction.
@@ -51,7 +51,7 @@ Global options include repeatable `--input-dir`, optional `--output-dir`, `--tim
 - Maintain only previous wrapped coordinates and current unwrapped coordinates, both \(O(N_\text{particles})\). Apply the per-particle minimum-image update
   \(dx \leftarrow dx-L_x\operatorname{round}(dx/L_x)\), then average in `f64`.
 - Compute elapsed time from steps and `--timestep`. Reproduce NumPy-style first/second-order endpoint gradients and centered interior gradients, including nonuniform COM sampling; require uniform sampling before correlation.
-- Implement Pearson correlation manually for every lag using centered paired windows, compensated `f64` accumulation, explicit zero-variance errors, lag-zero normalization to one, and clipping to \([-1,1]\).
+- Implement Pearson correlation manually for every lag using centered paired windows, compensated `f64` accumulation, explicit zero-variance assertions, lag-zero normalization to one, and clipping to \([-1,1]\).
 - Parallelize independent cases, lags, and transform grid rows with Rayon while keeping only one shard per active replicate mapped.
 - For duplicate cases, require a compatible common elapsed/lag prefix, compute each replicate’s COM velocity and Pearson series independently, then average those series pointwise. Store sample-standard-deviation bands and summed time-origin counts. The averaged Pearson series is the primary input to all downstream transforms and fitting.
 
