@@ -1,5 +1,6 @@
 //! Rayon and Tenferro CPU backend declaration.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -23,6 +24,11 @@ struct LeastSquaresGraph {
     matrix: TracedTensor,
     right_hand_side: TracedTensor,
     program: GraphProgram,
+}
+
+thread_local! {
+    static LEAST_SQUARES_EXECUTOR: RefCell<GraphExecutor<CpuBackend>> =
+        RefCell::new(new_least_squares_executor());
 }
 
 /// CPU backend backed by Rayon and Tenferro's faer provider.
@@ -194,20 +200,19 @@ impl AnalysisBackend for CpuAnalysisBackend {
         let right_hand_side = Tensor::from_vec_col_major(vec![rows, 1], rhs.to_vec())
             .expect("create least-squares right-hand side");
         let graph = self.least_squares_graph(rows, columns, rank_tolerance);
-        let mut executor = GraphExecutor::new(CpuBackend::new());
-        executor
-            .register_extension(tenferro_linalg::register_runtime)
-            .expect("register Tenferro linear algebra");
         let output = self.install(|| {
-            executor
-                .run_with_inputs(
-                    &graph.program,
-                    &[
-                        (&graph.matrix, &matrix),
-                        (&graph.right_hand_side, &right_hand_side),
-                    ],
-                )
-                .expect("solve least-squares system")
+            LEAST_SQUARES_EXECUTOR.with(|executor| {
+                executor
+                    .borrow_mut()
+                    .run_with_inputs(
+                        &graph.program,
+                        &[
+                            (&graph.matrix, &matrix),
+                            (&graph.right_hand_side, &right_hand_side),
+                        ],
+                    )
+                    .expect("solve least-squares system")
+            })
         });
         let (_, values) = output
             .into_vec_col_major::<f64>()
@@ -219,6 +224,14 @@ impl AnalysisBackend for CpuAnalysisBackend {
         );
         values
     }
+}
+
+fn new_least_squares_executor() -> GraphExecutor<CpuBackend> {
+    let mut executor = GraphExecutor::new(CpuBackend::new());
+    executor
+        .register_extension(tenferro_linalg::register_runtime)
+        .expect("register Tenferro linear algebra");
+    executor
 }
 
 impl CpuAnalysisBackend {

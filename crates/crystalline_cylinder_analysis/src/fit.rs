@@ -178,8 +178,7 @@ fn optimize_start<B: AnalysisBackend>(
         let prediction = damped_cosine(time, &parameters);
         let jacobian = damped_cosine_jacobian(time, &parameters);
         let rows = time.len();
-        let mut system = vec![0.0; (rows + PARAMETER_COUNT) * PARAMETER_COUNT];
-        let mut rhs = vec![0.0; rows + PARAMETER_COUNT];
+        let mut normal_matrix = [0.0; PARAMETER_COUNT * PARAMETER_COUNT];
         let mut gradient = [0.0; PARAMETER_COUNT];
         let mut column_norm_squared = [0.0; PARAMETER_COUNT];
         for row in 0..rows {
@@ -187,12 +186,18 @@ fn optimize_start<B: AnalysisBackend>(
             let robust_weight =
                 (1.0 + (weighted_residual / config.soft_l1_scale).powi(2)).powf(-0.25);
             let residual = robust_weight * weighted_residual;
-            rhs[row] = -residual;
+            let mut jacobian_row = [0.0; PARAMETER_COUNT];
             for column in 0..PARAMETER_COUNT {
                 let value = robust_weight * weights[row] * jacobian[row * PARAMETER_COUNT + column];
-                system[row * PARAMETER_COUNT + column] = value;
+                jacobian_row[column] = value;
                 column_norm_squared[column] += value * value;
                 gradient[column] += value * residual;
+            }
+            for left in 0..PARAMETER_COUNT {
+                for right in 0..PARAMETER_COUNT {
+                    normal_matrix[left * PARAMETER_COUNT + right] +=
+                        jacobian_row[left] * jacobian_row[right];
+                }
             }
         }
         let gradient_maximum = projected_gradient_maximum(&parameters, &gradient, &lower, &upper);
@@ -201,12 +206,13 @@ fn optimize_start<B: AnalysisBackend>(
             break;
         }
         for column in 0..PARAMETER_COUNT {
-            let scale = column_norm_squared[column].sqrt().max(1.0e-12);
-            system[(rows + column) * PARAMETER_COUNT + column] = damping.sqrt() * scale;
+            normal_matrix[column * PARAMETER_COUNT + column] +=
+                damping * column_norm_squared[column].max(1.0e-24);
         }
+        let rhs = gradient.map(|value| -value);
         let step = backend.linear_least_squares(
-            &system,
-            rows + PARAMETER_COUNT,
+            &normal_matrix,
+            PARAMETER_COUNT,
             PARAMETER_COUNT,
             &rhs,
             config.rank_tolerance,
