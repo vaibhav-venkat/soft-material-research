@@ -1,14 +1,16 @@
 //! Translation from CLI declarations to the reusable analysis pipeline.
 
 use crate::cli::{
-    AnalysisCommand, BigLxCircumference, Cli, CorrelationArgs, LaplaceArgs, PreferredArgs,
+    AnalysisCommand, BigLxCircumference, Cli, CorrelationArgs, FitArgs, LaplaceArgs, PreferredArgs,
     PreferredChoice,
 };
 use crate::plots::{
-    write_com_plot, write_correlation_plot, write_laplace_plots, write_preferred_plot,
+    write_com_plot, write_correlation_plot, write_fit_plot, write_laplace_plots,
+    write_preferred_plot,
 };
 use crystalline_cylinder_analysis::center_of_mass::{analyze_replica_com, ComConfig};
 use crystalline_cylinder_analysis::correlation::{analyze_correlation, CorrelationConfig};
+use crystalline_cylinder_analysis::fit::{fit_damped_cosine, FitConfig};
 use crystalline_cylinder_analysis::input::{
     discover_datasets, group_replicates, inspect_dataset, DatasetShape,
 };
@@ -40,8 +42,96 @@ pub fn run(cli: Cli) {
         AnalysisCommand::Correlation(args) => run_correlation(&backend, &common, args),
         AnalysisCommand::Laplace(args) => run_laplace(&backend, &common, args),
         AnalysisCommand::Preferred(args) => run_preferred(&backend, &common, args),
+        AnalysisCommand::Fit(args) => run_fit(&backend, &common, args),
         command => panic!("{} not implemented", command_name(&command)),
     }
+}
+
+fn run_fit(backend: &CpuAnalysisBackend, common: &crate::cli::CommonArgs, args: FitArgs) {
+    let mut analyses = correlation_analyses(backend, common, args.correlation);
+    let correlations = analyses
+        .iter()
+        .map(|analysis| {
+            analysis
+                .correlation
+                .as_ref()
+                .expect("analysis has no correlation")
+                .clone()
+        })
+        .collect::<Vec<_>>();
+    let (_, omega) = transform_axes(
+        &correlations,
+        LaplaceConfig {
+            r_min: None,
+            r_max: 0.0,
+            r_points: 2,
+            omega_min: Some(0.0),
+            omega_max: args.omega_max,
+            omega_points: args.omega_points,
+        },
+    );
+    let positive_omega = omega
+        .into_iter()
+        .filter(|value| *value > 0.0)
+        .collect::<Vec<_>>();
+    assert!(
+        positive_omega.len() >= 2,
+        "fit omega grid needs two positive points"
+    );
+    let config = FitConfig {
+        soft_l1_scale: args.soft_l1_scale,
+        tolerance: args.tolerance,
+        maximum_evaluations: args.maximum_evaluations,
+        rank_tolerance: args.rank_tolerance,
+    };
+    backend.install(|| {
+        analyses.par_iter_mut().for_each(|analysis| {
+            let correlation = analysis
+                .correlation
+                .as_ref()
+                .expect("analysis has no correlation");
+            analysis.fit = Some(fit_damped_cosine(
+                backend,
+                correlation,
+                &positive_omega,
+                config,
+            ));
+        });
+    });
+
+    for analysis in &analyses {
+        let fit = analysis.fit.as_ref().expect("analysis has no fit");
+        let relaxation_time = if fit.rate == 0.0 {
+            f64::INFINITY
+        } else {
+            1.0 / fit.rate
+        };
+        eprintln!(
+            "[damped_cosine_fit.case] case={} replicates={} selected=A,r,omega,phi A={:.8e} r={:.8e} omega={:.8e} phi={:.8e} B={:.8e} tau_r={:.8e} r_squared={:.8e} evaluations={} converged={} rate_lower_boundary={} rate_upper_boundary={} amplitude_upper_boundary={}",
+            analysis.group.case.case_id,
+            analysis.group.datasets.len(),
+            fit.amplitude,
+            fit.rate,
+            fit.omega,
+            fit.phase,
+            fit.offset,
+            relaxation_time,
+            fit.r_squared,
+            fit.evaluations,
+            fit.converged,
+            fit.rate_at_lower_boundary,
+            fit.rate_at_upper_boundary,
+            fit.amplitude_at_upper_boundary,
+        );
+    }
+    let output = output_path(common, "fit", "damped_cosine_fit.svg");
+    assert_output_available(&output, common.overwrite);
+    let written = write_fit_plot(&analyses, &output);
+    eprintln!(
+        "[crystalline-cylinder-analysis] command=fit cases={} output={}",
+        analyses.len(),
+        written.display()
+    );
 }
 
 fn run_com(

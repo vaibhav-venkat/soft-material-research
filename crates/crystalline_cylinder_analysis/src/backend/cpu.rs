@@ -5,7 +5,9 @@ use crate::correlation::pearson;
 use crate::integration::simpson_weights;
 use crate::model::{CorrelationSeries, LaplaceGrid};
 use rayon::prelude::*;
-use tenferro_cpu::CpuContext;
+use tenferro_cpu::{CpuBackend, CpuContext};
+use tenferro_linalg::TracedTensorLinalgExt;
+use tenferro_runtime::{GraphCompiler, GraphExecutor, TracedTensor};
 
 /// CPU backend backed by Rayon and Tenferro's faer provider.
 #[derive(Clone, Debug)]
@@ -125,13 +127,68 @@ impl AnalysisBackend for CpuAnalysisBackend {
 
     fn linear_least_squares(
         &self,
-        _matrix_row_major: &[f64],
-        _rows: usize,
-        _columns: usize,
-        _rhs: &[f64],
-        _rank_tolerance: f64,
+        matrix_row_major: &[f64],
+        rows: usize,
+        columns: usize,
+        rhs: &[f64],
+        rank_tolerance: f64,
     ) -> Vec<f64> {
-        todo!("solve through tenferro-linalg SVD or pseudoinverse")
+        assert!(rows >= columns, "least-squares matrix is too short");
+        assert!(columns > 0, "least-squares matrix has no columns");
+        assert_eq!(
+            matrix_row_major.len(),
+            rows * columns,
+            "matrix shape differs"
+        );
+        assert_eq!(rhs.len(), rows, "right-hand side shape differs");
+        assert!(
+            matrix_row_major.iter().all(|value| value.is_finite()),
+            "least-squares matrix is non-finite"
+        );
+        assert!(
+            rhs.iter().all(|value| value.is_finite()),
+            "least-squares right-hand side is non-finite"
+        );
+        assert!(
+            rank_tolerance.is_finite() && rank_tolerance >= 0.0,
+            "rank tolerance is invalid"
+        );
+
+        // Tenferro/faer is column-major. Compact only this small optimizer
+        // matrix; trajectory and correlation storage remains in its native order.
+        let mut matrix_column_major = vec![0.0; matrix_row_major.len()];
+        for row in 0..rows {
+            for column in 0..columns {
+                matrix_column_major[column * rows + row] = matrix_row_major[row * columns + column];
+            }
+        }
+        let matrix = TracedTensor::from_vec_col_major(vec![rows, columns], matrix_column_major)
+            .expect("create least-squares matrix");
+        let right_hand_side = TracedTensor::from_vec_col_major(vec![rows, 1], rhs.to_vec())
+            .expect("create least-squares right-hand side");
+        let solution = matrix
+            .pinv_with_rtol(rank_tolerance)
+            .expect("build least-squares pseudoinverse")
+            .matmul(&right_hand_side)
+            .expect("build least-squares product");
+        let mut compiler = GraphCompiler::new();
+        let program = compiler
+            .compile(&solution)
+            .expect("compile least-squares graph");
+        let mut executor = GraphExecutor::new(CpuBackend::new());
+        executor
+            .register_extension(tenferro_linalg::register_runtime)
+            .expect("register Tenferro linear algebra");
+        let output = self.install(|| executor.run(&program).expect("solve least-squares system"));
+        let (_, values) = output
+            .into_vec_col_major::<f64>()
+            .expect("read least-squares solution");
+        assert_eq!(values.len(), columns, "solution shape differs");
+        assert!(
+            values.iter().all(|value| value.is_finite()),
+            "least-squares solution is non-finite"
+        );
+        values
     }
 }
 
