@@ -119,8 +119,16 @@ pub struct PreferredArgs {
     pub correlation: CorrelationArgs,
     #[arg(long, value_enum, default_value_t = PreferredChoice::Both)]
     pub axis: PreferredChoice,
-    #[command(flatten)]
-    pub transform: TransformArgs,
+    #[arg(long)]
+    pub r_min: Option<f64>,
+    #[arg(long, default_value_t = 0.0)]
+    pub r_max: f64,
+    #[arg(long, default_value_t = 241)]
+    pub r_points: usize,
+    #[arg(long)]
+    pub omega_max: Option<f64>,
+    #[arg(long, default_value_t = 241)]
+    pub omega_points: usize,
 }
 
 /// Preferred-coordinate selection

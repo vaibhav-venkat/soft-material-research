@@ -1,6 +1,6 @@
 //! Pointwise aggregation of compatible seed replicas.
 
-use crate::model::{ComSeries, CorrelationSeries};
+use crate::model::{ComSeries, CorrelationSeries, PreferredEstimate};
 
 /// Average compatible COM series on their common elapsed-time prefix.
 pub fn average_com_series(replicas: &[ComSeries]) -> ComSeries {
@@ -115,6 +115,49 @@ pub fn average_correlations(replicas: &[CorrelationSeries]) -> CorrelationSeries
         pearson_std,
         origin_counts,
         replicate_count: replicas.iter().map(|series| series.replicate_count).sum(),
+    }
+}
+
+/// Average compatible seed preferred-coordinate estimates with sample deviation.
+pub fn average_preferred_estimates(replicas: &[PreferredEstimate]) -> PreferredEstimate {
+    assert!(!replicas.is_empty(), "no preferred estimates");
+    let axis = replicas[0].axis;
+    assert!(
+        replicas.iter().all(|estimate| estimate.axis == axis),
+        "preferred axes differ"
+    );
+    let count = replicas.len() as f64;
+    let coordinate = replicas
+        .iter()
+        .map(|estimate| estimate.coordinate)
+        .sum::<f64>()
+        / count;
+    let log10_magnitude = replicas
+        .iter()
+        .map(|estimate| estimate.log10_magnitude)
+        .sum::<f64>()
+        / count;
+    let coordinate_std = if replicas.len() > 1 {
+        (replicas
+            .iter()
+            .map(|estimate| (estimate.coordinate - coordinate).powi(2))
+            .sum::<f64>()
+            / (replicas.len() - 1) as f64)
+            .sqrt()
+    } else {
+        0.0
+    };
+    PreferredEstimate {
+        axis,
+        coordinate,
+        coordinate_std,
+        log10_magnitude,
+        at_lower_boundary: replicas.iter().any(|estimate| estimate.at_lower_boundary),
+        at_upper_boundary: replicas.iter().any(|estimate| estimate.at_upper_boundary),
+        replicate_count: replicas
+            .iter()
+            .map(|estimate| estimate.replicate_count)
+            .sum(),
     }
 }
 

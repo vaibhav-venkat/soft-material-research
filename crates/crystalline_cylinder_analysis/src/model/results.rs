@@ -24,9 +24,11 @@ pub enum PreferredAxis {
 pub struct PreferredEstimate {
     pub axis: PreferredAxis,
     pub coordinate: f64,
+    pub coordinate_std: f64,
     pub log10_magnitude: f64,
     pub at_lower_boundary: bool,
     pub at_upper_boundary: bool,
+    pub replicate_count: usize,
 }
 
 /// Parameters and diagnostics for the constrained damped-cosine model.

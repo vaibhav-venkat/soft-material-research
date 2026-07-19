@@ -1,7 +1,9 @@
 //! Complex Laplace transform and preferred-coordinate searches.
 
 use crate::backend::AnalysisBackend;
+use crate::integration::simpson_weights;
 use crate::model::{CorrelationSeries, LaplaceGrid, PreferredAxis, PreferredEstimate};
+use rayon::prelude::*;
 
 /// Transform-grid controls.
 #[derive(Clone, Copy, Debug)]
@@ -83,11 +85,83 @@ pub fn analyze_laplace<B: AnalysisBackend>(
 
 /// Locate the maximum log magnitude on the selected transform axis.
 pub fn preferred_coordinate(
-    _correlation: &CorrelationSeries,
-    _axis: PreferredAxis,
-    _coordinates: &[f64],
+    correlation: &CorrelationSeries,
+    axis: PreferredAxis,
+    coordinates: &[f64],
 ) -> PreferredEstimate {
-    todo!("evaluate the r=0 or omega=0 transform and diagnose boundary maxima")
+    validate_correlation(correlation);
+    assert!(coordinates.len() >= 2, "preferred grid needs two points");
+    assert!(
+        coordinates.windows(2).all(|pair| pair[1] > pair[0]),
+        "preferred grid is not increasing"
+    );
+    match axis {
+        PreferredAxis::Omega => assert!(
+            coordinates
+                .iter()
+                .all(|value| value.is_finite() && *value > 0.0),
+            "preferred omega grid must be positive"
+        ),
+        PreferredAxis::R => assert!(
+            coordinates
+                .iter()
+                .all(|value| value.is_finite() && *value < 0.0),
+            "preferred r grid must be negative"
+        ),
+    }
+
+    let spacing = correlation.lag_times[1] - correlation.lag_times[0];
+    let weights = simpson_weights(correlation.lag_times.len(), spacing);
+    let scores = coordinates
+        .par_iter()
+        .map(|&coordinate| {
+            let (r, omega) = match axis {
+                PreferredAxis::Omega => (0.0, coordinate),
+                PreferredAxis::R => (coordinate, 0.0),
+            };
+            let mut real = 0.0;
+            let mut real_compensation = 0.0;
+            let mut imaginary = 0.0;
+            let mut imaginary_compensation = 0.0;
+            for ((&time, &correlation_value), &weight) in correlation
+                .lag_times
+                .iter()
+                .zip(&correlation.pearson_mean)
+                .zip(&weights)
+            {
+                let envelope = (r * time).exp();
+                let (sine, cosine) = (omega * time).sin_cos();
+                compensated_add(
+                    weight * correlation_value * envelope * cosine,
+                    &mut real,
+                    &mut real_compensation,
+                );
+                compensated_add(
+                    weight * correlation_value * envelope * sine,
+                    &mut imaginary,
+                    &mut imaginary_compensation,
+                );
+            }
+            let magnitude = real.hypot(imaginary);
+            assert!(magnitude.is_finite(), "preferred magnitude is non-finite");
+            magnitude.max(f64::MIN_POSITIVE).log10()
+        })
+        .collect::<Vec<_>>();
+    let peak_index = scores
+        .iter()
+        .enumerate()
+        .max_by(|left, right| left.1.total_cmp(right.1))
+        .map(|(index, _)| index)
+        .expect("preferred grid is empty");
+    PreferredEstimate {
+        axis,
+        coordinate: coordinates[peak_index],
+        coordinate_std: 0.0,
+        log10_magnitude: scores[peak_index],
+        at_lower_boundary: axis == PreferredAxis::R && peak_index == 0,
+        at_upper_boundary: peak_index + 1 == coordinates.len(),
+        replicate_count: 1,
+    }
 }
 
 fn validate_correlation(correlation: &CorrelationSeries) {
@@ -129,4 +203,11 @@ fn linspace(minimum: f64, maximum: f64, count: usize) -> Vec<f64> {
     (0..count)
         .map(|index| minimum + (maximum - minimum) * index as f64 / denominator)
         .collect()
+}
+
+fn compensated_add(value: f64, sum: &mut f64, compensation: &mut f64) {
+    let corrected = value - *compensation;
+    let updated = *sum + corrected;
+    *compensation = (updated - *sum) - corrected;
+    *sum = updated;
 }
