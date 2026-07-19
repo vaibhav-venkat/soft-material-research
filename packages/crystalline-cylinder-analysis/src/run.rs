@@ -24,8 +24,10 @@ use crystalline_cylinder_analysis::replicates::{
 use crystalline_cylinder_analysis::{
     CaseSchema, ComSeries, CorrelationSeries, CpuAnalysisBackend, PreferredAxis, ReplicateGroup,
 };
+use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use std::path::PathBuf;
+use std::time::Duration;
 
 /// Validate a command, run the requested stages, and write their artifacts.
 pub fn run(cli: Cli) {
@@ -83,6 +85,7 @@ fn run_fit(backend: &CpuAnalysisBackend, common: &crate::cli::CommonArgs, args: 
         maximum_evaluations: args.maximum_evaluations,
         rank_tolerance: args.rank_tolerance,
     };
+    let progress = fit_progress_bar(analyses.len());
     backend.install(|| {
         analyses.par_iter_mut().for_each(|analysis| {
             let correlation = analysis
@@ -95,8 +98,11 @@ fn run_fit(backend: &CpuAnalysisBackend, common: &crate::cli::CommonArgs, args: 
                 &positive_omega,
                 config,
             ));
+            progress.set_message(format!("completed {}", analysis.group.case.case_id));
+            progress.inc(1);
         });
     });
+    progress.finish_with_message("all fits complete");
 
     for analysis in &analyses {
         let fit = analysis.fit.as_ref().expect("analysis has no fit");
@@ -131,6 +137,20 @@ fn run_fit(backend: &CpuAnalysisBackend, common: &crate::cli::CommonArgs, args: 
         analyses.len(),
         written.display()
     );
+}
+
+fn fit_progress_bar(case_count: usize) -> ProgressBar {
+    let progress =
+        ProgressBar::new(u64::try_from(case_count).expect("fit case count is too large"));
+    progress.set_style(
+        ProgressStyle::with_template(
+            "{spinner:.green} fitting [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} cases ETA {eta_precise} {msg}",
+        )
+        .expect("fit progress style")
+        .progress_chars("=>-"),
+    );
+    progress.enable_steady_tick(Duration::from_millis(120));
+    progress
 }
 
 fn run_com(
