@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crystalline_cylinder_analysis::pipeline::CaseAnalysis;
 use kuva::backend::svg::SvgBackend;
-use kuva::plot::LinePlot;
+use kuva::plot::{LegendPosition, LinePlot};
 use kuva::render::figure::Figure;
 use kuva::render::layout::Layout;
 use kuva::render::plots::Plot;
@@ -21,8 +21,8 @@ pub fn write_fit_plot(analyses: &[CaseAnalysis], output: &Path) -> PathBuf {
     );
     let columns = 2.min(analyses.len());
     let rows = analyses.len().div_ceil(columns);
-    let mut panels = Vec::with_capacity(rows * columns);
-    let mut layouts = Vec::with_capacity(rows * columns);
+    let mut panels = Vec::with_capacity(analyses.len());
+    let mut layouts = Vec::with_capacity(analyses.len());
     let maximum_time = analyses
         .iter()
         .filter_map(|analysis| analysis.correlation.as_ref())
@@ -57,7 +57,7 @@ pub fn write_fit_plot(analyses: &[CaseAnalysis], output: &Path) -> PathBuf {
             )
             .with_color("#4477AA")
             .with_stroke_width(1.7)
-            .with_legend("measured mean(C_v)");
+            .with_legend("data: mean(C_v)");
         let fitted = LinePlot::new()
             .with_data(
                 correlation
@@ -70,7 +70,7 @@ pub fn write_fit_plot(analyses: &[CaseAnalysis], output: &Path) -> PathBuf {
             .with_stroke_width(2.1)
             .with_dashed()
             .with_legend(format!(
-                "selected [A,r,omega,phi]: A={:.3e}, r={:.3e}, omega={:.3e}, phi={:.3e}; B={:.3e}, R2={:.4}",
+                "fit [A,r,omega,phi]: A={:.2e}, r={:.2e}, omega={:.2e}, phi={:.2e}; B={:.2e}, R2={:.3}",
                 fit.amplitude, fit.rate, fit.omega, fit.phase, fit.offset, fit.r_squared
             ));
         let zero = LinePlot::new()
@@ -84,26 +84,20 @@ pub fn write_fit_plot(analyses: &[CaseAnalysis], output: &Path) -> PathBuf {
                 .with_x_axis_max(maximum_time)
                 .with_title(label)
                 .with_x_label("lag time")
-                .with_y_label("Pearson coefficient"),
+                .with_y_label("Pearson coefficient")
+                .with_legend_position(LegendPosition::OutsideBottomCenter)
+                .with_legend_wrap(48)
+                .with_legend_box(false),
         );
         panels.push(plots);
     }
-    while panels.len() < rows * columns {
-        let empty = vec![Plot::Line(
-            LinePlot::new().with_data([(0.0, 0.0), (maximum_time, 0.0)]),
-        )];
-        layouts.push(
-            Layout::new((0.0, maximum_time), (-1.0, 1.0))
-                .with_x_axis_min(0.0)
-                .with_x_axis_max(maximum_time),
-        );
-        panels.push(empty);
-    }
+    let structure = panel_structure(analyses.len(), rows, columns);
     let scene = Figure::new(rows, columns)
+        .with_structure(structure)
         .with_plots(panels)
         .with_layouts(layouts)
         .with_title("Robust constrained damped-cosine fits")
-        .with_figure_size(columns as f64 * 850.0, rows as f64 * 520.0 + 80.0)
+        .with_figure_size(columns as f64 * 780.0, rows as f64 * 590.0 + 70.0)
         .render();
     let svg = SvgBackend::new()
         .with_pretty(true)
@@ -111,6 +105,15 @@ pub fn write_fit_plot(analyses: &[CaseAnalysis], output: &Path) -> PathBuf {
         .render_scene(&scene);
     write_atomic(output, svg.as_bytes());
     output.to_path_buf()
+}
+
+/// Give an unpaired final panel the full bottom row instead of drawing an empty axis.
+fn panel_structure(count: usize, rows: usize, columns: usize) -> Vec<Vec<usize>> {
+    let mut structure = (0..count).map(|cell| vec![cell]).collect::<Vec<_>>();
+    if columns == 2 && count % 2 == 1 {
+        structure[count - 1] = vec![rows * columns - 2, rows * columns - 1];
+    }
+    structure
 }
 
 fn write_atomic(output: &Path, contents: &[u8]) {
