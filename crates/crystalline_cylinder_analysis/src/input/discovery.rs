@@ -65,7 +65,27 @@ pub fn group_replicates(mut datasets: Vec<DiscoveredDataset>) -> Vec<ReplicateGr
             });
         }
     }
+    groups.sort_by(|left, right| {
+        schema_order(left.schema)
+            .cmp(&schema_order(right.schema))
+            .then_with(|| compare_circumference(&left.case, &right.case))
+            .then_with(|| left.case.geometry_kind.cmp(&right.case.geometry_kind))
+            .then_with(|| left.case.lx_multiplier.cmp(&right.case.lx_multiplier))
+            .then_with(|| left.case.case_id.cmp(&right.case.case_id))
+    });
     groups
+}
+
+fn compare_circumference(
+    left: &crate::model::CaseMetadata,
+    right: &crate::model::CaseMetadata,
+) -> std::cmp::Ordering {
+    match (left.circumference_diameters, right.circumference_diameters) {
+        (Some(left), Some(right)) => left.total_cmp(&right),
+        (None, Some(_)) => std::cmp::Ordering::Less,
+        (Some(_), None) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    }
 }
 
 fn schema_order(schema: CaseSchema) -> u8 {
