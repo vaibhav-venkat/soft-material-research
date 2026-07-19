@@ -43,14 +43,15 @@ pub fn transform_axes(
     );
     assert!(r_min < r_max, "r minimum must be below maximum");
 
-    let omega_min = config.omega_min.unwrap_or(0.0);
     let default_omega_max = nyquist.min(20.0 * std::f64::consts::PI / duration);
     let omega_max = config.omega_max.unwrap_or(default_omega_max);
+    let omega_min = config.omega_min.unwrap_or(-default_omega_max);
     assert!(
         omega_min.is_finite() && omega_max.is_finite(),
         "omega bounds are non-finite"
     );
     assert!(omega_min < omega_max, "omega minimum must be below maximum");
+    assert!(omega_min >= -nyquist, "omega minimum exceeds Nyquist");
     assert!(omega_max <= nyquist, "omega maximum exceeds Nyquist");
 
     (

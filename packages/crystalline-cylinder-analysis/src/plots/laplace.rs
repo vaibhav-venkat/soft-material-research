@@ -3,6 +3,7 @@
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crystalline_cylinder_analysis::pipeline::CaseAnalysis;
 use crystalline_cylinder_analysis::CaseSchema;
@@ -62,6 +63,50 @@ fn write_schema_panel(
         !output.exists() || overwrite,
         "output exists; use --overwrite"
     );
+    for analysis in analyses {
+        validate_grid(
+            analysis
+                .laplace
+                .as_ref()
+                .expect("analysis has no Laplace grid"),
+        );
+    }
+    let global_maximum = analyses
+        .iter()
+        .flat_map(|analysis| {
+            analysis
+                .laplace
+                .as_ref()
+                .expect("analysis has no Laplace grid")
+                .values
+                .iter()
+        })
+        .map(|value| value.norm())
+        .fold(f64::NEG_INFINITY, f64::max);
+    assert!(
+        global_maximum.is_finite() && global_maximum > 0.0,
+        "Laplace magnitude is not positive"
+    );
+    let magnitude_floor = global_maximum * 1.0e-12;
+    let (global_color_minimum, global_color_maximum) = analyses
+        .iter()
+        .flat_map(|analysis| {
+            analysis
+                .laplace
+                .as_ref()
+                .expect("analysis has no Laplace grid")
+                .values
+                .iter()
+        })
+        .map(|value| value.norm().max(magnitude_floor).log10())
+        .fold(
+            (f64::INFINITY, f64::NEG_INFINITY),
+            |(minimum, maximum), value| (minimum.min(value), maximum.max(value)),
+        );
+    assert!(
+        global_color_minimum.is_finite() && global_color_maximum > global_color_minimum,
+        "Laplace color range is invalid"
+    );
     let mut plots = Vec::with_capacity(analyses.len());
     let mut layouts = Vec::with_capacity(analyses.len());
     for analysis in analyses {
@@ -69,7 +114,6 @@ fn write_schema_panel(
             .laplace
             .as_ref()
             .expect("analysis has no Laplace grid");
-        validate_grid(grid);
         let r_min = grid.r[0];
         let r_max = *grid.r.last().expect("r grid is empty");
         let omega_min = grid.omega[0];
@@ -79,14 +123,24 @@ fn write_schema_panel(
             .chunks_exact(grid.r.len())
             .map(|row| {
                 row.iter()
-                    .map(|value| value.norm().max(f64::MIN_POSITIVE).log10())
+                    .map(|value| value.norm().max(magnitude_floor).log10())
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
+        let (local_minimum, local_maximum) = data.iter().flatten().fold(
+            (f64::INFINITY, f64::NEG_INFINITY),
+            |(minimum, maximum), &value| (minimum.min(value), maximum.max(value)),
+        );
+        let local_span = local_maximum - local_minimum;
+        let global_span = global_color_maximum - global_color_minimum;
+        let color_map = ColorMap::Custom(Arc::new(move |normalized| {
+            let value = local_minimum + normalized * local_span;
+            let globally_normalized = (value - global_color_minimum) / global_span;
+            ColorMap::Magma.map(globally_normalized.clamp(0.0, 1.0))
+        }));
         let heatmap = Heatmap::new()
             .with_data(data)
-            .with_color_map(ColorMap::Viridis)
-            .with_legend("log10 |C_hat_v|")
+            .with_color_map(color_map)
             .with_x_range(r_min, r_max)
             .with_y_range(omega_min, omega_max)
             .with_cell_size(1.0);
