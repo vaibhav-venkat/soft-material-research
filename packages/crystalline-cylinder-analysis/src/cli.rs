@@ -45,7 +45,6 @@ pub enum AnalysisCommand {
     Laplace(LaplaceArgs),
     Preferred(PreferredArgs),
     Fit(FitArgs),
-    All(AllArgs),
 }
 
 /// Axial center-of-mass controls.
@@ -154,22 +153,6 @@ pub struct FitArgs {
     pub tolerance: f64,
     #[arg(long, default_value_t = 20_000)]
     pub maximum_evaluations: usize,
-    #[arg(long, default_value_t = 1.0e-12)]
-    pub rank_tolerance: f64,
-}
-
-#[derive(Clone, Copy, Debug, Args)]
-pub struct AllArgs {
-    #[command(flatten)]
-    pub correlation: CorrelationArgs,
-    #[command(flatten)]
-    pub transform: TransformArgs,
-    #[arg(long, default_value_t = 0.05)]
-    pub soft_l1_scale: f64,
-    #[arg(long, default_value_t = 1.0e-8)]
-    pub fit_tolerance: f64,
-    #[arg(long, default_value_t = 20_000)]
-    pub maximum_fit_evaluations: usize,
     #[arg(long, default_value_t = 1.0e-12)]
     pub rank_tolerance: f64,
 }

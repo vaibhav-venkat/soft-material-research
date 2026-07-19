@@ -31,7 +31,6 @@ subcommands:
   laplace
   preferred --axis omega|r|both
   fit
-  all
 ```
 
 Global options include repeatable `--input-dir`, optional `--output-dir`, `--timestep` defaulting to `1e-6`, optional `--threads`, and explicit `--overwrite`. Correlation-derived commands expose `--max-lag`; every selected lag must retain at least two paired samples. Transform commands preserve the Python range/point defaults.
@@ -88,7 +87,6 @@ Global options include repeatable `--input-dir`, optional `--output-dir`, `--tim
   - schema-grouped `log10|Ĉv|` Laplace heatmap panels for Big-Lx and confinement cases;
   - preferred \(r\) and \(\omega\) versus \(L_x\) multiplier, grouped by circumference with confinement cases at multiplier one;
   - measured correlation and damped-cosine fit overlays with fitted parameters and \(R^2\).
-- `all` performs discovery and streaming once, reuses shared COM/correlation intermediates, and emits every artifact. [Kuva plotting pipeline](https://docs.rs/kuva/latest/kuva/)
 
 ## Validation
 

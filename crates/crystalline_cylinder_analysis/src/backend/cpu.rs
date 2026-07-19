@@ -1,5 +1,8 @@
 //! Rayon and Tenferro CPU backend declaration.
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
 use crate::backend::AnalysisBackend;
 use crate::correlation::pearson;
 use crate::integration::simpson_weights;
@@ -7,13 +10,36 @@ use crate::model::{CorrelationSeries, LaplaceGrid};
 use rayon::prelude::*;
 use tenferro_cpu::{CpuBackend, CpuContext};
 use tenferro_linalg::TracedTensorLinalgExt;
-use tenferro_runtime::{GraphCompiler, GraphExecutor, TracedTensor};
+use tenferro_runtime::{DType, GraphCompiler, GraphExecutor, GraphProgram, Tensor, TracedTensor};
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct LeastSquaresKey {
+    rows: usize,
+    columns: usize,
+    rank_tolerance_bits: u64,
+}
+
+struct LeastSquaresGraph {
+    matrix: TracedTensor,
+    right_hand_side: TracedTensor,
+    program: GraphProgram,
+}
 
 /// CPU backend backed by Rayon and Tenferro's faer provider.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct CpuAnalysisBackend {
     pub thread_count: usize,
     context: CpuContext,
+    least_squares_graphs: Arc<Mutex<HashMap<LeastSquaresKey, Arc<LeastSquaresGraph>>>>,
+}
+
+impl std::fmt::Debug for CpuAnalysisBackend {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CpuAnalysisBackend")
+            .field("thread_count", &self.thread_count)
+            .finish_non_exhaustive()
+    }
 }
 
 impl CpuAnalysisBackend {
@@ -29,6 +55,7 @@ impl CpuAnalysisBackend {
         Self {
             thread_count: context.num_threads(),
             context,
+            least_squares_graphs: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -162,24 +189,26 @@ impl AnalysisBackend for CpuAnalysisBackend {
                 matrix_column_major[column * rows + row] = matrix_row_major[row * columns + column];
             }
         }
-        let matrix = TracedTensor::from_vec_col_major(vec![rows, columns], matrix_column_major)
+        let matrix = Tensor::from_vec_col_major(vec![rows, columns], matrix_column_major)
             .expect("create least-squares matrix");
-        let right_hand_side = TracedTensor::from_vec_col_major(vec![rows, 1], rhs.to_vec())
+        let right_hand_side = Tensor::from_vec_col_major(vec![rows, 1], rhs.to_vec())
             .expect("create least-squares right-hand side");
-        let solution = matrix
-            .pinv_with_rtol(rank_tolerance)
-            .expect("build least-squares pseudoinverse")
-            .matmul(&right_hand_side)
-            .expect("build least-squares product");
-        let mut compiler = GraphCompiler::new();
-        let program = compiler
-            .compile(&solution)
-            .expect("compile least-squares graph");
+        let graph = self.least_squares_graph(rows, columns, rank_tolerance);
         let mut executor = GraphExecutor::new(CpuBackend::new());
         executor
             .register_extension(tenferro_linalg::register_runtime)
             .expect("register Tenferro linear algebra");
-        let output = self.install(|| executor.run(&program).expect("solve least-squares system"));
+        let output = self.install(|| {
+            executor
+                .run_with_inputs(
+                    &graph.program,
+                    &[
+                        (&graph.matrix, &matrix),
+                        (&graph.right_hand_side, &right_hand_side),
+                    ],
+                )
+                .expect("solve least-squares system")
+        });
         let (_, values) = output
             .into_vec_col_major::<f64>()
             .expect("read least-squares solution");
@@ -189,6 +218,55 @@ impl AnalysisBackend for CpuAnalysisBackend {
             "least-squares solution is non-finite"
         );
         values
+    }
+}
+
+impl CpuAnalysisBackend {
+    fn least_squares_graph(
+        &self,
+        rows: usize,
+        columns: usize,
+        rank_tolerance: f64,
+    ) -> Arc<LeastSquaresGraph> {
+        let key = LeastSquaresKey {
+            rows,
+            columns,
+            rank_tolerance_bits: rank_tolerance.to_bits(),
+        };
+        let mut graphs = self
+            .least_squares_graphs
+            .lock()
+            .expect("least-squares graph cache poisoned");
+        if let Some(graph) = graphs.get(&key) {
+            return Arc::clone(graph);
+        }
+
+        let matrix = TracedTensor::input_concrete_shape(DType::F64, &[rows, columns])
+            .expect("create least-squares matrix input");
+        let right_hand_side = TracedTensor::input_concrete_shape(DType::F64, &[rows, 1])
+            .expect("create least-squares right-hand side input");
+        let solution = matrix
+            .pinv_with_rtol(rank_tolerance)
+            .expect("build least-squares pseudoinverse")
+            .matmul(&right_hand_side)
+            .expect("build least-squares product");
+        let mut compiler = GraphCompiler::new();
+        let program = compiler
+            .compile_with_input_specs(
+                &solution,
+                &[
+                    (&matrix, DType::F64, &[rows, columns]),
+                    (&right_hand_side, DType::F64, &[rows, 1]),
+                ],
+            )
+            .expect("compile least-squares graph");
+        let graph = Arc::new(LeastSquaresGraph {
+            matrix,
+            right_hand_side,
+            program,
+        });
+        graphs.insert(key, Arc::clone(&graph));
+        graph
     }
 }
 

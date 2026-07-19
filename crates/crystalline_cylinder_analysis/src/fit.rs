@@ -195,7 +195,7 @@ fn optimize_start<B: AnalysisBackend>(
                 gradient[column] += value * residual;
             }
         }
-        let gradient_maximum = gradient.iter().map(|value| value.abs()).fold(0.0, f64::max);
+        let gradient_maximum = projected_gradient_maximum(&parameters, &gradient, &lower, &upper);
         if gradient_maximum <= config.tolerance {
             converged = true;
             break;
@@ -220,10 +220,6 @@ fn optimize_start<B: AnalysisBackend>(
             .zip(parameters)
             .map(|(&next, current)| (next - current).abs() / (1.0 + current.abs()))
             .fold(0.0, f64::max);
-        if scaled_step <= config.tolerance {
-            converged = true;
-            break;
-        }
         let candidate_objective =
             objective(time, observed, weights, &candidate, config.soft_l1_scale);
         *evaluations += 1;
@@ -234,7 +230,10 @@ fn optimize_start<B: AnalysisBackend>(
             parameters = candidate;
             objective_value = candidate_objective;
             damping = (damping * 0.3).max(1.0e-12);
-            if relative_change <= config.tolerance {
+            let secondary_gradient_tolerance = config.tolerance.sqrt();
+            if (relative_change <= config.tolerance || scaled_step <= config.tolerance)
+                && gradient_maximum <= secondary_gradient_tolerance
+            {
                 converged = true;
                 break;
             }
@@ -247,6 +246,25 @@ fn optimize_start<B: AnalysisBackend>(
         objective: objective_value,
         converged,
     }
+}
+
+fn projected_gradient_maximum(
+    parameters: &[f64; PARAMETER_COUNT],
+    gradient: &[f64; PARAMETER_COUNT],
+    lower: &[f64; PARAMETER_COUNT],
+    upper: &[f64; PARAMETER_COUNT],
+) -> f64 {
+    (0..PARAMETER_COUNT)
+        .map(|index| {
+            let at_lower = parameters[index] <= lower[index];
+            let at_upper = parameters[index] >= upper[index];
+            if (at_lower && gradient[index] > 0.0) || (at_upper && gradient[index] < 0.0) {
+                0.0
+            } else {
+                gradient[index].abs()
+            }
+        })
+        .fold(0.0, f64::max)
 }
 
 fn objective(

@@ -43,7 +43,6 @@ pub fn run(cli: Cli) {
         AnalysisCommand::Laplace(args) => run_laplace(&backend, &common, args),
         AnalysisCommand::Preferred(args) => run_preferred(&backend, &common, args),
         AnalysisCommand::Fit(args) => run_fit(&backend, &common, args),
-        command => panic!("{} not implemented", command_name(&command)),
     }
 }
 
@@ -518,7 +517,6 @@ pub fn command_name(command: &AnalysisCommand) -> &'static str {
         AnalysisCommand::Laplace(_) => "laplace",
         AnalysisCommand::Preferred(_) => "preferred",
         AnalysisCommand::Fit(_) => "fit",
-        AnalysisCommand::All(_) => "all",
     }
 }
 
