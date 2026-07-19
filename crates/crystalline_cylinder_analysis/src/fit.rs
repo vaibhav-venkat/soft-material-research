@@ -96,6 +96,7 @@ pub fn fit_damped_cosine<B: AnalysisBackend>(
 
     let mut evaluations = 0;
     let mut best: Option<FitState> = None;
+    let mut best_finite: Option<FitState> = None;
     for &initial_rate in &rate_starts {
         for &initial_omega in &omega_starts {
             let initial = [initial_amplitude, initial_rate, initial_omega, 0.0];
@@ -110,8 +111,17 @@ pub fn fit_damped_cosine<B: AnalysisBackend>(
                 config,
                 &mut evaluations,
             );
+            if state.parameters.iter().all(|value| value.is_finite())
+                && state.objective.is_finite()
+                && best_finite
+                    .as_ref()
+                    .is_none_or(|current| state.objective < current.objective)
+            {
+                best_finite = Some(state);
+            }
             if state.converged
                 && state.parameters.iter().all(|value| value.is_finite())
+                && state.objective.is_finite()
                 && best
                     .as_ref()
                     .is_none_or(|current| state.objective < current.objective)
@@ -120,7 +130,9 @@ pub fn fit_damped_cosine<B: AnalysisBackend>(
             }
         }
     }
-    let best = best.expect("damped-cosine fit found no finite solution");
+    let best = best
+        .or(best_finite)
+        .expect("damped-cosine fit found no finite parameters");
     let prediction = damped_cosine(time, &best.parameters);
     let mean = observed.iter().sum::<f64>() / observed.len() as f64;
     let residual_sum = observed
@@ -200,7 +212,13 @@ fn optimize_start<B: AnalysisBackend>(
                 }
             }
         }
-        let gradient_maximum = projected_gradient_maximum(&parameters, &gradient, &lower, &upper);
+        let gradient_maximum = projected_scaled_gradient_maximum(
+            &parameters,
+            &gradient,
+            &column_norm_squared,
+            &lower,
+            &upper,
+        );
         if gradient_maximum <= config.tolerance {
             converged = true;
             break;
@@ -230,13 +248,13 @@ fn optimize_start<B: AnalysisBackend>(
             objective(time, observed, weights, &candidate, config.soft_l1_scale);
         *evaluations += 1;
         start_evaluations += 1;
+        let secondary_gradient_tolerance = config.tolerance.sqrt();
         if candidate_objective < objective_value {
             let relative_change =
                 (objective_value - candidate_objective) / (1.0 + objective_value.abs());
             parameters = candidate;
             objective_value = candidate_objective;
             damping = (damping * 0.3).max(1.0e-12);
-            let secondary_gradient_tolerance = config.tolerance.sqrt();
             if (relative_change <= config.tolerance || scaled_step <= config.tolerance)
                 && gradient_maximum <= secondary_gradient_tolerance
             {
@@ -244,6 +262,10 @@ fn optimize_start<B: AnalysisBackend>(
                 break;
             }
         } else {
+            if scaled_step <= config.tolerance && gradient_maximum <= secondary_gradient_tolerance {
+                converged = true;
+                break;
+            }
             damping = (damping * 10.0).min(1.0e12);
         }
     }
@@ -254,9 +276,10 @@ fn optimize_start<B: AnalysisBackend>(
     }
 }
 
-fn projected_gradient_maximum(
+fn projected_scaled_gradient_maximum(
     parameters: &[f64; PARAMETER_COUNT],
     gradient: &[f64; PARAMETER_COUNT],
+    column_norm_squared: &[f64; PARAMETER_COUNT],
     lower: &[f64; PARAMETER_COUNT],
     upper: &[f64; PARAMETER_COUNT],
 ) -> f64 {
@@ -267,7 +290,7 @@ fn projected_gradient_maximum(
             if (at_lower && gradient[index] > 0.0) || (at_upper && gradient[index] < 0.0) {
                 0.0
             } else {
-                gradient[index].abs()
+                gradient[index].abs() / column_norm_squared[index].sqrt().max(1.0e-12)
             }
         })
         .fold(0.0, f64::max)
