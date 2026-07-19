@@ -25,11 +25,14 @@ pub fn write_correlation_plot(analyses: &[CaseAnalysis], output: &Path) -> PathB
     ];
     let mut mean_plots = Vec::with_capacity(analyses.len() + 2);
     let mut deviation_plots = Vec::with_capacity(analyses.len());
+    // Use the common supported duration so shorter cases do not leave an empty tail.
     let maximum_lag = analyses
         .iter()
         .filter_map(|analysis| analysis.correlation.as_ref())
         .filter_map(|series| series.lag_times.last().copied())
-        .fold(0.0_f64, f64::max);
+        .reduce(f64::min)
+        .expect("no correlation lag times");
+    assert!(maximum_lag > 0.0, "plot needs a positive lag");
     mean_plots.push(Plot::Line(reference_line(maximum_lag, 0.0, false)));
     mean_plots.push(Plot::Line(reference_line(maximum_lag, 1.0, true)));
 
@@ -51,12 +54,14 @@ pub fn write_correlation_plot(analyses: &[CaseAnalysis], output: &Path) -> PathB
             &correlation.pearson_mean,
             color,
             Some(label),
+            maximum_lag,
         )));
         deviation_plots.push(Plot::Line(series_line(
             &correlation.lag_times,
             &correlation.pearson_std,
             color,
             None,
+            maximum_lag,
         )));
     }
 
@@ -86,9 +91,20 @@ pub fn write_correlation_plot(analyses: &[CaseAnalysis], output: &Path) -> PathB
     output.to_path_buf()
 }
 
-fn series_line(x: &[f64], values: &[f64], color: &str, label: Option<&str>) -> LinePlot {
+fn series_line(
+    x: &[f64],
+    values: &[f64],
+    color: &str,
+    label: Option<&str>,
+    maximum_lag: f64,
+) -> LinePlot {
     let line = LinePlot::new()
-        .with_data(x.iter().copied().zip(values.iter().copied()))
+        .with_data(
+            x.iter()
+                .copied()
+                .zip(values.iter().copied())
+                .take_while(|(lag, _)| *lag <= maximum_lag),
+        )
         .with_color(color)
         .with_stroke_width(1.8);
     if let Some(label) = label {

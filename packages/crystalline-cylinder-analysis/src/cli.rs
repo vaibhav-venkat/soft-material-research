@@ -81,9 +81,6 @@ pub struct CorrelationArgs {
     /// Restrict big-Lx cases to one circumference; omit to include both.
     #[arg(long, value_enum)]
     pub circ: Option<BigLxCircumference>,
-    /// Minimum paired time origins retained at the greatest lag.
-    #[arg(long, default_value_t = 10)]
-    pub min_origins: usize,
     /// Explicit maximum lag index.
     #[arg(long)]
     pub max_lag: Option<usize>,

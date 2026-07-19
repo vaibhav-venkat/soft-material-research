@@ -76,7 +76,6 @@ fn run_correlation(
     let groups = selected_groups(common, args.circ);
     let com_config = com_config(common);
     let correlation_config = CorrelationConfig {
-        min_origins: args.min_origins,
         max_lag: args.max_lag,
     };
     let analyses = backend.install(|| {

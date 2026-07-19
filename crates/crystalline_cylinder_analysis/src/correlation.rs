@@ -3,10 +3,9 @@
 use crate::backend::AnalysisBackend;
 use crate::model::{ComSeries, CorrelationSeries};
 
-/// Controls the number of valid lag origins.
+/// Controls the requested maximum lag index.
 #[derive(Clone, Copy, Debug)]
 pub struct CorrelationConfig {
-    pub min_origins: usize,
     pub max_lag: Option<usize>,
 }
 
@@ -58,10 +57,10 @@ pub fn analyze_correlation<B: AnalysisBackend>(
         frame_count,
         "velocity/time lengths differ"
     );
-    assert!(config.min_origins >= 2, "min origins must be at least two");
+    assert!(frame_count >= 3, "correlation needs three frames");
     assert!(
-        config.min_origins <= frame_count,
-        "min origins exceeds frame count"
+        config.max_lag.is_none_or(|lag| lag > 0),
+        "max lag must be positive"
     );
     assert!(
         com.elapsed_time.iter().all(|value| value.is_finite()),
@@ -86,7 +85,8 @@ pub fn analyze_correlation<B: AnalysisBackend>(
         );
     }
 
-    let available_maximum = frame_count - config.min_origins;
+    // Every Pearson window must retain at least two paired samples.
+    let available_maximum = frame_count - 2;
     let maximum_lag = config
         .max_lag
         .unwrap_or(available_maximum)

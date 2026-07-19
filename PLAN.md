@@ -34,7 +34,7 @@ subcommands:
   all
 ```
 
-Global options include repeatable `--input-dir`, optional `--output-dir`, `--timestep` defaulting to `1e-6`, optional `--threads`, and explicit `--overwrite`. Correlation-derived commands expose `--min-origins` (default 10) and `--max-lag`; transform commands preserve the Python range/point defaults.
+Global options include repeatable `--input-dir`, optional `--output-dir`, `--timestep` defaulting to `1e-6`, optional `--threads`, and explicit `--overwrite`. Correlation-derived commands expose `--max-lag`; every selected lag must retain at least two paired samples. Transform commands preserve the Python range/point defaults.
 
 ## Implementation Changes
 
