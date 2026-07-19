@@ -2,6 +2,7 @@
 
 pub mod backend;
 pub mod center_of_mass;
+pub mod clusters;
 pub mod correlation;
 pub mod fit;
 pub mod input;
@@ -12,6 +13,11 @@ pub mod pipeline;
 pub mod replicates;
 
 pub use backend::{AnalysisBackend, CpuAnalysisBackend};
+pub use clusters::{
+    analyze_dataset_clusters, analyze_dataset_clusters_with_snapshots,
+    cluster_probability_histogram, ClusterConfig, ClusterHistogram, ClusterKind, ClusterRecord,
+    ClusterSnapshot, DatasetClusterAnalysis,
+};
 pub use model::{
     AnalysisManifest, CaseMetadata, CaseSchema, ComSeries, CorrelationSeries, DampedCosineFit,
     DiscoveredDataset, LaplaceGrid, PreferredAxis, PreferredEstimate, ReplicateGroup,

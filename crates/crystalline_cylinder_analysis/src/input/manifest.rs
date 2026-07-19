@@ -31,6 +31,17 @@ pub fn validate_manifest(path: &Path, schema: CaseSchema, manifest: &AnalysisMan
     );
     assert_ne!(manifest.case.n_particles, 0, "bad particles");
     assert!(manifest.case.lx_multiplier > 0, "bad multiplier");
+    for value in [
+        manifest.case.particle_diameter,
+        manifest.case.radius,
+        manifest.case.circumference,
+        manifest.case.transverse_span,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        assert!(value.is_finite() && value > 0.0, "bad case geometry");
+    }
     assert!(!manifest.shards.is_empty(), "no shards");
 
     let mut expected_start = 0;

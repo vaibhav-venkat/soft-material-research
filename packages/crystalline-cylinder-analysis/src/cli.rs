@@ -45,6 +45,8 @@ pub enum AnalysisCommand {
     Laplace(LaplaceArgs),
     Preferred(PreferredArgs),
     Fit(FitArgs),
+    /// Identify surface structural and coherent-motion clusters.
+    Clusters(ClusterArgs),
 }
 
 /// Axial center-of-mass controls.
@@ -155,4 +157,38 @@ pub struct FitArgs {
     pub maximum_evaluations: usize,
     #[arg(long, default_value_t = 1.0e-12)]
     pub rank_tolerance: f64,
+}
+
+/// Surface-cluster controls.
+#[derive(Clone, Debug, Args)]
+pub struct ClusterArgs {
+    /// Restrict big-Lx cases to one circumference; omit to include both.
+    #[arg(long, value_enum)]
+    pub circ: Option<BigLxCircumference>,
+    /// Restrict analysis to these discovered case IDs; repeat as needed.
+    #[arg(long)]
+    pub case: Vec<String>,
+    #[arg(long, default_value_t = 1)]
+    pub lag_frames: usize,
+    #[arg(long, default_value_t = 50)]
+    pub bins: usize,
+    #[arg(long, default_value_t = 0.7)]
+    pub psi6_min: f64,
+    #[arg(long, default_value_t = 5.0)]
+    pub misorientation_degrees: f64,
+    #[arg(long, default_value_t = 1.7272)]
+    pub neighbor_radius_diameters: f64,
+    #[arg(long, default_value_t = 0.8)]
+    pub motion_cosine_min: f64,
+    #[arg(long, default_value_t = 0.1)]
+    pub motion_rms_fraction: f64,
+    #[arg(long, default_value_t = 0.5)]
+    pub motion_magnitude_ratio: f64,
+    #[arg(long, default_value_t = 2)]
+    pub min_cluster_particles: usize,
+    #[arg(long, default_value_t = 64)]
+    pub target_shard_mib: usize,
+    /// Frame indices to render as static multi-angle cylinder views.
+    #[arg(long, value_delimiter = ',', default_value = "200,500,700")]
+    pub snapshot_frames: Vec<usize>,
 }

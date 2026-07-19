@@ -104,5 +104,11 @@ fn validate_compatible(group: &ReplicateGroup, dataset: &DiscoveredDataset) {
         && expected.circumference_diameters.map(f64::to_bits)
             == actual.circumference_diameters.map(f64::to_bits)
         && expected.geometry_kind == actual.geometry_kind;
+    let same = same
+        && expected.particle_diameter.map(f64::to_bits)
+            == actual.particle_diameter.map(f64::to_bits)
+        && expected.radius.map(f64::to_bits) == actual.radius.map(f64::to_bits)
+        && expected.circumference.map(f64::to_bits) == actual.circumference.map(f64::to_bits)
+        && expected.transverse_span.map(f64::to_bits) == actual.transverse_span.map(f64::to_bits);
     assert!(same, "bad replicas");
 }

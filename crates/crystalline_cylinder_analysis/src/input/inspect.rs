@@ -119,7 +119,7 @@ fn validate_coordinate_tensor(
     let finite = match tensor.dtype {
         TensorDtype::F32 => tensor.as_f32().iter().all(|value| value.is_finite()),
         TensorDtype::F64 => tensor.as_f64().iter().all(|value| value.is_finite()),
-        TensorDtype::I32 | TensorDtype::I64 => false,
+        TensorDtype::Bool | TensorDtype::I8 | TensorDtype::I32 | TensorDtype::I64 => false,
     };
     assert!(finite, "bad coords");
 }
@@ -140,7 +140,9 @@ fn validate_step_tensor(
             previous_step,
         ),
         TensorDtype::I64 => validate_steps(tensor.as_i64().iter().copied(), previous_step),
-        TensorDtype::F32 | TensorDtype::F64 => unreachable!("step dtype checked above"),
+        TensorDtype::Bool | TensorDtype::F32 | TensorDtype::F64 | TensorDtype::I8 => {
+            unreachable!("step dtype checked above")
+        }
     }
 }
 

@@ -60,7 +60,9 @@ pub fn analyze_replica_com(dataset: &DiscoveredDataset, config: ComConfig) -> Co
                 &mut steps,
                 &mut centers,
             ),
-            TensorDtype::I32 | TensorDtype::I64 => panic!("bad dtype"),
+            TensorDtype::Bool | TensorDtype::I8 | TensorDtype::I32 | TensorDtype::I64 => {
+                panic!("bad dtype")
+            }
         }
         // The mapping and all borrowed tensor views are dropped here.
     }
@@ -168,7 +170,9 @@ fn step_at(steps: &SafetensorView<'_>, index: usize) -> i64 {
     match steps.dtype {
         TensorDtype::I32 => i64::from(steps.as_i32()[index]),
         TensorDtype::I64 => steps.as_i64()[index],
-        TensorDtype::F32 | TensorDtype::F64 => unreachable!("step dtype validated"),
+        TensorDtype::Bool | TensorDtype::F32 | TensorDtype::F64 | TensorDtype::I8 => {
+            unreachable!("step dtype validated")
+        }
     }
 }
 

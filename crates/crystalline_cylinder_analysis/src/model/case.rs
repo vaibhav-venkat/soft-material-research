@@ -24,6 +24,14 @@ pub struct CaseMetadata {
     pub circumference_diameters: Option<f64>,
     pub geometry_kind: Option<String>,
     pub seed: Option<u64>,
+    #[serde(default)]
+    pub particle_diameter: Option<f64>,
+    #[serde(default)]
+    pub radius: Option<f64>,
+    #[serde(default)]
+    pub circumference: Option<f64>,
+    #[serde(default)]
+    pub transverse_span: Option<f64>,
 }
 
 /// One validated manifest discovered below an input directory.

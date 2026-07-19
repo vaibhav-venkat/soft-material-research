@@ -1,12 +1,14 @@
 //! Translation from CLI declarations to the reusable analysis pipeline.
 
+use crate::artifacts::{prepare_output_dir, write_cluster_dataset, write_json_atomic};
 use crate::cli::{
-    AnalysisCommand, BigLxCircumference, Cli, CorrelationArgs, FitArgs, LaplaceArgs, PreferredArgs,
-    PreferredChoice,
+    AnalysisCommand, BigLxCircumference, Cli, ClusterArgs, CorrelationArgs, FitArgs, LaplaceArgs,
+    PreferredArgs, PreferredChoice,
 };
 use crate::plots::{
-    write_com_plot, write_correlation_plot, write_fit_plot, write_laplace_plots,
-    write_preferred_plot,
+    write_cluster_histogram_plot, write_cluster_snapshot_plot, write_com_plot,
+    write_correlation_plot, write_fit_plot, write_laplace_plots, write_preferred_plot,
+    ClusterPlotCase,
 };
 use crystalline_cylinder_analysis::center_of_mass::{analyze_replica_com, ComConfig};
 use crystalline_cylinder_analysis::correlation::{analyze_correlation, CorrelationConfig};
@@ -22,10 +24,13 @@ use crystalline_cylinder_analysis::replicates::{
     average_com_series, average_correlations, average_preferred_estimates,
 };
 use crystalline_cylinder_analysis::{
-    CaseSchema, ComSeries, CorrelationSeries, CpuAnalysisBackend, PreferredAxis, ReplicateGroup,
+    analyze_dataset_clusters_with_snapshots, cluster_probability_histogram, CaseSchema,
+    ClusterConfig, ClusterHistogram, ComSeries, CorrelationSeries, CpuAnalysisBackend,
+    PreferredAxis, ReplicateGroup,
 };
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
+use serde::Serialize;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -45,7 +50,272 @@ pub fn run(cli: Cli) {
         AnalysisCommand::Laplace(args) => run_laplace(&backend, &common, args),
         AnalysisCommand::Preferred(args) => run_preferred(&backend, &common, args),
         AnalysisCommand::Fit(args) => run_fit(&backend, &common, args),
+        AnalysisCommand::Clusters(args) => run_clusters(&common, args),
     }
+}
+
+#[derive(Debug)]
+struct ClusterCaseWork {
+    case_id: String,
+    label: String,
+    replicate_count: usize,
+    structural_samples: Vec<f64>,
+    motion_samples: Vec<f64>,
+    dataset_manifests: Vec<PathBuf>,
+    snapshot_files: Vec<PathBuf>,
+}
+
+#[derive(Serialize)]
+struct ClusterRunCase {
+    case_id: String,
+    label: String,
+    replicate_count: usize,
+    dataset_manifests: Vec<PathBuf>,
+    snapshot_files: Vec<PathBuf>,
+    structural: ClusterHistogram,
+    motion: ClusterHistogram,
+}
+
+#[derive(Serialize)]
+struct ClusterRunManifest {
+    schema: String,
+    config: ClusterConfig,
+    bins: usize,
+    target_shard_mib: usize,
+    snapshot_frames: Vec<usize>,
+    histogram_range: [f64; 2],
+    cases: Vec<ClusterRunCase>,
+}
+
+fn run_clusters(common: &crate::cli::CommonArgs, args: ClusterArgs) {
+    assert!(args.bins > 0, "cluster histogram needs bins");
+    assert!(
+        args.target_shard_mib > 0,
+        "cluster shard target must be positive"
+    );
+    let config = ClusterConfig {
+        lag_frames: args.lag_frames,
+        psi6_minimum: args.psi6_min,
+        misorientation_degrees: args.misorientation_degrees,
+        neighbor_radius_diameters: args.neighbor_radius_diameters,
+        motion_cosine_minimum: args.motion_cosine_min,
+        motion_rms_fraction: args.motion_rms_fraction,
+        motion_magnitude_ratio: args.motion_magnitude_ratio,
+        minimum_particles: args.min_cluster_particles,
+    };
+    config.validate();
+    let mut snapshot_frames = args.snapshot_frames.clone();
+    snapshot_frames.sort_unstable();
+    snapshot_frames.dedup();
+    let groups = selected_cluster_groups(common, &args);
+    let cluster_root = output_root(common).join("clusters");
+    prepare_output_dir(&cluster_root, common.overwrite);
+    let mut work = Vec::with_capacity(groups.len());
+
+    for group in groups {
+        let label = group
+            .case
+            .label
+            .clone()
+            .unwrap_or_else(|| group.case.case_id.clone());
+        let mut case_work = ClusterCaseWork {
+            case_id: group.case.case_id.clone(),
+            label,
+            replicate_count: group.datasets.len(),
+            structural_samples: Vec::new(),
+            motion_samples: Vec::new(),
+            dataset_manifests: Vec::new(),
+            snapshot_files: Vec::new(),
+        };
+        for (replicate_index, dataset) in group.datasets.iter().enumerate() {
+            eprintln!(
+                "[clusters] case={} replicate={}/{} frames={} particles={}",
+                group.case.case_id,
+                replicate_index + 1,
+                group.datasets.len(),
+                dataset.manifest.frame_count,
+                dataset.manifest.case.n_particles,
+            );
+            let analysis =
+                analyze_dataset_clusters_with_snapshots(dataset, config, &snapshot_frames);
+            case_work.structural_samples.extend(
+                analysis
+                    .structural
+                    .iter()
+                    .map(|record| record.normalized_length),
+            );
+            case_work.motion_samples.extend(
+                analysis
+                    .motion
+                    .iter()
+                    .map(|record| record.normalized_length),
+            );
+            let replicate_dir = cluster_root
+                .join("data")
+                .join(safe_case_directory(&group.case.case_id))
+                .join(format!("replicate_{:03}", replicate_index + 1));
+            write_cluster_dataset(
+                &replicate_dir,
+                &dataset.manifest_path,
+                &analysis,
+                config,
+                args.target_shard_mib,
+            );
+            case_work
+                .dataset_manifests
+                .push(replicate_dir.join("manifest.json"));
+            if !snapshot_frames.is_empty() {
+                let cylinder_case = dataset.schema == CaseSchema::BigLx
+                    || matches!(
+                        dataset.manifest.case.geometry_kind.as_deref(),
+                        Some("cylinder_rattle" | "cylinder_rattle_tangent")
+                    );
+                if !cylinder_case {
+                    eprintln!(
+                        "[clusters] static cylinder views skipped for non-cylinder case={} replicate={}",
+                        group.case.case_id,
+                        replicate_index + 1,
+                    );
+                } else {
+                    let radius = dataset
+                        .manifest
+                        .case
+                        .radius
+                        .expect("cylinder snapshot has no radius");
+                    let visualization_dir = cluster_root
+                        .join("visualizations")
+                        .join(safe_case_directory(&group.case.case_id))
+                        .join(format!("replicate_{:03}", replicate_index + 1));
+                    for snapshot in &analysis.snapshots {
+                        let output = visualization_dir
+                            .join(format!("frame_{:06}.svg", snapshot.frame_index));
+                        write_cluster_snapshot_plot(
+                            snapshot,
+                            &case_work.label,
+                            radius,
+                            dataset.manifest.case.lx,
+                            &output,
+                        );
+                        case_work.snapshot_files.push(output);
+                    }
+                    for frame in &snapshot_frames {
+                        if *frame >= dataset.manifest.frame_count {
+                            eprintln!(
+                                "[clusters] snapshot frame={} out of range for case={} replicate={} (frames={})",
+                                frame,
+                                group.case.case_id,
+                                replicate_index + 1,
+                                dataset.manifest.frame_count,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        work.push(case_work);
+    }
+
+    let maximum = work
+        .iter()
+        .flat_map(|case| case.structural_samples.iter().chain(&case.motion_samples))
+        .copied()
+        .reduce(f64::max)
+        .unwrap_or(1.0);
+    assert!(
+        maximum.is_finite() && maximum > 0.0,
+        "bad cluster histogram maximum"
+    );
+    let range = (0.0, maximum);
+    let cases = work
+        .into_iter()
+        .map(|case| ClusterRunCase {
+            case_id: case.case_id,
+            label: case.label,
+            replicate_count: case.replicate_count,
+            dataset_manifests: case.dataset_manifests,
+            snapshot_files: case.snapshot_files,
+            structural: cluster_probability_histogram(&case.structural_samples, args.bins, range),
+            motion: cluster_probability_histogram(&case.motion_samples, args.bins, range),
+        })
+        .collect::<Vec<_>>();
+    let structural_plot_cases = cases
+        .iter()
+        .map(|case| ClusterPlotCase {
+            label: case.label.clone(),
+            histogram: case.structural.clone(),
+        })
+        .collect::<Vec<_>>();
+    let motion_plot_cases = cases
+        .iter()
+        .map(|case| ClusterPlotCase {
+            label: case.label.clone(),
+            histogram: case.motion.clone(),
+        })
+        .collect::<Vec<_>>();
+    let structural_output = cluster_root.join("structural_cluster_length_distribution.svg");
+    let motion_output = cluster_root.join("motion_cluster_length_distribution.svg");
+    write_cluster_histogram_plot(
+        &structural_plot_cases,
+        "Structural-cluster equivalent-perimeter distributions",
+        "#4477AA",
+        &structural_output,
+    );
+    write_cluster_histogram_plot(
+        &motion_plot_cases,
+        "Coherent-motion-cluster equivalent-perimeter distributions",
+        "#EE6677",
+        &motion_output,
+    );
+    let manifest = ClusterRunManifest {
+        schema: "crystalline-cylinder-analysis.clusters.run.v2".to_owned(),
+        config,
+        bins: args.bins,
+        target_shard_mib: args.target_shard_mib,
+        snapshot_frames,
+        histogram_range: [range.0, range.1],
+        cases,
+    };
+    write_json_atomic(&cluster_root.join("manifest.json"), &manifest);
+    eprintln!(
+        "[crystalline-cylinder-analysis] command=clusters cases={} structural={} motion={}",
+        manifest.cases.len(),
+        structural_output.display(),
+        motion_output.display(),
+    );
+}
+
+fn safe_case_directory(case_id: &str) -> &str {
+    let path = std::path::Path::new(case_id);
+    let mut components = path.components();
+    assert!(
+        matches!(components.next(), Some(std::path::Component::Normal(_)))
+            && components.next().is_none(),
+        "case ID is not a safe output directory name"
+    );
+    case_id
+}
+
+fn selected_cluster_groups(
+    common: &crate::cli::CommonArgs,
+    args: &ClusterArgs,
+) -> Vec<ReplicateGroup> {
+    let mut groups = select_circumference(discover_replicate_groups(&common.input_dir), args.circ);
+    if !args.case.is_empty() {
+        let requested = args.case.iter().collect::<std::collections::HashSet<_>>();
+        let discovered = groups
+            .iter()
+            .map(|group| &group.case.case_id)
+            .collect::<std::collections::HashSet<_>>();
+        for case in &args.case {
+            assert!(
+                discovered.contains(case),
+                "requested cluster case was not discovered: {case}"
+            );
+        }
+        groups.retain(|group| requested.contains(&group.case.case_id));
+    }
+    assert!(!groups.is_empty(), "no matching cluster cases");
+    groups
 }
 
 fn run_fit(backend: &CpuAnalysisBackend, common: &crate::cli::CommonArgs, args: FitArgs) {
@@ -537,6 +807,7 @@ pub fn command_name(command: &AnalysisCommand) -> &'static str {
         AnalysisCommand::Laplace(_) => "laplace",
         AnalysisCommand::Preferred(_) => "preferred",
         AnalysisCommand::Fit(_) => "fit",
+        AnalysisCommand::Clusters(_) => "clusters",
     }
 }
 

@@ -12,8 +12,10 @@ use safetensors::SafeTensors;
 /// Scalar dtypes accepted from trajectory-analysis tensors.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TensorDtype {
+    Bool,
     F32,
     F64,
+    I8,
     I32,
     I64,
 }
@@ -45,6 +47,17 @@ impl SafetensorView<'_> {
     /// View an I32 tensor as native typed values without copying.
     pub fn as_i32(&self) -> &[i32] {
         self.cast_values(TensorDtype::I32, "I32")
+    }
+
+    /// View an I8 tensor as native typed values without copying.
+    pub fn as_i8(&self) -> &[i8] {
+        self.cast_values(TensorDtype::I8, "I8")
+    }
+
+    /// View a BOOL tensor as its canonical zero/one bytes.
+    pub fn as_bool_bytes(&self) -> &[u8] {
+        assert_eq!(self.dtype, TensorDtype::Bool, "bad dtype");
+        self.bytes
     }
 
     fn cast_values<T: Pod>(&self, expected: TensorDtype, _name: &str) -> &[T] {
@@ -83,8 +96,10 @@ impl MappedShard {
         let tensors = SafeTensors::deserialize(&self.mapping).expect("bad shard");
         let view = tensors.tensor(name).expect("missing tensor");
         let dtype = match view.dtype() {
+            Dtype::BOOL => TensorDtype::Bool,
             Dtype::F32 => TensorDtype::F32,
             Dtype::F64 => TensorDtype::F64,
+            Dtype::I8 => TensorDtype::I8,
             Dtype::I32 => TensorDtype::I32,
             Dtype::I64 => TensorDtype::I64,
             _ => panic!("bad dtype"),
