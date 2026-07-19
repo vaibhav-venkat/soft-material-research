@@ -25,16 +25,16 @@ pub fn write_correlation_plot(analyses: &[CaseAnalysis], output: &Path) -> PathB
     ];
     let mut mean_plots = Vec::with_capacity(analyses.len() + 2);
     let mut deviation_plots = Vec::with_capacity(analyses.len());
-    // Use the common supported duration so shorter cases do not leave an empty tail.
-    let maximum_lag = analyses
+    // Pin Kuva's axis to the computed endpoint instead of its rounded "nice" bound.
+    let maximum_lag_time = analyses
         .iter()
         .filter_map(|analysis| analysis.correlation.as_ref())
         .filter_map(|series| series.lag_times.last().copied())
-        .reduce(f64::min)
+        .reduce(f64::max)
         .expect("no correlation lag times");
-    assert!(maximum_lag > 0.0, "plot needs a positive lag");
-    mean_plots.push(Plot::Line(reference_line(maximum_lag, 0.0, false)));
-    mean_plots.push(Plot::Line(reference_line(maximum_lag, 1.0, true)));
+    assert!(maximum_lag_time > 0.0, "plot needs a positive lag");
+    mean_plots.push(Plot::Line(reference_line(maximum_lag_time, 0.0, false)));
+    mean_plots.push(Plot::Line(reference_line(maximum_lag_time, 1.0, true)));
 
     for (index, analysis) in analyses.iter().enumerate() {
         let correlation = analysis
@@ -54,23 +54,25 @@ pub fn write_correlation_plot(analyses: &[CaseAnalysis], output: &Path) -> PathB
             &correlation.pearson_mean,
             color,
             Some(label),
-            maximum_lag,
         )));
         deviation_plots.push(Plot::Line(series_line(
             &correlation.lag_times,
             &correlation.pearson_std,
             color,
             None,
-            maximum_lag,
         )));
     }
 
     let plots = vec![mean_plots, deviation_plots];
     let layouts = vec![
-        Layout::new((0.0, maximum_lag), (-1.05, 1.05))
+        Layout::new((0.0, maximum_lag_time), (-1.05, 1.05))
+            .with_x_axis_min(0.0)
+            .with_x_axis_max(maximum_lag_time)
             .with_title("Axial COM-velocity lagged Pearson correlation")
             .with_y_label("Pearson coefficient"),
         Layout::auto_from_plots(&plots[1])
+            .with_x_axis_min(0.0)
+            .with_x_axis_max(maximum_lag_time)
             .with_title("Replicate sample standard deviation")
             .with_x_label("lag time")
             .with_y_label("std(Pearson coefficient)"),
@@ -91,20 +93,9 @@ pub fn write_correlation_plot(analyses: &[CaseAnalysis], output: &Path) -> PathB
     output.to_path_buf()
 }
 
-fn series_line(
-    x: &[f64],
-    values: &[f64],
-    color: &str,
-    label: Option<&str>,
-    maximum_lag: f64,
-) -> LinePlot {
+fn series_line(x: &[f64], values: &[f64], color: &str, label: Option<&str>) -> LinePlot {
     let line = LinePlot::new()
-        .with_data(
-            x.iter()
-                .copied()
-                .zip(values.iter().copied())
-                .take_while(|(lag, _)| *lag <= maximum_lag),
-        )
+        .with_data(x.iter().copied().zip(values.iter().copied()))
         .with_color(color)
         .with_stroke_width(1.8);
     if let Some(label) = label {
