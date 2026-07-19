@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::f64::consts::{PI, TAU};
 
 use kiddo::{KdTree, SquaredEuclidean};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::input::{resolve_shard_path, MappedShard, SafetensorView, TensorDtype};
@@ -488,15 +489,21 @@ fn neighbor_graph(frame: &SurfaceFrame, cutoff: f64) -> Vec<Vec<usize>> {
                 }
             }
         }
-        for &particle in particles {
-            let mut neighbors = tree
-                .within_unsorted::<SquaredEuclidean>(&frame.points[particle], cutoff * cutoff)
-                .into_iter()
-                .map(|neighbor| usize::try_from(neighbor.item).expect("bad particle ID"))
-                .filter(|&neighbor| neighbor != particle)
-                .collect::<Vec<_>>();
-            neighbors.sort_unstable();
-            neighbors.dedup();
+        let domain_neighbors = particles
+            .par_iter()
+            .map(|&particle| {
+                let mut neighbors = tree
+                    .within_unsorted::<SquaredEuclidean>(&frame.points[particle], cutoff * cutoff)
+                    .into_iter()
+                    .map(|neighbor| usize::try_from(neighbor.item).expect("bad particle ID"))
+                    .filter(|&neighbor| neighbor != particle)
+                    .collect::<Vec<_>>();
+                neighbors.sort_unstable();
+                neighbors.dedup();
+                (particle, neighbors)
+            })
+            .collect::<Vec<_>>();
+        for (particle, neighbors) in domain_neighbors {
             graph[particle] = neighbors;
         }
     }
@@ -516,7 +523,7 @@ fn periodic_shifts(period: Option<f64>) -> Vec<f64> {
 fn psi6_from_neighbors(frame: &SurfaceFrame) -> Vec<[f64; 2]> {
     frame
         .neighbors
-        .iter()
+        .par_iter()
         .enumerate()
         .map(|(particle, neighbors)| {
             if neighbors.is_empty() {

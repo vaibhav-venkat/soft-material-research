@@ -50,7 +50,7 @@ pub fn run(cli: Cli) {
         AnalysisCommand::Laplace(args) => run_laplace(&backend, &common, args),
         AnalysisCommand::Preferred(args) => run_preferred(&backend, &common, args),
         AnalysisCommand::Fit(args) => run_fit(&backend, &common, args),
-        AnalysisCommand::Clusters(args) => run_clusters(&common, args),
+        AnalysisCommand::Clusters(args) => run_clusters(&backend, &common, args),
     }
 }
 
@@ -62,6 +62,14 @@ struct ClusterCaseWork {
     structural_samples: Vec<f64>,
     motion_samples: Vec<f64>,
     dataset_manifests: Vec<PathBuf>,
+    snapshot_files: Vec<PathBuf>,
+}
+
+#[derive(Debug)]
+struct ClusterReplicateWork {
+    structural_samples: Vec<f64>,
+    motion_samples: Vec<f64>,
+    dataset_manifest: PathBuf,
     snapshot_files: Vec<PathBuf>,
 }
 
@@ -82,12 +90,13 @@ struct ClusterRunManifest {
     config: ClusterConfig,
     bins: usize,
     target_shard_mib: usize,
+    rayon_threads: usize,
     snapshot_frames: Vec<usize>,
     histogram_range: [f64; 2],
     cases: Vec<ClusterRunCase>,
 }
 
-fn run_clusters(common: &crate::cli::CommonArgs, args: ClusterArgs) {
+fn run_clusters(backend: &CpuAnalysisBackend, common: &crate::cli::CommonArgs, args: ClusterArgs) {
     assert!(args.bins > 0, "cluster histogram needs bins");
     assert!(
         args.target_shard_mib > 0,
@@ -110,110 +119,57 @@ fn run_clusters(common: &crate::cli::CommonArgs, args: ClusterArgs) {
     let groups = selected_cluster_groups(common, &args);
     let cluster_root = output_root(common).join("clusters");
     prepare_output_dir(&cluster_root, common.overwrite);
-    let mut work = Vec::with_capacity(groups.len());
-
-    for group in groups {
-        let label = group
-            .case
-            .label
-            .clone()
-            .unwrap_or_else(|| group.case.case_id.clone());
-        let mut case_work = ClusterCaseWork {
-            case_id: group.case.case_id.clone(),
-            label,
-            replicate_count: group.datasets.len(),
-            structural_samples: Vec::new(),
-            motion_samples: Vec::new(),
-            dataset_manifests: Vec::new(),
-            snapshot_files: Vec::new(),
-        };
-        for (replicate_index, dataset) in group.datasets.iter().enumerate() {
-            eprintln!(
-                "[clusters] case={} replicate={}/{} frames={} particles={}",
-                group.case.case_id,
-                replicate_index + 1,
-                group.datasets.len(),
-                dataset.manifest.frame_count,
-                dataset.manifest.case.n_particles,
-            );
-            let analysis =
-                analyze_dataset_clusters_with_snapshots(dataset, config, &snapshot_frames);
-            case_work.structural_samples.extend(
-                analysis
-                    .structural
-                    .iter()
-                    .map(|record| record.normalized_length),
-            );
-            case_work.motion_samples.extend(
-                analysis
-                    .motion
-                    .iter()
-                    .map(|record| record.normalized_length),
-            );
-            let replicate_dir = cluster_root
-                .join("data")
-                .join(safe_case_directory(&group.case.case_id))
-                .join(format!("replicate_{:03}", replicate_index + 1));
-            write_cluster_dataset(
-                &replicate_dir,
-                &dataset.manifest_path,
-                &analysis,
-                config,
-                args.target_shard_mib,
-            );
-            case_work
-                .dataset_manifests
-                .push(replicate_dir.join("manifest.json"));
-            if !snapshot_frames.is_empty() {
-                let cylinder_case = dataset.schema == CaseSchema::BigLx
-                    || matches!(
-                        dataset.manifest.case.geometry_kind.as_deref(),
-                        Some("cylinder_rattle" | "cylinder_rattle_tangent")
-                    );
-                if !cylinder_case {
-                    eprintln!(
-                        "[clusters] static cylinder views skipped for non-cylinder case={} replicate={}",
-                        group.case.case_id,
-                        replicate_index + 1,
-                    );
-                } else {
-                    let radius = dataset
-                        .manifest
-                        .case
-                        .radius
-                        .expect("cylinder snapshot has no radius");
-                    let visualization_dir = cluster_root
-                        .join("visualizations")
-                        .join(safe_case_directory(&group.case.case_id))
-                        .join(format!("replicate_{:03}", replicate_index + 1));
-                    for snapshot in &analysis.snapshots {
-                        let output = visualization_dir
-                            .join(format!("frame_{:06}.svg", snapshot.frame_index));
-                        write_cluster_snapshot_plot(
-                            snapshot,
-                            &case_work.label,
-                            radius,
-                            dataset.manifest.case.lx,
-                            &output,
-                        );
-                        case_work.snapshot_files.push(output);
-                    }
-                    for frame in &snapshot_frames {
-                        if *frame >= dataset.manifest.frame_count {
-                            eprintln!(
-                                "[clusters] snapshot frame={} out of range for case={} replicate={} (frames={})",
-                                frame,
-                                group.case.case_id,
-                                replicate_index + 1,
-                                dataset.manifest.frame_count,
-                            );
-                        }
-                    }
+    let work = backend.install(|| {
+        groups
+            .into_par_iter()
+            .map(|group| {
+                let label = group
+                    .case
+                    .label
+                    .clone()
+                    .unwrap_or_else(|| group.case.case_id.clone());
+                let replicate_count = group.datasets.len();
+                let replicates = group
+                    .datasets
+                    .par_iter()
+                    .enumerate()
+                    .map(|(replicate_index, dataset)| {
+                        analyze_cluster_replicate(
+                            &group,
+                            &label,
+                            replicate_index,
+                            dataset,
+                            config,
+                            &snapshot_frames,
+                            args.target_shard_mib,
+                            &cluster_root,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                ClusterCaseWork {
+                    case_id: group.case.case_id.clone(),
+                    label,
+                    replicate_count,
+                    structural_samples: replicates
+                        .iter()
+                        .flat_map(|replicate| replicate.structural_samples.iter().copied())
+                        .collect(),
+                    motion_samples: replicates
+                        .iter()
+                        .flat_map(|replicate| replicate.motion_samples.iter().copied())
+                        .collect(),
+                    dataset_manifests: replicates
+                        .iter()
+                        .map(|replicate| replicate.dataset_manifest.clone())
+                        .collect(),
+                    snapshot_files: replicates
+                        .into_iter()
+                        .flat_map(|replicate| replicate.snapshot_files)
+                        .collect(),
                 }
-            }
-        }
-        work.push(case_work);
-    }
+            })
+            .collect::<Vec<_>>()
+    });
 
     let maximum = work
         .iter()
@@ -271,17 +227,123 @@ fn run_clusters(common: &crate::cli::CommonArgs, args: ClusterArgs) {
         config,
         bins: args.bins,
         target_shard_mib: args.target_shard_mib,
+        rayon_threads: backend.thread_count,
         snapshot_frames,
         histogram_range: [range.0, range.1],
         cases,
     };
     write_json_atomic(&cluster_root.join("manifest.json"), &manifest);
     eprintln!(
-        "[crystalline-cylinder-analysis] command=clusters cases={} structural={} motion={}",
+        "[crystalline-cylinder-analysis] command=clusters threads={} cases={} structural={} motion={}",
+        manifest.rayon_threads,
         manifest.cases.len(),
         structural_output.display(),
         motion_output.display(),
     );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn analyze_cluster_replicate(
+    group: &ReplicateGroup,
+    label: &str,
+    replicate_index: usize,
+    dataset: &crystalline_cylinder_analysis::DiscoveredDataset,
+    config: ClusterConfig,
+    snapshot_frames: &[usize],
+    target_shard_mib: usize,
+    cluster_root: &std::path::Path,
+) -> ClusterReplicateWork {
+    eprintln!(
+        "[clusters] case={} replicate={}/{} frames={} particles={}",
+        group.case.case_id,
+        replicate_index + 1,
+        group.datasets.len(),
+        dataset.manifest.frame_count,
+        dataset.manifest.case.n_particles,
+    );
+    let analysis = analyze_dataset_clusters_with_snapshots(dataset, config, snapshot_frames);
+    let replicate_dir = cluster_root
+        .join("data")
+        .join(safe_case_directory(&group.case.case_id))
+        .join(format!("replicate_{:03}", replicate_index + 1));
+    write_cluster_dataset(
+        &replicate_dir,
+        &dataset.manifest_path,
+        &analysis,
+        config,
+        target_shard_mib,
+    );
+    let mut snapshot_files = Vec::new();
+    if !snapshot_frames.is_empty() {
+        let cylinder_case = dataset.schema == CaseSchema::BigLx
+            || matches!(
+                dataset.manifest.case.geometry_kind.as_deref(),
+                Some("cylinder_rattle" | "cylinder_rattle_tangent")
+            );
+        if !cylinder_case {
+            eprintln!(
+                "[clusters] static cylinder views skipped for non-cylinder case={} replicate={}",
+                group.case.case_id,
+                replicate_index + 1,
+            );
+        } else {
+            let radius = dataset
+                .manifest
+                .case
+                .radius
+                .expect("cylinder snapshot has no radius");
+            let visualization_dir = cluster_root
+                .join("visualizations")
+                .join(safe_case_directory(&group.case.case_id))
+                .join(format!("replicate_{:03}", replicate_index + 1));
+            for snapshot in &analysis.snapshots {
+                let output =
+                    visualization_dir.join(format!("frame_{:06}.svg", snapshot.frame_index));
+                write_cluster_snapshot_plot(
+                    snapshot,
+                    label,
+                    radius,
+                    dataset.manifest.case.lx,
+                    &output,
+                );
+                snapshot_files.push(output);
+            }
+            for frame in snapshot_frames {
+                if *frame >= dataset.manifest.frame_count {
+                    eprintln!(
+                        "[clusters] snapshot frame={} out of range for case={} replicate={} (frames={})",
+                        frame,
+                        group.case.case_id,
+                        replicate_index + 1,
+                        dataset.manifest.frame_count,
+                    );
+                }
+            }
+        }
+    }
+    eprintln!(
+        "[clusters] completed case={} replicate={}/{} structural={} motion={} snapshots={}",
+        group.case.case_id,
+        replicate_index + 1,
+        group.datasets.len(),
+        analysis.structural.len(),
+        analysis.motion.len(),
+        snapshot_files.len(),
+    );
+    ClusterReplicateWork {
+        structural_samples: analysis
+            .structural
+            .iter()
+            .map(|record| record.normalized_length)
+            .collect(),
+        motion_samples: analysis
+            .motion
+            .iter()
+            .map(|record| record.normalized_length)
+            .collect(),
+        dataset_manifest: replicate_dir.join("manifest.json"),
+        snapshot_files,
+    }
 }
 
 fn safe_case_directory(case_id: &str) -> &str {
