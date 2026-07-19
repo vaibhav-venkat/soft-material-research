@@ -1,233 +1,109 @@
-# Plan: Burn Cylindrical Coarse-Graining Rewrite
-
-## Goal
-
-Replace the current Gaussian, grid-chunk Burn coarse-graining path with a GPU-only finite-volume cylindrical pipeline:
-
-- Use Burn CUDA on CUDA systems and Burn MLX/Metal on Apple systems.
-- Remove the non-GPU rho-fitting coarse-graining implementation and all silent CPU fallback behavior.
-- Deposit particles conservatively with TSC onto a cylindrical grid.
-- Preserve rho-fitting/PDE contracts for 3D orientation moments and 2D surface fluxes.
-- Keep the implementation small, direct, and easy to audit.
-
-## Non-Goals
-
-- Do not run HOOMD simulations or the full radius workflow.
-- Do not refactor regression, reporting, plotting, or PDE validation unless a shape contract truly requires it.
-- Do not treat flux fit quality as validation of PDE closure quality.
-- Do not add broad helper layers or large class-style architecture.
-
-## Target Structure
-
-Prefer the smallest structure that stays readable. The current GPU backend lives in `crates/rho_fitting_gpu/src/coarse_grain_burn/` and should remain split into focused modules:
-
-- `coarse_grain_burn/mod.rs`: public API, validation, backend dispatch.
-- `coarse_grain_burn/backend.rs`: CUDA vs MLX device setup and panic handling.
-- `coarse_grain_burn/grid.rs`: cylindrical grid edges, centers, volumes, periodic indexing.
-- `coarse_grain_burn/tsc.rs`: TSC stencil and local per-particle normalization.
-- `coarse_grain_burn/deposit.rs`: conservative mass and weighted-moment deposition.
-- `coarse_grain_burn/smooth.rs`: optional conservative grid smoothing.
-- `coarse_grain_burn/mechanical.rs`: mechanical fields, currents, tensor moments, output packing.
-- `coarse_grain_burn/tensor.rs`: tiny Burn tensor/readback helpers only if still needed.
-
-Keep module names flexible. Avoid both one giant file and a broad helper layer that obscures the math.
-
-## Phase 1: Baseline And Contracts
-
-1. Record the current public Rust entry points:
-   - `coarse_grain_fields`
-   - `build_mechanical_fields`
-
-2. Lock down expected array shapes:
-   - `P`: `(T, Nx, Ny, 3)`
-   - `Q`, `A`: `(T, Nx, Ny, 3, 3)`
-   - `J_rho`: `(T, Nx, Ny, 2)`
-   - `J_P`: `(T, Nx, Ny, 2, 3)`
-   - `J_Q`: `(T, Nx, Ny, 2, 3, 3)`
-
-3. Confirm how the existing radial dimension is reduced or selected for the final surface fields.
-
-4. Keep radius `15D` conventions intact, especially the fixed `Lx` assumption used by this dataset.
-
-## Phase 2: Backend Migration
-
-1. Replace `burn-wgpu` Metal usage with Burn MLX/Metal.
-
-2. Keep CUDA support:
-   - Prefer CUDA when a CUDA device is available.
-   - Use MLX/Metal on Apple systems.
-   - If the APIs diverge too much, keep the CUDA and MLX execution paths separate.
-
-3. Remove coarse-graining CPU fallback:
-   - GPU requested but unavailable should be a clear error.
-   - GPU initialization failure should be surfaced, not silently rerouted to CPU.
-
-4. Update feature/dependency planning:
-   - Replace `gpu-metal` internals with MLX.
-   - Keep feature names stable if possible to avoid Python-side churn.
-   - Only rename features if Burn MLX forces it.
-
-## Phase 3: Cylindrical Grid
-
-1. Build finite-volume cells in `(x, r, theta)`.
-
-2. Compute per-cell volume from:
-   - `dx`
-   - `dtheta`
-   - radial shell volume contribution
-
-3. Treat theta as periodic.
-
-4. Treat x according to the existing periodic cylinder convention.
-
-5. Mark invalid cells outside the physical shell before normalization or smoothing.
-
-6. Avoid assuming equal cell volume; cylindrical cells do not all have the same volume.
-
-## Phase 4: TSC Deposition
-
-1. For each valid particle, find the local `3 x 3 x 3` TSC stencil.
-
-2. Compute separable TSC weights in `x`, `r`, and `theta`.
-
-3. Drop invalid cells from the stencil.
-
-4. Normalize each particle's remaining stencil so total deposited mass is one.
-
-5. Deposit mass first.
-
-6. Convert mass to density only after deposition, using cell volume.
-
-7. Preserve global particle count:
-   - `sum(mass) == valid_particle_count`
-   - `sum(rho * volume) == valid_particle_count`
-
-## Phase 5: Moment And Tensor Deposition
-
-1. Deposit weighted numerators for all particle fields instead of averaging tensor values directly.
-
-2. Deposit mass alongside each numerator.
-
-3. Divide numerator by mass only where mass is positive.
-
-4. Decide and preserve the current downstream-compatible empty-cell policy before changing output values:
-   - use `NaN` only where downstream code already accepts it
-   - otherwise keep the existing finite sentinel/zero behavior
-
-5. Construct:
-   - density
-   - `P`
-   - `Q`
-   - `A`
-   - `psi6_sq`
-   - `J_rho`
-   - `J_P`
-   - `J_Q`
-
-6. Keep orientation components 3D and final surface flux directions 2D.
-
-## Phase 6: Conservative Smoothing
-
-1. Make smoothing optional.
-
-2. Smooth mass fields, not density fields.
-
-3. Smooth tensor/moment numerators and mass with the same conservative stencil.
-
-4. Start with a small separable stencil such as `1, 2, 1` in each dimension.
-
-5. Normalize smoothing weights over valid target cells for every source cell.
-
-6. Recompute density and averages after smoothing.
-
-7. Verify mass conservation before and after smoothing.
-
-## Phase 7: Copy Reduction
-
-1. Stop building full repeated grid coordinate vectors when a stencil-based particle loop is enough.
-
-2. Prefer one upload per frame for particle arrays.
-
-3. Keep intermediate fields on device until final output packing.
-
-4. Avoid repeated per-component readbacks inside nested loops.
-
-5. Use host readback only for final ndarray outputs or unavoidable API boundaries.
-
-6. Keep the code readable even if a few small copies remain.
-
-## Phase 8: Python Boundary
-
-1. Keep Python function names and output dictionary keys stable.
-
-2. Remove silent CPU fallback from Python wrappers once the Rust GPU path is mandatory.
-
-3. Ensure failure messages explain whether the problem is:
-   - missing GPU feature
-   - missing CUDA/MLX device
-   - Burn initialization failure
-   - invalid input geometry or shapes
-
-4. Avoid changing rho-fitting workflow code unless shape compatibility requires it.
-
-## Phase 9: Validation
-
-Use Pixi for all checks.
-
-1. Rust compile checks:
-   - `pixi run cargo check --manifest-path packages/rho-fitting-core/Cargo.toml --features gpu-metal`
-   - `pixi run cargo check --manifest-path packages/rho-fitting-core/Cargo.toml --features gpu-cuda`
-   - `pixi run cargo check --manifest-path packages/rho-fitting-core/Cargo.toml --features gpu`
-   - Run the no-feature cargo check only if non-coarse-graining Rust APIs are intentionally kept buildable without GPU support.
-
-2. Build check:
-   - `pixi run rho-fitting-build`
-
-3. Python syntax/type checks:
-   - `pixi run python -m compileall hexatic`
-   - `pixi run ty check hexatic/rho_fitting`
-
-4. Data sanity checks on cached `radius_15D` inputs:
-   - shape checks for all mechanical fields
-   - finite/NaN policy checks for empty cells
-   - mass conservation before and after smoothing
-   - no accidental 3D surface flux output where PDE expects 2D
-
-5. PDE validation:
-   - Run only after cached field generation is sane.
-   - Compare divergence metrics and rollout metrics, not only flux R2.
+# Crystalline Cylinder Analysis in Rust
+
+## Summary
+
+Create:
+
+- `crates/crystalline_cylinder_analysis`: reusable Rust analysis library, published internally as `crystalline-cylinder-analysis`.
+- `packages/crystalline-cylinder-analysis`: CLI package named `crystalline-cylinder-analysis-cli`, exposing the `crystalline-cylinder-analysis` binary.
+
+The library will stream current Big-Lx and confinement safetensor outputs, compute COM motion, lagged velocity Pearson correlation, complex Laplace transforms, preferred \(r/\omega\), and robust damped-cosine fits. The CLI will produce Kuva SVG plots plus machine-readable safetensor and JSON artifacts.
+
+V1 is CPU-only on macOS and Linux, parallelized with Rayon and using Tenferro’s CPU-faer backend. It will not use Burn, PyO3, Maturin, or GPU dependencies yet.
+
+## Workspace and Public Interfaces
+
+- Raise the workspace `rust-version` from 1.83 to 1.87 for Kuva 0.4 compatibility and update `Cargo.lock`.
+- Add shared dependencies for safetensors 0.8, memmap2, bytemuck, Tenferro runtime/CPU/linalg 0.2, Kuva 0.4 with embedded-font SVG support, Clap 4, Serde/JSON, `num-complex`, and Rayon. Use assertion-driven fail-fast validation instead of custom error enums.
+- Do not add `integrate`: its Simpson API evaluates a function at new points, whereas this workflow integrates sampled correlation values. Implement sampled Simpson quadrature directly.
+- Expose typed result structures including `CaseMetadata`, `ComSeries`, `CorrelationSeries`, `LaplaceGrid`, `PreferredEstimate`, and `DampedCosineFit`.
+- Use focused enums for manifest schema, analysis kind, preferred axis, and output artifact type. Provide an `AnalysisBackend` trait with a `CpuAnalysisBackend`; keep I/O and plotting outside the backend abstraction.
+- Keep the core library free of CLI and Kuva concerns so it can later be wrapped by PyO3 without reorganizing numerical code.
+
+CLI shape:
+
+```text
+crystalline-cylinder-analysis [global options] <subcommand>
+
+subcommands:
+  com
+  correlation
+  laplace
+  preferred --axis omega|r|both
+  fit
+```
+
+Global options include repeatable `--input-dir`, optional `--output-dir`, `--timestep` defaulting to `1e-6`, optional `--threads`, and explicit `--overwrite`. Correlation-derived commands expose `--max-lag`; every selected lag must retain at least two paired samples. Transform commands preserve the Python range/point defaults.
+
+## Implementation Changes
+
+### Streaming input and validation
+
+- Scan each resolved `--input-dir/safetensors_output/*/manifest.json`; accept complete `hexatic.big_lx.analysis.v1` and `hexatic.confinement_comparison.analysis.v1` manifests.
+- Identify cases from manifest metadata—not shard filenames, which currently only encode frame ranges. Group replicates by `(schema, case_id)` and require matching geometry, particle count, \(L_x\), multiplier, and confinement metadata. Do not inspect or verify seed values.
+- Validate contained paths, contiguous zero-based shards, declared frame counts, required tensors, dtypes, shapes, finite coordinates, and globally increasing steps before using results.
+- Encapsulate a read-only `memmap2::Mmap` and direct `safetensors::SafeTensors` views in the shard reader. Borrow only `coords`/`position_cartesian` and `step`, expose typed zero-copy slices through bytemuck, decode one frame at a time, and drop each mapping before opening the next shard. Never materialize every tensor or every shard. Document the mmap safety requirement that inputs remain unchanged while mapped.
+- Refuse to overwrite existing analysis artifacts unless `--overwrite` is supplied; write JSON and safetensors atomically.
+
+### COM, correlation, and replicate handling
+
+- Maintain only previous wrapped coordinates and current unwrapped coordinates, both \(O(N_\text{particles})\). Apply the per-particle minimum-image update
+  \(dx \leftarrow dx-L_x\operatorname{round}(dx/L_x)\), then average in `f64`.
+- Compute elapsed time from steps and `--timestep`. Reproduce NumPy-style first/second-order endpoint gradients and centered interior gradients, including nonuniform COM sampling; require uniform sampling before correlation.
+- Implement Pearson correlation manually for every lag using centered paired windows, compensated `f64` accumulation, explicit zero-variance assertions, lag-zero normalization to one, and clipping to \([-1,1]\).
+- Parallelize independent cases, lags, and transform grid rows with Rayon while keeping only one shard per active replicate mapped.
+- For duplicate cases, require a compatible common elapsed/lag prefix, compute each replicate’s COM velocity and Pearson series independently, then average those series pointwise. Store sample-standard-deviation bands and summed time-origin counts. The averaged Pearson series is the primary input to all downstream transforms and fitting.
+
+### Laplace analysis and fitting
+
+- Implement sampled composite Simpson integration, including trapezoidal handling for two samples and SciPy’s final-interval Cartwright correction when the number of samples is even.
+- Evaluate
+  \[
+  \widehat C_v(r+i\omega)=\int e^{(r+i\omega)\tau}C_v(\tau)\,d\tau
+  \]
+  directly in `f64`/`Complex64`, parallelized over grid coordinates without allocating an `(r, omega, time)` temporary.
+- Preserve Python defaults:
+  - \(r_{\min}=-10/T\), \(r_{\max}=0\);
+  - \(\omega_{\max}=\min(\omega_\mathrm{Nyquist},20\pi/T)\);
+  - 161×241 full heatmap grid;
+  - 241-point preferred-coordinate grids.
+- Preferred \(\omega\) searches strictly positive frequencies at \(r=0\); preferred \(r\) searches strictly negative values at \(\omega=0\). Maximize `log10(max(abs(transform), f64::MIN_POSITIVE))` and report boundary warnings.
+- Reproduce the current robust model
+  \[
+  C_v(\tau)=A e^{-r\tau}\cos(\omega\tau+\phi)+B,\qquad
+  B=1-A\cos\phi.
+  \]
+  Preserve the Python bounds, origin-count weights, soft-L1 scale `0.05`, nine rate/frequency starts, 20,000-evaluation ceiling, boundary diagnostics, and unweighted \(R^2\).
+- Implement analytic Jacobians and a bounded Levenberg–Marquardt/IRLS loop. Each damped linearized system will be converted explicitly to Tenferro’s column-major layout and solved through `tenferro-linalg` SVD/pseudoinverse with a documented rank tolerance. Accept/reject steps using the exact soft-L1 objective and stop on gradient, step, or objective tolerances of `1e-8`.
+- Keep external safetensor data as borrowed row-major frame views; only the small optimizer matrices are compacted into Tenferro’s column-major representation. [Tenferro memory-order guidance](https://tensor4all.org/tenferro-rs/guides/memory-order.html)
+
+### Plotting and artifacts
+
+- Default output directory: `<first-input-dir>/crystalline_cylinder_analysis_output`.
+- Write an output manifest using schema `crystalline_cylinder_analysis.output.v1`, a JSON scalar summary, and per-case safetensors containing numerical arrays and replicate metadata.
+- Use Kuva 0.4 to generate self-contained SVGs:
+  - two-panel unwrapped COM and COM-velocity plot with replicate bands;
+  - velocity Pearson correlation versus lag with replicate bands;
+  - schema-grouped `log10|Ĉv|` Laplace heatmap panels for Big-Lx and confinement cases;
+  - preferred \(r\) and \(\omega\) versus \(L_x\) multiplier, grouped by circumference with confinement cases at multiplier one;
+  - measured correlation and damped-cosine fit overlays with fitted parameters and \(R^2\).
+
+## Validation
+
+Repository policy forbids adding or running a test suite. Verification will therefore be limited to:
+
+- `pixi run cargo fmt --all --check`
+- targeted `cargo check` for the new core crate and CLI package
+- CLI `--help`/argument parsing checks
+- review that no Burn, PyO3, Maturin, GPU, or generated analysis outputs were introduced
+- runtime fail-fast checks for malformed manifests, escaping shard paths, inconsistent replicas, invalid tensors, nonuniform correlation samples, zero variance, transform overflow, invalid grids, and singular/nonconvergent fits
+
+No production safetensors or generated plots will be overwritten during implementation.
 
 ## Assumptions
 
-- The active target is still the cached `radius_15D` rho-fitting data, not a new HOOMD run or the full radius workflow.
-- For this dataset, `Lx` follows the fixed `15D` convention from the repository notes, not a generic radius helper.
-- Particle inputs can be mapped to `(x, r, theta)` before deposition, and final rho-fitting outputs still collapse/select the radial coordinate into 2D surface fields.
-- `x` and `theta` are periodic for stencil indexing; `r` is not periodic and is restricted to the physical shell.
-- Feature names should stay stable if possible: `gpu-metal` should mean the Apple Metal path even if its implementation changes from `burn-wgpu` to `burn-mlx`.
-- If both CUDA and MLX/Metal features are compiled, backend selection must be deterministic and documented.
-- Optional smoothing is off unless explicitly enabled by the workflow or configuration.
-
-## Edge Cases
-
-- Particles exactly on `x` or `theta` boundaries must wrap consistently and not double-count boundary cells.
-- Particles outside the valid radial shell, or with a TSC stencil whose valid-weight sum is zero, must be skipped with a diagnostic count rather than normalized by zero.
-- TSC weights near non-periodic radial boundaries must be renormalized over valid cells so each valid particle deposits unit mass.
-- Invalid grid cells must not receive mass, moment numerators, smoothing mass, or smoothing numerators.
-- Cells with zero volume or non-finite volume are invalid and should fail validation before deposition.
-- Empty cells must not divide moment/tensor numerators by zero; apply the documented empty-cell policy consistently to `P`, `Q`, `A`, `psi6_sq`, `J_rho`, `J_P`, and `J_Q`.
-- Smoothing must conserve mass over valid cells even near radial shell boundaries and periodic seams.
-- Surface flux outputs must never expose a radial flux component to PDE validation; only the `(x, R theta)` directions belong in `J_rho`, `J_P`, and `J_Q`.
-- GPU initialization failures, missing compiled features, missing devices, and invalid input shapes should produce distinct errors rather than falling back to CPU.
-- Near-zero-copy is a performance goal, but correctness and readable direct code take priority over contorted tensor plumbing.
-
-## Risks
-
-- Burn MLX API may not match CUDA closely enough for a single generic backend path.
-- TSC deposition may be harder to vectorize than the current grid-chunk Gaussian method.
-- Radial-grid handling must not leak an unwanted radial flux component into PDE validation.
-- Conservative smoothing can preserve mass while still changing closure quality, so reports must distinguish numerical conservation from PDE usefulness.
-
-## Follow-Ups
-
-- Remove the old CPU coarse-graining path from rho-fitting rather than preserving it as a fallback.
-- Leave smoothing default selection to the user after implementation; do not run comparison studies as part of this plan.
+- CPU-first means no Metal/CUDA feature flags in v1; Rayon and Tenferro CPU-faer are supported on both target platforms.
+- Big-Lx and confinement replicas with the same case ID represent the same physical case once validated, regardless of seed metadata.
+- The existing `1e-6` timestep remains the default, but callers may override it.
+- Only axial COM velocity Pearson correlation is included; the Python hexatic-order autocorrelation is out of scope.
+- SVG is the canonical plot format; numeric safetensor and JSON artifacts provide future Python/PyO3 interoperability.

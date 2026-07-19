@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use crate::backend::AnalysisBackend;
 use crate::center_of_mass::ComConfig;
 use crate::correlation::CorrelationConfig;
-use crate::error::AnalysisResult;
 use crate::fit::FitConfig;
 use crate::laplace::LaplaceConfig;
 use crate::model::{
@@ -37,6 +36,6 @@ pub struct CaseAnalysis {
 pub fn run_pipeline<B: AnalysisBackend>(
     _backend: &B,
     _config: &PipelineConfig,
-) -> AnalysisResult<Vec<CaseAnalysis>> {
+) -> Vec<CaseAnalysis> {
     todo!("discover once, stream once, and reuse all requested intermediates")
 }
