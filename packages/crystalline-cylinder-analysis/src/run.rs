@@ -1,12 +1,13 @@
 //! Translation from CLI declarations to the reusable analysis pipeline.
 
-use crate::cli::{AnalysisCommand, BigLxCircumference, Cli, CorrelationArgs};
-use crate::plots::{write_com_plot, write_correlation_plot};
+use crate::cli::{AnalysisCommand, BigLxCircumference, Cli, CorrelationArgs, LaplaceArgs};
+use crate::plots::{write_com_plot, write_correlation_plot, write_laplace_plots};
 use crystalline_cylinder_analysis::center_of_mass::{analyze_replica_com, ComConfig};
 use crystalline_cylinder_analysis::correlation::{analyze_correlation, CorrelationConfig};
 use crystalline_cylinder_analysis::input::{
     discover_datasets, group_replicates, inspect_dataset, DatasetShape,
 };
+use crystalline_cylinder_analysis::laplace::{analyze_laplace, transform_axes, LaplaceConfig};
 use crystalline_cylinder_analysis::pipeline::CaseAnalysis;
 use crystalline_cylinder_analysis::replicates::{average_com_series, average_correlations};
 use crystalline_cylinder_analysis::{
@@ -28,6 +29,7 @@ pub fn run(cli: Cli) {
         AnalysisCommand::Inspect => inspect_inputs(&common.input_dir),
         AnalysisCommand::Com(args) => run_com(&backend, &common, args.circ),
         AnalysisCommand::Correlation(args) => run_correlation(&backend, &common, args),
+        AnalysisCommand::Laplace(args) => run_laplace(&backend, &common, args),
         command => panic!("{} not implemented", command_name(&command)),
     }
 }
@@ -73,17 +75,7 @@ fn run_correlation(
     common: &crate::cli::CommonArgs,
     args: CorrelationArgs,
 ) {
-    let groups = selected_groups(common, args.circ);
-    let com_config = com_config(common);
-    let correlation_config = CorrelationConfig {
-        max_lag: args.max_lag,
-    };
-    let analyses = backend.install(|| {
-        groups
-            .into_par_iter()
-            .map(|group| analyze_group_correlation(backend, group, com_config, correlation_config))
-            .collect::<Vec<_>>()
-    });
+    let analyses = correlation_analyses(backend, common, args);
 
     for analysis in &analyses {
         let correlation = analysis
@@ -108,6 +100,77 @@ fn run_correlation(
         analyses.len(),
         written.display()
     );
+}
+
+fn run_laplace(backend: &CpuAnalysisBackend, common: &crate::cli::CommonArgs, args: LaplaceArgs) {
+    let mut analyses = correlation_analyses(backend, common, args.correlation);
+    let correlations = analyses
+        .iter()
+        .map(|analysis| {
+            analysis
+                .correlation
+                .as_ref()
+                .expect("analysis has no correlation")
+                .clone()
+        })
+        .collect::<Vec<_>>();
+    let config = LaplaceConfig {
+        r_min: args.transform.r_min,
+        r_max: args.transform.r_max,
+        r_points: args.transform.r_points,
+        omega_min: args.transform.omega_min,
+        omega_max: args.transform.omega_max,
+        omega_points: args.transform.omega_points,
+    };
+    let (r, omega) = transform_axes(&correlations, config);
+    backend.install(|| {
+        analyses.par_iter_mut().for_each(|analysis| {
+            let correlation = analysis
+                .correlation
+                .as_ref()
+                .expect("analysis has no correlation");
+            analysis.laplace = Some(analyze_laplace(backend, correlation, &r, &omega));
+        });
+    });
+
+    for analysis in &analyses {
+        let grid = analysis
+            .laplace
+            .as_ref()
+            .expect("analysis has no Laplace grid");
+        eprintln!(
+            "[debug:laplace] case={} shape={:?} order=[omega,r] values={}",
+            analysis.group.case.case_id,
+            grid.shape,
+            grid.values.len()
+        );
+    }
+
+    let output_dir = output_root(common).join("laplace");
+    let written = write_laplace_plots(&analyses, &output_dir, common.overwrite);
+    eprintln!(
+        "[crystalline-cylinder-analysis] command=laplace cases={} outputs={}",
+        analyses.len(),
+        written.len()
+    );
+}
+
+fn correlation_analyses(
+    backend: &CpuAnalysisBackend,
+    common: &crate::cli::CommonArgs,
+    args: CorrelationArgs,
+) -> Vec<CaseAnalysis> {
+    let groups = selected_groups(common, args.circ);
+    let com_config = com_config(common);
+    let correlation_config = CorrelationConfig {
+        max_lag: args.max_lag,
+    };
+    backend.install(|| {
+        groups
+            .into_par_iter()
+            .map(|group| analyze_group_correlation(backend, group, com_config, correlation_config))
+            .collect()
+    })
 }
 
 fn selected_groups(
@@ -176,14 +239,17 @@ fn case_analysis(
 }
 
 fn output_path(common: &crate::cli::CommonArgs, directory: &str, file: &str) -> PathBuf {
-    let root = common.output_dir.clone().unwrap_or_else(|| {
+    output_root(common).join(directory).join(file)
+}
+
+fn output_root(common: &crate::cli::CommonArgs) -> PathBuf {
+    common.output_dir.clone().unwrap_or_else(|| {
         common
             .input_dir
             .first()
             .expect("missing --input-dir")
             .join("crystalline_cylinder_analysis_output")
-    });
-    root.join(directory).join(file)
+    })
 }
 
 fn assert_output_available(output: &std::path::Path, overwrite: bool) {

@@ -2,6 +2,7 @@
 
 use crate::backend::AnalysisBackend;
 use crate::correlation::pearson;
+use crate::integration::simpson_weights;
 use crate::model::{CorrelationSeries, LaplaceGrid};
 use rayon::prelude::*;
 use tenferro_cpu::CpuContext;
@@ -59,11 +60,67 @@ impl AnalysisBackend for CpuAnalysisBackend {
 
     fn laplace_grid(
         &self,
-        _correlation: &CorrelationSeries,
-        _r: &[f64],
-        _omega: &[f64],
+        correlation: &CorrelationSeries,
+        r: &[f64],
+        omega: &[f64],
     ) -> LaplaceGrid {
-        todo!("evaluate independent Laplace grid rows in parallel")
+        let sample_count = correlation.lag_times.len();
+        assert_eq!(
+            correlation.pearson_mean.len(),
+            sample_count,
+            "correlation lengths differ"
+        );
+        assert!(sample_count >= 2, "Laplace transform needs two lags");
+        assert!(!r.is_empty(), "r grid is empty");
+        assert!(!omega.is_empty(), "omega grid is empty");
+        let spacing = correlation.lag_times[1] - correlation.lag_times[0];
+        let weights = simpson_weights(sample_count, spacing);
+        let column_count = r.len();
+        let values = self.install(|| {
+            (0..omega.len() * column_count)
+                .into_par_iter()
+                .map(|flat_index| {
+                    let omega_value = omega[flat_index / column_count];
+                    let r_value = r[flat_index % column_count];
+                    let mut real = 0.0;
+                    let mut real_compensation = 0.0;
+                    let mut imaginary = 0.0;
+                    let mut imaginary_compensation = 0.0;
+                    for ((&time, &correlation_value), &weight) in correlation
+                        .lag_times
+                        .iter()
+                        .zip(&correlation.pearson_mean)
+                        .zip(&weights)
+                    {
+                        let envelope = (r_value * time).exp();
+                        assert!(envelope.is_finite(), "Laplace exponential overflow");
+                        let (sine, cosine) = (omega_value * time).sin_cos();
+                        compensated_add(
+                            weight * correlation_value * envelope * cosine,
+                            &mut real,
+                            &mut real_compensation,
+                        );
+                        compensated_add(
+                            weight * correlation_value * envelope * sine,
+                            &mut imaginary,
+                            &mut imaginary_compensation,
+                        );
+                    }
+                    let value = num_complex::Complex64::new(real, imaginary);
+                    assert!(
+                        value.re.is_finite() && value.im.is_finite(),
+                        "Laplace result is non-finite"
+                    );
+                    value
+                })
+                .collect()
+        });
+        LaplaceGrid {
+            r: r.to_vec(),
+            omega: omega.to_vec(),
+            values,
+            shape: [omega.len(), r.len()],
+        }
     }
 
     fn linear_least_squares(
@@ -76,4 +133,11 @@ impl AnalysisBackend for CpuAnalysisBackend {
     ) -> Vec<f64> {
         todo!("solve through tenferro-linalg SVD or pseudoinverse")
     }
+}
+
+fn compensated_add(value: f64, sum: &mut f64, compensation: &mut f64) {
+    let corrected = value - *compensation;
+    let updated = *sum + corrected;
+    *compensation = (updated - *sum) - corrected;
+    *sum = updated;
 }
