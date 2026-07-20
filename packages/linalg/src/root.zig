@@ -503,6 +503,63 @@ pub fn matmul(comptime T: type, operation_a: Transpose, operation_b: Transpose, 
     return result;
 }
 
+pub const SvdMode = enum { values_only, thin };
+
+pub const SvdOptions = struct {
+    mode: SvdMode = .thin,
+};
+
+pub fn SvdResult(comptime T: type) type {
+    validateScalar(T);
+    return struct {
+        const Self = @This();
+
+        u: ?Matrix(T),
+        singular_values: Vector(Real(T)),
+        vh: ?Matrix(T),
+
+        pub fn deinit(self: *Self) void {
+            if (self.u) |*matrix| matrix.deinit();
+            self.singular_values.deinit();
+            if (self.vh) |*matrix| matrix.deinit();
+            self.u = null;
+            self.vh = null;
+        }
+    };
+}
+
+pub fn svd(comptime T: type, input: ConstMatrixView(T), options: SvdOptions) !SvdResult(T) {
+    try validateMatrixView(T, input);
+    if (input.rows < input.cols) return error.WideMatrixUnsupported;
+
+    const context = @constCast(input.context);
+    var singular_values = try Vector(Real(T)).init(context, input.cols);
+    errdefer singular_values.deinit();
+    var u: ?Matrix(T) = null;
+    errdefer if (u) |*matrix| matrix.deinit();
+    var vh: ?Matrix(T) = null;
+    errdefer if (vh) |*matrix| matrix.deinit();
+    if (options.mode == .thin) {
+        u = try Matrix(T).init(context, input.rows, input.cols);
+        vh = try Matrix(T).init(context, input.cols, input.cols);
+    }
+
+    try driver.lapackSvd(
+        T,
+        context.allocator,
+        options.mode == .thin,
+        input.buffer,
+        input.offset,
+        input.rows,
+        input.cols,
+        input.leading_dimension,
+        if (u) |*matrix| &matrix.buffer else null,
+        &singular_values.buffer,
+        if (vh) |*matrix| &matrix.buffer else null,
+    );
+    return .{ .u = u, .singular_values = singular_values, .vh = vh };
+}
+
 fn expectComplexApprox(comptime T: type, expected: T, actual: T, tolerance: Real(T)) !void {
     try std.testing.expectApproxEqAbs(expected.re, actual.re, tolerance);
     try std.testing.expectApproxEqAbs(expected.im, actual.im, tolerance);
@@ -645,6 +702,53 @@ fn testComplexMatrixBlas(comptime T: type, tolerance: Real(T)) !void {
     try expectComplexApprox(T, T.init(3, 1), value[0], tolerance);
 }
 
+fn testSvd(comptime T: type, tolerance: Real(T)) !void {
+    var context = try Context.init(std.testing.allocator, .{});
+    defer context.deinit();
+    const values = if (comptime scalar.isComplex(T))
+        [_]T{ .init(1, 1), .init(2, 0), .init(0, -1), .init(0, 0), .init(1, -1), .init(3, 0) }
+    else
+        [_]T{ 1, 2, -1, 0, 1, 3 };
+    var input = try Matrix(T).fromHost(&context, 3, 2, &values);
+    defer input.deinit();
+    var result = try svd(T, input.constView(), .{ .mode = .thin });
+    defer result.deinit();
+
+    try std.testing.expect(result.u != null);
+    try std.testing.expect(result.vh != null);
+    var singular_host: [2]Real(T) = undefined;
+    result.singular_values.copyToHost(&singular_host);
+    try std.testing.expect(singular_host[0] >= singular_host[1]);
+    try std.testing.expect(singular_host[1] >= 0);
+
+    var sigma_values = [_]T{ scalarZero(T), scalarZero(T), scalarZero(T), scalarZero(T) };
+    sigma_values[0] = if (comptime scalar.isComplex(T)) T.init(singular_host[0], 0) else singular_host[0];
+    sigma_values[3] = if (comptime scalar.isComplex(T)) T.init(singular_host[1], 0) else singular_host[1];
+    var sigma = try Matrix(T).fromHost(&context, 2, 2, &sigma_values);
+    defer sigma.deinit();
+    var scaled_u = try matmul(T, .none, .none, result.u.?.constView(), sigma.constView());
+    defer scaled_u.deinit();
+    var reconstructed = try matmul(T, .none, .none, scaled_u.constView(), result.vh.?.constView());
+    defer reconstructed.deinit();
+    var reconstructed_host: [6]T = undefined;
+    reconstructed.copyToHost(&reconstructed_host);
+    for (values, reconstructed_host) |expected, actual| {
+        if (comptime scalar.isComplex(T)) {
+            try expectComplexApprox(T, expected, actual, tolerance);
+        } else {
+            try std.testing.expectApproxEqAbs(expected, actual, tolerance);
+        }
+    }
+
+    var values_only = try svd(T, input.constView(), .{ .mode = .values_only });
+    defer values_only.deinit();
+    try std.testing.expect(values_only.u == null);
+    try std.testing.expect(values_only.vh == null);
+    var values_only_host: [2]Real(T) = undefined;
+    values_only.singular_values.copyToHost(&values_only_host);
+    for (singular_host, values_only_host) |expected, actual| try std.testing.expectApproxEqAbs(expected, actual, tolerance);
+}
+
 test "complex representation and conversions" {
     const value = Complex32.init(2.5, -3.0);
     try std.testing.expectEqual(@sizeOf([2]f32), @sizeOf(Complex32));
@@ -703,4 +807,11 @@ test "real matrix BLAS" {
 test "complex matrix BLAS" {
     try testComplexMatrixBlas(Complex32, 1.0e-5);
     try testComplexMatrixBlas(Complex64, 1.0e-12);
+}
+
+test "thin and values-only SVD" {
+    try testSvd(f32, 1.0e-4);
+    try testSvd(f64, 1.0e-11);
+    try testSvd(Complex32, 1.0e-4);
+    try testSvd(Complex64, 1.0e-11);
 }

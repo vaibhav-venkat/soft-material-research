@@ -1,2 +1,14 @@
 #include <vecLib/cblas.h>
-#include <vecLib/lapack.h>
+
+void linalg_sgesdd(char jobz, int m, int n, float *a, int lda, float *s,
+                   float *u, int ldu, float *vt, int ldvt, float *work,
+                   int lwork, int *iwork, int *info);
+void linalg_dgesdd(char jobz, int m, int n, double *a, int lda, double *s,
+                   double *u, int ldu, double *vt, int ldvt, double *work,
+                   int lwork, int *iwork, int *info);
+void linalg_cgesdd(char jobz, int m, int n, void *a, int lda, float *s,
+                   void *u, int ldu, void *vt, int ldvt, void *work,
+                   int lwork, float *rwork, int *iwork, int *info);
+void linalg_zgesdd(char jobz, int m, int n, void *a, int lda, double *s,
+                   void *u, int ldu, void *vt, int ldvt, void *work,
+                   int lwork, double *rwork, int *iwork, int *info);

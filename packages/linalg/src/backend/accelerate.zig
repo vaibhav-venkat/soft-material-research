@@ -346,3 +346,99 @@ pub fn blasGemm(
     const trans_b = cTranspose(T, operation_b);
     if (T == f32) c.cblas_sgemm(cOrder(), trans_a, trans_b, m, n, k, alpha, @ptrCast(ap), lda, @ptrCast(bp), ldb, beta, @ptrCast(cp), ldc) else if (T == f64) c.cblas_dgemm(cOrder(), trans_a, trans_b, m, n, k, alpha, @ptrCast(ap), lda, @ptrCast(bp), ldb, beta, @ptrCast(cp), ldc) else if (T == scalar.Complex32) c.cblas_cgemm(cOrder(), trans_a, trans_b, m, n, k, &alpha, ap, lda, bp, ldb, &beta, cp, ldc) else c.cblas_zgemm(cOrder(), trans_a, trans_b, m, n, k, &alpha, ap, lda, bp, ldb, &beta, cp, ldc);
 }
+
+fn callGesdd(
+    comptime T: type,
+    jobz: u8,
+    m: c_int,
+    n: c_int,
+    a: [*]T,
+    singular_values: [*]scalar.Real(T),
+    u: [*]T,
+    vt: [*]T,
+    work: [*]T,
+    lwork: c_int,
+    rwork: ?[*]scalar.Real(T),
+    iwork: [*]c_int,
+    info: *c_int,
+) void {
+    const lda = m;
+    const ldu: c_int = if (jobz == 'S') m else 1;
+    const ldvt: c_int = if (jobz == 'S') n else 1;
+    if (T == f32) {
+        c.linalg_sgesdd(jobz, m, n, a, lda, singular_values, u, ldu, vt, ldvt, work, lwork, iwork, info);
+    } else if (T == f64) {
+        c.linalg_dgesdd(jobz, m, n, a, lda, singular_values, u, ldu, vt, ldvt, work, lwork, iwork, info);
+    } else if (T == scalar.Complex32) {
+        c.linalg_cgesdd(jobz, m, n, a, lda, singular_values, u, ldu, vt, ldvt, work, lwork, rwork.?, iwork, info);
+    } else {
+        c.linalg_zgesdd(jobz, m, n, a, lda, singular_values, u, ldu, vt, ldvt, work, lwork, rwork.?, iwork, info);
+    }
+}
+
+pub fn lapackSvd(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    vectors: bool,
+    input: *const Buffer(T),
+    input_offset: usize,
+    rows: usize,
+    cols: usize,
+    input_leading_dimension: usize,
+    output_u: ?*Buffer(T),
+    singular_values: *Buffer(scalar.Real(T)),
+    output_vh: ?*Buffer(T),
+) !void {
+    const m = try asCInt(rows);
+    const n = try asCInt(cols);
+    const matrix_len = try std.math.mul(usize, rows, cols);
+    var a = try allocator.alloc(T, matrix_len);
+    defer allocator.free(a);
+    for (0..cols) |column| {
+        @memcpy(a[column * rows ..][0..rows], input.values[input_offset + column * input_leading_dimension ..][0..rows]);
+    }
+
+    const thin_len = try std.math.mul(usize, rows, cols);
+    const u = try allocator.alloc(T, if (vectors) thin_len else 1);
+    defer allocator.free(u);
+    const vh = try allocator.alloc(T, if (vectors) try std.math.mul(usize, cols, cols) else 1);
+    defer allocator.free(vh);
+    const s = try allocator.alloc(scalar.Real(T), cols);
+    defer allocator.free(s);
+    const iwork = try allocator.alloc(c_int, try std.math.mul(usize, 8, cols));
+    defer allocator.free(iwork);
+
+    var rwork: ?[]scalar.Real(T) = null;
+    if (comptime scalar.isComplex(T)) {
+        const n_squared = try std.math.mul(usize, cols, cols);
+        const mn = try std.math.mul(usize, rows, cols);
+        const rwork_len = if (vectors)
+            try std.math.add(usize, try std.math.add(usize, try std.math.mul(usize, 7, n_squared), try std.math.mul(usize, 6, cols)), try std.math.mul(usize, 2, mn))
+        else
+            try std.math.mul(usize, 5, cols);
+        rwork = try allocator.alloc(scalar.Real(T), @max(rwork_len, 1));
+    }
+    defer if (rwork) |values| allocator.free(values);
+
+    var query: [1]T = undefined;
+    var info: c_int = 0;
+    const jobz: u8 = if (vectors) 'S' else 'N';
+    callGesdd(T, jobz, m, n, a.ptr, s.ptr, u.ptr, vh.ptr, &query, -1, if (rwork) |values| values.ptr else null, iwork.ptr, &info);
+    if (info != 0) return error.BackendFailure;
+    const suggested = if (comptime scalar.isComplex(T)) query[0].re else query[0];
+    if (!std.math.isFinite(suggested) or suggested < 1) return error.BackendFailure;
+    const work_len: usize = @intFromFloat(@ceil(suggested));
+    const lwork = try asCInt(work_len);
+    const work = try allocator.alloc(T, work_len);
+    defer allocator.free(work);
+
+    callGesdd(T, jobz, m, n, a.ptr, s.ptr, u.ptr, vh.ptr, work.ptr, lwork, if (rwork) |values| values.ptr else null, iwork.ptr, &info);
+    if (info < 0) return error.BackendFailure;
+    if (info > 0) return error.NonConvergent;
+
+    @memcpy(singular_values.values[0..cols], s);
+    if (vectors) {
+        @memcpy(output_u.?.values[0..thin_len], u);
+        @memcpy(output_vh.?.values[0 .. cols * cols], vh);
+    }
+}

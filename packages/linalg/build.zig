@@ -46,6 +46,7 @@ pub fn build(b: *std.Build) void {
     });
     module.addOptions("linalg_build_options", build_options);
     module.addImport("accelerate_c", accelerate_c);
+    module.addCSourceFile(.{ .file = b.path("src/backend/accelerate_shim.c") });
     module.link_libc = true;
     module.linkFramework("Accelerate", .{});
 
