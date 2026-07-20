@@ -26,7 +26,10 @@ pixi run cargo run --release -p crystalline-cylinder-analysis-cli -- \
   --input-dir hexatic/big_lx \
   --input-dir hexatic/confinement_comparison \
   --output-dir cluster_analysis_output \
-  clusters
+  clusters \
+  --frame-start 600 \
+  --frame-stop 1000 \
+  --snapshot-frames 700
 ```
 
 The `clusters` command currently selects cylindrical cases only. Its structural
@@ -35,6 +38,8 @@ and coherent-motion distributions use the occupied particle footprint
 `SA = Lx C = 2 pi R Lx`. The resulting horizontal coordinate is `A/SA`.
 Static cluster views assign an overlapping particle to the cluster with the
 larger occupied area (and use the smaller local cluster ID to break exact ties).
+`--frame-start` is inclusive and `--frame-stop` is exclusive. Omitting the stop
+uses the trajectory length; snapshots outside the selected interval are skipped.
 
 Tenferro uses explicit host/device transfers. This CLI uploads graph inputs and
 downloads final host-visible results; unsupported CUDA operations fail instead

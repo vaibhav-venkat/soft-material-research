@@ -109,6 +109,8 @@ fn run_clusters(
         "cluster shard target must be positive"
     );
     let config = ClusterConfig {
+        frame_start: args.frame_start,
+        frame_stop: args.frame_stop,
         lag_frames: args.lag_frames,
         psi6_minimum: args.psi6_min,
         misorientation_degrees: args.misorientation_degrees,
@@ -229,7 +231,7 @@ fn run_clusters(
         &motion_output,
     );
     let manifest = ClusterRunManifest {
-        schema: "crystalline-cylinder-analysis.clusters.run.v3".to_owned(),
+        schema: "crystalline-cylinder-analysis.clusters.run.v4".to_owned(),
         config,
         bins: args.bins,
         target_shard_mib: args.target_shard_mib,
@@ -260,12 +262,15 @@ fn analyze_cluster_replicate(
     target_shard_mib: usize,
     cluster_root: &std::path::Path,
 ) -> ClusterReplicateWork {
+    let frame_stop = config.frame_stop.unwrap_or(dataset.manifest.frame_count);
     eprintln!(
-        "[clusters] case={} replicate={}/{} frames={} particles={}",
+        "[clusters] case={} replicate={}/{} frame_range={}..{} selected_frames={} particles={}",
         group.case.case_id,
         replicate_index + 1,
         group.datasets.len(),
-        dataset.manifest.frame_count,
+        config.frame_start,
+        frame_stop,
+        frame_stop.saturating_sub(config.frame_start),
         dataset.manifest.case.n_particles,
     );
     let analysis = analyze_dataset_clusters_with_snapshots(dataset, config, snapshot_frames);
@@ -316,13 +321,14 @@ fn analyze_cluster_replicate(
                 snapshot_files.push(output);
             }
             for frame in snapshot_frames {
-                if *frame >= dataset.manifest.frame_count {
+                if *frame < config.frame_start || *frame >= frame_stop {
                     eprintln!(
-                        "[clusters] snapshot frame={} out of range for case={} replicate={} (frames={})",
+                        "[clusters] snapshot frame={} outside selected range {}..{} for case={} replicate={}",
                         frame,
+                        config.frame_start,
+                        frame_stop,
                         group.case.case_id,
                         replicate_index + 1,
-                        dataset.manifest.frame_count,
                     );
                 }
             }

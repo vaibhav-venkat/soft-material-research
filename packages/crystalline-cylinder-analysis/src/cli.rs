@@ -173,6 +173,12 @@ pub struct ClusterArgs {
     /// Restrict analysis to these discovered case IDs; repeat as needed.
     #[arg(long)]
     pub case: Vec<String>,
+    /// First frame index to analyze (inclusive).
+    #[arg(long, default_value_t = 0)]
+    pub frame_start: usize,
+    /// Frame index at which analysis stops (exclusive); defaults to the trajectory length.
+    #[arg(long)]
+    pub frame_stop: Option<usize>,
     #[arg(long, default_value_t = 1)]
     pub lag_frames: usize,
     #[arg(long, default_value_t = 50)]

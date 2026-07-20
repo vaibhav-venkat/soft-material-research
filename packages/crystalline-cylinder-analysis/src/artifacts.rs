@@ -94,7 +94,7 @@ pub fn write_cluster_dataset(
         target_bytes,
     );
     let manifest = ClusterDatasetManifest {
-        schema: "crystalline-cylinder-analysis.clusters.dataset.v2".to_owned(),
+        schema: "crystalline-cylinder-analysis.clusters.dataset.v3".to_owned(),
         case_id: analysis.case_id.clone(),
         input_manifest: input_manifest.to_path_buf(),
         frame_count: analysis.frame_count,

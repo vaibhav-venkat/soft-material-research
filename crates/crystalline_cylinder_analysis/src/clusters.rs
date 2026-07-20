@@ -13,6 +13,8 @@ use crate::model::{CaseSchema, DiscoveredDataset};
 /// Numerical controls shared by structural and motion clustering.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 pub struct ClusterConfig {
+    pub frame_start: usize,
+    pub frame_stop: Option<usize>,
     pub lag_frames: usize,
     pub psi6_minimum: f64,
     pub misorientation_degrees: f64,
@@ -26,6 +28,8 @@ pub struct ClusterConfig {
 impl Default for ClusterConfig {
     fn default() -> Self {
         Self {
+            frame_start: 0,
+            frame_stop: None,
             lag_frames: 1,
             psi6_minimum: 0.7,
             misorientation_degrees: 5.0,
@@ -41,6 +45,12 @@ impl Default for ClusterConfig {
 impl ClusterConfig {
     /// Reject non-physical or numerically ambiguous controls.
     pub fn validate(self) {
+        if let Some(frame_stop) = self.frame_stop {
+            assert!(
+                frame_stop > self.frame_start,
+                "cluster frame stop must exceed frame start"
+            );
+        }
         assert!(self.lag_frames > 0, "cluster lag must be positive");
         assert!(
             self.psi6_minimum.is_finite() && (0.0..=1.0).contains(&self.psi6_minimum),
@@ -221,9 +231,20 @@ pub fn analyze_dataset_clusters_with_snapshots(
         Geometry::Cylinder,
         "cluster analysis currently supports cylinders only"
     );
+    let frame_start = config.frame_start;
+    let frame_stop = config.frame_stop.unwrap_or(dataset.manifest.frame_count);
     assert!(
-        dataset.manifest.frame_count > config.lag_frames,
-        "cluster lag exceeds trajectory"
+        frame_stop <= dataset.manifest.frame_count,
+        "cluster frame stop exceeds trajectory"
+    );
+    assert!(
+        frame_start < frame_stop,
+        "cluster frame start must be inside the trajectory"
+    );
+    let analysis_frame_count = frame_stop - frame_start;
+    assert!(
+        analysis_frame_count > config.lag_frames,
+        "cluster lag exceeds selected frame range"
     );
     let diameter = dataset
         .manifest
@@ -243,11 +264,15 @@ pub fn analyze_dataset_clusters_with_snapshots(
     let mut lag_window = VecDeque::with_capacity(config.lag_frames + 1);
 
     for shard in &dataset.manifest.shards {
+        let selected_start = shard.frame_start.max(frame_start);
+        let selected_stop = shard.frame_stop.min(frame_stop);
+        if selected_start >= selected_stop {
+            continue;
+        }
         let path = resolve_shard_path(&dataset.manifest_path, &shard.file);
         let mapped = MappedShard::open(&path);
-        let frame_count = shard.frame_stop - shard.frame_start;
-        for local_frame in 0..frame_count {
-            let frame_index = shard.frame_start + local_frame;
+        for frame_index in selected_start..selected_stop {
+            let local_frame = frame_index - shard.frame_start;
             let capture_snapshot = collect_snapshots && requested_snapshots.contains(&frame_index);
             let mut frame =
                 load_surface_frame(dataset, &mapped, local_frame, frame_index, capture_snapshot);
@@ -294,12 +319,9 @@ pub fn analyze_dataset_clusters_with_snapshots(
     }
 
     assert_eq!(
-        dataset
-            .manifest
-            .frame_count
-            .saturating_sub(config.lag_frames),
-        dataset.manifest.frame_count - lag_window.len(),
-        "bad motion origin count"
+        lag_window.len(),
+        config.lag_frames,
+        "bad terminal cluster lag window"
     );
     DatasetClusterAnalysis {
         case_id: dataset.manifest.case.case_id.clone(),
