@@ -94,7 +94,7 @@ pub fn write_cluster_dataset(
         target_bytes,
     );
     let manifest = ClusterDatasetManifest {
-        schema: "crystalline-cylinder-analysis.clusters.dataset.v3".to_owned(),
+        schema: "crystalline-cylinder-analysis.clusters.dataset.v4".to_owned(),
         case_id: analysis.case_id.clone(),
         input_manifest: input_manifest.to_path_buf(),
         frame_count: analysis.frame_count,
@@ -178,21 +178,17 @@ fn write_cluster_shard(path: &Path, kind: ClusterKind, records: &[ClusterRecord]
         .iter()
         .map(|record| as_i64(record.particle_count))
         .collect::<Vec<_>>();
-    let occupied_area = records
+    let equivalent_circumference = records
         .iter()
-        .map(|record| record.occupied_area)
+        .map(|record| record.equivalent_circumference)
         .collect::<Vec<_>>();
-    let cylinder_surface_area = records
+    let surface_equivalent_circumference = records
         .iter()
-        .map(|record| record.cylinder_surface_area)
+        .map(|record| record.surface_equivalent_circumference)
         .collect::<Vec<_>>();
-    let equivalent_perimeter = records
+    let normalized_circumference = records
         .iter()
-        .map(|record| record.equivalent_perimeter)
-        .collect::<Vec<_>>();
-    let normalized_area = records
-        .iter()
-        .map(|record| record.normalized_area)
+        .map(|record| record.normalized_circumference)
         .collect::<Vec<_>>();
     let mut member_offsets = Vec::with_capacity(count + 1);
     let mut member_particle_ids = Vec::new();
@@ -226,20 +222,24 @@ fn write_cluster_shard(path: &Path, kind: ClusterKind, records: &[ClusterRecord]
     insert_i64(&mut tensors, "domain_id", &[count], &domain_id);
     insert_f64(&mut tensors, "centroid", &[count, 2], &centroid);
     insert_i64(&mut tensors, "particle_count", &[count], &particle_count);
-    insert_f64(&mut tensors, "occupied_area", &[count], &occupied_area);
     insert_f64(
         &mut tensors,
-        "cylinder_surface_area",
+        "equivalent_circumference",
         &[count],
-        &cylinder_surface_area,
+        &equivalent_circumference,
     );
     insert_f64(
         &mut tensors,
-        "equivalent_perimeter",
+        "surface_equivalent_circumference",
         &[count],
-        &equivalent_perimeter,
+        &surface_equivalent_circumference,
     );
-    insert_f64(&mut tensors, "normalized_area", &[count], &normalized_area);
+    insert_f64(
+        &mut tensors,
+        "normalized_circumference",
+        &[count],
+        &normalized_circumference,
+    );
     insert_i64(
         &mut tensors,
         "member_offsets",
@@ -256,7 +256,7 @@ fn write_cluster_shard(path: &Path, kind: ClusterKind, records: &[ClusterRecord]
     let metadata = HashMap::from([
         (
             "schema".to_owned(),
-            "crystalline-cylinder-analysis.clusters.shard.v2".to_owned(),
+            "crystalline-cylinder-analysis.clusters.shard.v3".to_owned(),
         ),
         ("kind".to_owned(), format!("{kind:?}").to_lowercase()),
     ]);

@@ -33,20 +33,23 @@ pixi run cargo run --release -p crystalline-cylinder-analysis-cli -- \
 ```
 
 The `clusters` command currently selects cylindrical cases only. Its structural
-and coherent-motion distributions use the occupied particle footprint
-`A = N pi (D/2)^2`, normalized by the cylinder surface area
-`SA = Lx C = 2 pi R Lx`. The resulting horizontal coordinate is `A/SA`.
+and coherent-motion distributions use the equivalent-circle circumference
+`C_cluster = pi D sqrt(N)` divided by the equivalent circumference of the full
+cylinder surface, `C_surface = 2 sqrt(pi Lx C)`. The resulting horizontal
+coordinate is `C_cluster/C_surface`.
 Static cluster views assign an overlapping particle to the cluster with the
-larger occupied area (and use the smaller local cluster ID to break exact ties).
+larger equivalent circumference (and use the smaller local cluster ID to break
+exact ties).
 `--frame-start` is inclusive and `--frame-stop` is exclusive. Omitting the stop
 uses the trajectory length; snapshots outside the selected interval are skipped.
 The command writes log-binned cluster-count distributions and linear
-area-weighted distributions for both structural and coherent-motion clusters.
-Area weighting preserves small clusters but makes each cluster contribute in
-proportion to the particle area it contains.
+circumference-weighted distributions for both structural and coherent-motion
+clusters. Each cluster contributes in proportion to its equivalent
+circumference.
 It also writes a structural–motion overlap distribution. Each same-frame
 structural/motion cluster pair is located by particle-membership Jaccard overlap
-and weighted by the particle area shared by that pair.
+and weighted by the equivalent circumference of the particles shared by that
+pair.
 
 Tenferro uses explicit host/device transfers. This CLI uploads graph inputs and
 downloads final host-visible results; unsupported CUDA operations fail instead

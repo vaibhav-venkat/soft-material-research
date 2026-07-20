@@ -24,7 +24,7 @@ use crystalline_cylinder_analysis::replicates::{
     average_com_series, average_correlations, average_preferred_estimates,
 };
 use crystalline_cylinder_analysis::{
-    analyze_dataset_clusters_with_snapshots, cluster_area_weighted_probability_histogram,
+    analyze_dataset_clusters_with_snapshots, cluster_circumference_weighted_probability_histogram,
     cluster_log_probability_histogram, cluster_weighted_probability_histogram,
     structural_motion_overlap_samples, CaseSchema, ClusterConfig, ClusterHistogram, ComSeries,
     CorrelationSeries, DeviceAnalysisBackend, PreferredAxis, ReplicateGroup,
@@ -88,9 +88,9 @@ struct ClusterRunCase {
     snapshot_files: Vec<PathBuf>,
     structural_count_log: ClusterHistogram,
     motion_count_log: ClusterHistogram,
-    structural_area_weighted: ClusterHistogram,
-    motion_area_weighted: ClusterHistogram,
-    structural_motion_overlap_area_weighted: ClusterHistogram,
+    structural_circumference_weighted: ClusterHistogram,
+    motion_circumference_weighted: ClusterHistogram,
+    structural_motion_overlap_circumference_weighted: ClusterHistogram,
 }
 
 #[derive(Serialize)]
@@ -102,8 +102,8 @@ struct ClusterRunManifest {
     rayon_threads: usize,
     compute_device: String,
     snapshot_frames: Vec<usize>,
-    count_log_area_fraction_range: [f64; 2],
-    area_weighted_area_fraction_range: [f64; 2],
+    count_log_circumference_ratio_range: [f64; 2],
+    circumference_weighted_ratio_range: [f64; 2],
     overlap_jaccard_range: [f64; 2],
     cases: Vec<ClusterRunCase>,
 }
@@ -237,22 +237,23 @@ fn run_clusters(
                 args.bins,
                 log_range,
             ),
-            structural_area_weighted: cluster_area_weighted_probability_histogram(
+            structural_circumference_weighted: cluster_circumference_weighted_probability_histogram(
                 &case.structural_samples,
                 args.bins,
                 linear_range,
             ),
-            motion_area_weighted: cluster_area_weighted_probability_histogram(
+            motion_circumference_weighted: cluster_circumference_weighted_probability_histogram(
                 &case.motion_samples,
                 args.bins,
                 linear_range,
             ),
-            structural_motion_overlap_area_weighted: cluster_weighted_probability_histogram(
-                &case.overlap_samples,
-                &case.overlap_weights,
-                args.bins,
-                (0.0, 1.0),
-            ),
+            structural_motion_overlap_circumference_weighted:
+                cluster_weighted_probability_histogram(
+                    &case.overlap_samples,
+                    &case.overlap_weights,
+                    args.bins,
+                    (0.0, 1.0),
+                ),
         })
         .collect::<Vec<_>>();
     let structural_plot_cases = cases
@@ -273,34 +274,39 @@ fn run_clusters(
         .iter()
         .map(|case| ClusterPlotCase {
             label: case.label.clone(),
-            histogram: case.structural_area_weighted.clone(),
+            histogram: case.structural_circumference_weighted.clone(),
         })
         .collect::<Vec<_>>();
     let motion_weighted_plot_cases = cases
         .iter()
         .map(|case| ClusterPlotCase {
             label: case.label.clone(),
-            histogram: case.motion_area_weighted.clone(),
+            histogram: case.motion_circumference_weighted.clone(),
         })
         .collect::<Vec<_>>();
     let overlap_weighted_plot_cases = cases
         .iter()
         .map(|case| ClusterPlotCase {
             label: case.label.clone(),
-            histogram: case.structural_motion_overlap_area_weighted.clone(),
+            histogram: case
+                .structural_motion_overlap_circumference_weighted
+                .clone(),
         })
         .collect::<Vec<_>>();
-    let structural_output = cluster_root.join("structural_cluster_count_log_distribution.svg");
-    let motion_output = cluster_root.join("motion_cluster_count_log_distribution.svg");
+    let structural_output =
+        cluster_root.join("structural_cluster_circumference_count_log_distribution.svg");
+    let motion_output =
+        cluster_root.join("motion_cluster_circumference_count_log_distribution.svg");
     let structural_weighted_output =
-        cluster_root.join("structural_cluster_area_weighted_distribution.svg");
-    let motion_weighted_output = cluster_root.join("motion_cluster_area_weighted_distribution.svg");
-    let overlap_weighted_output =
-        cluster_root.join("structural_motion_cluster_overlap_area_weighted_distribution.svg");
+        cluster_root.join("structural_cluster_circumference_weighted_distribution.svg");
+    let motion_weighted_output =
+        cluster_root.join("motion_cluster_circumference_weighted_distribution.svg");
+    let overlap_weighted_output = cluster_root
+        .join("structural_motion_cluster_overlap_circumference_weighted_distribution.svg");
     write_cluster_histogram_plot(
         &structural_plot_cases,
         "Structural-cluster count distributions",
-        "cluster area fraction, A/SA (log scale)",
+        "equivalent-circle circumference ratio (log scale)",
         "cluster-count probability per log bin",
         true,
         "#4477AA",
@@ -309,7 +315,7 @@ fn run_clusters(
     write_cluster_histogram_plot(
         &motion_plot_cases,
         "Coherent-motion-cluster count distributions",
-        "cluster area fraction, A/SA (log scale)",
+        "equivalent-circle circumference ratio (log scale)",
         "cluster-count probability per log bin",
         true,
         "#EE6677",
@@ -317,18 +323,18 @@ fn run_clusters(
     );
     write_cluster_histogram_plot(
         &structural_weighted_plot_cases,
-        "Structural-cluster area-weighted distributions",
-        "cluster area fraction, A/SA",
-        "fraction of clustered area per bin",
+        "Structural-cluster circumference-weighted distributions",
+        "equivalent-circle circumference ratio",
+        "fraction of clustered equivalent circumference per bin",
         false,
         "#4477AA",
         &structural_weighted_output,
     );
     write_cluster_histogram_plot(
         &motion_weighted_plot_cases,
-        "Coherent-motion-cluster area-weighted distributions",
-        "cluster area fraction, A/SA",
-        "fraction of clustered area per bin",
+        "Coherent-motion-cluster circumference-weighted distributions",
+        "equivalent-circle circumference ratio",
+        "fraction of clustered equivalent circumference per bin",
         false,
         "#EE6677",
         &motion_weighted_output,
@@ -337,27 +343,27 @@ fn run_clusters(
         &overlap_weighted_plot_cases,
         "Structural–motion cluster overlap distributions",
         "pairwise particle-membership overlap, Jaccard",
-        "fraction of shared clustered area per bin",
+        "fraction of shared equivalent circumference per bin",
         false,
         "#228833",
         &overlap_weighted_output,
     );
     let manifest = ClusterRunManifest {
-        schema: "crystalline-cylinder-analysis.clusters.run.v6".to_owned(),
+        schema: "crystalline-cylinder-analysis.clusters.run.v7".to_owned(),
         config,
         bins: args.bins,
         target_shard_mib: args.target_shard_mib,
         rayon_threads: backend.thread_count,
         compute_device: backend.device_label(),
         snapshot_frames,
-        count_log_area_fraction_range: [log_range.0, log_range.1],
-        area_weighted_area_fraction_range: [linear_range.0, linear_range.1],
+        count_log_circumference_ratio_range: [log_range.0, log_range.1],
+        circumference_weighted_ratio_range: [linear_range.0, linear_range.1],
         overlap_jaccard_range: [0.0, 1.0],
         cases,
     };
     write_json_atomic(&cluster_root.join("manifest.json"), &manifest);
     eprintln!(
-        "[crystalline-cylinder-analysis] command=clusters threads={} cases={} count_log=[{},{}] area_weighted=[{},{},{}]",
+        "[crystalline-cylinder-analysis] command=clusters threads={} cases={} count_log=[{},{}] circumference_weighted=[{},{},{}]",
         manifest.rayon_threads,
         manifest.cases.len(),
         structural_output.display(),
@@ -466,12 +472,12 @@ fn analyze_cluster_replicate(
         structural_samples: analysis
             .structural
             .iter()
-            .map(|record| record.normalized_area)
+            .map(|record| record.normalized_circumference)
             .collect(),
         motion_samples: analysis
             .motion
             .iter()
-            .map(|record| record.normalized_area)
+            .map(|record| record.normalized_circumference)
             .collect(),
         overlap_samples: overlap_samples
             .iter()
@@ -479,7 +485,7 @@ fn analyze_cluster_replicate(
             .collect(),
         overlap_weights: overlap_samples
             .iter()
-            .map(|sample| sample.shared_particle_count as f64)
+            .map(|sample| (sample.shared_particle_count as f64).sqrt())
             .collect(),
         dataset_manifest: replicate_dir.join("manifest.json"),
         snapshot_files,

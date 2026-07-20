@@ -103,10 +103,9 @@ pub struct ClusterRecord {
     pub domain_id: i16,
     pub centroid: [f64; 2],
     pub particle_count: usize,
-    pub occupied_area: f64,
-    pub cylinder_surface_area: f64,
-    pub equivalent_perimeter: f64,
-    pub normalized_area: f64,
+    pub equivalent_circumference: f64,
+    pub surface_equivalent_circumference: f64,
+    pub normalized_circumference: f64,
     pub members: Vec<u64>,
 }
 
@@ -162,7 +161,7 @@ pub fn cluster_probability_histogram(
     cluster_histogram_from_edges(samples, None, edges)
 }
 
-/// Bin cluster counts on logarithmically spaced area-fraction edges.
+/// Bin cluster counts on logarithmically spaced circumference-ratio edges.
 pub fn cluster_log_probability_histogram(
     samples: &[f64],
     bins: usize,
@@ -184,18 +183,18 @@ pub fn cluster_log_probability_histogram(
     cluster_histogram_from_edges(samples, None, edges)
 }
 
-/// Bin by area fraction while weighting each cluster by its occupied area.
+/// Bin by equivalent-circumference ratio and weight by that linear size.
 ///
-/// Within one physical case the cylinder surface area is constant, so using
-/// `A/SA` as the weight is equivalent to using `A` after normalization.
-pub fn cluster_area_weighted_probability_histogram(
+/// The surface equivalent circumference is constant within one physical case,
+/// so the normalized ratio is proportional to cluster equivalent circumference.
+pub fn cluster_circumference_weighted_probability_histogram(
     samples: &[f64],
     bins: usize,
     range: (f64, f64),
 ) -> ClusterHistogram {
     assert!(
         samples.iter().all(|value| *value > 0.0),
-        "area weights must be positive"
+        "circumference weights must be positive"
     );
     cluster_weighted_probability_histogram(samples, samples, bins, range)
 }
@@ -500,12 +499,13 @@ fn cluster_assignments_for_records<'a>(
         for &member in &record.members {
             let particle = usize::try_from(member).expect("bad cluster member");
             assert!(particle < particle_count, "cluster member is out of range");
-            let replace = selected[particle].is_none_or(|(area, local_id): (f64, usize)| {
-                record.occupied_area > area
-                    || (record.occupied_area == area && record.local_id < local_id)
+            let replace = selected[particle].is_none_or(|(linear_size, local_id): (f64, usize)| {
+                record.equivalent_circumference > linear_size
+                    || (record.equivalent_circumference == linear_size
+                        && record.local_id < local_id)
             });
             if replace {
-                selected[particle] = Some((record.occupied_area, record.local_id));
+                selected[particle] = Some((record.equivalent_circumference, record.local_id));
             }
         }
     }
@@ -929,14 +929,18 @@ fn components_from_edges(
                 "cluster crosses surface domains"
             );
             let particle_count = members.len();
-            let occupied_area = particle_count as f64 * PI * (0.5 * particle_diameter).powi(2);
-            let cylinder_surface_area = frame.periods[0].expect("axial period missing")
-                * frame.periods[1].expect("circumference missing");
+            let axial_period = frame.periods[0].expect("axial period missing");
+            let cylinder_circumference = frame.periods[1].expect("circumference missing");
+            let equivalent_circumference = PI * particle_diameter * (particle_count as f64).sqrt();
+            let surface_equivalent_circumference =
+                2.0 * (PI * axial_period * cylinder_circumference).sqrt();
             assert!(
-                cylinder_surface_area.is_finite() && cylinder_surface_area > 0.0,
-                "bad cylinder surface area"
+                equivalent_circumference.is_finite()
+                    && equivalent_circumference > 0.0
+                    && surface_equivalent_circumference.is_finite()
+                    && surface_equivalent_circumference > 0.0,
+                "bad equivalent circumference"
             );
-            let equivalent_perimeter = 2.0 * (PI * occupied_area).sqrt();
             ClusterRecord {
                 kind,
                 frame_index: frame.frame_index,
@@ -947,10 +951,10 @@ fn components_from_edges(
                 domain_id,
                 centroid: component_centroid(frame, &members),
                 particle_count,
-                occupied_area,
-                cylinder_surface_area,
-                equivalent_perimeter,
-                normalized_area: occupied_area / cylinder_surface_area,
+                equivalent_circumference,
+                surface_equivalent_circumference,
+                normalized_circumference: equivalent_circumference
+                    / surface_equivalent_circumference,
                 members: members
                     .into_iter()
                     .map(|particle| u64::try_from(particle).expect("particle ID is too large"))

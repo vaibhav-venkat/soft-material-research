@@ -1,4 +1,4 @@
-//! Kuva cylinder cluster area-fraction probability histograms.
+//! Kuva cylinder cluster equivalent-circumference probability histograms.
 
 use std::fmt::Write as FmtWrite;
 use std::fs::OpenOptions;
