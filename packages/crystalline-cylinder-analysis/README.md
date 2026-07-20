@@ -44,6 +44,9 @@ The command writes log-binned cluster-count distributions and linear
 area-weighted distributions for both structural and coherent-motion clusters.
 Area weighting preserves small clusters but makes each cluster contribute in
 proportion to the particle area it contains.
+It also writes a structural–motion overlap distribution. Each same-frame
+structural/motion cluster pair is located by particle-membership Jaccard overlap
+and weighted by the particle area shared by that pair.
 
 Tenferro uses explicit host/device transfers. This CLI uploads graph inputs and
 downloads final host-visible results; unsupported CUDA operations fail instead

@@ -25,7 +25,8 @@ use crystalline_cylinder_analysis::replicates::{
 };
 use crystalline_cylinder_analysis::{
     analyze_dataset_clusters_with_snapshots, cluster_area_weighted_probability_histogram,
-    cluster_log_probability_histogram, CaseSchema, ClusterConfig, ClusterHistogram, ComSeries,
+    cluster_log_probability_histogram, cluster_weighted_probability_histogram,
+    structural_motion_overlap_samples, CaseSchema, ClusterConfig, ClusterHistogram, ComSeries,
     CorrelationSeries, DeviceAnalysisBackend, PreferredAxis, ReplicateGroup,
 };
 use indicatif::{ProgressBar, ProgressStyle};
@@ -62,6 +63,8 @@ struct ClusterCaseWork {
     replicate_count: usize,
     structural_samples: Vec<f64>,
     motion_samples: Vec<f64>,
+    overlap_samples: Vec<f64>,
+    overlap_weights: Vec<f64>,
     dataset_manifests: Vec<PathBuf>,
     snapshot_files: Vec<PathBuf>,
 }
@@ -70,6 +73,8 @@ struct ClusterCaseWork {
 struct ClusterReplicateWork {
     structural_samples: Vec<f64>,
     motion_samples: Vec<f64>,
+    overlap_samples: Vec<f64>,
+    overlap_weights: Vec<f64>,
     dataset_manifest: PathBuf,
     snapshot_files: Vec<PathBuf>,
 }
@@ -85,6 +90,7 @@ struct ClusterRunCase {
     motion_count_log: ClusterHistogram,
     structural_area_weighted: ClusterHistogram,
     motion_area_weighted: ClusterHistogram,
+    structural_motion_overlap_area_weighted: ClusterHistogram,
 }
 
 #[derive(Serialize)]
@@ -98,6 +104,7 @@ struct ClusterRunManifest {
     snapshot_frames: Vec<usize>,
     count_log_area_fraction_range: [f64; 2],
     area_weighted_area_fraction_range: [f64; 2],
+    overlap_jaccard_range: [f64; 2],
     cases: Vec<ClusterRunCase>,
 }
 
@@ -169,6 +176,14 @@ fn run_clusters(
                         .iter()
                         .flat_map(|replicate| replicate.motion_samples.iter().copied())
                         .collect(),
+                    overlap_samples: replicates
+                        .iter()
+                        .flat_map(|replicate| replicate.overlap_samples.iter().copied())
+                        .collect(),
+                    overlap_weights: replicates
+                        .iter()
+                        .flat_map(|replicate| replicate.overlap_weights.iter().copied())
+                        .collect(),
                     dataset_manifests: replicates
                         .iter()
                         .map(|replicate| replicate.dataset_manifest.clone())
@@ -232,6 +247,12 @@ fn run_clusters(
                 args.bins,
                 linear_range,
             ),
+            structural_motion_overlap_area_weighted: cluster_weighted_probability_histogram(
+                &case.overlap_samples,
+                &case.overlap_weights,
+                args.bins,
+                (0.0, 1.0),
+            ),
         })
         .collect::<Vec<_>>();
     let structural_plot_cases = cases
@@ -262,11 +283,20 @@ fn run_clusters(
             histogram: case.motion_area_weighted.clone(),
         })
         .collect::<Vec<_>>();
+    let overlap_weighted_plot_cases = cases
+        .iter()
+        .map(|case| ClusterPlotCase {
+            label: case.label.clone(),
+            histogram: case.structural_motion_overlap_area_weighted.clone(),
+        })
+        .collect::<Vec<_>>();
     let structural_output = cluster_root.join("structural_cluster_count_log_distribution.svg");
     let motion_output = cluster_root.join("motion_cluster_count_log_distribution.svg");
     let structural_weighted_output =
         cluster_root.join("structural_cluster_area_weighted_distribution.svg");
     let motion_weighted_output = cluster_root.join("motion_cluster_area_weighted_distribution.svg");
+    let overlap_weighted_output =
+        cluster_root.join("structural_motion_cluster_overlap_area_weighted_distribution.svg");
     write_cluster_histogram_plot(
         &structural_plot_cases,
         "Structural-cluster count distributions",
@@ -303,8 +333,17 @@ fn run_clusters(
         "#EE6677",
         &motion_weighted_output,
     );
+    write_cluster_histogram_plot(
+        &overlap_weighted_plot_cases,
+        "Structural–motion cluster overlap distributions",
+        "pairwise particle-membership overlap, Jaccard",
+        "fraction of shared clustered area per bin",
+        false,
+        "#228833",
+        &overlap_weighted_output,
+    );
     let manifest = ClusterRunManifest {
-        schema: "crystalline-cylinder-analysis.clusters.run.v5".to_owned(),
+        schema: "crystalline-cylinder-analysis.clusters.run.v6".to_owned(),
         config,
         bins: args.bins,
         target_shard_mib: args.target_shard_mib,
@@ -313,17 +352,19 @@ fn run_clusters(
         snapshot_frames,
         count_log_area_fraction_range: [log_range.0, log_range.1],
         area_weighted_area_fraction_range: [linear_range.0, linear_range.1],
+        overlap_jaccard_range: [0.0, 1.0],
         cases,
     };
     write_json_atomic(&cluster_root.join("manifest.json"), &manifest);
     eprintln!(
-        "[crystalline-cylinder-analysis] command=clusters threads={} cases={} count_log=[{},{}] area_weighted=[{},{}]",
+        "[crystalline-cylinder-analysis] command=clusters threads={} cases={} count_log=[{},{}] area_weighted=[{},{},{}]",
         manifest.rayon_threads,
         manifest.cases.len(),
         structural_output.display(),
         motion_output.display(),
         structural_weighted_output.display(),
         motion_weighted_output.display(),
+        overlap_weighted_output.display(),
     );
 }
 
@@ -350,6 +391,7 @@ fn analyze_cluster_replicate(
         dataset.manifest.case.n_particles,
     );
     let analysis = analyze_dataset_clusters_with_snapshots(dataset, config, snapshot_frames);
+    let overlap_samples = structural_motion_overlap_samples(&analysis);
     let replicate_dir = cluster_root
         .join("data")
         .join(safe_case_directory(&group.case.case_id))
@@ -411,12 +453,13 @@ fn analyze_cluster_replicate(
         }
     }
     eprintln!(
-        "[clusters] completed case={} replicate={}/{} structural={} motion={} snapshots={}",
+        "[clusters] completed case={} replicate={}/{} structural={} motion={} overlap_pairs={} snapshots={}",
         group.case.case_id,
         replicate_index + 1,
         group.datasets.len(),
         analysis.structural.len(),
         analysis.motion.len(),
+        overlap_samples.len(),
         snapshot_files.len(),
     );
     ClusterReplicateWork {
@@ -429,6 +472,14 @@ fn analyze_cluster_replicate(
             .motion
             .iter()
             .map(|record| record.normalized_area)
+            .collect(),
+        overlap_samples: overlap_samples
+            .iter()
+            .map(|sample| sample.jaccard)
+            .collect(),
+        overlap_weights: overlap_samples
+            .iter()
+            .map(|sample| sample.shared_particle_count as f64)
             .collect(),
         dataset_manifest: replicate_dir.join("manifest.json"),
         snapshot_files,

@@ -142,6 +142,13 @@ pub struct ClusterHistogram {
     pub sample_count: usize,
 }
 
+/// Pairwise membership agreement between one structural and one motion cluster.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+pub struct ClusterOverlapSample {
+    pub jaccard: f64,
+    pub shared_particle_count: usize,
+}
+
 /// Bin samples on a caller-supplied common range and normalize by cluster count.
 pub fn cluster_probability_histogram(
     samples: &[f64],
@@ -186,15 +193,89 @@ pub fn cluster_area_weighted_probability_histogram(
     bins: usize,
     range: (f64, f64),
 ) -> ClusterHistogram {
-    let width = validate_histogram_inputs(samples, bins, range) / bins as f64;
     assert!(
         samples.iter().all(|value| *value > 0.0),
         "area weights must be positive"
     );
+    cluster_weighted_probability_histogram(samples, samples, bins, range)
+}
+
+/// Bin samples linearly with caller-supplied non-negative weights.
+pub fn cluster_weighted_probability_histogram(
+    samples: &[f64],
+    weights: &[f64],
+    bins: usize,
+    range: (f64, f64),
+) -> ClusterHistogram {
+    let width = validate_histogram_inputs(samples, bins, range) / bins as f64;
     let edges = (0..=bins)
         .map(|index| range.0 + index as f64 * width)
         .collect::<Vec<_>>();
-    cluster_histogram_from_edges(samples, Some(samples), edges)
+    cluster_histogram_from_edges(samples, Some(weights), edges)
+}
+
+/// Compute same-frame structural–motion pair overlaps using particle membership.
+pub fn structural_motion_overlap_samples(
+    analysis: &DatasetClusterAnalysis,
+) -> Vec<ClusterOverlapSample> {
+    let mut structural_by_frame = BTreeMap::<usize, Vec<&ClusterRecord>>::new();
+    for record in &analysis.structural {
+        structural_by_frame
+            .entry(record.frame_index)
+            .or_default()
+            .push(record);
+    }
+    let mut motion_by_frame = BTreeMap::<usize, Vec<&ClusterRecord>>::new();
+    for record in &analysis.motion {
+        motion_by_frame
+            .entry(record.frame_index)
+            .or_default()
+            .push(record);
+    }
+
+    let mut overlaps = Vec::new();
+    for (frame_index, motion_records) in motion_by_frame {
+        let Some(structural_records) = structural_by_frame.get(&frame_index) else {
+            continue;
+        };
+        let structural_assignments = cluster_assignments_for_records(
+            analysis.particle_count,
+            structural_records.iter().copied(),
+        );
+        let motion_assignments = cluster_assignments_for_records(
+            analysis.particle_count,
+            motion_records.iter().copied(),
+        );
+        let structural_sizes = structural_records
+            .iter()
+            .map(|record| (record.local_id, record.particle_count))
+            .collect::<HashMap<_, _>>();
+        let motion_sizes = motion_records
+            .iter()
+            .map(|record| (record.local_id, record.particle_count))
+            .collect::<HashMap<_, _>>();
+        let mut shared_counts = HashMap::<(usize, usize), usize>::new();
+        for (structural_id, motion_id) in structural_assignments.into_iter().zip(motion_assignments)
+        {
+            if let (Some(structural_id), Some(motion_id)) = (structural_id, motion_id) {
+                *shared_counts.entry((structural_id, motion_id)).or_default() += 1;
+            }
+        }
+        for ((structural_id, motion_id), shared_particle_count) in shared_counts {
+            let union_count =
+                structural_sizes[&structural_id] + motion_sizes[&motion_id] - shared_particle_count;
+            let jaccard = shared_particle_count as f64 / union_count as f64;
+            assert!(
+                jaccard.is_finite() && jaccard > 0.0 && jaccard <= 1.0,
+                "bad structural-motion cluster overlap"
+            );
+            overlaps.push(ClusterOverlapSample {
+                jaccard,
+                shared_particle_count,
+            });
+        }
+    }
+    overlaps
 }
 
 fn validate_histogram_inputs(samples: &[f64], bins: usize, range: (f64, f64)) -> f64 {
@@ -407,6 +488,13 @@ pub fn analyze_dataset_clusters_with_snapshots(
 }
 
 fn cluster_assignments(particle_count: usize, records: &[ClusterRecord]) -> Vec<Option<usize>> {
+    cluster_assignments_for_records(particle_count, records)
+}
+
+fn cluster_assignments_for_records<'a>(
+    particle_count: usize,
+    records: impl IntoIterator<Item = &'a ClusterRecord>,
+) -> Vec<Option<usize>> {
     let mut selected = vec![None; particle_count];
     for record in records {
         for &member in &record.members {
