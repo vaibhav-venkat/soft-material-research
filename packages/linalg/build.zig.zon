@@ -1,0 +1,13 @@
+.{
+    .name = .linalg,
+    .version = "0.1.0",
+    .fingerprint = 0xd2a48ac9f4c00c89,
+    .minimum_zig_version = "0.17.0-dev.0",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "README.md",
+    },
+}
