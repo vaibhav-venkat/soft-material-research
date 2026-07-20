@@ -361,6 +361,148 @@ pub fn indexAbsMax(comptime T: type, x: ConstVectorView(T)) !usize {
     return driver.blasIndexAbsMax(T, x.buffer, x.offset, x.stride, x.len);
 }
 
+fn scalarZero(comptime T: type) T {
+    return if (comptime scalar.isComplex(T)) T.init(0, 0) else 0;
+}
+
+fn scalarOne(comptime T: type) T {
+    return if (comptime scalar.isComplex(T)) T.init(1, 0) else 1;
+}
+
+fn operatedRows(comptime T: type, matrix: ConstMatrixView(T), operation: Transpose) usize {
+    return if (operation == .none) matrix.rows else matrix.cols;
+}
+
+fn operatedCols(comptime T: type, matrix: ConstMatrixView(T), operation: Transpose) usize {
+    return if (operation == .none) matrix.cols else matrix.rows;
+}
+
+fn validateMatrixView(comptime T: type, matrix: anytype) !void {
+    _ = T;
+    if (matrix.rows == 0 or matrix.cols == 0) return error.EmptyInput;
+    if (matrix.leading_dimension < matrix.rows) return error.InvalidStride;
+}
+
+pub fn gemvInto(
+    comptime T: type,
+    operation: Transpose,
+    alpha: T,
+    a: ConstMatrixView(T),
+    x: ConstVectorView(T),
+    beta: T,
+    y: VectorView(T),
+) !void {
+    try validateMatrixView(T, a);
+    if (a.context != x.context or a.context != y.context) return error.ContextMismatch;
+    if (x.len != operatedCols(T, a, operation) or y.len != operatedRows(T, a, operation)) return error.DimensionMismatch;
+    if (a.buffer == x.buffer or a.buffer == y.buffer or x.buffer == y.buffer) return error.OutputAliased;
+    try driver.blasGemv(
+        T,
+        @intFromEnum(operation),
+        alpha,
+        a.buffer,
+        a.offset,
+        a.rows,
+        a.cols,
+        a.leading_dimension,
+        x.buffer,
+        x.offset,
+        x.stride,
+        beta,
+        y.buffer,
+        y.offset,
+        y.stride,
+    );
+}
+
+pub fn matvec(comptime T: type, operation: Transpose, a: ConstMatrixView(T), x: ConstVectorView(T)) !Vector(T) {
+    const output_len = operatedRows(T, a, operation);
+    var result = try Vector(T).init(@constCast(a.context), output_len);
+    errdefer result.deinit();
+    try gemvInto(T, operation, scalarOne(T), a, x, scalarZero(T), result.view());
+    return result;
+}
+
+fn gerIntoInternal(
+    comptime T: type,
+    conjugate_y: bool,
+    alpha: T,
+    x: ConstVectorView(T),
+    y: ConstVectorView(T),
+    a: MatrixView(T),
+) !void {
+    try validateMatrixView(T, a);
+    if (x.context != y.context or x.context != a.context) return error.ContextMismatch;
+    if (a.rows != x.len or a.cols != y.len) return error.DimensionMismatch;
+    if (a.buffer == x.buffer or a.buffer == y.buffer) return error.OutputAliased;
+    try driver.blasGer(T, conjugate_y, alpha, x.buffer, x.offset, x.stride, y.buffer, y.offset, y.stride, a.buffer, a.offset, a.rows, a.cols, a.leading_dimension);
+}
+
+pub fn gerInto(comptime T: type, alpha: T, x: ConstVectorView(T), y: ConstVectorView(T), a: MatrixView(T)) !void {
+    if (comptime scalar.isComplex(T)) @compileError("complex outer products must use geruInto or gercInto explicitly");
+    try gerIntoInternal(T, false, alpha, x, y, a);
+}
+
+pub fn geruInto(comptime T: type, alpha: T, x: ConstVectorView(T), y: ConstVectorView(T), a: MatrixView(T)) !void {
+    if (comptime !scalar.isComplex(T)) @compileError("geruInto requires complex inputs");
+    try gerIntoInternal(T, false, alpha, x, y, a);
+}
+
+pub fn gercInto(comptime T: type, alpha: T, x: ConstVectorView(T), y: ConstVectorView(T), a: MatrixView(T)) !void {
+    if (comptime !scalar.isComplex(T)) @compileError("gercInto requires complex inputs");
+    try gerIntoInternal(T, true, alpha, x, y, a);
+}
+
+pub fn gemmInto(
+    comptime T: type,
+    operation_a: Transpose,
+    operation_b: Transpose,
+    alpha: T,
+    a: ConstMatrixView(T),
+    b: ConstMatrixView(T),
+    beta: T,
+    output: MatrixView(T),
+) !void {
+    try validateMatrixView(T, a);
+    try validateMatrixView(T, b);
+    try validateMatrixView(T, output);
+    if (a.context != b.context or a.context != output.context) return error.ContextMismatch;
+    const m = operatedRows(T, a, operation_a);
+    const k = operatedCols(T, a, operation_a);
+    const b_rows = operatedRows(T, b, operation_b);
+    const n = operatedCols(T, b, operation_b);
+    if (k != b_rows or output.rows != m or output.cols != n) return error.DimensionMismatch;
+    if (output.buffer == a.buffer or output.buffer == b.buffer) return error.OutputAliased;
+    try driver.blasGemm(
+        T,
+        @intFromEnum(operation_a),
+        @intFromEnum(operation_b),
+        m,
+        n,
+        k,
+        alpha,
+        a.buffer,
+        a.offset,
+        a.leading_dimension,
+        b.buffer,
+        b.offset,
+        b.leading_dimension,
+        beta,
+        output.buffer,
+        output.offset,
+        output.leading_dimension,
+    );
+}
+
+pub fn matmul(comptime T: type, operation_a: Transpose, operation_b: Transpose, a: ConstMatrixView(T), b: ConstMatrixView(T)) !Matrix(T) {
+    const rows = operatedRows(T, a, operation_a);
+    const cols = operatedCols(T, b, operation_b);
+    var result = try Matrix(T).init(@constCast(a.context), rows, cols);
+    errdefer result.deinit();
+    try gemmInto(T, operation_a, operation_b, scalarOne(T), a, b, scalarZero(T), result.view());
+    return result;
+}
+
 fn expectComplexApprox(comptime T: type, expected: T, actual: T, tolerance: Real(T)) !void {
     try std.testing.expectApproxEqAbs(expected.re, actual.re, tolerance);
     try std.testing.expectApproxEqAbs(expected.im, actual.im, tolerance);
@@ -418,6 +560,91 @@ fn testComplexLevelOne(comptime T: type, tolerance: Real(T)) !void {
     try expectComplexApprox(T, T.init(0, 1), output[1], tolerance);
 }
 
+fn testRealMatrixBlas(comptime T: type, tolerance: T) !void {
+    var context = try Context.init(std.testing.allocator, .{});
+    defer context.deinit();
+    const a_values = [_]T{ 1, 4, 2, 5, 3, 6 };
+    var a = try Matrix(T).fromHost(&context, 2, 3, &a_values);
+    defer a.deinit();
+    var x = try Vector(T).fromHost(&context, &[_]T{ 1, 2, 1 });
+    defer x.deinit();
+    var y = try Vector(T).fromHost(&context, &[_]T{ 1, 1 });
+    defer y.deinit();
+    try gemvInto(T, .none, 2, a.constView(), x.constView(), 0.5, y.view());
+    var y_output: [2]T = undefined;
+    y.copyToHost(&y_output);
+    try std.testing.expectApproxEqAbs(@as(T, 16.5), y_output[0], tolerance);
+    try std.testing.expectApproxEqAbs(@as(T, 40.5), y_output[1], tolerance);
+
+    var trans_x = try Vector(T).fromHost(&context, &[_]T{ 1, 2 });
+    defer trans_x.deinit();
+    var trans_y = try matvec(T, .transpose, a.constView(), trans_x.constView());
+    defer trans_y.deinit();
+    var trans_output: [3]T = undefined;
+    trans_y.copyToHost(&trans_output);
+    try std.testing.expectEqualSlices(T, &[_]T{ 9, 12, 15 }, &trans_output);
+
+    const b_values = [_]T{ 1, 0, 1, 2, 1, 0 };
+    var b = try Matrix(T).fromHost(&context, 3, 2, &b_values);
+    defer b.deinit();
+    var product = try matmul(T, .none, .none, a.constView(), b.constView());
+    defer product.deinit();
+    var product_output: [4]T = undefined;
+    product.copyToHost(&product_output);
+    try std.testing.expectEqualSlices(T, &[_]T{ 4, 10, 4, 13 }, &product_output);
+
+    var outer_x = try Vector(T).fromHost(&context, &[_]T{ 1, 2 });
+    defer outer_x.deinit();
+    var outer_y = try Vector(T).fromHost(&context, &[_]T{ 3, 4, 5 });
+    defer outer_y.deinit();
+    var outer = try Matrix(T).fromHost(&context, 2, 3, &[_]T{ 0, 0, 0, 0, 0, 0 });
+    defer outer.deinit();
+    try gerInto(T, 1, outer_x.constView(), outer_y.constView(), outer.view());
+    var outer_output: [6]T = undefined;
+    outer.copyToHost(&outer_output);
+    try std.testing.expectEqualSlices(T, &[_]T{ 3, 6, 4, 8, 5, 10 }, &outer_output);
+}
+
+fn testComplexMatrixBlas(comptime T: type, tolerance: Real(T)) !void {
+    var context = try Context.init(std.testing.allocator, .{});
+    defer context.deinit();
+    const a_values = [_]T{ .init(1, 1), .init(2, 0), .init(0, 1), .init(3, -1) };
+    var a = try Matrix(T).fromHost(&context, 2, 2, &a_values);
+    defer a.deinit();
+    var x = try Vector(T).fromHost(&context, &[_]T{ .init(1, 0), .init(0, 1) });
+    defer x.deinit();
+    var y = try matvec(T, .conjugate_transpose, a.constView(), x.constView());
+    defer y.deinit();
+    var y_output: [2]T = undefined;
+    y.copyToHost(&y_output);
+    try expectComplexApprox(T, T.init(1, 1), y_output[0], tolerance);
+    try expectComplexApprox(T, T.init(-1, 2), y_output[1], tolerance);
+
+    var identity = try Matrix(T).fromHost(&context, 2, 2, &[_]T{ .init(1, 0), .init(0, 0), .init(0, 0), .init(1, 0) });
+    defer identity.deinit();
+    var product = try matmul(T, .none, .none, a.constView(), identity.constView());
+    defer product.deinit();
+    var product_output: [4]T = undefined;
+    product.copyToHost(&product_output);
+    for (a_values, product_output) |expected, actual| try expectComplexApprox(T, expected, actual, tolerance);
+
+    var outer_x = try Vector(T).fromHost(&context, &[_]T{.init(1, 1)});
+    defer outer_x.deinit();
+    var outer_y = try Vector(T).fromHost(&context, &[_]T{.init(2, 1)});
+    defer outer_y.deinit();
+    var outer_u = try Matrix(T).fromHost(&context, 1, 1, &[_]T{.init(0, 0)});
+    defer outer_u.deinit();
+    var outer_c = try Matrix(T).fromHost(&context, 1, 1, &[_]T{.init(0, 0)});
+    defer outer_c.deinit();
+    try geruInto(T, T.init(1, 0), outer_x.constView(), outer_y.constView(), outer_u.view());
+    try gercInto(T, T.init(1, 0), outer_x.constView(), outer_y.constView(), outer_c.view());
+    var value: [1]T = undefined;
+    outer_u.copyToHost(&value);
+    try expectComplexApprox(T, T.init(1, 3), value[0], tolerance);
+    outer_c.copyToHost(&value);
+    try expectComplexApprox(T, T.init(3, 1), value[0], tolerance);
+}
+
 test "complex representation and conversions" {
     const value = Complex32.init(2.5, -3.0);
     try std.testing.expectEqual(@sizeOf([2]f32), @sizeOf(Complex32));
@@ -466,4 +693,14 @@ test "real Level 1 BLAS" {
 test "complex Level 1 BLAS" {
     try testComplexLevelOne(Complex32, 1.0e-5);
     try testComplexLevelOne(Complex64, 1.0e-12);
+}
+
+test "real matrix BLAS" {
+    try testRealMatrixBlas(f32, 1.0e-5);
+    try testRealMatrixBlas(f64, 1.0e-12);
+}
+
+test "complex matrix BLAS" {
+    try testComplexMatrixBlas(Complex32, 1.0e-5);
+    try testComplexMatrixBlas(Complex64, 1.0e-12);
 }
