@@ -94,7 +94,7 @@ struct ClusterRunManifest {
     rayon_threads: usize,
     compute_device: String,
     snapshot_frames: Vec<usize>,
-    histogram_range: [f64; 2],
+    area_fraction_histogram_range: [f64; 2],
     cases: Vec<ClusterRunCase>,
 }
 
@@ -214,29 +214,29 @@ fn run_clusters(
             histogram: case.motion.clone(),
         })
         .collect::<Vec<_>>();
-    let structural_output = cluster_root.join("structural_cluster_length_distribution.svg");
-    let motion_output = cluster_root.join("motion_cluster_length_distribution.svg");
+    let structural_output = cluster_root.join("structural_cluster_area_fraction_distribution.svg");
+    let motion_output = cluster_root.join("motion_cluster_area_fraction_distribution.svg");
     write_cluster_histogram_plot(
         &structural_plot_cases,
-        "Structural-cluster equivalent-perimeter distributions",
+        "Structural-cluster area-fraction distributions",
         "#4477AA",
         &structural_output,
     );
     write_cluster_histogram_plot(
         &motion_plot_cases,
-        "Coherent-motion-cluster equivalent-perimeter distributions",
+        "Coherent-motion-cluster area-fraction distributions",
         "#EE6677",
         &motion_output,
     );
     let manifest = ClusterRunManifest {
-        schema: "crystalline-cylinder-analysis.clusters.run.v2".to_owned(),
+        schema: "crystalline-cylinder-analysis.clusters.run.v3".to_owned(),
         config,
         bins: args.bins,
         target_shard_mib: args.target_shard_mib,
         rayon_threads: backend.thread_count,
         compute_device: backend.device_label(),
         snapshot_frames,
-        histogram_range: [range.0, range.1],
+        area_fraction_histogram_range: [range.0, range.1],
         cases,
     };
     write_json_atomic(&cluster_root.join("manifest.json"), &manifest);
@@ -341,12 +341,12 @@ fn analyze_cluster_replicate(
         structural_samples: analysis
             .structural
             .iter()
-            .map(|record| record.normalized_length)
+            .map(|record| record.normalized_area)
             .collect(),
         motion_samples: analysis
             .motion
             .iter()
-            .map(|record| record.normalized_length)
+            .map(|record| record.normalized_area)
             .collect(),
         dataset_manifest: replicate_dir.join("manifest.json"),
         snapshot_files,
@@ -369,6 +369,7 @@ fn selected_cluster_groups(
     args: &ClusterArgs,
 ) -> Vec<ReplicateGroup> {
     let mut groups = select_circumference(discover_replicate_groups(&common.input_dir), args.circ);
+    groups.retain(is_cylinder_group);
     if !args.case.is_empty() {
         let requested = args.case.iter().collect::<std::collections::HashSet<_>>();
         let discovered = groups
@@ -385,6 +386,14 @@ fn selected_cluster_groups(
     }
     assert!(!groups.is_empty(), "no matching cluster cases");
     groups
+}
+
+fn is_cylinder_group(group: &ReplicateGroup) -> bool {
+    group.schema == CaseSchema::BigLx
+        || matches!(
+            group.case.geometry_kind.as_deref(),
+            Some("cylinder_rattle" | "cylinder_rattle_tangent")
+        )
 }
 
 fn run_fit(backend: &DeviceAnalysisBackend, common: &crate::cli::CommonArgs, args: FitArgs) {

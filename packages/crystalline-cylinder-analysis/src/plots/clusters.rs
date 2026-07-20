@@ -1,4 +1,4 @@
-//! Kuva cluster equivalent-perimeter probability histograms.
+//! Kuva cylinder cluster area-fraction probability histograms.
 
 use std::fmt::Write as FmtWrite;
 use std::fs::OpenOptions;
@@ -53,7 +53,7 @@ pub fn write_cluster_histogram_plot(
         layouts.push(
             Layout::auto_from_plots(&panel)
                 .with_title(panel_title)
-                .with_x_label("equivalent perimeter ratio, l/Lx")
+                .with_x_label("cluster area fraction, A/SA")
                 .with_y_label("probability per bin"),
         );
         plots.push(panel);

@@ -94,7 +94,7 @@ pub fn write_cluster_dataset(
         target_bytes,
     );
     let manifest = ClusterDatasetManifest {
-        schema: "crystalline-cylinder-analysis.clusters.dataset.v1".to_owned(),
+        schema: "crystalline-cylinder-analysis.clusters.dataset.v2".to_owned(),
         case_id: analysis.case_id.clone(),
         input_manifest: input_manifest.to_path_buf(),
         frame_count: analysis.frame_count,
@@ -182,13 +182,17 @@ fn write_cluster_shard(path: &Path, kind: ClusterKind, records: &[ClusterRecord]
         .iter()
         .map(|record| record.occupied_area)
         .collect::<Vec<_>>();
+    let cylinder_surface_area = records
+        .iter()
+        .map(|record| record.cylinder_surface_area)
+        .collect::<Vec<_>>();
     let equivalent_perimeter = records
         .iter()
         .map(|record| record.equivalent_perimeter)
         .collect::<Vec<_>>();
-    let normalized_length = records
+    let normalized_area = records
         .iter()
-        .map(|record| record.normalized_length)
+        .map(|record| record.normalized_area)
         .collect::<Vec<_>>();
     let mut member_offsets = Vec::with_capacity(count + 1);
     let mut member_particle_ids = Vec::new();
@@ -225,16 +229,17 @@ fn write_cluster_shard(path: &Path, kind: ClusterKind, records: &[ClusterRecord]
     insert_f64(&mut tensors, "occupied_area", &[count], &occupied_area);
     insert_f64(
         &mut tensors,
+        "cylinder_surface_area",
+        &[count],
+        &cylinder_surface_area,
+    );
+    insert_f64(
+        &mut tensors,
         "equivalent_perimeter",
         &[count],
         &equivalent_perimeter,
     );
-    insert_f64(
-        &mut tensors,
-        "normalized_length",
-        &[count],
-        &normalized_length,
-    );
+    insert_f64(&mut tensors, "normalized_area", &[count], &normalized_area);
     insert_i64(
         &mut tensors,
         "member_offsets",
@@ -251,7 +256,7 @@ fn write_cluster_shard(path: &Path, kind: ClusterKind, records: &[ClusterRecord]
     let metadata = HashMap::from([
         (
             "schema".to_owned(),
-            "crystalline-cylinder-analysis.clusters.shard.v1".to_owned(),
+            "crystalline-cylinder-analysis.clusters.shard.v2".to_owned(),
         ),
         ("kind".to_owned(), format!("{kind:?}").to_lowercase()),
     ]);

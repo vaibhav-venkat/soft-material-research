@@ -94,8 +94,9 @@ pub struct ClusterRecord {
     pub centroid: [f64; 2],
     pub particle_count: usize,
     pub occupied_area: f64,
+    pub cylinder_surface_area: f64,
     pub equivalent_perimeter: f64,
-    pub normalized_length: f64,
+    pub normalized_area: f64,
     pub members: Vec<u64>,
 }
 
@@ -215,6 +216,11 @@ pub fn analyze_dataset_clusters_with_snapshots(
     snapshot_frames: &[usize],
 ) -> DatasetClusterAnalysis {
     config.validate();
+    assert_eq!(
+        geometry(dataset),
+        Geometry::Cylinder,
+        "cluster analysis currently supports cylinders only"
+    );
     assert!(
         dataset.manifest.frame_count > config.lag_frames,
         "cluster lag exceeds trajectory"
@@ -232,7 +238,7 @@ pub fn analyze_dataset_clusters_with_snapshots(
     let mut structural = Vec::new();
     let mut motion = Vec::new();
     let requested_snapshots = snapshot_frames.iter().copied().collect::<HashSet<_>>();
-    let collect_snapshots = geometry(dataset) == Geometry::Cylinder;
+    let collect_snapshots = true;
     let mut snapshots = BTreeMap::new();
     let mut lag_window = VecDeque::with_capacity(config.lag_frames + 1);
 
@@ -306,18 +312,24 @@ pub fn analyze_dataset_clusters_with_snapshots(
 }
 
 fn cluster_assignments(particle_count: usize, records: &[ClusterRecord]) -> Vec<Option<usize>> {
-    let mut assignments = vec![None; particle_count];
+    let mut selected = vec![None; particle_count];
     for record in records {
         for &member in &record.members {
             let particle = usize::try_from(member).expect("bad cluster member");
-            assert!(
-                assignments[particle].is_none(),
-                "particle belongs to two clusters"
-            );
-            assignments[particle] = Some(record.local_id);
+            assert!(particle < particle_count, "cluster member is out of range");
+            let replace = selected[particle].is_none_or(|(area, local_id): (f64, usize)| {
+                record.occupied_area > area
+                    || (record.occupied_area == area && record.local_id < local_id)
+            });
+            if replace {
+                selected[particle] = Some((record.occupied_area, record.local_id));
+            }
         }
     }
-    assignments
+    selected
+        .into_iter()
+        .map(|choice| choice.map(|(_, local_id)| local_id))
+        .collect()
 }
 
 fn load_surface_frame(
@@ -735,6 +747,12 @@ fn components_from_edges(
             );
             let particle_count = members.len();
             let occupied_area = particle_count as f64 * PI * (0.5 * particle_diameter).powi(2);
+            let cylinder_surface_area = frame.periods[0].expect("axial period missing")
+                * frame.periods[1].expect("circumference missing");
+            assert!(
+                cylinder_surface_area.is_finite() && cylinder_surface_area > 0.0,
+                "bad cylinder surface area"
+            );
             let equivalent_perimeter = 2.0 * (PI * occupied_area).sqrt();
             ClusterRecord {
                 kind,
@@ -747,9 +765,9 @@ fn components_from_edges(
                 centroid: component_centroid(frame, &members),
                 particle_count,
                 occupied_area,
+                cylinder_surface_area,
                 equivalent_perimeter,
-                normalized_length: equivalent_perimeter
-                    / frame.periods[0].expect("axial period missing"),
+                normalized_area: occupied_area / cylinder_surface_area,
                 members: members
                     .into_iter()
                     .map(|particle| u64::try_from(particle).expect("particle ID is too large"))
