@@ -1391,7 +1391,7 @@ dependencies = [
  "safetensors 0.8.0",
  "serde",
  "serde_json",
- "tenferro-cpu",
+ "tenferro-gpu",
  "tenferro-linalg",
  "tenferro-runtime",
 ]
@@ -6044,6 +6044,276 @@ dependencies = [
 ]
 
 [[package]]
+name = "t4a-cubecl"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cafff45a4d04bf504da69f9ff5ffafcbb9b2412e67ec15daca146a4a15fe70e5"
+dependencies = [
+ "half",
+ "t4a-cubecl-core",
+ "t4a-cubecl-cuda",
+ "t4a-cubecl-ir",
+ "t4a-cubecl-runtime",
+ "t4a-cubecl-std",
+ "t4a-cubecl-wgpu",
+]
+
+[[package]]
+name = "t4a-cubecl-common"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e9f94663d570e31e6e782ad469f86b529c599614a6fd9f6a6d22e0992fac353c"
+dependencies = [
+ "backtrace",
+ "bytemuck",
+ "cfg-if",
+ "cfg_aliases",
+ "ciborium",
+ "derive-new",
+ "derive_more",
+ "dirs",
+ "embassy-futures",
+ "embassy-time",
+ "float4",
+ "float8",
+ "futures-lite",
+ "half",
+ "hashbrown 0.16.1",
+ "log",
+ "num-traits",
+ "oneshot",
+ "parking_lot",
+ "portable-atomic",
+ "portable-atomic-util",
+ "rand 0.10.1",
+ "sanitize-filename",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "spin",
+ "toml",
+ "tynm",
+ "wasm-bindgen-futures",
+ "web-time 1.1.0",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "t4a-cubecl-core"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf212fb31eba4ce82b062513a41388c4ea72eee86212fb8578024fa2d67904a5"
+dependencies = [
+ "bitflags",
+ "bytemuck",
+ "derive-new",
+ "derive_more",
+ "enumset",
+ "float-ord",
+ "half",
+ "hashbrown 0.16.1",
+ "log",
+ "num-complex",
+ "num-traits",
+ "paste",
+ "serde",
+ "serde_json",
+ "t4a-cubecl-common",
+ "t4a-cubecl-ir",
+ "t4a-cubecl-macros",
+ "t4a-cubecl-runtime",
+ "t4a-cubecl-zspace",
+ "variadics_please",
+]
+
+[[package]]
+name = "t4a-cubecl-cpp"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "260f3a73dbd8b0b1483d32b07369ddab88c632a6fe59cc9806af029d642b6fb5"
+dependencies = [
+ "bytemuck",
+ "derive-new",
+ "half",
+ "itertools 0.14.0",
+ "log",
+ "t4a-cubecl-common",
+ "t4a-cubecl-core",
+ "t4a-cubecl-opt",
+ "t4a-cubecl-runtime",
+]
+
+[[package]]
+name = "t4a-cubecl-cuda"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cae9b959e07a1ea70ee5831e9097db5f9057cfd87bbde2db71ec19e6cfe6d958"
+dependencies = [
+ "bytemuck",
+ "cudarc",
+ "derive-new",
+ "half",
+ "log",
+ "serde",
+ "t4a-cubecl-common",
+ "t4a-cubecl-core",
+ "t4a-cubecl-cpp",
+ "t4a-cubecl-runtime",
+]
+
+[[package]]
+name = "t4a-cubecl-ir"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5ff0e2a2f1b414690d94f4e357a18bcb0daba3997cdc07e9ab77fac1af6956f"
+dependencies = [
+ "derive-new",
+ "derive_more",
+ "enumset",
+ "float-ord",
+ "fnv",
+ "foldhash 0.2.0",
+ "half",
+ "hashbrown 0.16.1",
+ "num-complex",
+ "num-traits",
+ "portable-atomic",
+ "serde",
+ "t4a-cubecl-common",
+ "t4a-cubecl-macros-internal",
+ "variadics_please",
+]
+
+[[package]]
+name = "t4a-cubecl-macros"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f0fdc51526bc62bf101b161cb45529635a22dd7250585376fb2754104909d750"
+dependencies = [
+ "darling 0.23.0",
+ "derive-new",
+ "ident_case",
+ "inflections",
+ "prettyplease",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.118",
+ "t4a-cubecl-common",
+]
+
+[[package]]
+name = "t4a-cubecl-macros-internal"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b34ccb07f54b2f30da12422487a29c6adf2b0f8db56383139d818643f828f7b"
+dependencies = [
+ "darling 0.23.0",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.118",
+]
+
+[[package]]
+name = "t4a-cubecl-opt"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e978b04084982d185dc97120b14f31db37eb2c357445425a5088179622c47e75"
+dependencies = [
+ "float-ord",
+ "log",
+ "num",
+ "petgraph",
+ "smallvec",
+ "stable-vec",
+ "t4a-cubecl-common",
+ "t4a-cubecl-core",
+ "t4a-cubecl-ir",
+ "type-map",
+]
+
+[[package]]
+name = "t4a-cubecl-runtime"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "361468eaaa01421adef77e28786250dee88d3a061ad2d934359c4222f4cfd2b7"
+dependencies = [
+ "ahash",
+ "async-channel",
+ "bytemuck",
+ "cfg-if",
+ "cfg_aliases",
+ "derive-new",
+ "derive_more",
+ "dirs",
+ "enumset",
+ "hashbrown 0.16.1",
+ "log",
+ "md5",
+ "serde",
+ "serde_json",
+ "spin",
+ "t4a-cubecl-common",
+ "t4a-cubecl-ir",
+ "t4a-cubecl-zspace",
+ "thiserror 2.0.18",
+ "toml",
+ "wasm-bindgen-futures",
+ "web-time 1.1.0",
+]
+
+[[package]]
+name = "t4a-cubecl-std"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "111117140c8e0520eccb4e3a8e176253192c784b1faf806bb4426f4f259bf1a7"
+dependencies = [
+ "half",
+ "num-traits",
+ "paste",
+ "serde",
+ "spin",
+ "t4a-cubecl-common",
+ "t4a-cubecl-core",
+ "t4a-cubecl-runtime",
+ "variadics_please",
+]
+
+[[package]]
+name = "t4a-cubecl-wgpu"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd076d55a0bdc3edb0ac6832ebea1d75a169d6d3df80a1fa01138e7269e9a545"
+dependencies = [
+ "async-channel",
+ "bytemuck",
+ "cfg-if",
+ "cfg_aliases",
+ "derive-new",
+ "derive_more",
+ "half",
+ "hashbrown 0.16.1",
+ "log",
+ "sanitize-filename",
+ "t4a-cubecl-common",
+ "t4a-cubecl-core",
+ "t4a-cubecl-ir",
+ "t4a-cubecl-runtime",
+ "wasm-bindgen-futures",
+ "wgpu",
+]
+
+[[package]]
+name = "t4a-cubecl-zspace"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ad178923d45c150e22e4b33f0bde60b9e3ad087c4f6f45278f053b0d31853b3a"
+dependencies = [
+ "derive-new",
+ "serde",
+ "smallvec",
+]
+
+[[package]]
 name = "tar"
 version = "0.4.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6101,6 +6371,7 @@ dependencies = [
  "num-complex",
  "num-traits",
  "tenferro-cpu",
+ "tenferro-gpu",
  "tenferro-internal-ops",
  "tenferro-runtime",
  "tenferro-tensor",
@@ -6127,6 +6398,25 @@ dependencies = [
  "smallvec",
  "strided-einsum2",
  "strided-kernel",
+ "tenferro-tensor",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "tenferro-gpu"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13743022ecfe0309172fac978b2e6b0f61c0b85508f79bfccade2f0ec9be4eec"
+dependencies = [
+ "cudarc",
+ "libloading 0.8.9",
+ "num-complex",
+ "num-traits",
+ "smallvec",
+ "t4a-cubecl",
+ "t4a-cubecl-cuda",
+ "t4a-cubecl-runtime",
+ "tenferro-core-ops",
  "tenferro-tensor",
  "thiserror 2.0.18",
 ]
@@ -6163,12 +6453,18 @@ version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93050be9329245e890d622b32126c824a27cecae84e36ec6d7deb15eca3a3477"
 dependencies = [
+ "cudarc",
  "faer 0.24.4",
  "lapack",
+ "libloading 0.8.9",
  "num-complex",
  "num-traits",
+ "t4a-cubecl",
+ "t4a-cubecl-cuda",
+ "t4a-cubecl-runtime",
  "tenferro-ad",
  "tenferro-cpu",
+ "tenferro-gpu",
  "tenferro-internal-extension-macros",
  "tenferro-internal-ops",
  "tenferro-runtime",

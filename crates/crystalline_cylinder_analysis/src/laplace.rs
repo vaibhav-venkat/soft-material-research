@@ -1,9 +1,7 @@
 //! Complex Laplace transform and preferred-coordinate searches.
 
 use crate::backend::AnalysisBackend;
-use crate::integration::simpson_weights;
 use crate::model::{CorrelationSeries, LaplaceGrid, PreferredAxis, PreferredEstimate};
-use rayon::prelude::*;
 
 /// Transform-grid controls.
 #[derive(Clone, Copy, Debug)]
@@ -84,7 +82,8 @@ pub fn analyze_laplace<B: AnalysisBackend>(
 }
 
 /// Locate the maximum log magnitude on the selected transform axis.
-pub fn preferred_coordinate(
+pub fn preferred_coordinate<B: AnalysisBackend>(
+    backend: &B,
     correlation: &CorrelationSeries,
     axis: PreferredAxis,
     coordinates: &[f64],
@@ -110,39 +109,15 @@ pub fn preferred_coordinate(
         ),
     }
 
-    let spacing = correlation.lag_times[1] - correlation.lag_times[0];
-    let weights = simpson_weights(correlation.lag_times.len(), spacing);
-    let scores = coordinates
-        .par_iter()
-        .map(|&coordinate| {
-            let (r, omega) = match axis {
-                PreferredAxis::Omega => (0.0, coordinate),
-                PreferredAxis::R => (coordinate, 0.0),
-            };
-            let mut real = 0.0;
-            let mut real_compensation = 0.0;
-            let mut imaginary = 0.0;
-            let mut imaginary_compensation = 0.0;
-            for ((&time, &correlation_value), &weight) in correlation
-                .lag_times
-                .iter()
-                .zip(&correlation.pearson_mean)
-                .zip(&weights)
-            {
-                let envelope = (r * time).exp();
-                let (sine, cosine) = (omega * time).sin_cos();
-                compensated_add(
-                    weight * correlation_value * envelope * cosine,
-                    &mut real,
-                    &mut real_compensation,
-                );
-                compensated_add(
-                    weight * correlation_value * envelope * sine,
-                    &mut imaginary,
-                    &mut imaginary_compensation,
-                );
-            }
-            let magnitude = real.hypot(imaginary);
+    let grid = match axis {
+        PreferredAxis::Omega => backend.laplace_grid(correlation, &[0.0], coordinates),
+        PreferredAxis::R => backend.laplace_grid(correlation, coordinates, &[0.0]),
+    };
+    let scores = grid
+        .values
+        .iter()
+        .map(|value| {
+            let magnitude = value.norm();
             assert!(magnitude.is_finite(), "preferred magnitude is non-finite");
             magnitude.max(f64::MIN_POSITIVE).log10()
         })
@@ -203,11 +178,4 @@ fn linspace(minimum: f64, maximum: f64, count: usize) -> Vec<f64> {
     (0..count)
         .map(|index| minimum + (maximum - minimum) * index as f64 / denominator)
         .collect()
-}
-
-fn compensated_add(value: f64, sum: &mut f64, compensation: &mut f64) {
-    let corrected = value - *compensation;
-    let updated = *sum + corrected;
-    *compensation = (updated - *sum) - corrected;
-    *sum = updated;
 }

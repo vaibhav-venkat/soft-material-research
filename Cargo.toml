@@ -34,9 +34,9 @@ rustfft = "6"
 safetensors = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tenferro-cpu = { version = "0.2", default-features = false, features = ["cpu-faer"] }
-tenferro-linalg = { version = "0.2", default-features = false, features = ["cpu-faer"] }
-tenferro-runtime = { version = "0.2", default-features = false, features = ["cpu-faer"] }
+tenferro-gpu = { version = "0.2", default-features = false, features = ["cuda"] }
+tenferro-linalg = { version = "0.2", default-features = false, features = ["cuda", "cpu-faer"] }
+tenferro-runtime = { version = "0.2", default-features = false }
 thiserror = "2"
 burn = { version = "0.21", default-features = false, features = ["std", "flex", "fusion", "autotune"] }
 burn-cuda = { version = "0.21", default-features = false, features = ["std"] }

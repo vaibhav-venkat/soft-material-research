@@ -25,7 +25,7 @@ use crystalline_cylinder_analysis::replicates::{
 };
 use crystalline_cylinder_analysis::{
     analyze_dataset_clusters_with_snapshots, cluster_probability_histogram, CaseSchema,
-    ClusterConfig, ClusterHistogram, ComSeries, CorrelationSeries, CpuAnalysisBackend,
+    ClusterConfig, ClusterHistogram, ComSeries, CorrelationSeries, DeviceAnalysisBackend,
     PreferredAxis, ReplicateGroup,
 };
 use indicatif::{ProgressBar, ProgressStyle};
@@ -37,9 +37,10 @@ use std::time::Duration;
 /// Validate a command, run the requested stages, and write their artifacts.
 pub fn run(cli: Cli) {
     let Cli { common, command } = cli;
-    let backend = CpuAnalysisBackend::new(common.threads);
+    let backend = DeviceAnalysisBackend::new(common.threads, common.device);
     eprintln!(
-        "[debug:init] backend=tenferro-cpu threads={}",
+        "[debug:init] backend=tenferro-cuda device={} host_threads={}",
+        backend.device_label(),
         backend.thread_count,
     );
 
@@ -91,12 +92,17 @@ struct ClusterRunManifest {
     bins: usize,
     target_shard_mib: usize,
     rayon_threads: usize,
+    compute_device: String,
     snapshot_frames: Vec<usize>,
     histogram_range: [f64; 2],
     cases: Vec<ClusterRunCase>,
 }
 
-fn run_clusters(backend: &CpuAnalysisBackend, common: &crate::cli::CommonArgs, args: ClusterArgs) {
+fn run_clusters(
+    backend: &DeviceAnalysisBackend,
+    common: &crate::cli::CommonArgs,
+    args: ClusterArgs,
+) {
     assert!(args.bins > 0, "cluster histogram needs bins");
     assert!(
         args.target_shard_mib > 0,
@@ -228,6 +234,7 @@ fn run_clusters(backend: &CpuAnalysisBackend, common: &crate::cli::CommonArgs, a
         bins: args.bins,
         target_shard_mib: args.target_shard_mib,
         rayon_threads: backend.thread_count,
+        compute_device: backend.device_label(),
         snapshot_frames,
         histogram_range: [range.0, range.1],
         cases,
@@ -380,7 +387,7 @@ fn selected_cluster_groups(
     groups
 }
 
-fn run_fit(backend: &CpuAnalysisBackend, common: &crate::cli::CommonArgs, args: FitArgs) {
+fn run_fit(backend: &DeviceAnalysisBackend, common: &crate::cli::CommonArgs, args: FitArgs) {
     let mut analyses = correlation_analyses(backend, common, args.correlation);
     let correlations = analyses
         .iter()
@@ -486,7 +493,7 @@ fn fit_progress_bar(case_count: usize) -> ProgressBar {
 }
 
 fn run_com(
-    backend: &CpuAnalysisBackend,
+    backend: &DeviceAnalysisBackend,
     common: &crate::cli::CommonArgs,
     circumference: Option<BigLxCircumference>,
 ) {
@@ -522,7 +529,7 @@ fn run_com(
 }
 
 fn run_correlation(
-    backend: &CpuAnalysisBackend,
+    backend: &DeviceAnalysisBackend,
     common: &crate::cli::CommonArgs,
     args: CorrelationArgs,
 ) {
@@ -553,7 +560,11 @@ fn run_correlation(
     );
 }
 
-fn run_laplace(backend: &CpuAnalysisBackend, common: &crate::cli::CommonArgs, args: LaplaceArgs) {
+fn run_laplace(
+    backend: &DeviceAnalysisBackend,
+    common: &crate::cli::CommonArgs,
+    args: LaplaceArgs,
+) {
     let mut analyses = correlation_analyses(backend, common, args.correlation);
     let correlations = analyses
         .iter()
@@ -607,7 +618,7 @@ fn run_laplace(backend: &CpuAnalysisBackend, common: &crate::cli::CommonArgs, ar
 }
 
 fn correlation_analyses(
-    backend: &CpuAnalysisBackend,
+    backend: &DeviceAnalysisBackend,
     common: &crate::cli::CommonArgs,
     args: CorrelationArgs,
 ) -> Vec<CaseAnalysis> {
@@ -623,7 +634,7 @@ struct CorrelationCaseInput {
 }
 
 fn correlation_case_inputs(
-    backend: &CpuAnalysisBackend,
+    backend: &DeviceAnalysisBackend,
     common: &crate::cli::CommonArgs,
     args: CorrelationArgs,
 ) -> Vec<CorrelationCaseInput> {
@@ -643,7 +654,7 @@ fn correlation_case_inputs(
 }
 
 fn run_preferred(
-    backend: &CpuAnalysisBackend,
+    backend: &DeviceAnalysisBackend,
     common: &crate::cli::CommonArgs,
     args: PreferredArgs,
 ) {
@@ -700,7 +711,9 @@ fn run_preferred(
                 let estimates = input
                     .replicas
                     .par_iter()
-                    .map(|correlation| preferred_coordinate(correlation, axis, coordinates))
+                    .map(|correlation| {
+                        preferred_coordinate(backend, correlation, axis, coordinates)
+                    })
                     .collect::<Vec<_>>();
                 input
                     .analysis
@@ -781,7 +794,7 @@ fn analyze_group_com(group: ReplicateGroup, config: ComConfig) -> CaseAnalysis {
 }
 
 fn analyze_group_correlation_input(
-    backend: &CpuAnalysisBackend,
+    backend: &DeviceAnalysisBackend,
     group: ReplicateGroup,
     com_config: ComConfig,
     correlation_config: CorrelationConfig,

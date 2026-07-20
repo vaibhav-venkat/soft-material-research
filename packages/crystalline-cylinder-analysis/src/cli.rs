@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use crystalline_cylinder_analysis::ComputeDevice;
 
 /// Streaming crystalline-cylinder analysis and plotting.
 #[derive(Debug, Parser)]
@@ -30,6 +31,10 @@ pub struct CommonArgs {
     /// Maximum Rayon worker count; defaults to Rayon policy.
     #[arg(long, global = true)]
     pub threads: Option<usize>,
+
+    /// Tenferro compute device in provider:ordinal form.
+    #[arg(long, default_value = "cuda:0", global = true)]
+    pub device: ComputeDevice,
 
     #[arg(long, global = true)]
     pub overwrite: bool,

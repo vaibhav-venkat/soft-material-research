@@ -19,6 +19,6 @@ rayon.workspace = true
 safetensors.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tenferro-cpu.workspace = true
+tenferro-gpu.workspace = true
 tenferro-linalg.workspace = true
 tenferro-runtime.workspace = true

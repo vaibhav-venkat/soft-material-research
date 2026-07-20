@@ -12,7 +12,7 @@ pub mod model;
 pub mod pipeline;
 pub mod replicates;
 
-pub use backend::{AnalysisBackend, CpuAnalysisBackend};
+pub use backend::{AnalysisBackend, ComputeDevice, DeviceAnalysisBackend};
 pub use clusters::{
     analyze_dataset_clusters, analyze_dataset_clusters_with_snapshots,
     cluster_probability_histogram, ClusterConfig, ClusterHistogram, ClusterKind, ClusterRecord,

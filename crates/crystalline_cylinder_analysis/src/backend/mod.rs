@@ -1,8 +1,8 @@
 //! Numerical backend boundary for future CPU and GPU implementations.
 
-mod cpu;
+mod cuda;
 
-pub use cpu::CpuAnalysisBackend;
+pub use cuda::{ComputeDevice, DeviceAnalysisBackend};
 
 use crate::model::{CorrelationSeries, LaplaceGrid};
 

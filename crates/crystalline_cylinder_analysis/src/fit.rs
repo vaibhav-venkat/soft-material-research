@@ -60,7 +60,7 @@ pub fn fit_damped_cosine<B: AnalysisBackend>(
     let duration = *time.last().expect("correlation is empty");
     let nyquist = std::f64::consts::PI / dt;
     let preferred_omega =
-        preferred_coordinate(correlation, PreferredAxis::Omega, omega_grid).coordinate;
+        preferred_coordinate(backend, correlation, PreferredAxis::Omega, omega_grid).coordinate;
     let tail_count = 3.max(observed.len() / 10);
     let mut tail = observed[observed.len() - tail_count..].to_vec();
     tail.sort_by(|left, right| left.total_cmp(right));
