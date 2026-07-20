@@ -28,3 +28,31 @@ void linalg_zgesdd(char jobz, int m, int n, void *a, int lda, double *s,
     zgesdd_(&jobz, &m, &n, a, &lda, s, u, &ldu, vt, &ldvt, work, &lwork,
             rwork, iwork, info);
 }
+
+void linalg_sgelss(int m, int n, int nrhs, float *a, int lda, float *b,
+                   int ldb, float *s, float rcond, int *rank, float *work,
+                   int lwork, int *info) {
+    sgelss_(&m, &n, &nrhs, a, &lda, b, &ldb, s, &rcond, rank, work, &lwork,
+            info);
+}
+
+void linalg_dgelss(int m, int n, int nrhs, double *a, int lda, double *b,
+                   int ldb, double *s, double rcond, int *rank,
+                   double *work, int lwork, int *info) {
+    dgelss_(&m, &n, &nrhs, a, &lda, b, &ldb, s, &rcond, rank, work, &lwork,
+            info);
+}
+
+void linalg_cgelss(int m, int n, int nrhs, void *a, int lda, void *b,
+                   int ldb, float *s, float rcond, int *rank, void *work,
+                   int lwork, float *rwork, int *info) {
+    cgelss_(&m, &n, &nrhs, a, &lda, b, &ldb, s, &rcond, rank, work, &lwork,
+            rwork, info);
+}
+
+void linalg_zgelss(int m, int n, int nrhs, void *a, int lda, void *b,
+                   int ldb, double *s, double rcond, int *rank, void *work,
+                   int lwork, double *rwork, int *info) {
+    zgelss_(&m, &n, &nrhs, a, &lda, b, &ldb, s, &rcond, rank, work, &lwork,
+            rwork, info);
+}

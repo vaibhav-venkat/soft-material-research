@@ -560,6 +560,66 @@ pub fn svd(comptime T: type, input: ConstMatrixView(T), options: SvdOptions) !Sv
     return .{ .u = u, .singular_values = singular_values, .vh = vh };
 }
 
+pub fn LeastSquaresOptions(comptime T: type) type {
+    validateScalar(T);
+    return struct {
+        rcond: ?Real(T) = null,
+    };
+}
+
+pub fn LeastSquaresResult(comptime T: type) type {
+    validateScalar(T);
+    return struct {
+        const Self = @This();
+
+        solution: Matrix(T),
+        singular_values: Vector(Real(T)),
+        rank: usize,
+
+        pub fn deinit(self: *Self) void {
+            self.solution.deinit();
+            self.singular_values.deinit();
+            self.rank = 0;
+        }
+    };
+}
+
+pub fn leastSquares(
+    comptime T: type,
+    coefficients: ConstMatrixView(T),
+    right_hand_sides: ConstMatrixView(T),
+    options: LeastSquaresOptions(T),
+) !LeastSquaresResult(T) {
+    try validateMatrixView(T, coefficients);
+    try validateMatrixView(T, right_hand_sides);
+    if (coefficients.context != right_hand_sides.context) return error.ContextMismatch;
+    if (coefficients.rows < coefficients.cols) return error.WideMatrixUnsupported;
+    if (right_hand_sides.rows != coefficients.rows) return error.DimensionMismatch;
+
+    const context = @constCast(coefficients.context);
+    var solution = try Matrix(T).init(context, coefficients.cols, right_hand_sides.cols);
+    errdefer solution.deinit();
+    var singular_values = try Vector(Real(T)).init(context, coefficients.cols);
+    errdefer singular_values.deinit();
+    const rank = try driver.lapackLeastSquares(
+        T,
+        context.allocator,
+        coefficients.buffer,
+        coefficients.offset,
+        coefficients.rows,
+        coefficients.cols,
+        coefficients.leading_dimension,
+        right_hand_sides.buffer,
+        right_hand_sides.offset,
+        right_hand_sides.cols,
+        right_hand_sides.leading_dimension,
+        options.rcond orelse -1,
+        &solution.buffer,
+        &singular_values.buffer,
+    );
+    return .{ .solution = solution, .singular_values = singular_values, .rank = rank };
+}
+
 fn expectComplexApprox(comptime T: type, expected: T, actual: T, tolerance: Real(T)) !void {
     try std.testing.expectApproxEqAbs(expected.re, actual.re, tolerance);
     try std.testing.expectApproxEqAbs(expected.im, actual.im, tolerance);
@@ -749,6 +809,38 @@ fn testSvd(comptime T: type, tolerance: Real(T)) !void {
     for (singular_host, values_only_host) |expected, actual| try std.testing.expectApproxEqAbs(expected, actual, tolerance);
 }
 
+fn testLeastSquares(comptime T: type, tolerance: Real(T)) !void {
+    var context = try Context.init(std.testing.allocator, .{});
+    defer context.deinit();
+    const coefficient_values = if (comptime scalar.isComplex(T))
+        [_]T{ .init(1, 1), .init(0, 0), .init(1, 0), .init(0, 0), .init(1, -1), .init(1, 0) }
+    else
+        [_]T{ 1, 0, 1, 0, 1, 1 };
+    const expected_values = if (comptime scalar.isComplex(T))
+        [_]T{ .init(2, -1), .init(3, 2), .init(-1, 1), .init(4, -2) }
+    else
+        [_]T{ 2, 3, -1, 4 };
+    var coefficients = try Matrix(T).fromHost(&context, 3, 2, &coefficient_values);
+    defer coefficients.deinit();
+    var expected = try Matrix(T).fromHost(&context, 2, 2, &expected_values);
+    defer expected.deinit();
+    var right_hand_sides = try matmul(T, .none, .none, coefficients.constView(), expected.constView());
+    defer right_hand_sides.deinit();
+
+    var result = try leastSquares(T, coefficients.constView(), right_hand_sides.constView(), .{});
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 2), result.rank);
+    var solution_host: [4]T = undefined;
+    result.solution.copyToHost(&solution_host);
+    for (expected_values, solution_host) |expected_value, actual| {
+        if (comptime scalar.isComplex(T)) {
+            try expectComplexApprox(T, expected_value, actual, tolerance);
+        } else {
+            try std.testing.expectApproxEqAbs(expected_value, actual, tolerance);
+        }
+    }
+}
+
 test "complex representation and conversions" {
     const value = Complex32.init(2.5, -3.0);
     try std.testing.expectEqual(@sizeOf([2]f32), @sizeOf(Complex32));
@@ -814,4 +906,11 @@ test "thin and values-only SVD" {
     try testSvd(f64, 1.0e-11);
     try testSvd(Complex32, 1.0e-4);
     try testSvd(Complex64, 1.0e-11);
+}
+
+test "overdetermined least squares" {
+    try testLeastSquares(f32, 1.0e-4);
+    try testLeastSquares(f64, 1.0e-11);
+    try testLeastSquares(Complex32, 1.0e-4);
+    try testLeastSquares(Complex64, 1.0e-11);
 }
