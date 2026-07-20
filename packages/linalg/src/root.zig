@@ -1,5 +1,6 @@
 const std = @import("std");
 const build_options = @import("linalg_build_options");
+const scalar = @import("scalar.zig");
 
 const driver = if (std.mem.eql(u8, build_options.backend, "accelerate"))
     @import("backend/accelerate.zig")
@@ -14,44 +15,13 @@ else
 
 pub const Transpose = enum { none, transpose, conjugate_transpose };
 
-pub fn Complex(comptime T: type) type {
-    if (T != f32 and T != f64) @compileError("Complex components must be f32 or f64");
-    return extern struct {
-        re: T,
-        im: T,
-
-        const Self = @This();
-
-        pub fn init(re: T, im: T) Self {
-            return .{ .re = re, .im = im };
-        }
-
-        pub fn conjugate(self: Self) Self {
-            return .{ .re = self.re, .im = -self.im };
-        }
-
-        pub fn fromStd(value: std.math.Complex(T)) Self {
-            return .{ .re = value.re, .im = value.im };
-        }
-
-        pub fn toStd(self: Self) std.math.Complex(T) {
-            return .init(self.re, self.im);
-        }
-    };
-}
-
-pub const Complex32 = Complex(f32);
-pub const Complex64 = Complex(f64);
-
-pub fn Real(comptime T: type) type {
-    validateScalar(T);
-    return if (T == f32 or T == Complex32) f32 else f64;
-}
+pub const Complex = scalar.Complex;
+pub const Complex32 = scalar.Complex32;
+pub const Complex64 = scalar.Complex64;
+pub const Real = scalar.Real;
 
 fn validateScalar(comptime T: type) void {
-    if (T != f32 and T != f64 and T != Complex32 and T != Complex64) {
-        @compileError("linalg supports f32, f64, Complex(f32), and Complex(f64)");
-    }
+    scalar.validate(T);
 }
 
 pub const ContextOptions = struct {
@@ -116,11 +86,23 @@ pub const Event = struct {
 pub fn VectorView(comptime T: type) type {
     validateScalar(T);
     return struct {
+        const Self = @This();
+
         context: *Context,
         buffer: *driver.Buffer(T),
         offset: usize,
         len: usize,
         stride: usize,
+
+        pub fn asConst(self: Self) ConstVectorView(T) {
+            return .{
+                .context = self.context,
+                .buffer = self.buffer,
+                .offset = self.offset,
+                .len = self.len,
+                .stride = self.stride,
+            };
+        }
     };
 }
 
@@ -138,12 +120,25 @@ pub fn ConstVectorView(comptime T: type) type {
 pub fn MatrixView(comptime T: type) type {
     validateScalar(T);
     return struct {
+        const Self = @This();
+
         context: *Context,
         buffer: *driver.Buffer(T),
         offset: usize,
         rows: usize,
         cols: usize,
         leading_dimension: usize,
+
+        pub fn asConst(self: Self) ConstMatrixView(T) {
+            return .{
+                .context = self.context,
+                .buffer = self.buffer,
+                .offset = self.offset,
+                .rows = self.rows,
+                .cols = self.cols,
+                .leading_dimension = self.leading_dimension,
+            };
+        }
     };
 }
 
@@ -304,6 +299,125 @@ pub fn Matrix(comptime T: type) type {
     };
 }
 
+fn validateVectorPair(comptime T: type, x: ConstVectorView(T), y: anytype) !void {
+    if (x.context != y.context) return error.ContextMismatch;
+    if (x.len != y.len) return error.DimensionMismatch;
+    if ((x.len > 1 and x.stride == 0) or (y.len > 1 and y.stride == 0)) return error.InvalidStride;
+}
+
+pub fn copy(comptime T: type, x: ConstVectorView(T), y: VectorView(T)) !void {
+    try validateVectorPair(T, x, y);
+    try driver.blasCopy(T, x.buffer, x.offset, x.stride, y.buffer, y.offset, y.stride, x.len);
+}
+
+pub fn swap(comptime T: type, x: VectorView(T), y: VectorView(T)) !void {
+    try validateVectorPair(T, x.asConst(), y);
+    try driver.blasSwap(T, x.buffer, x.offset, x.stride, y.buffer, y.offset, y.stride, x.len);
+}
+
+pub fn scale(comptime T: type, alpha: T, x: VectorView(T)) !void {
+    if (x.len > 1 and x.stride == 0) return error.InvalidStride;
+    try driver.blasScale(T, alpha, x.buffer, x.offset, x.stride, x.len);
+}
+
+pub fn scaleReal(comptime T: type, alpha: Real(T), x: VectorView(T)) !void {
+    if (comptime !scalar.isComplex(T)) @compileError("scaleReal requires a complex vector");
+    if (x.len > 1 and x.stride == 0) return error.InvalidStride;
+    try driver.blasScaleReal(T, alpha, x.buffer, x.offset, x.stride, x.len);
+}
+
+pub fn axpy(comptime T: type, alpha: T, x: ConstVectorView(T), y: VectorView(T)) !void {
+    try validateVectorPair(T, x, y);
+    try driver.blasAxpy(T, alpha, x.buffer, x.offset, x.stride, y.buffer, y.offset, y.stride, x.len);
+}
+
+pub fn dot(comptime T: type, x: ConstVectorView(T), y: ConstVectorView(T)) !T {
+    if (comptime scalar.isComplex(T)) @compileError("complex dot products must use dotu or dotc explicitly");
+    return dotu(T, x, y);
+}
+
+pub fn dotu(comptime T: type, x: ConstVectorView(T), y: ConstVectorView(T)) !T {
+    try validateVectorPair(T, x, y);
+    return driver.blasDot(T, false, x.buffer, x.offset, x.stride, y.buffer, y.offset, y.stride, x.len);
+}
+
+pub fn dotc(comptime T: type, x: ConstVectorView(T), y: ConstVectorView(T)) !T {
+    try validateVectorPair(T, x, y);
+    return driver.blasDot(T, true, x.buffer, x.offset, x.stride, y.buffer, y.offset, y.stride, x.len);
+}
+
+pub fn norm2(comptime T: type, x: ConstVectorView(T)) !Real(T) {
+    if (x.len > 1 and x.stride == 0) return error.InvalidStride;
+    return driver.blasNorm2(T, x.buffer, x.offset, x.stride, x.len);
+}
+
+pub fn absSum(comptime T: type, x: ConstVectorView(T)) !Real(T) {
+    if (x.len > 1 and x.stride == 0) return error.InvalidStride;
+    return driver.blasAbsSum(T, x.buffer, x.offset, x.stride, x.len);
+}
+
+pub fn indexAbsMax(comptime T: type, x: ConstVectorView(T)) !usize {
+    if (x.len > 1 and x.stride == 0) return error.InvalidStride;
+    return driver.blasIndexAbsMax(T, x.buffer, x.offset, x.stride, x.len);
+}
+
+fn expectComplexApprox(comptime T: type, expected: T, actual: T, tolerance: Real(T)) !void {
+    try std.testing.expectApproxEqAbs(expected.re, actual.re, tolerance);
+    try std.testing.expectApproxEqAbs(expected.im, actual.im, tolerance);
+}
+
+fn testRealLevelOne(comptime T: type, tolerance: T) !void {
+    var context = try Context.init(std.testing.allocator, .{});
+    defer context.deinit();
+    const x_values = [_]T{ 1, -2, 3 };
+    const y_values = [_]T{ 4, 5, 6 };
+    var x = try Vector(T).fromHost(&context, &x_values);
+    defer x.deinit();
+    var y = try Vector(T).fromHost(&context, &y_values);
+    defer y.deinit();
+
+    try std.testing.expectApproxEqAbs(@as(T, 12), try dot(T, x.constView(), y.constView()), tolerance);
+    try std.testing.expectApproxEqAbs(@sqrt(@as(T, 14)), try norm2(T, x.constView()), tolerance);
+    try std.testing.expectApproxEqAbs(@as(T, 6), try absSum(T, x.constView()), tolerance);
+    try std.testing.expectEqual(@as(usize, 2), try indexAbsMax(T, x.constView()));
+
+    try scale(T, 2, y.view());
+    try axpy(T, -1, x.constView(), y.view());
+    var output: [3]T = undefined;
+    y.copyToHost(&output);
+    try std.testing.expectEqualSlices(T, &[_]T{ 7, 12, 9 }, &output);
+
+    try copy(T, x.constView(), y.view());
+    try swap(T, x.view(), y.view());
+    x.copyToHost(&output);
+    try std.testing.expectEqualSlices(T, &x_values, &output);
+}
+
+fn testComplexLevelOne(comptime T: type, tolerance: Real(T)) !void {
+    var context = try Context.init(std.testing.allocator, .{});
+    defer context.deinit();
+    const x_values = [_]T{ .init(1, 2), .init(-3, 1) };
+    const y_values = [_]T{ .init(2, -1), .init(1, 4) };
+    var x = try Vector(T).fromHost(&context, &x_values);
+    defer x.deinit();
+    var y = try Vector(T).fromHost(&context, &y_values);
+    defer y.deinit();
+
+    try expectComplexApprox(T, T.init(-3, -8), try dotu(T, x.constView(), y.constView()), tolerance);
+    try expectComplexApprox(T, T.init(1, -18), try dotc(T, x.constView(), y.constView()), tolerance);
+    try std.testing.expectApproxEqAbs(@sqrt(@as(Real(T), 15)), try norm2(T, x.constView()), tolerance);
+    try std.testing.expectApproxEqAbs(@as(Real(T), 7), try absSum(T, x.constView()), tolerance);
+    try std.testing.expectEqual(@as(usize, 1), try indexAbsMax(T, x.constView()));
+
+    try scaleReal(T, 2, x.view());
+    try scale(T, T.init(0, 0.5), x.view());
+    try axpy(T, T.init(1, 0), y.constView(), x.view());
+    var output: [2]T = undefined;
+    x.copyToHost(&output);
+    try expectComplexApprox(T, T.init(0, 0), output[0], tolerance);
+    try expectComplexApprox(T, T.init(0, 1), output[1], tolerance);
+}
+
 test "complex representation and conversions" {
     const value = Complex32.init(2.5, -3.0);
     try std.testing.expectEqual(@sizeOf([2]f32), @sizeOf(Complex32));
@@ -342,4 +456,14 @@ test "backend-owned vector and matrix round trips" {
     var matrix_output: [6]f64 = undefined;
     matrix.copyToHost(&matrix_output);
     try std.testing.expectEqualSlices(f64, &matrix_values, &matrix_output);
+}
+
+test "real Level 1 BLAS" {
+    try testRealLevelOne(f32, 1.0e-5);
+    try testRealLevelOne(f64, 1.0e-12);
+}
+
+test "complex Level 1 BLAS" {
+    try testComplexLevelOne(Complex32, 1.0e-5);
+    try testComplexLevelOne(Complex64, 1.0e-12);
 }
