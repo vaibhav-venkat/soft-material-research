@@ -4,8 +4,8 @@
 LAPACK implementations. It owns API semantics, validation, storage layout, and
 tests; a backend driver owns memory and vendor calls.
 
-The current implementation uses Apple's Accelerate framework. A CUDA driver is
-reserved behind the same public API for cuBLAS and cuSOLVER.
+The package implements Apple's Accelerate framework and NVIDIA CUDA 12.9+
+behind the same public API. Backend selection is explicit and never falls back.
 
 The source layout follows the numerical boundaries without splitting every
 routine into its own file:
@@ -16,6 +16,8 @@ routine into its own file:
 - `lapack.zig`: backend-neutral SVD and least-squares ownership/dispatch.
 - `tests.zig`: the shared backend-independent numerical contract.
 - `backend/accelerate_{core,blas,lapack}.zig`: Accelerate driver layers.
+- `backend/cuda_{core,blas,lapack}.zig`: CUDA memory/event, cuBLAS, and
+  cuSOLVER driver layers.
 
 ## Build on macOS
 
@@ -67,20 +69,31 @@ Implemented wrappers:
 SVD and least squares currently accept tall or square coefficient matrices.
 LAPACK-destructive inputs are copied, so caller-owned matrices are preserved.
 
-## CUDA implementation contract
+## Build on Linux with CUDA
 
-The CUDA implementation should replace `src/backend/cuda.zig` without changing
-`src/root.zig` or its tests. Its build branch should require an explicit CUDA
-root (for example `-Dcuda-root=/usr/local/cuda`), translate a narrow shim header
-from `build.zig`, compile its shim source, and link `cudart`, `cublas`, and
-`cusolver`. Do not restore `@cImport`.
+CUDA 12.9 or newer, a working NVIDIA driver, and an explicit toolkit path are
+required. The path must contain `include/`; libraries are discovered in `lib`,
+`lib64`, or `targets/x86_64-linux/lib` beneath it.
 
-Each CUDA `Context` should own one `cudaStream_t`, one `cublasHandle_t`, and one
-`cusolverDnHandle_t`, with both handles bound to that stream. `Buffer(T)` should
-own device memory; host transfers, BLAS calls, LAPACK-equivalent calls, events,
-and synchronization should preserve the public ordering and error semantics.
-Validate `Complex32`/`Complex64` layout against `cuComplex`/`cuDoubleComplex` in
-the shim before using pointer casts.
+```bash
+zig build -Dbackend=cuda -Dcuda-path=/usr/local/cuda-12.9 check
+zig build -Dbackend=cuda -Dcuda-path=/usr/local/cuda-12.9 test
+```
+
+The repository Pixi environment exposes the toolkit target directory and has
+matching tasks:
+
+```bash
+pixi run linalg-cuda-check
+pixi run linalg-cuda-test
+```
+
+Each CUDA `Context` owns one nonblocking `cudaStream_t`, one `cublasHandle_t`,
+and one `cusolverDnHandle_t`, with both handles bound to that stream. Buffers
+live in device memory. Host-returning transfers and reductions synchronize;
+BLAS calls enqueue in context order. Events provide opt-in completion checks.
+The translated CUDA header rejects older toolkits and asserts complex size and
+field layout before the driver uses pointer casts.
 
 Map the operations as follows:
 
@@ -88,9 +101,12 @@ Map the operations as follows:
 | --- | --- | --- |
 | Level 1, GEMV, GER, GEMM | CBLAS | cuBLAS |
 | thin/values-only SVD | `xGESDD` | cuSOLVER `gesvd`/`gesvdj` adapter |
-| least squares | `xGELSS` | cuSOLVER SVD plus rank-filtered solve |
+| least squares | `xGELSS` | cuSOLVER SVD plus rank-filtered cuBLAS solve |
 | synchronize/event | synchronous/no-op event | stream/event |
 
-The package-local tests intentionally contain no Accelerate symbols or macOS
-conditionals. Run the same tests with `-Dbackend=cuda`; backend-specific tests
-should be limited to driver initialization and error translation.
+CUDA least squares performs the one intentional singular-value synchronization
+needed to determine rank, then uses cuBLAS scaling and GEMM for the pseudoinverse
+application and residual norms. It does not use a custom CUDA kernel.
+
+The package-local tests intentionally contain no Accelerate symbols or platform
+conditionals. The same numerical contract runs for either selected backend.

@@ -79,11 +79,13 @@ pub fn LeastSquaresResult(comptime T: type) type {
 
         solution: Matrix(T),
         singular_values: Vector(Real(T)),
+        residual_norms: Vector(Real(T)),
         rank: usize,
 
         pub fn deinit(self: *Self) void {
             self.solution.deinit();
             self.singular_values.deinit();
+            self.residual_norms.deinit();
             self.rank = 0;
         }
     };
@@ -100,12 +102,17 @@ pub fn leastSquares(
     if (coefficients.context != right_hand_sides.context) return error.ContextMismatch;
     if (coefficients.rows < coefficients.cols) return error.WideMatrixUnsupported;
     if (right_hand_sides.rows != coefficients.rows) return error.DimensionMismatch;
+    if (options.rcond) |rcond| {
+        if (!@import("std").math.isFinite(rcond) or rcond < 0) return error.InvalidTolerance;
+    }
 
     const context = @constCast(coefficients.context);
     var solution = try Matrix(T).init(context, coefficients.cols, right_hand_sides.cols);
     errdefer solution.deinit();
     var singular_values = try Vector(Real(T)).init(context, coefficients.cols);
     errdefer singular_values.deinit();
+    var residual_norms = try Vector(Real(T)).init(context, right_hand_sides.cols);
+    errdefer residual_norms.deinit();
     const rank = try driver.lapackLeastSquares(
         T,
         context.allocator,
@@ -121,6 +128,7 @@ pub fn leastSquares(
         options.rcond orelse -1,
         &solution.buffer,
         &singular_values.buffer,
+        &residual_norms.buffer,
     );
-    return .{ .solution = solution, .singular_values = singular_values, .rank = rank };
+    return .{ .solution = solution, .singular_values = singular_values, .residual_norms = residual_norms, .rank = rank };
 }

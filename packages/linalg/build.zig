@@ -1,5 +1,10 @@
 const std = @import("std");
 
+fn addLibraryPathIfPresent(b: *std.Build, module: *std.Build.Module, path: []const u8) void {
+    std.Io.Dir.accessAbsolute(b.graph.io, path, .{}) catch return;
+    module.addLibraryPath(b.graph.cwdRelativePath(path));
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -14,30 +19,12 @@ pub fn build(b: *std.Build) void {
     if (is_accelerate and target.result.os.tag != .macos) {
         @panic("the accelerate backend requires a macOS target");
     }
-    if (is_cuda) {
-        @panic("the cuda backend contract exists but is not implemented in this worktree");
+    if (is_cuda and target.result.os.tag != .linux) {
+        @panic("the cuda backend requires a Linux target");
     }
 
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "backend", backend);
-
-    const macos_sdk = b.option(
-        []const u8,
-        "macos-sdk",
-        "Path to the macOS SDK used to translate Accelerate headers",
-    ) orelse "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk";
-    const accelerate_frameworks = std.fs.path.join(b.allocator, &.{
-        macos_sdk,
-        "System/Library/Frameworks/Accelerate.framework/Frameworks",
-    }) catch @panic("out of memory while constructing the Accelerate framework path");
-    const translate_accelerate = b.addTranslateC(.{
-        .root_source_file = b.path("src/backend/accelerate.h"),
-        .target = target,
-        .optimize = optimize,
-    });
-    translate_accelerate.defineCMacro("ACCELERATE_NEW_LAPACK", "1");
-    translate_accelerate.addSystemFrameworkPath(b.graph.cwdRelativePath(accelerate_frameworks));
-    const accelerate_c = translate_accelerate.createModule();
 
     const module = b.addModule("linalg", .{
         .root_source_file = b.path("src/root.zig"),
@@ -45,10 +32,52 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     module.addOptions("linalg_build_options", build_options);
-    module.addImport("accelerate_c", accelerate_c);
-    module.addCSourceFile(.{ .file = b.path("src/backend/accelerate_shim.c") });
     module.link_libc = true;
-    module.linkFramework("Accelerate", .{});
+
+    if (is_accelerate) {
+        const macos_sdk = b.option(
+            []const u8,
+            "macos-sdk",
+            "Path to the macOS SDK used to translate Accelerate headers",
+        ) orelse "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk";
+        const accelerate_frameworks = std.fs.path.join(b.allocator, &.{
+            macos_sdk,
+            "System/Library/Frameworks/Accelerate.framework/Frameworks",
+        }) catch @panic("out of memory while constructing the Accelerate framework path");
+        const translate_accelerate = b.addTranslateC(.{
+            .root_source_file = b.path("src/backend/accelerate.h"),
+            .target = target,
+            .optimize = optimize,
+        });
+        translate_accelerate.defineCMacro("ACCELERATE_NEW_LAPACK", "1");
+        translate_accelerate.addSystemFrameworkPath(b.graph.cwdRelativePath(accelerate_frameworks));
+        module.addImport("accelerate_c", translate_accelerate.createModule());
+        module.addCSourceFile(.{ .file = b.path("src/backend/accelerate_shim.c") });
+        module.linkFramework("Accelerate", .{});
+    } else {
+        const cuda_path = b.option([]const u8, "cuda-path", "Required CUDA 12.9+ toolkit root") orelse
+            @panic("the cuda backend requires -Dcuda-path=/path/to/cuda-12.9-or-newer");
+        const cuda_include = std.fs.path.join(b.allocator, &.{ cuda_path, "include" }) catch @panic("out of memory");
+        const cuda_lib = std.fs.path.join(b.allocator, &.{ cuda_path, "lib" }) catch @panic("out of memory");
+        const cuda_lib64 = std.fs.path.join(b.allocator, &.{ cuda_path, "lib64" }) catch @panic("out of memory");
+        const cuda_target_lib = std.fs.path.join(b.allocator, &.{ cuda_path, "targets/x86_64-linux/lib" }) catch @panic("out of memory");
+        const translate_cuda = b.addTranslateC(.{
+            .root_source_file = b.path("src/backend/cuda.h"),
+            .target = target,
+            .optimize = optimize,
+        });
+        translate_cuda.addIncludePath(b.graph.cwdRelativePath(cuda_include));
+        const cuda_c = translate_cuda.createModule();
+        cuda_c.addIncludePath(b.graph.cwdRelativePath(cuda_include));
+        module.addImport("cuda_c", cuda_c);
+        module.addIncludePath(b.graph.cwdRelativePath(cuda_include));
+        addLibraryPathIfPresent(b, module, cuda_lib);
+        addLibraryPathIfPresent(b, module, cuda_lib64);
+        addLibraryPathIfPresent(b, module, cuda_target_lib);
+        module.linkSystemLibrary("cudart", .{});
+        module.linkSystemLibrary("cublas", .{});
+        module.linkSystemLibrary("cusolver", .{});
+    }
 
     const test_module = b.createModule(.{
         .root_source_file = b.path("src/tests.zig"),
