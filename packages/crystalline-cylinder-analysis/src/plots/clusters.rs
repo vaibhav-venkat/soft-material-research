@@ -23,6 +23,9 @@ pub struct ClusterPlotCase {
 pub fn write_cluster_histogram_plot(
     cases: &[ClusterPlotCase],
     title: &str,
+    x_label: &str,
+    y_label: &str,
+    log_x: bool,
     color: &str,
     output: &Path,
 ) -> PathBuf {
@@ -50,12 +53,11 @@ pub fn write_cluster_histogram_plot(
             Histogram::from_bins(histogram.bin_edges.clone(), histogram.probabilities.clone())
                 .with_color(color),
         )];
-        layouts.push(
-            Layout::auto_from_plots(&panel)
-                .with_title(panel_title)
-                .with_x_label("cluster area fraction, A/SA")
-                .with_y_label("probability per bin"),
-        );
+        let layout = Layout::auto_from_plots(&panel)
+            .with_title(panel_title)
+            .with_x_label(x_label)
+            .with_y_label(y_label);
+        layouts.push(if log_x { layout.with_log_x() } else { layout });
         plots.push(panel);
     }
     let columns = cases.len().min(3);

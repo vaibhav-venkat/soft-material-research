@@ -15,6 +15,7 @@ pub mod replicates;
 pub use backend::{AnalysisBackend, ComputeDevice, DeviceAnalysisBackend};
 pub use clusters::{
     analyze_dataset_clusters, analyze_dataset_clusters_with_snapshots,
+    cluster_area_weighted_probability_histogram, cluster_log_probability_histogram,
     cluster_probability_histogram, ClusterConfig, ClusterHistogram, ClusterKind, ClusterRecord,
     ClusterSnapshot, DatasetClusterAnalysis,
 };

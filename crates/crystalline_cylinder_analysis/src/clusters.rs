@@ -148,6 +148,56 @@ pub fn cluster_probability_histogram(
     bins: usize,
     range: (f64, f64),
 ) -> ClusterHistogram {
+    let width = validate_histogram_inputs(samples, bins, range) / bins as f64;
+    let edges = (0..=bins)
+        .map(|index| range.0 + index as f64 * width)
+        .collect::<Vec<_>>();
+    cluster_histogram_from_edges(samples, None, edges)
+}
+
+/// Bin cluster counts on logarithmically spaced area-fraction edges.
+pub fn cluster_log_probability_histogram(
+    samples: &[f64],
+    bins: usize,
+    range: (f64, f64),
+) -> ClusterHistogram {
+    validate_histogram_inputs(samples, bins, range);
+    assert!(range.0 > 0.0, "log histogram range must be positive");
+    assert!(
+        samples.iter().all(|value| *value > 0.0),
+        "log histogram samples must be positive"
+    );
+    let log_minimum = range.0.ln();
+    let log_width = (range.1.ln() - log_minimum) / bins as f64;
+    let mut edges = (0..=bins)
+        .map(|index| (log_minimum + index as f64 * log_width).exp())
+        .collect::<Vec<_>>();
+    edges[0] = range.0;
+    edges[bins] = range.1;
+    cluster_histogram_from_edges(samples, None, edges)
+}
+
+/// Bin by area fraction while weighting each cluster by its occupied area.
+///
+/// Within one physical case the cylinder surface area is constant, so using
+/// `A/SA` as the weight is equivalent to using `A` after normalization.
+pub fn cluster_area_weighted_probability_histogram(
+    samples: &[f64],
+    bins: usize,
+    range: (f64, f64),
+) -> ClusterHistogram {
+    let width = validate_histogram_inputs(samples, bins, range) / bins as f64;
+    assert!(
+        samples.iter().all(|value| *value > 0.0),
+        "area weights must be positive"
+    );
+    let edges = (0..=bins)
+        .map(|index| range.0 + index as f64 * width)
+        .collect::<Vec<_>>();
+    cluster_histogram_from_edges(samples, Some(samples), edges)
+}
+
+fn validate_histogram_inputs(samples: &[f64], bins: usize, range: (f64, f64)) -> f64 {
     assert!(bins > 0, "cluster histogram needs bins");
     assert!(
         range.0.is_finite() && range.1.is_finite() && range.1 > range.0,
@@ -157,26 +207,49 @@ pub fn cluster_probability_histogram(
         samples.iter().all(|value| value.is_finite()),
         "bad cluster sample"
     );
-    let width = (range.1 - range.0) / bins as f64;
-    let bin_edges = (0..=bins)
-        .map(|index| range.0 + index as f64 * width)
-        .collect::<Vec<_>>();
-    let mut probabilities = vec![0.0; bins];
-    for &sample in samples {
+    range.1 - range.0
+}
+
+fn cluster_histogram_from_edges(
+    samples: &[f64],
+    weights: Option<&[f64]>,
+    bin_edges: Vec<f64>,
+) -> ClusterHistogram {
+    let bins = bin_edges.len() - 1;
+    if let Some(weights) = weights {
+        assert_eq!(
+            weights.len(),
+            samples.len(),
+            "cluster weights are misaligned"
+        );
         assert!(
-            sample >= range.0 && sample <= range.1,
+            weights
+                .iter()
+                .all(|weight| weight.is_finite() && *weight >= 0.0),
+            "bad cluster weight"
+        );
+    }
+    let minimum = bin_edges[0];
+    let maximum = bin_edges[bins];
+    let mut probabilities = vec![0.0; bins];
+    let mut total_weight = 0.0;
+    for (sample_index, &sample) in samples.iter().enumerate() {
+        assert!(
+            sample >= minimum && sample <= maximum,
             "cluster sample outside range"
         );
-        let index = if sample == range.1 {
+        let index = if sample == maximum {
             bins - 1
         } else {
-            ((sample - range.0) / width).floor() as usize
+            bin_edges.partition_point(|edge| *edge <= sample) - 1
         };
-        probabilities[index] += 1.0;
+        let weight = weights.map_or(1.0, |values| values[sample_index]);
+        probabilities[index] += weight;
+        total_weight += weight;
     }
-    if !samples.is_empty() {
+    if total_weight > 0.0 {
         for probability in &mut probabilities {
-            *probability /= samples.len() as f64;
+            *probability /= total_weight;
         }
         let total: f64 = probabilities.iter().sum();
         assert!(

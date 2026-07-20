@@ -40,6 +40,10 @@ Static cluster views assign an overlapping particle to the cluster with the
 larger occupied area (and use the smaller local cluster ID to break exact ties).
 `--frame-start` is inclusive and `--frame-stop` is exclusive. Omitting the stop
 uses the trajectory length; snapshots outside the selected interval are skipped.
+The command writes log-binned cluster-count distributions and linear
+area-weighted distributions for both structural and coherent-motion clusters.
+Area weighting preserves small clusters but makes each cluster contribute in
+proportion to the particle area it contains.
 
 Tenferro uses explicit host/device transfers. This CLI uploads graph inputs and
 downloads final host-visible results; unsupported CUDA operations fail instead

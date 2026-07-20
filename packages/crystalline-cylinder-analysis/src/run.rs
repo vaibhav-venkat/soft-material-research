@@ -24,9 +24,9 @@ use crystalline_cylinder_analysis::replicates::{
     average_com_series, average_correlations, average_preferred_estimates,
 };
 use crystalline_cylinder_analysis::{
-    analyze_dataset_clusters_with_snapshots, cluster_probability_histogram, CaseSchema,
-    ClusterConfig, ClusterHistogram, ComSeries, CorrelationSeries, DeviceAnalysisBackend,
-    PreferredAxis, ReplicateGroup,
+    analyze_dataset_clusters_with_snapshots, cluster_area_weighted_probability_histogram,
+    cluster_log_probability_histogram, CaseSchema, ClusterConfig, ClusterHistogram, ComSeries,
+    CorrelationSeries, DeviceAnalysisBackend, PreferredAxis, ReplicateGroup,
 };
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
@@ -81,8 +81,10 @@ struct ClusterRunCase {
     replicate_count: usize,
     dataset_manifests: Vec<PathBuf>,
     snapshot_files: Vec<PathBuf>,
-    structural: ClusterHistogram,
-    motion: ClusterHistogram,
+    structural_count_log: ClusterHistogram,
+    motion_count_log: ClusterHistogram,
+    structural_area_weighted: ClusterHistogram,
+    motion_area_weighted: ClusterHistogram,
 }
 
 #[derive(Serialize)]
@@ -94,7 +96,8 @@ struct ClusterRunManifest {
     rayon_threads: usize,
     compute_device: String,
     snapshot_frames: Vec<usize>,
-    area_fraction_histogram_range: [f64; 2],
+    count_log_area_fraction_range: [f64; 2],
+    area_weighted_area_fraction_range: [f64; 2],
     cases: Vec<ClusterRunCase>,
 }
 
@@ -179,17 +182,28 @@ fn run_clusters(
             .collect::<Vec<_>>()
     });
 
-    let maximum = work
+    let extrema = work
         .iter()
         .flat_map(|case| case.structural_samples.iter().chain(&case.motion_samples))
         .copied()
-        .reduce(f64::max)
-        .unwrap_or(1.0);
+        .fold(None, |extrema, value| {
+            Some(
+                extrema.map_or((value, value), |(minimum, maximum): (f64, f64)| {
+                    (minimum.min(value), maximum.max(value))
+                }),
+            )
+        });
+    let (minimum, maximum) = extrema.unwrap_or((1.0e-12, 1.0));
     assert!(
-        maximum.is_finite() && maximum > 0.0,
-        "bad cluster histogram maximum"
+        minimum.is_finite() && minimum > 0.0 && maximum.is_finite() && maximum > 0.0,
+        "bad cluster histogram range"
     );
-    let range = (0.0, maximum);
+    let log_range = if minimum < maximum {
+        (minimum, maximum)
+    } else {
+        (0.5 * minimum, 1.5 * maximum)
+    };
+    let linear_range = (0.0, maximum);
     let cases = work
         .into_iter()
         .map(|case| ClusterRunCase {
@@ -198,56 +212,118 @@ fn run_clusters(
             replicate_count: case.replicate_count,
             dataset_manifests: case.dataset_manifests,
             snapshot_files: case.snapshot_files,
-            structural: cluster_probability_histogram(&case.structural_samples, args.bins, range),
-            motion: cluster_probability_histogram(&case.motion_samples, args.bins, range),
+            structural_count_log: cluster_log_probability_histogram(
+                &case.structural_samples,
+                args.bins,
+                log_range,
+            ),
+            motion_count_log: cluster_log_probability_histogram(
+                &case.motion_samples,
+                args.bins,
+                log_range,
+            ),
+            structural_area_weighted: cluster_area_weighted_probability_histogram(
+                &case.structural_samples,
+                args.bins,
+                linear_range,
+            ),
+            motion_area_weighted: cluster_area_weighted_probability_histogram(
+                &case.motion_samples,
+                args.bins,
+                linear_range,
+            ),
         })
         .collect::<Vec<_>>();
     let structural_plot_cases = cases
         .iter()
         .map(|case| ClusterPlotCase {
             label: case.label.clone(),
-            histogram: case.structural.clone(),
+            histogram: case.structural_count_log.clone(),
         })
         .collect::<Vec<_>>();
     let motion_plot_cases = cases
         .iter()
         .map(|case| ClusterPlotCase {
             label: case.label.clone(),
-            histogram: case.motion.clone(),
+            histogram: case.motion_count_log.clone(),
         })
         .collect::<Vec<_>>();
-    let structural_output = cluster_root.join("structural_cluster_area_fraction_distribution.svg");
-    let motion_output = cluster_root.join("motion_cluster_area_fraction_distribution.svg");
+    let structural_weighted_plot_cases = cases
+        .iter()
+        .map(|case| ClusterPlotCase {
+            label: case.label.clone(),
+            histogram: case.structural_area_weighted.clone(),
+        })
+        .collect::<Vec<_>>();
+    let motion_weighted_plot_cases = cases
+        .iter()
+        .map(|case| ClusterPlotCase {
+            label: case.label.clone(),
+            histogram: case.motion_area_weighted.clone(),
+        })
+        .collect::<Vec<_>>();
+    let structural_output = cluster_root.join("structural_cluster_count_log_distribution.svg");
+    let motion_output = cluster_root.join("motion_cluster_count_log_distribution.svg");
+    let structural_weighted_output =
+        cluster_root.join("structural_cluster_area_weighted_distribution.svg");
+    let motion_weighted_output = cluster_root.join("motion_cluster_area_weighted_distribution.svg");
     write_cluster_histogram_plot(
         &structural_plot_cases,
-        "Structural-cluster area-fraction distributions",
+        "Structural-cluster count distributions",
+        "cluster area fraction, A/SA (log scale)",
+        "cluster-count probability per log bin",
+        true,
         "#4477AA",
         &structural_output,
     );
     write_cluster_histogram_plot(
         &motion_plot_cases,
-        "Coherent-motion-cluster area-fraction distributions",
+        "Coherent-motion-cluster count distributions",
+        "cluster area fraction, A/SA (log scale)",
+        "cluster-count probability per log bin",
+        true,
         "#EE6677",
         &motion_output,
     );
+    write_cluster_histogram_plot(
+        &structural_weighted_plot_cases,
+        "Structural-cluster area-weighted distributions",
+        "cluster area fraction, A/SA",
+        "fraction of clustered area per bin",
+        false,
+        "#4477AA",
+        &structural_weighted_output,
+    );
+    write_cluster_histogram_plot(
+        &motion_weighted_plot_cases,
+        "Coherent-motion-cluster area-weighted distributions",
+        "cluster area fraction, A/SA",
+        "fraction of clustered area per bin",
+        false,
+        "#EE6677",
+        &motion_weighted_output,
+    );
     let manifest = ClusterRunManifest {
-        schema: "crystalline-cylinder-analysis.clusters.run.v4".to_owned(),
+        schema: "crystalline-cylinder-analysis.clusters.run.v5".to_owned(),
         config,
         bins: args.bins,
         target_shard_mib: args.target_shard_mib,
         rayon_threads: backend.thread_count,
         compute_device: backend.device_label(),
         snapshot_frames,
-        area_fraction_histogram_range: [range.0, range.1],
+        count_log_area_fraction_range: [log_range.0, log_range.1],
+        area_weighted_area_fraction_range: [linear_range.0, linear_range.1],
         cases,
     };
     write_json_atomic(&cluster_root.join("manifest.json"), &manifest);
     eprintln!(
-        "[crystalline-cylinder-analysis] command=clusters threads={} cases={} structural={} motion={}",
+        "[crystalline-cylinder-analysis] command=clusters threads={} cases={} count_log=[{},{}] area_weighted=[{},{}]",
         manifest.rayon_threads,
         manifest.cases.len(),
         structural_output.display(),
         motion_output.display(),
+        structural_weighted_output.display(),
+        motion_weighted_output.display(),
     );
 }
 
