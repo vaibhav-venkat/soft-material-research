@@ -129,6 +129,10 @@ pixi run cargo check --workspace
 pixi run cargo check --workspace --all-features
 pixi run rho-fitting-build
 
+# Zig dense-linear-algebra checks (macOS Accelerate)
+pixi run linalg-check
+pixi run linalg-test
+
 # Cached rho-fitting and PDE workflows (can be expensive)
 pixi run rho-fitting-lite --case radius_15D --fit-only --overwrite
 pixi run python -m hexatic.rho_fitting.pde_validation --case radius_15D --mode all --no-plot --overwrite

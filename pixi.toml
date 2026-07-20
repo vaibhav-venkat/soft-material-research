@@ -11,6 +11,8 @@ rho-fitting-build-cuda = "maturin develop --manifest-path packages/rho-fitting-c
 rho-fitting-build-gpu = "maturin develop --manifest-path packages/rho-fitting-core/Cargo.toml --release --features gpu"
 cargo-check = "cargo check --workspace --all-features"
 cargo-fmt-check = "cargo fmt --all --check"
+linalg-check = "cd packages/linalg && zig build -Dbackend=accelerate check"
+linalg-test = "cd packages/linalg && zig build -Dbackend=accelerate test"
 rho-fitting-smoke = "python -um hexatic.rho_fitting --case radius_15D --nd 1000 --no-plot"
 rho-fitting = "RHO_FITTING_GPU=1 python -um hexatic.rho_fitting --overwrite --nd 100000"
 rho-fitting-lite = "RHO_FITTING_GPU=1 python -um hexatic.rho_fitting --overwrite --nd 20000"
