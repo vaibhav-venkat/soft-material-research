@@ -7,6 +7,16 @@ tests; a backend driver owns memory and vendor calls.
 The current implementation uses Apple's Accelerate framework. A CUDA driver is
 reserved behind the same public API for cuBLAS and cuSOLVER.
 
+The source layout follows the numerical boundaries without splitting every
+routine into its own file:
+
+- `root.zig`: public facade and scientific guidance for choosing operations.
+- `types.zig`: contexts, events, buffers, vectors, matrices, and views.
+- `blas.zig`: backend-neutral vector and matrix BLAS validation/dispatch.
+- `lapack.zig`: backend-neutral SVD and least-squares ownership/dispatch.
+- `tests.zig`: the shared backend-independent numerical contract.
+- `backend/accelerate_{core,blas,lapack}.zig`: Accelerate driver layers.
+
 ## Build on macOS
 
 Backend selection is intentionally explicit:

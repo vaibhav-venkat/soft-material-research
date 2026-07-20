@@ -50,7 +50,13 @@ pub fn build(b: *std.Build) void {
     module.link_libc = true;
     module.linkFramework("Accelerate", .{});
 
-    const module_tests = b.addTest(.{ .root_module = module });
+    const test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    test_module.addImport("linalg", module);
+    const module_tests = b.addTest(.{ .root_module = test_module });
     const check_step = b.step("check", "Compile the linalg package and tests");
     check_step.dependOn(&module_tests.step);
 
