@@ -24,14 +24,11 @@ fn callGesdd(
     const lda = m;
     const ldu: c_int = if (jobz == 'S') m else 1;
     const ldvt: c_int = if (jobz == 'S') n else 1;
-    if (T == f32) {
-        c.linalg_sgesdd(jobz, m, n, a, lda, singular_values, u, ldu, vt, ldvt, work, lwork, iwork, info);
-    } else if (T == f64) {
-        c.linalg_dgesdd(jobz, m, n, a, lda, singular_values, u, ldu, vt, ldvt, work, lwork, iwork, info);
-    } else if (T == scalar.Complex32) {
-        c.linalg_cgesdd(jobz, m, n, a, lda, singular_values, u, ldu, vt, ldvt, work, lwork, rwork.?, iwork, info);
-    } else {
-        c.linalg_zgesdd(jobz, m, n, a, lda, singular_values, u, ldu, vt, ldvt, work, lwork, rwork.?, iwork, info);
+    switch (T) {
+        f32 => c.linalg_sgesdd(jobz, m, n, a, lda, singular_values, u, ldu, vt, ldvt, work, lwork, iwork, info),
+        f64 => c.linalg_dgesdd(jobz, m, n, a, lda, singular_values, u, ldu, vt, ldvt, work, lwork, iwork, info),
+        scalar.Complex32 => c.linalg_cgesdd(jobz, m, n, a, lda, singular_values, u, ldu, vt, ldvt, work, lwork, rwork.?, iwork, info),
+        else => c.linalg_zgesdd(jobz, m, n, a, lda, singular_values, u, ldu, vt, ldvt, work, lwork, rwork.?, iwork, info),
     }
 }
 
@@ -117,14 +114,11 @@ fn callGelss(
     rwork: ?[*]scalar.Real(T),
     info: *c_int,
 ) void {
-    if (T == f32) {
-        c.linalg_sgelss(m, n, nrhs, a, m, b, m, singular_values, rcond, rank, work, lwork, info);
-    } else if (T == f64) {
-        c.linalg_dgelss(m, n, nrhs, a, m, b, m, singular_values, rcond, rank, work, lwork, info);
-    } else if (T == scalar.Complex32) {
-        c.linalg_cgelss(m, n, nrhs, a, m, b, m, singular_values, rcond, rank, work, lwork, rwork.?, info);
-    } else {
-        c.linalg_zgelss(m, n, nrhs, a, m, b, m, singular_values, rcond, rank, work, lwork, rwork.?, info);
+    switch (T) {
+        f32 => c.linalg_sgelss(m, n, nrhs, a, m, b, m, singular_values, rcond, rank, work, lwork, info),
+        f64 => c.linalg_dgelss(m, n, nrhs, a, m, b, m, singular_values, rcond, rank, work, lwork, info),
+        scalar.Complex32 => c.linalg_cgelss(m, n, nrhs, a, m, b, m, singular_values, rcond, rank, work, lwork, rwork.?, info),
+        else => c.linalg_zgelss(m, n, nrhs, a, m, b, m, singular_values, rcond, rank, work, lwork, rwork.?, info),
     }
 }
 

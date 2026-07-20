@@ -24,7 +24,12 @@ pub fn blasCopy(
     const incy = try asCInt(y_stride);
     const xp = constPointer(T, x, x_offset);
     const yp = mutablePointer(T, y, y_offset);
-    if (T == f32) c.cblas_scopy(n, @ptrCast(xp), incx, @ptrCast(yp), incy) else if (T == f64) c.cblas_dcopy(n, @ptrCast(xp), incx, @ptrCast(yp), incy) else if (T == scalar.Complex32) c.cblas_ccopy(n, xp, incx, yp, incy) else c.cblas_zcopy(n, xp, incx, yp, incy);
+    switch (T) {
+        f32 => c.cblas_scopy(n, @ptrCast(xp), incx, @ptrCast(yp), incy),
+        f64 => c.cblas_dcopy(n, @ptrCast(xp), incx, @ptrCast(yp), incy),
+        scalar.Complex32 => c.cblas_ccopy(n, xp, incx, yp, incy),
+        else => c.cblas_zcopy(n, xp, incx, yp, incy),
+    }
 }
 
 pub fn blasSwap(
@@ -43,7 +48,12 @@ pub fn blasSwap(
     const incy = try asCInt(y_stride);
     const xp = mutablePointer(T, x, x_offset);
     const yp = mutablePointer(T, y, y_offset);
-    if (T == f32) c.cblas_sswap(n, @ptrCast(xp), incx, @ptrCast(yp), incy) else if (T == f64) c.cblas_dswap(n, @ptrCast(xp), incx, @ptrCast(yp), incy) else if (T == scalar.Complex32) c.cblas_cswap(n, xp, incx, yp, incy) else c.cblas_zswap(n, xp, incx, yp, incy);
+    switch (T) {
+        f32 => c.cblas_sswap(n, @ptrCast(xp), incx, @ptrCast(yp), incy),
+        f64 => c.cblas_dswap(n, @ptrCast(xp), incx, @ptrCast(yp), incy),
+        scalar.Complex32 => c.cblas_cswap(n, xp, incx, yp, incy),
+        else => c.cblas_zswap(n, xp, incx, yp, incy),
+    }
 }
 
 pub fn blasScale(
@@ -58,7 +68,12 @@ pub fn blasScale(
     const n = try asCInt(len);
     const incx = try asCInt(stride);
     const xp = mutablePointer(T, x, offset);
-    if (T == f32) c.cblas_sscal(n, alpha, @ptrCast(xp), incx) else if (T == f64) c.cblas_dscal(n, alpha, @ptrCast(xp), incx) else if (T == scalar.Complex32) c.cblas_cscal(n, &alpha, xp, incx) else c.cblas_zscal(n, &alpha, xp, incx);
+    switch (T) {
+        f32 => c.cblas_sscal(n, alpha, @ptrCast(xp), incx),
+        f64 => c.cblas_dscal(n, alpha, @ptrCast(xp), incx),
+        scalar.Complex32 => c.cblas_cscal(n, &alpha, xp, incx),
+        else => c.cblas_zscal(n, &alpha, xp, incx),
+    }
 }
 
 pub fn blasScaleReal(
@@ -74,7 +89,10 @@ pub fn blasScaleReal(
     const n = try asCInt(len);
     const incx = try asCInt(stride);
     const xp = mutablePointer(T, x, offset);
-    if (T == scalar.Complex32) c.cblas_csscal(n, alpha, xp, incx) else c.cblas_zdscal(n, alpha, xp, incx);
+    switch (T) {
+        scalar.Complex32 => c.cblas_csscal(n, alpha, xp, incx),
+        else => c.cblas_zdscal(n, alpha, xp, incx),
+    }
 }
 
 pub fn blasAxpy(
@@ -94,7 +112,12 @@ pub fn blasAxpy(
     const incy = try asCInt(y_stride);
     const xp = constPointer(T, x, x_offset);
     const yp = mutablePointer(T, y, y_offset);
-    if (T == f32) c.cblas_saxpy(n, alpha, @ptrCast(xp), incx, @ptrCast(yp), incy) else if (T == f64) c.cblas_daxpy(n, alpha, @ptrCast(xp), incx, @ptrCast(yp), incy) else if (T == scalar.Complex32) c.cblas_caxpy(n, &alpha, xp, incx, yp, incy) else c.cblas_zaxpy(n, &alpha, xp, incx, yp, incy);
+    switch (T) {
+        f32 => c.cblas_saxpy(n, alpha, @ptrCast(xp), incx, @ptrCast(yp), incy),
+        f64 => c.cblas_daxpy(n, alpha, @ptrCast(xp), incx, @ptrCast(yp), incy),
+        scalar.Complex32 => c.cblas_caxpy(n, &alpha, xp, incx, yp, incy),
+        else => c.cblas_zaxpy(n, &alpha, xp, incx, yp, incy),
+    }
 }
 
 pub fn blasDot(
@@ -114,15 +137,20 @@ pub fn blasDot(
     const incy = try asCInt(y_stride);
     const xp = constPointer(T, x, x_offset);
     const yp = constPointer(T, y, y_offset);
-    if (T == f32) return c.cblas_sdot(n, @ptrCast(xp), incx, @ptrCast(yp), incy);
-    if (T == f64) return c.cblas_ddot(n, @ptrCast(xp), incx, @ptrCast(yp), incy);
-    var result = T.init(0, 0);
-    if (T == scalar.Complex32) {
-        if (conjugate) c.cblas_cdotc_sub(n, xp, incx, yp, incy, &result) else c.cblas_cdotu_sub(n, xp, incx, yp, incy, &result);
-    } else {
-        if (conjugate) c.cblas_zdotc_sub(n, xp, incx, yp, incy, &result) else c.cblas_zdotu_sub(n, xp, incx, yp, incy, &result);
-    }
-    return result;
+    return switch (T) {
+        f32 => c.cblas_sdot(n, @ptrCast(xp), incx, @ptrCast(yp), incy),
+        f64 => c.cblas_ddot(n, @ptrCast(xp), incx, @ptrCast(yp), incy),
+        scalar.Complex32 => result: {
+            var value = T.init(0, 0);
+            if (conjugate) c.cblas_cdotc_sub(n, xp, incx, yp, incy, &value) else c.cblas_cdotu_sub(n, xp, incx, yp, incy, &value);
+            break :result value;
+        },
+        else => result: {
+            var value = T.init(0, 0);
+            if (conjugate) c.cblas_zdotc_sub(n, xp, incx, yp, incy, &value) else c.cblas_zdotu_sub(n, xp, incx, yp, incy, &value);
+            break :result value;
+        },
+    };
 }
 
 pub fn blasNorm2(
@@ -136,10 +164,12 @@ pub fn blasNorm2(
     const n = try asCInt(len);
     const incx = try asCInt(stride);
     const xp = constPointer(T, x, offset);
-    if (T == f32) return c.cblas_snrm2(n, @ptrCast(xp), incx);
-    if (T == f64) return c.cblas_dnrm2(n, @ptrCast(xp), incx);
-    if (T == scalar.Complex32) return c.cblas_scnrm2(n, xp, incx);
-    return c.cblas_dznrm2(n, xp, incx);
+    return switch (T) {
+        f32 => c.cblas_snrm2(n, @ptrCast(xp), incx),
+        f64 => c.cblas_dnrm2(n, @ptrCast(xp), incx),
+        scalar.Complex32 => c.cblas_scnrm2(n, xp, incx),
+        else => c.cblas_dznrm2(n, xp, incx),
+    };
 }
 
 pub fn blasAbsSum(
@@ -153,10 +183,12 @@ pub fn blasAbsSum(
     const n = try asCInt(len);
     const incx = try asCInt(stride);
     const xp = constPointer(T, x, offset);
-    if (T == f32) return c.cblas_sasum(n, @ptrCast(xp), incx);
-    if (T == f64) return c.cblas_dasum(n, @ptrCast(xp), incx);
-    if (T == scalar.Complex32) return c.cblas_scasum(n, xp, incx);
-    return c.cblas_dzasum(n, xp, incx);
+    return switch (T) {
+        f32 => c.cblas_sasum(n, @ptrCast(xp), incx),
+        f64 => c.cblas_dasum(n, @ptrCast(xp), incx),
+        scalar.Complex32 => c.cblas_scasum(n, xp, incx),
+        else => c.cblas_dzasum(n, xp, incx),
+    };
 }
 
 pub fn blasIndexAbsMax(
@@ -170,14 +202,12 @@ pub fn blasIndexAbsMax(
     const n = try asCInt(len);
     const incx = try asCInt(stride);
     const xp = constPointer(T, x, offset);
-    const index = if (T == f32)
-        c.cblas_isamax(n, @ptrCast(xp), incx)
-    else if (T == f64)
-        c.cblas_idamax(n, @ptrCast(xp), incx)
-    else if (T == scalar.Complex32)
-        c.cblas_icamax(n, xp, incx)
-    else
-        c.cblas_izamax(n, xp, incx);
+    const index = switch (T) {
+        f32 => c.cblas_isamax(n, @ptrCast(xp), incx),
+        f64 => c.cblas_idamax(n, @ptrCast(xp), incx),
+        scalar.Complex32 => c.cblas_icamax(n, xp, incx),
+        else => c.cblas_izamax(n, xp, incx),
+    };
     return std.math.cast(usize, index) orelse error.BackendFailure;
 }
 
@@ -220,7 +250,12 @@ pub fn blasGemv(
     const xp = constPointer(T, x, x_offset);
     const yp = mutablePointer(T, y, y_offset);
     const trans = cTranspose(T, operation);
-    if (T == f32) c.cblas_sgemv(cOrder(), trans, m, n, alpha, @ptrCast(ap), lda, @ptrCast(xp), incx, beta, @ptrCast(yp), incy) else if (T == f64) c.cblas_dgemv(cOrder(), trans, m, n, alpha, @ptrCast(ap), lda, @ptrCast(xp), incx, beta, @ptrCast(yp), incy) else if (T == scalar.Complex32) c.cblas_cgemv(cOrder(), trans, m, n, &alpha, ap, lda, xp, incx, &beta, yp, incy) else c.cblas_zgemv(cOrder(), trans, m, n, &alpha, ap, lda, xp, incx, &beta, yp, incy);
+    switch (T) {
+        f32 => c.cblas_sgemv(cOrder(), trans, m, n, alpha, @ptrCast(ap), lda, @ptrCast(xp), incx, beta, @ptrCast(yp), incy),
+        f64 => c.cblas_dgemv(cOrder(), trans, m, n, alpha, @ptrCast(ap), lda, @ptrCast(xp), incx, beta, @ptrCast(yp), incy),
+        scalar.Complex32 => c.cblas_cgemv(cOrder(), trans, m, n, &alpha, ap, lda, xp, incx, &beta, yp, incy),
+        else => c.cblas_zgemv(cOrder(), trans, m, n, &alpha, ap, lda, xp, incx, &beta, yp, incy),
+    }
 }
 
 pub fn blasGer(
@@ -247,10 +282,17 @@ pub fn blasGer(
     const xp = constPointer(T, x, x_offset);
     const yp = constPointer(T, y, y_offset);
     const ap = mutablePointer(T, a, a_offset);
-    if (T == f32) c.cblas_sger(cOrder(), m, n, alpha, @ptrCast(xp), incx, @ptrCast(yp), incy, @ptrCast(ap), lda) else if (T == f64) c.cblas_dger(cOrder(), m, n, alpha, @ptrCast(xp), incx, @ptrCast(yp), incy, @ptrCast(ap), lda) else if (T == scalar.Complex32) {
-        if (conjugate_y) c.cblas_cgerc(cOrder(), m, n, &alpha, xp, incx, yp, incy, ap, lda) else c.cblas_cgeru(cOrder(), m, n, &alpha, xp, incx, yp, incy, ap, lda);
-    } else {
-        if (conjugate_y) c.cblas_zgerc(cOrder(), m, n, &alpha, xp, incx, yp, incy, ap, lda) else c.cblas_zgeru(cOrder(), m, n, &alpha, xp, incx, yp, incy, ap, lda);
+    switch (T) {
+        f32 => c.cblas_sger(cOrder(), m, n, alpha, @ptrCast(xp), incx, @ptrCast(yp), incy, @ptrCast(ap), lda),
+        f64 => c.cblas_dger(cOrder(), m, n, alpha, @ptrCast(xp), incx, @ptrCast(yp), incy, @ptrCast(ap), lda),
+        scalar.Complex32 => if (conjugate_y)
+            c.cblas_cgerc(cOrder(), m, n, &alpha, xp, incx, yp, incy, ap, lda)
+        else
+            c.cblas_cgeru(cOrder(), m, n, &alpha, xp, incx, yp, incy, ap, lda),
+        else => if (conjugate_y)
+            c.cblas_zgerc(cOrder(), m, n, &alpha, xp, incx, yp, incy, ap, lda)
+        else
+            c.cblas_zgeru(cOrder(), m, n, &alpha, xp, incx, yp, incy, ap, lda),
     }
 }
 
@@ -284,5 +326,10 @@ pub fn blasGemm(
     const cp = mutablePointer(T, output, output_offset);
     const trans_a = cTranspose(T, operation_a);
     const trans_b = cTranspose(T, operation_b);
-    if (T == f32) c.cblas_sgemm(cOrder(), trans_a, trans_b, m, n, k, alpha, @ptrCast(ap), lda, @ptrCast(bp), ldb, beta, @ptrCast(cp), ldc) else if (T == f64) c.cblas_dgemm(cOrder(), trans_a, trans_b, m, n, k, alpha, @ptrCast(ap), lda, @ptrCast(bp), ldb, beta, @ptrCast(cp), ldc) else if (T == scalar.Complex32) c.cblas_cgemm(cOrder(), trans_a, trans_b, m, n, k, &alpha, ap, lda, bp, ldb, &beta, cp, ldc) else c.cblas_zgemm(cOrder(), trans_a, trans_b, m, n, k, &alpha, ap, lda, bp, ldb, &beta, cp, ldc);
+    switch (T) {
+        f32 => c.cblas_sgemm(cOrder(), trans_a, trans_b, m, n, k, alpha, @ptrCast(ap), lda, @ptrCast(bp), ldb, beta, @ptrCast(cp), ldc),
+        f64 => c.cblas_dgemm(cOrder(), trans_a, trans_b, m, n, k, alpha, @ptrCast(ap), lda, @ptrCast(bp), ldb, beta, @ptrCast(cp), ldc),
+        scalar.Complex32 => c.cblas_cgemm(cOrder(), trans_a, trans_b, m, n, k, &alpha, ap, lda, bp, ldb, &beta, cp, ldc),
+        else => c.cblas_zgemm(cOrder(), trans_a, trans_b, m, n, k, &alpha, ap, lda, bp, ldb, &beta, cp, ldc),
+    }
 }

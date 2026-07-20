@@ -1,7 +1,10 @@
 const std = @import("std");
 
 pub fn Complex(comptime T: type) type {
-    if (T != f32 and T != f64) @compileError("Complex components must be f32 or f64");
+    switch (T) {
+        f32, f64 => {},
+        else => @compileError("Complex components must be f32 or f64"),
+    }
     return extern struct {
         re: T,
         im: T,
@@ -31,16 +34,23 @@ pub const Complex64 = Complex(f64);
 
 pub fn Real(comptime T: type) type {
     validate(T);
-    return if (T == f32 or T == Complex32) f32 else f64;
+    return switch (T) {
+        f32, Complex32 => f32,
+        else => f64,
+    };
 }
 
 pub fn validate(comptime T: type) void {
-    if (T != f32 and T != f64 and T != Complex32 and T != Complex64) {
-        @compileError("linalg supports f32, f64, Complex(f32), and Complex(f64)");
+    switch (T) {
+        f32, f64, Complex32, Complex64 => {},
+        else => @compileError("linalg supports f32, f64, Complex(f32), and Complex(f64)"),
     }
 }
 
 pub fn isComplex(comptime T: type) bool {
     validate(T);
-    return T == Complex32 or T == Complex64;
+    return switch (T) {
+        Complex32, Complex64 => true,
+        else => false,
+    };
 }
