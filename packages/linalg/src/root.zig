@@ -62,7 +62,8 @@ pub const gercInto = blas.gercInto;
 pub const gemmInto = blas.gemmInto;
 /// Allocating GEMM convenience
 pub const matmul = blas.matmul;
-
+// Find mean of a vector
+pub const vecMean = blas.vecMean;
 pub const SvdMode = lapack.SvdMode;
 pub const SvdOptions = lapack.SvdOptions;
 pub const SvdResult = lapack.SvdResult;

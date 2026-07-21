@@ -41,8 +41,18 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(library);
 
-    const module_tests = b.addTest(.{ .root_module = module });
+    const test_module = b.createModule(.{
+        .root_source_file = b.path("src/tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    test_module.addImport("dynamics_analysis", module);
+    const module_tests = b.addTest(.{ .root_module = test_module });
     const check_step = b.step("check", "Compile the dynamics analysis package");
     check_step.dependOn(&library.step);
     check_step.dependOn(&module_tests.step);
+
+    const run_tests = b.addRunArtifact(module_tests);
+    const test_step = b.step("test", "Run dynamics analysis package tests");
+    test_step.dependOn(&run_tests.step);
 }

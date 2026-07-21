@@ -4,6 +4,7 @@ pub const backend = @import("backend/root.zig");
 pub const dynamics = @import("dynamics/root.zig");
 pub const ffi = @import("ffi/root.zig");
 pub const input = @import("input/root.zig");
+pub const schema = @import("schema.zig");
 
 pub const Options = @import("options.zig").Options;
 pub const ComSeries = @import("result.zig").ComSeries;
