@@ -20,6 +20,8 @@ dynamics-analysis-test = "cd packages/dynamics_analysis && zig build -Dbackend=a
 dynamics-analysis-build = "cd packages/dynamics_analysis && zig build -Dbackend=accelerate -Doptimize=ReleaseFast"
 dynamics-analysis-build-cuda = "cd packages/dynamics_analysis && zig build -Dbackend=cuda -Dcuda-path=${CUDA_HOME:-/usr/local/cuda} -Doptimize=ReleaseFast"
 dynamics-analysis-plot = "python -m hexatic.big_lx_analysis.run_dynamics"
+laplacian-analysis-check = "cd packages/laplacian_analysis && zig build check"
+laplacian-analysis-test = "cd packages/laplacian_analysis && zig build test"
 rho-fitting-smoke = "python -um hexatic.rho_fitting --case radius_15D --nd 1000 --no-plot"
 rho-fitting = "RHO_FITTING_GPU=1 python -um hexatic.rho_fitting --overwrite --nd 100000"
 rho-fitting-lite = "RHO_FITTING_GPU=1 python -um hexatic.rho_fitting --overwrite --nd 20000"
