@@ -68,6 +68,7 @@ def raise_for_status(status: int, package: str) -> None:
         1: "invalid paths or options",
         2: "native allocation failed",
         3: "native initialization, safetensor validation, or numerical analysis failed",
+        4: "native numerical analysis is not implemented yet",
     }
     if status:
         raise RuntimeError(f"{package}: {messages.get(status, f'native error {status}')}")
