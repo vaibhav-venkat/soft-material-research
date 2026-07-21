@@ -1,0 +1,3 @@
+[submodule "hoomd-blue"]
+	path = hoomd-blue
+	url = git@github.com:vaibhav-venkat/hoomd-blue-polydisperse.git
