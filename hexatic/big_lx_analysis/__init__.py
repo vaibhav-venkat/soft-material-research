@@ -1,5 +1,17 @@
-"""Safetensor-only lag-correlation analysis for Big-Lx simulations."""
+"""Plot-oriented Python frontend for the Zig big-Lx analysis packages."""
 
-from .correlations import CorrelationSeries, analyze_correlations, plot_correlations
+from .clusters import ClusterOptions, ClusterResult, analyze_clusters
+from .dynamics import DynamicsOptions, DynamicsResult, analyze_dynamics
+from .laplacian import LaplacianOptions, LaplacianResult, analyze_laplacian
 
-__all__ = ["CorrelationSeries", "analyze_correlations", "plot_correlations"]
+__all__ = [
+    "ClusterOptions",
+    "ClusterResult",
+    "DynamicsOptions",
+    "DynamicsResult",
+    "LaplacianOptions",
+    "LaplacianResult",
+    "analyze_clusters",
+    "analyze_dynamics",
+    "analyze_laplacian",
+]

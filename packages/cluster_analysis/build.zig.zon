@@ -1,0 +1,15 @@
+.{
+    .name = .cluster_analysis,
+    .version = "0.1.0",
+    .fingerprint = 0xae8210efbba642bd,
+    .minimum_zig_version = "0.17.0-dev.387+31f157d80",
+    .dependencies = .{
+        .safetensors = .{ .path = "../safetensors" },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "README.md",
+    },
+}
