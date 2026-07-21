@@ -67,7 +67,7 @@ def raise_for_status(status: int, package: str) -> None:
     messages = {
         1: "invalid paths or options",
         2: "native allocation failed",
-        3: "a safetensor file could not be opened or validated",
+        3: "native initialization, safetensor validation, or numerical analysis failed",
     }
     if status:
         raise RuntimeError(f"{package}: {messages.get(status, f'native error {status}')}")

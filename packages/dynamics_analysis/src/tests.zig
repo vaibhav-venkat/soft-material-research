@@ -327,7 +327,7 @@ test "top-level analysis returns COM and correlation series" {
 }
 
 test "C ABI reports version, argument errors, valid mappings, and file errors" {
-    try std.testing.expectEqual(@as(u32, 1), ffi.dynamics_analysis_api_version());
+    try std.testing.expectEqual(@as(u32, 2), ffi.dynamics_analysis_api_version());
     const options = ffi.COptions{
         .frame_start = 0,
         .frame_stop = 0,
@@ -335,32 +335,52 @@ test "C ABI reports version, argument errors, valid mappings, and file errors" {
         .timestep = 1.0,
         .max_lag = 0,
         .has_max_lag = false,
+        .device_ordinal = 0,
     };
     var output: ffi.CResult = undefined;
     const no_paths = [_][*:0]const u8{""};
     try std.testing.expectEqual(
         @as(c_int, 1),
-        ffi.dynamics_analysis_run(&no_paths, 0, &options, &output),
+        ffi.dynamics_analysis_run("", &no_paths, 0, &options, &output),
     );
 
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
-    const path = try writeFixture(&temporary, "ffi.safetensors", valid_header, 88);
-    defer std.testing.allocator.free(path);
-    const path_z = try std.testing.allocator.dupeSentinel(u8, path, 0);
-    defer std.testing.allocator.free(path_z);
-    const valid_paths = [_][*:0]const u8{path_z.ptr};
+    const fixture_paths = try writeDynamicsFixtures(&temporary);
+    defer std.testing.allocator.free(fixture_paths[0]);
+    defer std.testing.allocator.free(fixture_paths[1]);
+    const static_path_z = try std.testing.allocator.dupeSentinel(u8, fixture_paths[0], 0);
+    defer std.testing.allocator.free(static_path_z);
+    const frame_path_z = try std.testing.allocator.dupeSentinel(u8, fixture_paths[1], 0);
+    defer std.testing.allocator.free(frame_path_z);
+    const valid_paths = [_][*:0]const u8{frame_path_z.ptr};
     try std.testing.expectEqual(
         @as(c_int, 0),
-        ffi.dynamics_analysis_run(&valid_paths, valid_paths.len, &options, &output),
+        ffi.dynamics_analysis_run(
+            static_path_z.ptr,
+            &valid_paths,
+            valid_paths.len,
+            &options,
+            &output,
+        ),
     );
-    try std.testing.expectEqual(@as(usize, 0), output.elapsed_time.len);
-    try std.testing.expectEqual(@as(usize, 0), output.pearson.len);
+    try std.testing.expectEqual(@as(usize, 3), output.elapsed_time.len);
+    try std.testing.expectEqual(@as(usize, 3), output.center.len);
+    try std.testing.expectEqual(@as(usize, 3), output.velocity.len);
+    try std.testing.expectEqual(@as(usize, 2), output.pearson.len);
+    try std.testing.expect(output.owner != null);
     ffi.dynamics_analysis_release(&output);
+    try std.testing.expect(output.owner == null);
 
     const missing_paths = [_][*:0]const u8{"missing.safetensors"};
     try std.testing.expectEqual(
         @as(c_int, 3),
-        ffi.dynamics_analysis_run(&missing_paths, missing_paths.len, &options, &output),
+        ffi.dynamics_analysis_run(
+            static_path_z.ptr,
+            &missing_paths,
+            missing_paths.len,
+            &options,
+            &output,
+        ),
     );
 }
