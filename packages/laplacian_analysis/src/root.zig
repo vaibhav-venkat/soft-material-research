@@ -1,6 +1,7 @@
 //! Complex Laplace and damped-cosine analysis of dynamics correlations.
 
 pub const dynamics_analysis = @import("dynamics_analysis");
+pub const backend = @import("backend/root.zig");
 pub const ffi = @import("ffi/root.zig");
 pub const schema = @import("schema.zig");
 

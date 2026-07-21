@@ -5,6 +5,7 @@ const dynamics_analysis = @import("dynamics_analysis");
 const options = @import("options.zig");
 const result = @import("result.zig");
 const schema = @import("schema.zig");
+const integrate = @import("backend/integrate.zig");
 
 pub fn transformAxes(
     allocator: std.mem.Allocator,
@@ -94,7 +95,7 @@ pub fn analyzeLaplace(
     errdefer allocator.free(values_real);
     const values_imag = try allocator.alloc(f64, value_count);
     errdefer allocator.free(values_imag);
-    const weights = try simpsonWeights(allocator, correlation.lag_times.len, spacing);
+    const weights = try integrate.simpsonWeights(allocator, correlation.lag_times.len, spacing);
     defer allocator.free(weights);
 
     try evaluateGridParallel(
@@ -114,8 +115,6 @@ pub fn analyzeLaplace(
         .shape = .{ axes.omega.len, axes.r.len },
     };
 }
-
-const ComplexValue = struct { real: f64, imaginary: f64 };
 
 const WorkerState = struct {
     correlation: dynamics_analysis.CorrelationSeries,
@@ -186,7 +185,7 @@ fn evaluateGridRange(state: *WorkerState) void {
     for (state.start..state.stop) |index| {
         const omega_index = index / r_count;
         const r_index = index % r_count;
-        const value = integrateLaplaceSimpson(
+        const value = integrate.integrateLaplaceSimpson(
             state.correlation,
             state.weights,
             state.r[r_index],
@@ -198,73 +197,6 @@ fn evaluateGridRange(state: *WorkerState) void {
         state.values_real[index] = value.real;
         state.values_imag[index] = value.imaginary;
     }
-}
-
-fn integrateLaplaceSimpson(
-    correlation: dynamics_analysis.CorrelationSeries,
-    weights: []const f64,
-    r: f64,
-    omega: f64,
-) !ComplexValue {
-    if (weights.len != correlation.lag_times.len) return error.DimensionMismatch;
-    var real: f64 = 0.0;
-    var imaginary: f64 = 0.0;
-    const first_time = correlation.lag_times[0];
-    const spacing = correlation.lag_times[1] - first_time;
-    var envelope = @exp(r * first_time);
-    const envelope_step = @exp(r * spacing);
-    const first_phase = omega * first_time;
-    const phase_step = omega * spacing;
-    var cosine = @cos(first_phase);
-    var sine = @sin(first_phase);
-    const cosine_step = @cos(phase_step);
-    const sine_step = @sin(phase_step);
-
-    for (correlation.pearson, weights, 0..) |pearson, weight, index| {
-        const weighted = weight * pearson * envelope;
-        real += weighted * cosine;
-        imaginary += weighted * sine;
-
-        if (index + 1 < weights.len) {
-            envelope *= envelope_step;
-            const next_cosine = cosine * cosine_step - sine * sine_step;
-            sine = sine * cosine_step + cosine * sine_step;
-            cosine = next_cosine;
-        }
-    }
-    if (!std.math.isFinite(real) or !std.math.isFinite(imaginary)) {
-        return error.NonFiniteTransform;
-    }
-    return .{ .real = real, .imaginary = imaginary };
-}
-
-fn simpsonWeights(allocator: std.mem.Allocator, sample_count: usize, spacing: f64) ![]f64 {
-    if (sample_count < 2 or !std.math.isFinite(spacing) or spacing <= 0.0) {
-        return error.InvalidSamples;
-    }
-    const weights = try allocator.alloc(f64, sample_count);
-    @memset(weights, 0.0);
-    if (sample_count == 2) {
-        weights[0] = spacing / 2.0;
-        weights[1] = spacing / 2.0;
-        return weights;
-    }
-    const simpson_count = if (sample_count % 2 == 0) sample_count - 1 else sample_count;
-    for (weights[0..simpson_count], 0..) |*weight, i| {
-        const multiplier: f64 = if (i == 0 or i + 1 == simpson_count)
-            1.0
-        else if (i % 2 == 1)
-            4.0
-        else
-            2.0;
-        weight.* = multiplier * spacing / 3.0;
-    }
-    if (sample_count % 2 == 0) {
-        weights[sample_count - 1] += 5.0 * spacing / 12.0;
-        weights[sample_count - 2] += 2.0 * spacing / 3.0;
-        weights[sample_count - 3] -= spacing / 12.0;
-    }
-    return weights;
 }
 
 fn validateAxis(axis: []const f64) !void {
