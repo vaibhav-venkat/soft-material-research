@@ -61,17 +61,7 @@ pub fn preferredAxes(
     if (preferred_options.r_min orelse -1.0 >= 0.0 or preferred_options.omega_max orelse 1.0 <= 0.0) {
         return error.InvalidPreferredRBounds;
     }
-    return try transformAxes(
-        allocator,
-        correlation,
-        .{
-            .r_min = preferred_options.r_min,
-            .r_max = -std.math.floatEps(f64),
-            .omega_min = std.math.floatEps(f64),
-            .omega_max = preferred_options.omega_max,
-            .omega_points = preferred_options.omega_points,
-            .r_points = preferred_options.r_points
-    });
+    return try transformAxes(allocator, correlation, .{ .r_min = preferred_options.r_min, .r_max = -std.math.floatEps(f64), .omega_min = std.math.floatEps(f64), .omega_max = preferred_options.omega_max, .omega_points = preferred_options.omega_points, .r_points = preferred_options.r_points });
 }
 
 pub fn analyzeLaplace(
@@ -84,8 +74,8 @@ pub fn analyzeLaplace(
     // success the returned grid owns the slices; on failure they are freed.
     errdefer axes.deinit(allocator);
     const spacing = try schema.validateCorrelation(correlation);
-    try validateAxis(axes.r);
-    try validateAxis(axes.omega);
+    try schema.validateAxis(axes.r);
+    try schema.validateAxis(axes.omega);
     _ = context;
 
     const value_count = std.math.mul(usize, axes.omega.len, axes.r.len) catch {
@@ -199,14 +189,6 @@ fn evaluateGridRange(state: *WorkerState) void {
     }
 }
 
-fn validateAxis(axis: []const f64) !void {
-    if (axis.len < 2) return error.TooFewGridPoints;
-    for (axis, 0..) |value, index| {
-        if (!std.math.isFinite(value)) return error.NonFiniteGrid;
-        if (index > 0 and value <= axis[index - 1]) return error.NonIncreasingGrid;
-    }
-}
-
 pub fn preferredCoordinate(
     allocator: std.mem.Allocator,
     context: *dynamics_analysis.backend.Context,
@@ -216,7 +198,7 @@ pub fn preferredCoordinate(
 ) !result.PreferredEstimate {
     _ = context;
     const spacing = try schema.validateCorrelation(correlation);
-    try validateAxis(coordinates);
+    try schema.validateAxis(coordinates);
     for (coordinates) |coordinate| switch (axis) {
         .omega => if (coordinate <= 0.0) return error.InvalidPreferredOmegaBounds,
         .r => if (coordinate >= 0.0) return error.InvalidPreferredRBounds,

@@ -38,7 +38,13 @@ pub fn validateTransformOptions(value: options.TransformOptions) !void {
     if (value.omega_min != null and value.omega_max != null and
         value.omega_min.? >= value.omega_max.?) return error.InvalidOmegaBounds;
 }
-
+pub fn validateAxis(axis: []const f64) !void {
+    if (axis.len < 2) return error.TooFewGridPoints;
+    for (axis, 0..) |value, index| {
+        if (!std.math.isFinite(value)) return error.NonFiniteGrid;
+        if (index > 0 and value <= axis[index - 1]) return error.NonIncreasingGrid;
+    }
+}
 pub fn validateFitOptions(value: options.FitOptions) !void {
     if (!std.math.isFinite(value.soft_l1_scale) or value.soft_l1_scale <= 0.0) {
         return error.InvalidSoftL1Scale;
@@ -49,5 +55,33 @@ pub fn validateFitOptions(value: options.FitOptions) !void {
     if (value.maximum_evaluations < 2) return error.InvalidEvaluationLimit;
     if (!std.math.isFinite(value.rank_tolerance) or value.rank_tolerance < 0.0) {
         return error.InvalidRankTolerance;
+    }
+}
+
+pub fn validateFitInput(
+    correlation: dynamics_analysis.CorrelationSeries,
+    omega_grid: []const f64,
+    fit_options: options.FitOptions,
+) !f64 {
+    const spacing = try validateCorrelation(correlation);
+    try validateFitOptions(fit_options);
+    try validateAxis(omega_grid);
+    if (correlation.lag_times.len < 4) return error.TooFewFitSamples;
+    if (correlation.lag_times[0] != 0.0) return error.FitMustStartAtZero;
+    for (correlation.origin_counts) |count| {
+        if (count == 0) return error.InvalidOriginCounts;
+    }
+    for (omega_grid) |omega| {
+        if (omega <= 0.0) return error.InvalidPreferredOmegaBounds;
+    }
+    return spacing;
+}
+
+pub fn validateModelInput(time: []const f64, parameters: []const f64) !void {
+    for (time) |value| {
+        if (!std.math.isFinite(value)) return error.NonFiniteTime;
+    }
+    for (parameters) |value| {
+        if (!std.math.isFinite(value)) return error.NonFiniteParameter;
     }
 }
