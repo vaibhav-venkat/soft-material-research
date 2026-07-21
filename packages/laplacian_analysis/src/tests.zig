@@ -88,6 +88,52 @@ test "complex Laplace grid uses omega-major row order" {
     try std.testing.expectApproxEqAbs(@as(f64, 0.0), grid.values_imag[0], 1.0e-9);
 }
 
+test "Laplace integration handles two and even sample counts" {
+    var context = try laplacian.dynamics_analysis.backend.Context.init(
+        std.testing.allocator,
+        .{},
+    );
+    defer context.deinit();
+
+    const two_r = try std.testing.allocator.dupe(f64, &.{ 0.0, 0.5 });
+    const two_omega = std.testing.allocator.dupe(f64, &.{ 0.0, 1.0 }) catch |err| {
+        std.testing.allocator.free(two_r);
+        return err;
+    };
+    const two_grid = try laplacian.analyzeLaplace(
+        std.testing.allocator,
+        &context,
+        .{
+            .lag_indices = @constCast(&[_]usize{ 0, 1 }),
+            .lag_times = @constCast(&[_]f64{ 0.0, 1.0 }),
+            .pearson = @constCast(&[_]f64{ 1.0, 1.0 }),
+            .origin_counts = @constCast(&[_]usize{ 2, 1 }),
+        },
+        .{ .r = two_r, .omega = two_omega },
+    );
+    defer two_grid.deinit(std.testing.allocator);
+    try std.testing.expectApproxEqAbs(@as(f64, 1.0), two_grid.values_real[0], 1.0e-12);
+
+    const even_r = try std.testing.allocator.dupe(f64, &.{ 0.0, 0.5 });
+    const even_omega = std.testing.allocator.dupe(f64, &.{ 0.0, 1.0 }) catch |err| {
+        std.testing.allocator.free(even_r);
+        return err;
+    };
+    const even_grid = try laplacian.analyzeLaplace(
+        std.testing.allocator,
+        &context,
+        .{
+            .lag_indices = @constCast(&[_]usize{ 0, 1, 2, 3 }),
+            .lag_times = @constCast(&[_]f64{ 0.0, 1.0, 2.0, 3.0 }),
+            .pearson = @constCast(&[_]f64{ 0.0, 1.0, 4.0, 9.0 }),
+            .origin_counts = @constCast(&[_]usize{ 4, 3, 2, 1 }),
+        },
+        .{ .r = even_r, .omega = even_omega },
+    );
+    defer even_grid.deinit(std.testing.allocator);
+    try std.testing.expectApproxEqAbs(@as(f64, 9.0), even_grid.values_real[0], 1.0e-12);
+}
+
 test "preferred omega reports the maximum log-magnitude coordinate" {
     var context = try laplacian.dynamics_analysis.backend.Context.init(
         std.testing.allocator,

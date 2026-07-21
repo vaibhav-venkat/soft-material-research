@@ -94,6 +94,8 @@ pub fn analyzeLaplace(
     errdefer allocator.free(values_real);
     const values_imag = try allocator.alloc(f64, value_count);
     errdefer allocator.free(values_imag);
+    const weights = try simpsonWeights(allocator, correlation.lag_times.len, spacing);
+    defer allocator.free(weights);
 
     // Flatten in `(omega, r)` row-major order. A future accelerated backend
     // can replace this host traversal while preserving the public layout.
@@ -102,7 +104,7 @@ pub fn analyzeLaplace(
             const index = omega_index * axes.r.len + r_index;
             const value = try integrateLaplaceSimpson(
                 correlation,
-                spacing,
+                weights,
                 r_value,
                 omega_value,
             );
@@ -124,51 +126,55 @@ const ComplexValue = struct { real: f64, imaginary: f64 };
 
 fn integrateLaplaceSimpson(
     correlation: dynamics_analysis.CorrelationSeries,
-    spacing: f64,
+    weights: []const f64,
     r: f64,
     omega: f64,
 ) !ComplexValue {
-    _ = correlation;
-    _ = spacing;
-    _ = r;
-    _ = omega;
-    // TODO: Stream composite Simpson weights over the samples without
-    // allocating temporary real or imaginary integrand arrays:
-    //
-    //   real += w[t] * C(t) * exp(r*t) * cos(omega*t)
-    //   imag += w[t] * C(t) * exp(r*t) * sin(omega*t)
-    //
-    // Match the Rust behavior exactly: trapezoidal weights for two samples,
-    // ordinary Simpson weights for odd sample counts, and the Cartwright
-    // final-interval correction when the sample count is even.
-    return error.NotImplemented;
+    if (weights.len != correlation.lag_times.len) return error.DimensionMismatch;
+    var real: f64 = 0.0;
+    var imaginary: f64 = 0.0;
+    for (
+        correlation.lag_times,
+        correlation.pearson,
+        weights,
+    ) |time, pearson, weight| {
+        const envelope = @exp(r * time);
+        const phase = omega * time;
+        const weighted = weight * pearson * envelope;
+        real += weighted * @cos(phase);
+        imaginary += weighted * @sin(phase);
+    }
+    if (!std.math.isFinite(real) or !std.math.isFinite(imaginary)) {
+        return error.NonFiniteTransform;
+    }
+    return .{ .real = real, .imaginary = imaginary };
 }
 
-fn simpsonWeights(allocator: std.mem.Allocator, sample_count: usize, spacing: u64) ![]f64 {
-    if (sample_count < 2 or !std.math.isFinite(spacing)) {
+fn simpsonWeights(allocator: std.mem.Allocator, sample_count: usize, spacing: f64) ![]f64 {
+    if (sample_count < 2 or !std.math.isFinite(spacing) or spacing <= 0.0) {
         return error.InvalidSamples;
     }
     const weights = try allocator.alloc(f64, sample_count);
-    errdefer allocator.free(weights);
-    if (sample_count  == 2) {
+    @memset(weights, 0.0);
+    if (sample_count == 2) {
         weights[0] = spacing / 2.0;
         weights[1] = spacing / 2.0;
+        return weights;
     }
-    const simpson_count: f64 = if (sample_count % 2 == 0) sample_count - 1 else sample_count;
+    const simpson_count = if (sample_count % 2 == 0) sample_count - 1 else sample_count;
     for (weights[0..simpson_count], 0..) |*weight, i| {
-        const multiplier: f64 = if (i == 0 or i == simpson_count - 1) {
-            1.0;
-        } else if (i % 2 == 1) {
-            4.0;
-        } else {
+        const multiplier: f64 = if (i == 0 or i + 1 == simpson_count)
+            1.0
+        else if (i % 2 == 1)
+            4.0
+        else
             2.0;
-        };
-        weight.* = multiplier * spacing/3.0;
+        weight.* = multiplier * spacing / 3.0;
     }
-    if (sample_count % 2  == 0) {
-        weights[sample_count - 1] += 5.0 * spacing/12.0;
-        weights[sample_count - 2] += 2.0 * spacing/3.0;
-        weights[sample_count - 3] -= spacing/12.0;
+    if (sample_count % 2 == 0) {
+        weights[sample_count - 1] += 5.0 * spacing / 12.0;
+        weights[sample_count - 2] += 2.0 * spacing / 3.0;
+        weights[sample_count - 3] -= spacing / 12.0;
     }
     return weights;
 }
