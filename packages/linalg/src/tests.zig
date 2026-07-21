@@ -1,6 +1,5 @@
 const std = @import("std");
 const linalg = @import("linalg");
-
 const Complex32 = linalg.Complex32;
 const Complex64 = linalg.Complex64;
 const Real = linalg.Real;

@@ -2,7 +2,7 @@ const std = @import("std");
 
 fn addLibraryPathIfPresent(b: *std.Build, module: *std.Build.Module, path: []const u8) void {
     std.Io.Dir.accessAbsolute(b.graph.io, path, .{}) catch return;
-    module.addLibraryPath(b.graph.cwdRelativePath(path));
+    module.addLibraryPath(.{ .cwd_relative = path });
 }
 
 pub fn build(b: *std.Build) void {
@@ -50,7 +50,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         });
         translate_accelerate.defineCMacro("ACCELERATE_NEW_LAPACK", "1");
-        translate_accelerate.addSystemFrameworkPath(b.graph.cwdRelativePath(accelerate_frameworks));
+        translate_accelerate.addSystemFrameworkPath(.{ .cwd_relative = accelerate_frameworks });
         module.addImport("accelerate_c", translate_accelerate.createModule());
         module.addCSourceFile(.{ .file = b.path("src/backend/accelerate_shim.c") });
         module.linkFramework("Accelerate", .{});
@@ -66,11 +66,11 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         });
-        translate_cuda.addIncludePath(b.graph.cwdRelativePath(cuda_include));
+        translate_cuda.addIncludePath(.{ .cwd_relative = cuda_include });
         const cuda_c = translate_cuda.createModule();
-        cuda_c.addIncludePath(b.graph.cwdRelativePath(cuda_include));
+        cuda_c.addIncludePath(.{ .cwd_relative = cuda_include });
         module.addImport("cuda_c", cuda_c);
-        module.addIncludePath(b.graph.cwdRelativePath(cuda_include));
+        module.addIncludePath(.{ .cwd_relative = cuda_include });
         addLibraryPathIfPresent(b, module, cuda_lib);
         addLibraryPathIfPresent(b, module, cuda_lib64);
         addLibraryPathIfPresent(b, module, cuda_target_lib);
