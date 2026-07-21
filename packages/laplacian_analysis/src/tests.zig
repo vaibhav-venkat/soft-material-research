@@ -134,6 +134,40 @@ test "Laplace integration handles two and even sample counts" {
     try std.testing.expectApproxEqAbs(@as(f64, 9.0), even_grid.values_real[0], 1.0e-12);
 }
 
+test "parallel recurrence grid preserves conjugate frequency symmetry" {
+    var context = try laplacian.dynamics_analysis.backend.Context.init(
+        std.testing.allocator,
+        .{},
+    );
+    defer context.deinit();
+    const axes = try laplacian.transformAxes(
+        std.testing.allocator,
+        correlation(),
+        .{ .r_points = 17, .omega_points = 17 },
+    );
+    const grid = try laplacian.analyzeLaplace(
+        std.testing.allocator,
+        &context,
+        correlation(),
+        axes,
+    );
+    defer grid.deinit(std.testing.allocator);
+
+    const positive_row = (grid.omega.len - 1) * grid.r.len;
+    for (0..grid.r.len) |r_index| {
+        try std.testing.expectApproxEqAbs(
+            grid.values_real[r_index],
+            grid.values_real[positive_row + r_index],
+            1.0e-10,
+        );
+        try std.testing.expectApproxEqAbs(
+            grid.values_imag[r_index],
+            -grid.values_imag[positive_row + r_index],
+            1.0e-10,
+        );
+    }
+}
+
 test "preferred omega reports the maximum log-magnitude coordinate" {
     var context = try laplacian.dynamics_analysis.backend.Context.init(
         std.testing.allocator,

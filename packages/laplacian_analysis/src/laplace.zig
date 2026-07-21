@@ -97,21 +97,14 @@ pub fn analyzeLaplace(
     const weights = try simpsonWeights(allocator, correlation.lag_times.len, spacing);
     defer allocator.free(weights);
 
-    // Flatten in `(omega, r)` row-major order. A future accelerated backend
-    // can replace this host traversal while preserving the public layout.
-    for (axes.omega, 0..) |omega_value, omega_index| {
-        for (axes.r, 0..) |r_value, r_index| {
-            const index = omega_index * axes.r.len + r_index;
-            const value = try integrateLaplaceSimpson(
-                correlation,
-                weights,
-                r_value,
-                omega_value,
-            );
-            values_real[index] = value.real;
-            values_imag[index] = value.imaginary;
-        }
-    }
+    try evaluateGridParallel(
+        allocator,
+        correlation,
+        weights,
+        axes,
+        values_real,
+        values_imag,
+    );
 
     return .{
         .r = axes.r,
@@ -124,6 +117,89 @@ pub fn analyzeLaplace(
 
 const ComplexValue = struct { real: f64, imaginary: f64 };
 
+const WorkerState = struct {
+    correlation: dynamics_analysis.CorrelationSeries,
+    weights: []const f64,
+    r: []const f64,
+    omega: []const f64,
+    values_real: []f64,
+    values_imag: []f64,
+    start: usize,
+    stop: usize,
+    failure: ?anyerror = null,
+};
+
+fn evaluateGridParallel(
+    allocator: std.mem.Allocator,
+    correlation: dynamics_analysis.CorrelationSeries,
+    weights: []const f64,
+    axes: result.TransformAxes,
+    values_real: []f64,
+    values_imag: []f64,
+) !void {
+    const value_count = values_real.len;
+    if (values_imag.len != value_count) return error.DimensionMismatch;
+
+    const minimum_points_per_worker: usize = 256;
+    const useful_workers = value_count / minimum_points_per_worker +
+        @intFromBool(value_count % minimum_points_per_worker != 0);
+    const cpu_count = std.Thread.getCpuCount() catch 1;
+    const worker_count = @max(@as(usize, 1), @min(cpu_count, useful_workers));
+    const chunk_size = value_count / worker_count +
+        @intFromBool(value_count % worker_count != 0);
+
+    const states = try allocator.alloc(WorkerState, worker_count);
+    defer allocator.free(states);
+    const threads = try allocator.alloc(std.Thread, worker_count - 1);
+    defer allocator.free(threads);
+
+    for (states, 0..) |*state, worker_index| {
+        const start = worker_index * chunk_size;
+        state.* = .{
+            .correlation = correlation,
+            .weights = weights,
+            .r = axes.r,
+            .omega = axes.omega,
+            .values_real = values_real,
+            .values_imag = values_imag,
+            .start = start,
+            .stop = @min(start + chunk_size, value_count),
+        };
+    }
+
+    var spawned: usize = 0;
+    for (threads, 0..) |*thread, index| {
+        thread.* = std.Thread.spawn(.{}, evaluateGridRange, .{&states[index]}) catch |err| {
+            for (threads[0..spawned]) |started| started.join();
+            return err;
+        };
+        spawned += 1;
+    }
+    evaluateGridRange(&states[worker_count - 1]);
+    for (threads) |thread| thread.join();
+
+    for (states) |state| if (state.failure) |err| return err;
+}
+
+fn evaluateGridRange(state: *WorkerState) void {
+    const r_count = state.r.len;
+    for (state.start..state.stop) |index| {
+        const omega_index = index / r_count;
+        const r_index = index % r_count;
+        const value = integrateLaplaceSimpson(
+            state.correlation,
+            state.weights,
+            state.r[r_index],
+            state.omega[omega_index],
+        ) catch |err| {
+            state.failure = err;
+            return;
+        };
+        state.values_real[index] = value.real;
+        state.values_imag[index] = value.imaginary;
+    }
+}
+
 fn integrateLaplaceSimpson(
     correlation: dynamics_analysis.CorrelationSeries,
     weights: []const f64,
@@ -133,16 +209,28 @@ fn integrateLaplaceSimpson(
     if (weights.len != correlation.lag_times.len) return error.DimensionMismatch;
     var real: f64 = 0.0;
     var imaginary: f64 = 0.0;
-    for (
-        correlation.lag_times,
-        correlation.pearson,
-        weights,
-    ) |time, pearson, weight| {
-        const envelope = @exp(r * time);
-        const phase = omega * time;
+    const first_time = correlation.lag_times[0];
+    const spacing = correlation.lag_times[1] - first_time;
+    var envelope = @exp(r * first_time);
+    const envelope_step = @exp(r * spacing);
+    const first_phase = omega * first_time;
+    const phase_step = omega * spacing;
+    var cosine = @cos(first_phase);
+    var sine = @sin(first_phase);
+    const cosine_step = @cos(phase_step);
+    const sine_step = @sin(phase_step);
+
+    for (correlation.pearson, weights, 0..) |pearson, weight, index| {
         const weighted = weight * pearson * envelope;
-        real += weighted * @cos(phase);
-        imaginary += weighted * @sin(phase);
+        real += weighted * cosine;
+        imaginary += weighted * sine;
+
+        if (index + 1 < weights.len) {
+            envelope *= envelope_step;
+            const next_cosine = cosine * cosine_step - sine * sine_step;
+            sine = sine * cosine_step + cosine * sine_step;
+            cosine = next_cosine;
+        }
     }
     if (!std.math.isFinite(real) or !std.math.isFinite(imaginary)) {
         return error.NonFiniteTransform;
