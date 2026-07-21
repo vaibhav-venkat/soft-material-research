@@ -6,6 +6,10 @@ platforms = ["osx-arm64", "linux-64"]
 version = "0.1.0"
 
 [tasks]
+hoomd-configure = "cmake -B hoomd-blue/build-$PIXI_ENVIRONMENT_NAME -S hoomd-blue -GNinja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DENABLE_GPU=ON -DHOOMD_GPU_PLATFORM=CUDA -DCUDA_ARCH_LIST=89 -DCMAKE_CUDA_COMPILER=/usr/bin/nvcc -DCMAKE_CUDA_HOST_COMPILER=/usr/bin/c++ -DPython_EXECUTABLE=$CONDA_PREFIX/bin/python -DCMAKE_PREFIX_PATH=$CONDA_PREFIX"
+hoomd-build = { cmd = "cmake --build hoomd-blue/build-$PIXI_ENVIRONMENT_NAME --parallel", depends-on = ["hoomd-configure"] }
+hoomd-install = { cmd = "cmake --install hoomd-blue/build-$PIXI_ENVIRONMENT_NAME", depends-on = ["hoomd-build"] }
+hoomd-test-import = "python -c \"import hoomd; assert hoomd.version.version == '7.0.1'; assert hoomd.version.gpu_enabled; assert hoomd.version.gpu_platform == 'CUDA'; print(hoomd.version.version, hoomd.version.gpu_platform, hoomd.version.gpu_api_version)\""
 rho-fitting-build = "maturin develop --manifest-path packages/rho-fitting-core/Cargo.toml --features gpu-metal --release"
 rho-fitting-build-cuda = "maturin develop --manifest-path packages/rho-fitting-core/Cargo.toml --release --features gpu-cuda"
 rho-fitting-build-gpu = "maturin develop --manifest-path packages/rho-fitting-core/Cargo.toml --release --features gpu"
@@ -44,7 +48,10 @@ passive-dense-laplace = "python -um hexatic.confinement_comparison.passive_dense
 passive-dense-com = "python -um hexatic.confinement_comparison.passive_dense.plot_com"
 [dependencies]
 python = "3.13.*"
-hoomd = "7.0.1.*"
+cmake = "*"
+eigen = "*"
+ninja = "*"
+pybind11 = "*"
 gsd = "4.2.0.*"
 numpy = "2.4.2.*"
 matplotlib = "3.10.8.*"
@@ -71,7 +78,6 @@ desloppify = ">=1.0, <2"
 platforms = ["linux-64"]
 
 [feature.big-lx-cuda12.dependencies]
-hoomd = { version = "7.0.1.*", build = "*gpu*" }
 cuda-version = "12.*"
 
 [feature.big-lx-cuda12.pypi-dependencies]
