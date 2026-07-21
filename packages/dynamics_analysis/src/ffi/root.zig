@@ -1,6 +1,7 @@
 //! Stable C ABI declarations used by the Python ctypes wrapper.
 
 const std = @import("std");
+const ShardSet = @import("../input/root.zig").ShardSet;
 
 pub const COptions = extern struct {
     frame_start: usize,
@@ -33,11 +34,26 @@ pub export fn dynamics_analysis_run(
     options: *const COptions,
     output: *CResult,
 ) callconv(.c) c_int {
-    _ = paths;
-    _ = path_count;
     _ = options;
     output.* = std.mem.zeroes(CResult);
-    return 4;
+    if (path_count == 0) return 1;
+
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+    const path_slices = allocator.alloc([]const u8, path_count) catch return 2;
+    defer allocator.free(path_slices);
+    for (0..path_count) |index| {
+        path_slices[index] = std.mem.span(paths[index]);
+    }
+
+    var shards = ShardSet.open(allocator, path_slices) catch |err| return switch (err) {
+        error.NoInput => 1,
+        error.OutOfMemory => 2,
+        else => 3,
+    };
+    defer shards.deinit();
+    return 0;
 }
 
 pub export fn dynamics_analysis_release(result: *CResult) callconv(.c) void {

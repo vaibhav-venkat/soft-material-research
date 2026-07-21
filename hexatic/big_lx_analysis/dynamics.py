@@ -30,7 +30,7 @@ def analyze_dynamics(
     safetensor_files: str | Path | list[str | Path],
     options: DynamicsOptions = DynamicsOptions(),
 ) -> DynamicsResult:
-    """Validate safetensors in Zig and return placeholder analysis arrays."""
+    """Memory-map safetensor shards in Zig and return placeholder analysis arrays."""
     library = load_library("dynamics_analysis")
 
     class NativeOptions(ctypes.Structure):
