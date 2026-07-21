@@ -187,35 +187,17 @@ fn optimizeStart(
     while (start_evaluations < fit_options.maximum_evaluations) {
         try fillDampedCosine(prediction, time, parameters);
         try differentiate.fillDampedCosineJacobian(jacobian, time, parameters);
-        var normal_matrix: [parameter_count * parameter_count]f64 = @splat(0.0);
-        var gradient: Parameters = @splat(0.0);
-        var column_norm_squared: Parameters = @splat(0.0);
-
-        for (0..time.len) |row| {
-            const weighted_residual = weights[row] * (prediction[row] - observed[row]);
-            const scaled_residual = weighted_residual / fit_options.soft_l1_scale;
-            const robust_weight = 1.0 / @sqrt(std.math.hypot(1.0, scaled_residual));
-            const residual = robust_weight * weighted_residual;
-            var jacobian_row: Parameters = @splat(0.0);
-            for (0..parameter_count) |column| {
-                const value = robust_weight * weights[row] *
-                    jacobian[row * parameter_count + column];
-                jacobian_row[column] = value;
-                column_norm_squared[column] += value * value;
-                gradient[column] += value * residual;
-            }
-            for (0..parameter_count) |left| {
-                for (0..parameter_count) |right| {
-                    normal_matrix[left * parameter_count + right] +=
-                        jacobian_row[left] * jacobian_row[right];
-                }
-            }
-        }
-
-        const gradient_maximum = projectedScaledGradientMaximum(
+        var gradient_system = try differentiate.assembleSoftL1GradientSystem(
+            prediction,
+            observed,
+            weights,
+            jacobian,
+            fit_options.soft_l1_scale,
+        );
+        const gradient_maximum = differentiate.projectedScaledGradientMaximum(
             parameters,
-            gradient,
-            column_norm_squared,
+            gradient_system.gradient,
+            gradient_system.column_norm_squared,
             lower,
             upper,
         );
@@ -224,12 +206,17 @@ fn optimizeStart(
             break;
         }
         for (0..parameter_count) |column| {
-            normal_matrix[column * parameter_count + column] +=
-                damping * @max(column_norm_squared[column], 1.0e-24);
+            gradient_system.normal_matrix[column * parameter_count + column] +=
+                damping * @max(gradient_system.column_norm_squared[column], 1.0e-24);
         }
         var rhs: Parameters = undefined;
-        for (gradient, &rhs) |value, *target| target.* = -value;
-        const step = try solveStep(context, normal_matrix, rhs, fit_options.rank_tolerance);
+        for (gradient_system.gradient, &rhs) |value, *target| target.* = -value;
+        const step = try solveStep(
+            context,
+            gradient_system.normal_matrix,
+            rhs,
+            fit_options.rank_tolerance,
+        );
 
         var candidate = parameters;
         var scaled_step: f64 = 0.0;
@@ -336,27 +323,6 @@ fn objective(
         value += 2.0 * scale * scale * (std.math.hypot(1.0, scaled) - 1.0);
     }
     return value;
-}
-
-fn projectedScaledGradientMaximum(
-    parameters: Parameters,
-    gradient: Parameters,
-    column_norm_squared: Parameters,
-    lower: Parameters,
-    upper: Parameters,
-) f64 {
-    var maximum: f64 = 0.0;
-    for (0..parameter_count) |index| {
-        const at_lower = parameters[index] <= lower[index];
-        const at_upper = parameters[index] >= upper[index];
-        const projected = if ((at_lower and gradient[index] > 0.0) or
-            (at_upper and gradient[index] < 0.0))
-            0.0
-        else
-            @abs(gradient[index]) / @max(@sqrt(column_norm_squared[index]), 1.0e-12);
-        maximum = @max(maximum, projected);
-    }
-    return maximum;
 }
 
 fn finiteState(state: FitState) bool {
