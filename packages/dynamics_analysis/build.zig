@@ -3,9 +3,26 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const backend = b.option([]const u8, "backend", "Linalg backend: accelerate or cuda") orelse
+        if (target.result.os.tag == .macos) "accelerate" else
+        @panic("missing required -Dbackend=accelerate|cuda");
     const safetensors_dependency = b.dependency("safetensors", .{
         .target = target,
         .optimize = optimize,
+    });
+    const linalg_dependency = if (std.mem.eql(u8, backend, "cuda")) blk: {
+        const cuda_path = b.option([]const u8, "cuda-path", "CUDA toolkit root") orelse
+            @panic("the CUDA backend requires -Dcuda-path=/path/to/cuda");
+        break :blk b.dependency("linalg", .{
+            .target = target,
+            .optimize = optimize,
+            .backend = backend,
+            .@"cuda-path" = cuda_path,
+        });
+    } else b.dependency("linalg", .{
+        .target = target,
+        .optimize = optimize,
+        .backend = backend,
     });
 
     const module = b.addModule("dynamics_analysis", .{
@@ -14,6 +31,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     module.addImport("safetensors", safetensors_dependency.module("safetensors"));
+    module.addImport("linalg", linalg_dependency.module("linalg"));
     module.link_libc = true;
 
     const library = b.addLibrary(.{

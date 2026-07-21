@@ -5,6 +5,7 @@
     .minimum_zig_version = "0.17.0-dev.387+31f157d80",
     .dependencies = .{
         .safetensors = .{ .path = "../safetensors" },
+        .linalg = .{ .path = "../linalg" },
     },
     .paths = .{
         "build.zig",
