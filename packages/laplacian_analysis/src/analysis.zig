@@ -22,15 +22,14 @@ pub fn analyze(
     defer dynamics.deinit(allocator);
 
     const axes = try laplace.transformAxes(allocator, dynamics.correlation, options.transform);
-    defer axes.deinit(allocator);
+    const grid = try laplace.analyzeLaplace(allocator, context, dynamics.correlation, axes);
+    errdefer grid.deinit(allocator);
     const preferred_axes = try laplace.preferredAxes(
         allocator,
         dynamics.correlation,
         options.preferred,
     );
     defer preferred_axes.deinit(allocator);
-    const grid = try laplace.analyzeLaplace(allocator, context, dynamics.correlation, axes);
-    errdefer grid.deinit(allocator);
     const preferred_r = try laplace.preferredCoordinate(
         allocator,
         context,

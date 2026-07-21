@@ -79,6 +79,9 @@ pub fn analyzeLaplace(
     correlation: dynamics_analysis.CorrelationSeries,
     axes: result.TransformAxes,
 ) !result.LaplaceGrid {
+    // Ownership of `axes` transfers to this function on every call. On
+    // success the returned grid owns the slices; on failure they are freed.
+    errdefer axes.deinit(allocator);
     const spacing = try schema.validateCorrelation(correlation);
     try validateAxis(axes.r);
     try validateAxis(axes.omega);
@@ -87,10 +90,6 @@ pub fn analyzeLaplace(
     const value_count = std.math.mul(usize, axes.omega.len, axes.r.len) catch {
         return error.GridSizeOverflow;
     };
-    const r = try allocator.dupe(f64, axes.r);
-    errdefer allocator.free(r);
-    const omega = try allocator.dupe(f64, axes.omega);
-    errdefer allocator.free(omega);
     const values_real = try allocator.alloc(f64, value_count);
     errdefer allocator.free(values_real);
     const values_imag = try allocator.alloc(f64, value_count);
@@ -98,9 +97,9 @@ pub fn analyzeLaplace(
 
     // Flatten in `(omega, r)` row-major order. A future accelerated backend
     // can replace this host traversal while preserving the public layout.
-    for (omega, 0..) |omega_value, omega_index| {
-        for (r, 0..) |r_value, r_index| {
-            const index = omega_index * r.len + r_index;
+    for (axes.omega, 0..) |omega_value, omega_index| {
+        for (axes.r, 0..) |r_value, r_index| {
+            const index = omega_index * axes.r.len + r_index;
             const value = try integrateLaplaceSimpson(
                 correlation,
                 spacing,
@@ -113,11 +112,11 @@ pub fn analyzeLaplace(
     }
 
     return .{
-        .r = r,
-        .omega = omega,
+        .r = axes.r,
+        .omega = axes.omega,
         .values_real = values_real,
         .values_imag = values_imag,
-        .shape = .{ omega.len, r.len },
+        .shape = .{ axes.omega.len, axes.r.len },
     };
 }
 
@@ -133,7 +132,6 @@ fn integrateLaplaceSimpson(
     _ = spacing;
     _ = r;
     _ = omega;
-
     // TODO: Stream composite Simpson weights over the samples without
     // allocating temporary real or imaginary integrand arrays:
     //
@@ -144,6 +142,35 @@ fn integrateLaplaceSimpson(
     // ordinary Simpson weights for odd sample counts, and the Cartwright
     // final-interval correction when the sample count is even.
     return error.NotImplemented;
+}
+
+fn simpsonWeights(allocator: std.mem.Allocator, sample_count: usize, spacing: u64) ![]f64 {
+    if (sample_count < 2 or !std.math.isFinite(spacing)) {
+        return error.InvalidSamples;
+    }
+    const weights = try allocator.alloc(f64, sample_count);
+    errdefer allocator.free(weights);
+    if (sample_count  == 2) {
+        weights[0] = spacing / 2.0;
+        weights[1] = spacing / 2.0;
+    }
+    const simpson_count: f64 = if (sample_count % 2 == 0) sample_count - 1 else sample_count;
+    for (weights[0..simpson_count], 0..) |*weight, i| {
+        const multiplier: f64 = if (i == 0 or i == simpson_count - 1) {
+            1.0;
+        } else if (i % 2 == 1) {
+            4.0;
+        } else {
+            2.0;
+        };
+        weight.* = multiplier * spacing/3.0;
+    }
+    if (sample_count % 2  == 0) {
+        weights[sample_count - 1] += 5.0 * spacing/12.0;
+        weights[sample_count - 2] += 2.0 * spacing/3.0;
+        weights[sample_count - 3] -= spacing/12.0;
+    }
+    return weights;
 }
 
 fn validateAxis(axis: []const f64) !void {

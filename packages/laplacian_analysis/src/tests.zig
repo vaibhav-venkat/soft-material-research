@@ -65,10 +65,12 @@ test "complex Laplace grid uses omega-major row order" {
         .{},
     );
     defer context.deinit();
-    const axes = laplacian.TransformAxes{
-        .r = @constCast(&[_]f64{ 0.0, 0.5 }),
-        .omega = @constCast(&[_]f64{ 0.0, 1.0 }),
+    const r = try std.testing.allocator.dupe(f64, &.{ 0.0, 0.5 });
+    const omega = std.testing.allocator.dupe(f64, &.{ 0.0, 1.0 }) catch |err| {
+        std.testing.allocator.free(r);
+        return err;
     };
+    const axes = laplacian.TransformAxes{ .r = r, .omega = omega };
     const grid = try laplacian.analyzeLaplace(
         std.testing.allocator,
         &context,
