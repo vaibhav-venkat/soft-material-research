@@ -214,10 +214,47 @@ pub fn preferredCoordinate(
     axis: result.PreferredAxis,
     coordinates: []const f64,
 ) !result.PreferredEstimate {
-    _ = allocator;
     _ = context;
-    _ = correlation;
-    _ = axis;
-    _ = coordinates;
-    return error.NotImplemented;
+    const spacing = try schema.validateCorrelation(correlation);
+    try validateAxis(coordinates);
+    for (coordinates) |coordinate| switch (axis) {
+        .omega => if (coordinate <= 0.0) return error.InvalidPreferredOmegaBounds,
+        .r => if (coordinate >= 0.0) return error.InvalidPreferredRBounds,
+    };
+
+    const weights = try integrate.simpsonWeights(
+        allocator,
+        correlation.lag_times.len,
+        spacing,
+    );
+    defer allocator.free(weights);
+
+    var peak_index: usize = 0;
+    var peak_score = -std.math.inf(f64);
+    for (coordinates, 0..) |coordinate, index| {
+        const transform = try integrate.integrateLaplaceSimpson(
+            correlation,
+            weights,
+            if (axis == .r) coordinate else 0.0,
+            if (axis == .omega) coordinate else 0.0,
+        );
+        const magnitude = std.math.hypot(transform.real, transform.imaginary);
+        if (!std.math.isFinite(magnitude)) return error.NonFiniteTransform;
+        const score = std.math.log10(@max(magnitude, std.math.floatMin(f64)));
+        // Match Rust's `Iterator::max_by`, which keeps the later item on ties.
+        if (score >= peak_score) {
+            peak_index = index;
+            peak_score = score;
+        }
+    }
+
+    return .{
+        .axis = axis,
+        .coordinate = coordinates[peak_index],
+        .coordinate_std = 0.0,
+        .log10_magnitude = peak_score,
+        .at_lower_boundary = axis == .r and peak_index == 0,
+        .at_upper_boundary = peak_index + 1 == coordinates.len,
+        .replicate_count = 1,
+    };
 }
