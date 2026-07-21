@@ -11,14 +11,6 @@ pub const TransformOptions = struct {
     omega_points: usize = 241,
 };
 
-pub const PreferredOptions = struct {
-    r_min: ?f64 = null,
-    r_max: f64 = 0.0,
-    r_points: usize = 241,
-    omega_max: ?f64 = null,
-    omega_points: usize = 241,
-};
-
 pub const FitOptions = struct {
     soft_l1_scale: f64 = 0.05,
     tolerance: f64 = 1.0e-8,
@@ -29,6 +21,6 @@ pub const FitOptions = struct {
 pub const Options = struct {
     dynamics: dynamics_analysis.Options = .{},
     transform: TransformOptions = .{},
-    preferred: PreferredOptions = .{},
+    preferred: TransformOptions = .{},
     fit: FitOptions = .{},
 };

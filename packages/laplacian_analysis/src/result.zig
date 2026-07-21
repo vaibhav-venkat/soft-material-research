@@ -12,15 +12,6 @@ pub const TransformAxes = struct {
     }
 };
 
-pub const PreferredAxes = struct {
-    r: []f64,
-    omega: []f64,
-
-    pub fn deinit(self: PreferredAxes, allocator: std.mem.Allocator) void {
-        allocator.free(self.r);
-        allocator.free(self.omega);
-    }
-};
 
 /// Complex values are parallel arrays in `(omega, r)` row-major order.
 pub const LaplaceGrid = struct {
