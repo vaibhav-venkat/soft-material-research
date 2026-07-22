@@ -34,6 +34,9 @@ OF SUCH DAMAGE.
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#if !defined(WIN32) && !defined(__WIN32__)
+#include <alloca.h>
+#endif
 #include "kdtree.h"
 
 #if defined(WIN32) || defined(__WIN32__)
@@ -139,7 +142,7 @@ static void clear_rec(struct kdnode *node, void (*destr)(void*))
 
 	clear_rec(node->left, destr);
 	clear_rec(node->right, destr);
-	
+
 	if(destr) {
 		destr(node->data);
 	}
@@ -299,7 +302,7 @@ static int find_nearest_n(struct kdnode *node, const double *pos, double range, 
 	int i, ret, added_res = 0;
 
 	if(!node) return 0;
-	
+
 	/* if the photon is close enough, add it to the result heap */
 	dist_sq = 0;
 	for(i=0; i<dim; i++) {
