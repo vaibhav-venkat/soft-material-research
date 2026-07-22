@@ -3,7 +3,7 @@ const std = @import("std");
 fn hdf5Prefix(b: *std.Build) []const u8 {
     if (b.option([]const u8, "hdf5-path", "HDF5 installation prefix")) |path| return path;
     if (b.graph.environ_map.get("CONDA_PREFIX")) |path| return path;
-    return b.pathFromRoot("../../.pixi/envs/default");
+    return "../../.pixi/envs/default";
 }
 
 pub fn build(b: *std.Build) void {
