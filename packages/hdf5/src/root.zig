@@ -485,7 +485,6 @@ fn initialize() Error!void {
 
 fn validateShape(shape: []const u64) Error!void {
     if (shape.len == 0 or shape.len > c.H5S_MAX_RANK) return error.InvalidRank;
-    for (shape) |extent| if (extent == 0) return error.InvalidShape;
     _ = try elementCount(shape);
 }
 

@@ -63,6 +63,21 @@ test "chunked datasets round trip whole arrays and hyperslabs" {
     try std.testing.expectEqual(hdf5.Dtype.f32, try dataset.dtype());
 }
 
+test "fixed datasets may represent an empty sample collection" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const file_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/empty.h5", .{temporary.sub_path});
+    defer std.testing.allocator.free(file_path);
+    var file = try hdf5.File.create(std.testing.allocator, file_path, .exclusive);
+    defer file.deinit();
+    var dataset = try file.createDataset(u32, "samples", &.{0}, .{});
+    defer dataset.deinit();
+    try dataset.writeAll(u32, &.{});
+    const shape = try dataset.shapeAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(shape);
+    try std.testing.expectEqualSlices(u64, &.{0}, shape);
+}
+
 test "files reopen without loading datasets and preserve metadata" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();

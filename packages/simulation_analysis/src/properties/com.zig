@@ -1,7 +1,7 @@
 //! Streaming unwrapped center of mass and physical-time finite differences.
 
 const std = @import("std");
-const coordinates_module = @import("../coordinates.zig");
+const coordinates_module = @import("../data_structures/coordinates.zig");
 
 /// One frame-level cylindrical vector.
 pub const CylindricalFrameValue = struct {

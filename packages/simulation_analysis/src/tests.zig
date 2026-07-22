@@ -26,6 +26,11 @@ fn createTrajectory(allocator: std.mem.Allocator, trajectory_path: []const u8) !
         2, 2, 0,
         3, 0, -2,
     });
+    try writer.writeChunk(f32, "particles/orientation", 4, 3, &.{
+        1, 0, 0, 0,
+        1, 0, 0, 0,
+        1, 0, 0, 0,
+    });
     try writer.endFrame();
     try writer.writeChunk(u64, "configuration/step", 1, 1, &.{200});
     try writer.writeChunk(f32, "particles/position", 3, 3, &.{
@@ -33,12 +38,17 @@ fn createTrajectory(allocator: std.mem.Allocator, trajectory_path: []const u8) !
         5, 0,  0,
         6, 2,  2,
     });
+    try writer.writeChunk(f32, "particles/orientation", 4, 3, &.{
+        1, 0, 0, 0,
+        1, 0, 0, 0,
+        1, 0, 0, 0,
+    });
     try writer.endFrame();
     try writer.flush();
 }
 
 test "public defaults and field registry are fixed before implementation" {
-    const options = simulation_analysis.Options{ .input_path = "input.gsd", .output_dir = "output" };
+    const options = simulation_analysis.Options{ .input_path = "input.gsd", .output_dir = "output", .cylinder_radius = 10 };
     try std.testing.expectEqual(@as(usize, 256 * 1024 * 1024), options.target_shard_bytes);
     try std.testing.expectEqual(@as(f64, 1.0), options.timestep);
     try std.testing.expectEqual(simulation_analysis.WriteMode.create, options.write_mode);
@@ -49,13 +59,14 @@ test "public defaults and field registry are fixed before implementation" {
 test "option validation catches empty paths and invalid resource controls" {
     try std.testing.expectError(
         error.EmptyInputPath,
-        simulation_analysis.schema.validateOptions(.{ .input_path = "", .output_dir = "out" }),
+        simulation_analysis.schema.validateOptions(.{ .input_path = "", .output_dir = "out", .cylinder_radius = 10 }),
     );
     try std.testing.expectError(
         error.InvalidWorkerCount,
         simulation_analysis.schema.validateOptions(.{
             .input_path = "in.gsd",
             .output_dir = "out",
+            .cylinder_radius = 10,
             .worker_count = 0,
         }),
     );
@@ -64,13 +75,14 @@ test "option validation catches empty paths and invalid resource controls" {
         simulation_analysis.schema.validateOptions(.{
             .input_path = "in.gsd",
             .output_dir = "out",
+            .cylinder_radius = 10,
             .timestep = 0,
         }),
     );
 }
 
 test "shard planning covers every frame contiguously" {
-    const ranges = try simulation_analysis.planShards(std.testing.allocator, 10, 100, 4_900);
+    const ranges = try simulation_analysis.planShards(std.testing.allocator, 10, 100, 16_900);
     defer std.testing.allocator.free(ranges);
     try std.testing.expectEqualDeep(&[_]simulation_analysis.ShardRange{
         .{ .start = 0, .stop = 4 },
@@ -80,7 +92,7 @@ test "shard planning covers every frame contiguously" {
 }
 
 test "SIMD cylindrical transform handles quadrants, origin, and a tail" {
-    var positions: simulation_analysis.CartesianPositions = .empty;
+    var positions: simulation_analysis.data_structures.coordinates.CartesianPositions = .empty;
     defer positions.deinit(std.testing.allocator);
     try positions.resize(std.testing.allocator, 5);
     var position_slices = positions.slice();
@@ -89,7 +101,7 @@ test "SIMD cylindrical transform handles quadrants, origin, and a tail" {
     position_slices.set(2, .{ .x = 3, .y = 0, .z = -2 });
     position_slices.set(3, .{ .x = 4, .y = -2, .z = 0 });
     position_slices.set(4, .{ .x = 5, .y = 0, .z = 0 });
-    var coordinates: simulation_analysis.CylindricalCoordinates = .empty;
+    var coordinates: simulation_analysis.data_structures.coordinates.CylindricalCoordinates = .empty;
     defer coordinates.deinit(std.testing.allocator);
     try coordinates.resize(std.testing.allocator, positions.len);
     try simulation_analysis.transformCylindrical(positions.slice(), coordinates.slice());
@@ -105,8 +117,185 @@ test "SIMD cylindrical transform handles quadrants, origin, and a tail" {
     }
 }
 
+test "generic cell list finds periodic radius neighbors without duplicates" {
+    const CellList2 = simulation_analysis.data_structures.CellList(2);
+    const x = [_]f32{ -4.9, 4.9, 0.0, 0.4 };
+    const s = [_]f32{ 0.0, 0.0, 3.0, 3.0 };
+    var cells = try CellList2.init(
+        std.testing.allocator,
+        .{ &x, &s },
+        .{ .{ .lower = -5, .upper = 5 }, .{ .lower = 0, .upper = 6 } },
+        .{ true, true },
+        1.0,
+    );
+    defer cells.deinit();
+    var neighbors: std.ArrayList(CellList2.Neighbor) = .empty;
+    defer neighbors.deinit(std.testing.allocator);
+    try cells.queryRadius(0, 0.3, true, null, &neighbors);
+    try std.testing.expectEqual(@as(usize, 1), neighbors.items.len);
+    try std.testing.expectEqual(@as(usize, 1), neighbors.items[0].index);
+    try std.testing.expectApproxEqAbs(@as(f32, -0.2), neighbors.items[0].displacement[0], 1.0e-5);
+}
+
+test "generic cell list rebuilds and returns deterministic nearest neighbors" {
+    const CellList3 = simulation_analysis.data_structures.CellList(3);
+    const x = [_]f32{ 0, 1, 2, 3, 4, 5, 6 };
+    const y = [_]f32{ 0, 0, 0, 0, 0, 0, 0 };
+    const z = [_]f32{ 0, 0, 0, 0, 0, 0, 0 };
+    var cells = try CellList3.init(
+        std.testing.allocator,
+        .{ &x, &y, &z },
+        .{
+            .{ .lower = -0.5, .upper = 6.5 },
+            .{ .lower = -1, .upper = 1 },
+            .{ .lower = -1, .upper = 1 },
+        },
+        .{ false, false, false },
+        0.75,
+    );
+    defer cells.deinit();
+    var neighbors: std.ArrayList(CellList3.Neighbor) = .empty;
+    defer neighbors.deinit(std.testing.allocator);
+    try cells.nearest(0, 6, null, &neighbors);
+    try std.testing.expectEqual(@as(usize, 6), neighbors.items.len);
+    for (neighbors.items, 1..) |neighbor, expected| try std.testing.expectEqual(expected, neighbor.index);
+
+    const reversed = [_]f32{ 6, 5, 4, 3, 2, 1, 0 };
+    try cells.rebuild(.{ &reversed, &y, &z });
+    try cells.queryRadius(6, 1.1, true, null, &neighbors);
+    try std.testing.expectEqual(@as(usize, 1), neighbors.items.len);
+    try std.testing.expectEqual(@as(usize, 5), neighbors.items[0].index);
+}
+
+test "math helpers match active-direction and cylindrical conventions" {
+    const coordinate_types = simulation_analysis.data_structures.coordinates;
+    const direction = try simulation_analysis.properties.math.activeDirection(.{
+        .w = @sqrt(@as(f32, 0.5)),
+        .x = 0,
+        .y = 0,
+        .z = @sqrt(@as(f32, 0.5)),
+    });
+    try std.testing.expectApproxEqAbs(@as(f32, 0), direction.x, 1.0e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 1), direction.y, 1.0e-6);
+    const cylindrical = simulation_analysis.properties.math.cylindricalVector(
+        coordinate_types.CartesianVector{ .x = 0, .y = 1, .z = 0 },
+        0,
+    );
+    try std.testing.expectEqual(@as(f32, 0), cylindrical.r);
+    try std.testing.expectEqual(@as(f32, 1), cylindrical.theta);
+}
+
+test "hexatic kernel gives unit order and zero charge on a triangular shell" {
+    const coordinate_types = simulation_analysis.data_structures.coordinates;
+    const CellList3 = simulation_analysis.data_structures.CellList(3);
+    const radius: f32 = 20;
+    var positions: coordinate_types.CartesianPositions = .empty;
+    defer positions.deinit(std.testing.allocator);
+    try positions.resize(std.testing.allocator, 7);
+    var position_slices = positions.slice();
+    position_slices.set(0, .{ .x = 0, .y = 0, .z = radius });
+    for (0..6) |neighbor| {
+        const angle = @as(f32, @floatFromInt(neighbor)) * std.math.pi / 3.0;
+        const axial = @cos(angle);
+        const surface = @sin(angle);
+        position_slices.set(neighbor + 1, .{
+            .x = axial,
+            .y = radius * @sin(surface / radius),
+            .z = radius * @cos(surface / radius),
+        });
+    }
+    var cells = try CellList3.init(
+        std.testing.allocator,
+        .{ position_slices.items(.x), position_slices.items(.y), position_slices.items(.z) },
+        .{
+            .{ .lower = -5, .upper = 5 },
+            .{ .lower = -radius - 1, .upper = radius + 1 },
+            .{ .lower = -radius - 1, .upper = radius + 1 },
+        },
+        .{ true, false, false },
+        1.2,
+    );
+    defer cells.deinit();
+    var order: [7]f32 = undefined;
+    var real: [7]f32 = undefined;
+    var imaginary: [7]f32 = undefined;
+    var charge: [7]i8 = undefined;
+    var mask: [7]u8 = undefined;
+    try simulation_analysis.properties.hexatic.calculate(
+        std.testing.allocator,
+        &cells,
+        positions.slice(),
+        .{ .cylinder_radius = radius, .shell_delta = 1, .coordination_radius = 1.2 },
+        .{ .order = &order, .real = &real, .imaginary = &imaginary, .disclination = &charge, .shell_mask = &mask },
+    );
+    try std.testing.expectApproxEqAbs(@as(f32, 1), order[0], 2.0e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 1), real[0], 2.0e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), imaginary[0], 2.0e-5);
+    try std.testing.expectEqual(@as(i8, 0), charge[0]);
+    try std.testing.expectEqual(@as(u8, 1), mask[0]);
+}
+
+test "polar kernel includes self and writes x radial azimuthal order" {
+    const coordinate_types = simulation_analysis.data_structures.coordinates;
+    const CellList3 = simulation_analysis.data_structures.CellList(3);
+    const x = [_]f32{ 0, 0.25 };
+    const y = [_]f32{ 0, 0 };
+    const z = [_]f32{ 2, 2 };
+    var cells = try CellList3.init(
+        std.testing.allocator,
+        .{ &x, &y, &z },
+        .{ .{ .lower = -2, .upper = 2 }, .{ .lower = -1, .upper = 1 }, .{ .lower = 1, .upper = 3 } },
+        .{ true, false, false },
+        1,
+    );
+    defer cells.deinit();
+    var orientations: coordinate_types.Quaternions = .empty;
+    defer orientations.deinit(std.testing.allocator);
+    try orientations.resize(std.testing.allocator, 2);
+    var orientation_slices = orientations.slice();
+    orientation_slices.set(0, .{ .w = 1, .x = 0, .y = 0, .z = 0 });
+    orientation_slices.set(1, .{ .w = 1, .x = 0, .y = 0, .z = 0 });
+    var polar: coordinate_types.CylindricalVectors = .empty;
+    defer polar.deinit(std.testing.allocator);
+    try polar.resize(std.testing.allocator, 2);
+    var rho: [2]f32 = undefined;
+    try simulation_analysis.properties.polar.calculate(
+        std.testing.allocator,
+        &cells,
+        orientations.slice(),
+        &.{ 0, 0 },
+        .{ .pocket_radius = 1 },
+        &rho,
+        polar.slice(),
+    );
+    const expected = try simulation_analysis.properties.math.gaussianWeight(0, 1) +
+        try simulation_analysis.properties.math.gaussianWeight(0.25 * 0.25, 1);
+    try std.testing.expectApproxEqAbs(expected, rho[0], 1.0e-6);
+    try std.testing.expectApproxEqAbs(expected, polar.slice().items(.x)[0], 1.0e-6);
+    try std.testing.expectEqual(@as(f32, 0), polar.slice().items(.r)[0]);
+    try std.testing.expectEqual(@as(f32, 0), polar.slice().items(.theta)[0]);
+}
+
+test "cluster kernel returns raw component particle counts across a seam" {
+    var sizes = try simulation_analysis.properties.clusters.calculate(
+        std.testing.allocator,
+        &.{ -4.9, 4.9, 0 },
+        &.{ 0, 0, 2 },
+        &.{ 1, 1, 1 },
+        &.{ 0, 0, 0 },
+        &.{ 1, 1, 1 },
+        .{
+            .axial_period = 10,
+            .cylinder_radius = 2,
+            .neighbor_radius = 0.5,
+        },
+    );
+    defer sizes.deinit(std.testing.allocator);
+    try std.testing.expectEqualSlices(u32, &.{2}, sizes.items);
+}
+
 test "COM unwraps axial and angular crossings and velocity uses physical timestep" {
-    var coordinates: simulation_analysis.CylindricalCoordinates = .empty;
+    var coordinates: simulation_analysis.data_structures.coordinates.CylindricalCoordinates = .empty;
     defer coordinates.deinit(std.testing.allocator);
     try coordinates.resize(std.testing.allocator, 6);
     var coordinate_slices = coordinates.slice();
@@ -144,6 +333,7 @@ test "new conversion writes static metadata and frame shards" {
     const result = try simulation_analysis.run(std.testing.allocator, .{
         .input_path = trajectory,
         .output_dir = output,
+        .cylinder_radius = 3.5,
         .worker_count = 2,
         .target_shard_bytes = 64,
     });
@@ -214,6 +404,32 @@ test "new conversion writes static metadata and frame shards" {
     var box: [6]f32 = undefined;
     try inherited_box.readAll(f32, &box);
     try std.testing.expectEqualSlices(f32, &.{ 20, 30, 30, 0, 0, 0 }, &box);
+
+    var order_dataset = try first_shard.openDataset("hexatic_order");
+    defer order_dataset.deinit();
+    const order_shape = try order_dataset.shapeAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(order_shape);
+    try std.testing.expectEqualSlices(u64, &.{ 1, 3 }, order_shape);
+    var mask_dataset = try first_shard.openDataset("hexatic_shell_mask");
+    defer mask_dataset.deinit();
+    var mask_values: [3]u8 = undefined;
+    try mask_dataset.readAll(u8, &mask_values);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0 }, &mask_values);
+    var rho_dataset = try first_shard.openDataset("rho");
+    defer rho_dataset.deinit();
+    var rho_values: [3]f32 = undefined;
+    try rho_dataset.readAll(f32, &rho_values);
+    for (rho_values) |value| try std.testing.expect(value > 0);
+    var polar_dataset = try first_shard.openDataset("polar_cylindrical");
+    defer polar_dataset.deinit();
+    const polar_shape = try polar_dataset.shapeAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(polar_shape);
+    try std.testing.expectEqualSlices(u64, &.{ 3, 1, 3 }, polar_shape);
+    var cluster_dataset = try first_shard.openDataset("cluster_sizes");
+    defer cluster_dataset.deinit();
+    const cluster_shape = try cluster_dataset.shapeAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(cluster_shape);
+    try std.testing.expectEqualSlices(u64, &.{0}, cluster_shape);
 }
 
 test "update adds a missing field without replacing established data" {
@@ -228,24 +444,34 @@ test "update adds a missing field without replacing established data" {
     const created = try simulation_analysis.run(std.testing.allocator, .{
         .input_path = trajectory,
         .output_dir = output,
+        .cylinder_radius = 3.5,
     });
-    try std.testing.expectEqual(@as(usize, 6), created.fields_written);
+    try std.testing.expectEqual(@as(usize, 14), created.fields_written);
     const shard_path = try std.fs.path.join(std.testing.allocator, &.{ output, "frames_000000.h5" });
     defer std.testing.allocator.free(shard_path);
     {
         var shard = try hdf5.File.openPath(std.testing.allocator, shard_path, .read_write);
         defer shard.deinit();
         try shard.writeAttribute(u64, "preserved", 42);
+        try shard.deleteLink("rho");
     }
     const updated = try simulation_analysis.run(std.testing.allocator, .{
         .input_path = trajectory,
         .output_dir = output,
+        .cylinder_radius = 3.5,
         .write_mode = .update,
     });
-    try std.testing.expectEqual(@as(usize, 0), updated.fields_written);
+    try std.testing.expectEqual(@as(usize, 1), updated.fields_written);
     var shard = try hdf5.File.openPath(std.testing.allocator, shard_path, .read_only);
     defer shard.deinit();
     try std.testing.expectEqual(@as(u64, 42), try shard.readAttribute(u64, "preserved"));
+    try std.testing.expect(try shard.objectExists("rho"));
+    try std.testing.expectError(error.AnalysisConfigurationMismatch, simulation_analysis.run(std.testing.allocator, .{
+        .input_path = trajectory,
+        .output_dir = output,
+        .cylinder_radius = 4.0,
+        .write_mode = .update,
+    }));
 }
 
 test "existing output is refused without update or overwrite" {
@@ -259,10 +485,12 @@ test "existing output is refused without update or overwrite" {
     _ = try simulation_analysis.run(std.testing.allocator, .{
         .input_path = trajectory,
         .output_dir = output,
+        .cylinder_radius = 3.5,
     });
     try std.testing.expectError(error.OutputExists, simulation_analysis.run(std.testing.allocator, .{
         .input_path = trajectory,
         .output_dir = output,
+        .cylinder_radius = 3.5,
     }));
 }
 
@@ -273,6 +501,8 @@ test "CLI parses the agreed package-only conversion interface" {
         "trajectory.gsd",
         "--output-dir",
         "analysis",
+        "--cylinder-radius",
+        "10",
         "--workers",
         "4",
         "--target-shard-mib",
@@ -287,6 +517,15 @@ test "CLI parses the agreed package-only conversion interface" {
     try std.testing.expectEqual(@as(usize, 128 * 1024 * 1024), options.target_shard_bytes);
     try std.testing.expectEqual(@as(f64, 0.000001), options.timestep);
     try std.testing.expectEqual(simulation_analysis.WriteMode.update, options.write_mode);
+    try std.testing.expectEqual(@as(f64, 10), options.cylinder_radius);
+
+    try std.testing.expectError(error.MissingCylinderRadius, simulation_analysis.cli.parseArgs(std.testing.allocator, &.{
+        "simulation-analysis",
+        "--input",
+        "trajectory.gsd",
+        "--output-dir",
+        "analysis",
+    }));
 
     try std.testing.expectError(error.UnknownArgument, simulation_analysis.cli.parseArgs(std.testing.allocator, &.{
         "simulation-analysis",
@@ -294,6 +533,8 @@ test "CLI parses the agreed package-only conversion interface" {
         "trajectory.gsd",
         "--output-dir",
         "analysis",
+        "--cylinder-radius",
+        "10",
         "--metadata",
         "metadata.json",
     }));
