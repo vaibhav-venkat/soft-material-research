@@ -41,12 +41,16 @@ class ClusterSummary:
     lx_multiplier: int
     area_weighted_mean: float
     area_weighted_mode: float
+    area_weighted_std: float
     sqrt_area_weighted_mean: float
     sqrt_area_weighted_mode: float
+    sqrt_area_weighted_std: float
     absolute_area_weighted_mean: float
     absolute_area_weighted_mode: float
+    absolute_area_weighted_std: float
     absolute_sqrt_area_weighted_mean: float
     absolute_sqrt_area_weighted_mode: float
+    absolute_sqrt_area_weighted_std: float
 
 
 def _case_metadata(manifest: Path) -> tuple[float, int, float, float, str]:
@@ -254,6 +258,15 @@ def _weighted_mode(
     return float((edges[mode_bin] + edges[mode_bin + 1]) / 2.0)
 
 
+def _weighted_mean_std(
+    values: NDArray[np.float64],
+    weights: NDArray[np.float64],
+) -> tuple[float, float]:
+    mean = float(np.average(values, weights=weights))
+    variance = float(np.average((values - mean) ** 2, weights=weights))
+    return mean, float(np.sqrt(variance))
+
+
 def _summarize(
     case: CaseClusters,
     area_bins: list[float],
@@ -273,32 +286,46 @@ def _summarize(
             np.nan,
             np.nan,
             np.nan,
+            np.nan,
+            np.nan,
+            np.nan,
+            np.nan,
         )
     sqrt_area = np.sqrt(area)
     absolute_area = case.absolute_area
     absolute_sqrt_area = np.sqrt(absolute_area)
+    area_mean, area_std = _weighted_mean_std(area, area)
+    sqrt_area_mean, sqrt_area_std = _weighted_mean_std(sqrt_area, area)
+    absolute_area_mean, absolute_area_std = _weighted_mean_std(
+        absolute_area,
+        absolute_area,
+    )
+    absolute_sqrt_area_mean, absolute_sqrt_area_std = _weighted_mean_std(
+        absolute_sqrt_area,
+        absolute_area,
+    )
     return ClusterSummary(
         lx_multiplier=case.lx_multiplier,
-        area_weighted_mean=float(np.average(area, weights=area)),
+        area_weighted_mean=area_mean,
         area_weighted_mode=_weighted_mode(area, area, area_bins),
-        sqrt_area_weighted_mean=float(np.average(sqrt_area, weights=area)),
+        area_weighted_std=area_std,
+        sqrt_area_weighted_mean=sqrt_area_mean,
         sqrt_area_weighted_mode=_weighted_mode(sqrt_area, area, sqrt_bins),
-        absolute_area_weighted_mean=float(
-            np.average(absolute_area, weights=absolute_area)
-        ),
+        sqrt_area_weighted_std=sqrt_area_std,
+        absolute_area_weighted_mean=absolute_area_mean,
         absolute_area_weighted_mode=_weighted_mode(
             absolute_area,
             absolute_area,
             absolute_bins,
         ),
-        absolute_sqrt_area_weighted_mean=float(
-            np.average(absolute_sqrt_area, weights=absolute_area)
-        ),
+        absolute_area_weighted_std=absolute_area_std,
+        absolute_sqrt_area_weighted_mean=absolute_sqrt_area_mean,
         absolute_sqrt_area_weighted_mode=_weighted_mode(
             absolute_sqrt_area,
             absolute_area,
             absolute_sqrt_bins,
         ),
+        absolute_sqrt_area_weighted_std=absolute_sqrt_area_std,
     )
 
 
@@ -326,13 +353,20 @@ def _plot_mean_mode(cases: list[CaseClusters], output: Path) -> None:
     ]
     area_means = np.asarray([summary.area_weighted_mean for summary in summaries])
     area_modes = np.asarray([summary.area_weighted_mode for summary in summaries])
+    area_stds = np.asarray([summary.area_weighted_std for summary in summaries])
     sqrt_means = np.asarray([summary.sqrt_area_weighted_mean for summary in summaries])
     sqrt_modes = np.asarray([summary.sqrt_area_weighted_mode for summary in summaries])
+    sqrt_stds = np.asarray(
+        [summary.sqrt_area_weighted_std for summary in summaries]
+    )
     absolute_means = np.asarray(
         [summary.absolute_area_weighted_mean for summary in summaries]
     )
     absolute_modes = np.asarray(
         [summary.absolute_area_weighted_mode for summary in summaries]
+    )
+    absolute_stds = np.asarray(
+        [summary.absolute_area_weighted_std for summary in summaries]
     )
     absolute_sqrt_means = np.asarray(
         [summary.absolute_sqrt_area_weighted_mean for summary in summaries]
@@ -340,12 +374,16 @@ def _plot_mean_mode(cases: list[CaseClusters], output: Path) -> None:
     absolute_sqrt_modes = np.asarray(
         [summary.absolute_sqrt_area_weighted_mode for summary in summaries]
     )
+    absolute_sqrt_stds = np.asarray(
+        [summary.absolute_sqrt_area_weighted_std for summary in summaries]
+    )
     figure, axes = plt.subplots(1, 4, figsize=(20.0, 4.4), constrained_layout=True)
-    for axis, means, modes, title, ylabel in (
+    for axis, means, modes, stds, title, ylabel in (
         (
             axes[0],
             area_means,
             area_modes,
+            area_stds,
             "Area-weighted cluster fractions versus axial-length multiplier",
             r"Cluster area fraction $A/SA$",
         ),
@@ -353,6 +391,7 @@ def _plot_mean_mode(cases: list[CaseClusters], output: Path) -> None:
             axes[1],
             sqrt_means,
             sqrt_modes,
+            sqrt_stds,
             "Area-weighted circumference ratios versus axial-length multiplier",
             r"Cluster circumference ratio $\sqrt{A/SA}$",
         ),
@@ -360,6 +399,7 @@ def _plot_mean_mode(cases: list[CaseClusters], output: Path) -> None:
             axes[2],
             absolute_means,
             absolute_modes,
+            absolute_stds,
             "Absolute cluster area versus axial-length multiplier",
             r"Absolute cluster area $A$",
         ),
@@ -367,6 +407,7 @@ def _plot_mean_mode(cases: list[CaseClusters], output: Path) -> None:
             axes[3],
             absolute_sqrt_means,
             absolute_sqrt_modes,
+            absolute_sqrt_stds,
             "Absolute cluster circumference scale versus axial-length multiplier",
             r"Absolute cluster circumference scale $\sqrt{A}$",
         ),
@@ -397,6 +438,15 @@ def _plot_mean_mode(cases: list[CaseClusters], output: Path) -> None:
                 lw=2.0,
                 label=rf"Mode, $C={circumference:g}D$",
             )
+            axis.plot(
+                multipliers,
+                stds[indices],
+                color=color,
+                marker="^",
+                ls=":",
+                lw=2.0,
+                label=rf"Std., $C={circumference:g}D$",
+            )
         axis.set(
             title=title,
             xlabel=r"Axial-length multiplier $L_x/L_{x,1}$",
@@ -418,14 +468,19 @@ def _plot_mean_mode(cases: list[CaseClusters], output: Path) -> None:
             f"case={case.case_id} Lx={case.lx:.12g} replicates={case.replicate_count} "
             f"area_weighted_mean={summary.area_weighted_mean:.12g} "
             f"area_weighted_mode={summary.area_weighted_mode:.12g} "
+            f"area_weighted_std={summary.area_weighted_std:.12g} "
             f"sqrt_area_weighted_mean={summary.sqrt_area_weighted_mean:.12g} "
             f"sqrt_area_weighted_mode={summary.sqrt_area_weighted_mode:.12g} "
+            f"sqrt_area_weighted_std={summary.sqrt_area_weighted_std:.12g} "
             f"absolute_area_weighted_mean={summary.absolute_area_weighted_mean:.12g} "
             f"absolute_area_weighted_mode={summary.absolute_area_weighted_mode:.12g} "
+            f"absolute_area_weighted_std={summary.absolute_area_weighted_std:.12g} "
             f"absolute_sqrt_area_weighted_mean="
             f"{summary.absolute_sqrt_area_weighted_mean:.12g} "
             f"absolute_sqrt_area_weighted_mode="
-            f"{summary.absolute_sqrt_area_weighted_mode:.12g}"
+            f"{summary.absolute_sqrt_area_weighted_mode:.12g} "
+            f"absolute_sqrt_area_weighted_std="
+            f"{summary.absolute_sqrt_area_weighted_std:.12g}"
         )
 
 
