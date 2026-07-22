@@ -182,17 +182,19 @@ def _plot_clusters(samples: dict[str, tuple[str, list[np.ndarray]]], output: Pat
         _save(figure, output)
         return
     all_area = np.concatenate(pooled)
-    area_bins = np.histogram_bin_edges(all_area, bins="auto")
-    sqrt_bins = np.histogram_bin_edges(np.sqrt(all_area), bins="auto")
+    # Seaborn 0.13 compares `bins` to the string "auto" internally; lists
+    # avoid NumPy 2's ambiguous ndarray/string equality result.
+    area_bins = np.histogram_bin_edges(all_area, bins="auto").tolist()
+    sqrt_bins = np.histogram_bin_edges(np.sqrt(all_area), bins="auto").tolist()
     for color, (label, replicates) in zip(colors, samples.values(), strict=True):
         area = np.concatenate(replicates) if replicates else np.empty(0)
         if area.size == 0:
             continue
         # A cluster contributes in proportion to the surface area it contains,
         # rather than every tiny and large cluster receiving equal mass.
-        sns.histplot(area, weights=area, stat="probability", element="step", fill=False,
+        sns.histplot(x=area, weights=area, stat="probability", element="step", fill=False,
                      common_norm=False, bins=area_bins, color=color, label=label, ax=axes[0])
-        sns.histplot(np.sqrt(area), weights=area, stat="probability", element="step", fill=False,
+        sns.histplot(x=np.sqrt(area), weights=area, stat="probability", element="step", fill=False,
                      common_norm=False, bins=sqrt_bins, color=color, label=label, ax=axes[1])
     axes[0].set(
         title="Area-weighted structural-cluster fractions",
