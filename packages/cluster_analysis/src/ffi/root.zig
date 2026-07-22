@@ -59,7 +59,6 @@ pub export fn cluster_analysis_run(
         fromCOptions(c_options.*),
     ) catch |err| return switch (err) {
         error.OutOfMemory => 2,
-        error.NotImplemented => 4,
         else => 3,
     };
     output.* = .{
