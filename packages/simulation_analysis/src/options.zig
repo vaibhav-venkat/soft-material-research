@@ -9,7 +9,6 @@ pub const WriteMode = enum {
 pub const Options = struct {
     input_path: []const u8,
     output_dir: []const u8,
-    metadata_path: ?[]const u8 = null,
     worker_count: ?usize = null,
     target_shard_bytes: usize = 256 * 1024 * 1024,
     write_mode: WriteMode = .create,

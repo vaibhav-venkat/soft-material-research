@@ -9,7 +9,6 @@ pub fn parseArgs(allocator: std.mem.Allocator, arguments: []const []const u8) !O
     _ = allocator;
     var input_path: ?[]const u8 = null;
     var output_dir: ?[]const u8 = null;
-    var metadata_path: ?[]const u8 = null;
     var worker_count: ?usize = null;
     var target_shard_bytes: usize = 256 * 1024 * 1024;
     var write_mode: WriteMode = .create;
@@ -26,10 +25,6 @@ pub fn parseArgs(allocator: std.mem.Allocator, arguments: []const []const u8) !O
             index += 1;
             if (index >= arguments.len) return error.MissingArgumentValue;
             output_dir = arguments[index];
-        } else if (std.mem.eql(u8, argument, "--metadata")) {
-            index += 1;
-            if (index >= arguments.len) return error.MissingArgumentValue;
-            metadata_path = arguments[index];
         } else if (std.mem.eql(u8, argument, "--workers")) {
             index += 1;
             if (index >= arguments.len) return error.MissingArgumentValue;
@@ -56,7 +51,6 @@ pub fn parseArgs(allocator: std.mem.Allocator, arguments: []const []const u8) !O
     return .{
         .input_path = input_path orelse return error.MissingInput,
         .output_dir = output_dir orelse return error.MissingOutputDirectory,
-        .metadata_path = metadata_path,
         .worker_count = worker_count,
         .target_shard_bytes = target_shard_bytes,
         .write_mode = write_mode,

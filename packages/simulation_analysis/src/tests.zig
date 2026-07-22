@@ -228,4 +228,14 @@ test "CLI parses the agreed package-only conversion interface" {
     try std.testing.expectEqual(@as(?usize, 4), options.worker_count);
     try std.testing.expectEqual(@as(usize, 128 * 1024 * 1024), options.target_shard_bytes);
     try std.testing.expectEqual(simulation_analysis.WriteMode.update, options.write_mode);
+
+    try std.testing.expectError(error.UnknownArgument, simulation_analysis.cli.parseArgs(std.testing.allocator, &.{
+        "simulation-analysis",
+        "--input",
+        "trajectory.gsd",
+        "--output-dir",
+        "analysis",
+        "--metadata",
+        "metadata.json",
+    }));
 }
