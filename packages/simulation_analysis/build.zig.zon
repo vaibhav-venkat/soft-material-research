@@ -1,0 +1,11 @@
+.{
+    .name = .simulation_analysis,
+    .version = "0.1.0",
+    .fingerprint = 0xc76ba64ed0e9c36e,
+    .minimum_zig_version = "0.17.0-dev.387+31f157d80",
+    .dependencies = .{
+        .gsd = .{ .path = "../gsd" },
+        .hdf5 = .{ .path = "../hdf5" },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "src", "README.md" },
+}
