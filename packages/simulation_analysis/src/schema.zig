@@ -23,6 +23,11 @@ pub const base_fields = [_]FieldSpec{
     .{ .name = "coords", .dtype = .f32, .rank = 3, .version = 2 },
 };
 
+pub const property_fields = [_]FieldSpec{
+    .{ .name = "com_unwrapped", .dtype = .f32, .rank = 2, .version = 1 },
+    .{ .name = "com_velocity_unwrapped", .dtype = .f32, .rank = 2, .version = 1 },
+};
+
 pub fn validateOptions(options: Options) !void {
     if (options.input_path.len == 0) return error.EmptyInputPath;
     if (options.output_dir.len == 0) return error.EmptyOutputDirectory;

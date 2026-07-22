@@ -5,6 +5,8 @@ const gsd = @import("gsd");
 const hdf5 = @import("hdf5");
 const Options = @import("options.zig").Options;
 const schema = @import("schema.zig");
+const coordinate_types = @import("coordinates.zig");
+const properties = @import("properties/root.zig");
 
 pub const ShardRange = struct {
     start: u64,
@@ -17,23 +19,10 @@ pub const Summary = struct {
     fields_written: usize,
 };
 
-/// One Cartesian particle position. `MultiArrayList` stores each field in a
-/// separate contiguous allocation region.
-pub const CartesianPosition = struct {
-    x: f32,
-    y: f32,
-    z: f32,
-};
-
-/// One cylindrical particle position around the x axis.
-pub const CylindricalCoordinate = struct {
-    x: f32,
-    theta: f32,
-    r: f32,
-};
-
-pub const CartesianPositions = std.MultiArrayList(CartesianPosition);
-pub const CylindricalCoordinates = std.MultiArrayList(CylindricalCoordinate);
+pub const CartesianPosition = coordinate_types.CartesianPosition;
+pub const CylindricalCoordinate = coordinate_types.CylindricalCoordinate;
+pub const CartesianPositions = coordinate_types.CartesianPositions;
+pub const CylindricalCoordinates = coordinate_types.CylindricalCoordinates;
 
 const ShardState = struct {
     input_path: []const u8,
@@ -53,13 +42,19 @@ const MissingFields = struct {
     step: bool,
     box: bool,
     coords: bool,
+    com_unwrapped: bool,
+    com_velocity_unwrapped: bool,
     replace_coords: bool = false,
 
-    fn count(self: MissingFields) usize {
+    fn baseCount(self: MissingFields) usize {
         return @as(usize, @intFromBool(self.frame_index)) +
             @as(usize, @intFromBool(self.step)) +
             @as(usize, @intFromBool(self.box)) +
             @as(usize, @intFromBool(self.coords));
+    }
+
+    fn any(self: MissingFields) bool {
+        return self.baseCount() != 0 or self.com_unwrapped or self.com_velocity_unwrapped;
     }
 };
 
@@ -308,32 +303,41 @@ fn writeShard(state: *ShardState, shard_index: usize) !usize {
         .step = true,
         .box = true,
         .coords = true,
+        .com_unwrapped = true,
+        .com_velocity_unwrapped = true,
     };
-    if (missing.count() == 0) return 0;
+    if (!missing.any()) return 0;
 
     const frames = if (missing.frame_index) try allocator.alloc(u64, frame_count) else null;
     defer if (frames) |values| allocator.free(values);
-    const steps = if (missing.step) try allocator.alloc(u64, frame_count) else null;
+    const steps = if (missing.step or missing.com_velocity_unwrapped) try allocator.alloc(u64, frame_count) else null;
     defer if (steps) |values| allocator.free(values);
     const boxes = if (missing.box) try allocator.alloc(f32, frame_count * 6) else null;
     defer if (boxes) |values| allocator.free(values);
-    const raw_positions = if (missing.coords) try allocator.alloc(f32, particle_count * 3) else null;
+    const properties_requested = missing.com_unwrapped or missing.com_velocity_unwrapped;
+    const raw_positions = if (missing.coords or properties_requested) try allocator.alloc(f32, particle_count * 3) else null;
     defer if (raw_positions) |values| allocator.free(values);
     var positions: CartesianPositions = .empty;
     defer positions.deinit(allocator);
-    if (missing.coords) try positions.resize(allocator, particle_count);
+    if (missing.coords or properties_requested) try positions.resize(allocator, particle_count);
     var coordinates: CylindricalCoordinates = .empty;
     defer coordinates.deinit(allocator);
-    if (missing.coords) try coordinates.resize(allocator, coordinate_count);
+    if (missing.coords or properties_requested) try coordinates.resize(allocator, coordinate_count);
+    var centers: properties.CylindricalFrameValues = .empty;
+    defer centers.deinit(allocator);
+    if (missing.com_unwrapped) try centers.resize(allocator, frame_count);
+    var center_velocities: properties.CylindricalFrameValues = .empty;
+    defer center_velocities.deinit(allocator);
+    if (missing.com_velocity_unwrapped) try center_velocities.resize(allocator, frame_count);
 
-    if (missing.step or missing.box or missing.coords) {
+    if (missing.step or missing.box or missing.coords or properties_requested) {
         var input = try gsd.File.openRead(allocator, state.input_path);
         defer input.deinit();
         for (0..frame_count) |local_frame| {
             const frame = range.start + local_frame;
             if (steps) |values| try readFrameChunk(&input, u64, frame, "configuration/step", values[local_frame .. local_frame + 1]);
             if (boxes) |values| try readFrameChunk(&input, f32, 0, "configuration/box", values[local_frame * 6 ..][0..6]);
-            if (missing.coords) {
+            if (missing.coords or properties_requested) {
                 var particle_value: [1]u32 = undefined;
                 try readFrameChunk(&input, u32, 0, "particles/N", &particle_value);
                 if (particle_value[0] != state.particle_count) return error.VariableParticleCount;
@@ -347,6 +351,21 @@ fn writeShard(state: *ShardState, shard_index: usize) !usize {
     if (frames) |values| {
         for (values, 0..) |*frame, local_frame| frame.* = range.start + local_frame;
     }
+
+    const centers_ready = if (missing.com_unwrapped) blk: {
+        properties.com_unwrapped(coordinates.slice(), particle_count, centers.slice()) catch |err| switch (err) {
+            error.NotImplemented => break :blk false,
+            else => return err,
+        };
+        break :blk true;
+    } else false;
+    const center_velocities_ready = if (missing.com_velocity_unwrapped) blk: {
+        properties.com_velocity_unwrapped(coordinates.slice(), steps.?, particle_count, center_velocities.slice()) catch |err| switch (err) {
+            error.NotImplemented => break :blk false,
+            else => return err,
+        };
+        break :blk true;
+    } else false;
 
     if (state.serialize_hdf5) while (!state.hdf5_mutex.tryLock()) std.atomic.spinLoopHint();
     defer if (state.serialize_hdf5) state.hdf5_mutex.unlock();
@@ -387,8 +406,32 @@ fn writeShard(state: *ShardState, shard_index: usize) !usize {
         try dataset.writeHyperslab(f32, &.{ 1, 0, 0 }, &.{ 1, frame_count_u64, state.particle_count }, coordinate_slices.items(.theta));
         try dataset.writeHyperslab(f32, &.{ 2, 0, 0 }, &.{ 1, frame_count_u64, state.particle_count }, coordinate_slices.items(.r));
     }
+    var property_fields_written: usize = 0;
+    if (centers_ready) {
+        try writeCylindricalFrameProperty(&file, "com_unwrapped", frame_count_u64, centers.slice());
+        property_fields_written += 1;
+    }
+    if (center_velocities_ready) {
+        try writeCylindricalFrameProperty(&file, "com_velocity_unwrapped", frame_count_u64, center_velocities.slice());
+        property_fields_written += 1;
+    }
     try file.flush();
-    return missing.count();
+    return missing.baseCount() + property_fields_written;
+}
+
+fn writeCylindricalFrameProperty(
+    file: *hdf5.File,
+    name: []const u8,
+    frame_count: u64,
+    values: properties.CylindricalFrameValues.Slice,
+) !void {
+    var dataset = try file.createDataset(f32, name, &.{ 3, frame_count }, .{ .chunk_shape = &.{ 1, frame_count } });
+    defer dataset.deinit();
+    try dataset.writeStringAttribute("components", "x,theta,r");
+    try dataset.writeStringAttribute("layout", "component,frame");
+    try dataset.writeHyperslab(f32, &.{ 0, 0 }, &.{ 1, frame_count }, values.items(.x));
+    try dataset.writeHyperslab(f32, &.{ 1, 0 }, &.{ 1, frame_count }, values.items(.theta));
+    try dataset.writeHyperslab(f32, &.{ 2, 0 }, &.{ 1, frame_count }, values.items(.r));
 }
 
 fn deinterleaveCartesian(values: []const f32, positions: CartesianPositions.Slice) void {
@@ -434,6 +477,8 @@ fn inspectMissingFields(
         .step = !try file.objectExists("step"),
         .box = !try file.objectExists("box"),
         .coords = !coords_compatible,
+        .com_unwrapped = !try file.objectExists("com_unwrapped"),
+        .com_velocity_unwrapped = !try file.objectExists("com_velocity_unwrapped"),
         .replace_coords = coords_exists and !coords_compatible,
     };
 }

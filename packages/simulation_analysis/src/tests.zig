@@ -96,6 +96,23 @@ test "SIMD cylindrical transform handles quadrants, origin, and a tail" {
     }
 }
 
+test "COM property headers accept SoA buffers and remain explicitly unimplemented" {
+    var coordinates: simulation_analysis.CylindricalCoordinates = .empty;
+    defer coordinates.deinit(std.testing.allocator);
+    try coordinates.resize(std.testing.allocator, 2);
+    var result: simulation_analysis.properties.CylindricalFrameValues = .empty;
+    defer result.deinit(std.testing.allocator);
+    try result.resize(std.testing.allocator, 1);
+    try std.testing.expectError(
+        error.NotImplemented,
+        simulation_analysis.properties.com_unwrapped(coordinates.slice(), 2, result.slice()),
+    );
+    try std.testing.expectError(
+        error.NotImplemented,
+        simulation_analysis.properties.com_velocity_unwrapped(coordinates.slice(), &.{100}, 2, result.slice()),
+    );
+}
+
 test "new conversion writes static metadata and frame shards" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
@@ -125,6 +142,8 @@ test "new conversion writes static metadata and frame shards" {
     defer std.testing.allocator.free(first_shard_path);
     var first_shard = try hdf5.File.openPath(std.testing.allocator, first_shard_path, .read_only);
     defer first_shard.deinit();
+    try std.testing.expect(!(try first_shard.objectExists("com_unwrapped")));
+    try std.testing.expect(!(try first_shard.objectExists("com_velocity_unwrapped")));
     var first_coords = try first_shard.openDataset("coords");
     defer first_coords.deinit();
     const first_shape = try first_coords.shapeAlloc(std.testing.allocator);

@@ -3,6 +3,8 @@
 pub const analysis = @import("analysis.zig");
 pub const cli = @import("cli.zig");
 pub const schema = @import("schema.zig");
+pub const coordinates = @import("coordinates.zig");
+pub const properties = @import("properties/root.zig");
 
 pub const Options = @import("options.zig").Options;
 pub const WriteMode = @import("options.zig").WriteMode;
