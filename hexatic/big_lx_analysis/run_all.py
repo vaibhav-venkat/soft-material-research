@@ -128,12 +128,22 @@ def _plot_clusters(samples: dict[str, tuple[str, list[np.ndarray]]], output: Pat
         area = np.concatenate(replicates) if replicates else np.empty(0)
         if area.size == 0:
             continue
-        sns.histplot(area, stat="probability", element="step", fill=False,
+        # A cluster contributes in proportion to the surface area it contains,
+        # rather than every tiny and large cluster receiving equal mass.
+        sns.histplot(area, weights=area, stat="probability", element="step", fill=False,
                      common_norm=False, bins=area_bins, color=color, label=label, ax=axes[0])
-        sns.histplot(np.sqrt(area), stat="probability", element="step", fill=False,
+        sns.histplot(np.sqrt(area), weights=area, stat="probability", element="step", fill=False,
                      common_norm=False, bins=sqrt_bins, color=color, label=label, ax=axes[1])
-    axes[0].set(title="Structural-cluster area fractions", xlabel=r"$A/SA$", ylabel="Probability")
-    axes[1].set(title="Structural-cluster circumference ratios", xlabel=r"$\sqrt{A/SA}$", ylabel="Probability")
+    axes[0].set(
+        title="Area-weighted structural-cluster fractions",
+        xlabel=r"$A/SA$",
+        ylabel="Area-weighted probability",
+    )
+    axes[1].set(
+        title="Area-weighted structural-cluster circumference ratios",
+        xlabel=r"$\sqrt{A/SA}$",
+        ylabel="Area-weighted probability",
+    )
     for axis in axes:
         axis.legend(frameon=False)
         axis.grid(axis="y", color="0.9")
