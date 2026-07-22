@@ -8,6 +8,25 @@ const Options = @import("options.zig").Options;
 const Result = @import("result.zig").Result;
 const schema = @import("schema.zig");
 
+const FrameJob = struct {
+    coordinates: safetensors.TensorView,
+    psi_real: safetensors.TensorView,
+    psi_imaginary: safetensors.TensorView,
+    mask: safetensors.TensorView,
+    local_frame: usize,
+};
+
+const WorkerState = struct {
+    allocator: std.mem.Allocator,
+    jobs: []const FrameJob,
+    next_job: *std.atomic.Value(usize),
+    particle_count: usize,
+    periods: [2]f64,
+    options: Options,
+    ratios: std.ArrayList(f64) = .empty,
+    failure: ?anyerror = null,
+};
+
 pub fn analyze(
     allocator: std.mem.Allocator,
     dataset_input: input.DatasetInput,
@@ -30,16 +49,10 @@ pub fn analyze(
         return error.InvalidFrameRange;
     }
 
-    const particle_count = reference.?.particle_count;
-    const points = try allocator.alloc([2]f64, particle_count);
-    defer allocator.free(points);
-    const psi6 = try allocator.alloc([2]f64, particle_count);
-    defer allocator.free(psi6);
-    const eligible = try allocator.alloc(bool, particle_count);
-    defer allocator.free(eligible);
-
-    var ratios: std.ArrayList(f64) = .empty;
-    errdefer ratios.deinit(allocator);
+    const selected_frame_count = frame_stop - options.frame_start;
+    const jobs = try allocator.alloc(FrameJob, selected_frame_count);
+    defer allocator.free(jobs);
+    var job_index: usize = 0;
     var shard_frame_start: usize = 0;
     for (dataset.shards) |*shard| {
         const coordinates = try shard.reader.tensor("coords");
@@ -53,35 +66,113 @@ pub fn analyze(
             const local_start = selected_start - shard_frame_start;
             const local_stop = selected_stop - shard_frame_start;
             for (local_start..local_stop) |local_frame| {
-                try decodeFrame(
-                    points,
-                    psi6,
-                    eligible,
-                    coordinates,
-                    psi_real,
-                    psi_imaginary,
-                    mask,
-                    local_frame,
-                    geometry.circumference,
-                );
-                const frame_result = try clusters.analyzeStructuralFrame(
-                    allocator,
-                    .{
-                        .points = points,
-                        .psi6 = psi6,
-                        .eligible = eligible,
-                        .periods = .{ geometry.axial_period, geometry.circumference },
-                    },
-                    options,
-                );
-                defer frame_result.deinit(allocator);
-                try ratios.appendSlice(allocator, frame_result.ratios);
+                jobs[job_index] = .{
+                    .coordinates = coordinates,
+                    .psi_real = psi_real,
+                    .psi_imaginary = psi_imaginary,
+                    .mask = mask,
+                    .local_frame = local_frame,
+                };
+                job_index += 1;
             }
         }
         shard_frame_start = shard_frame_stop;
     }
+    std.debug.assert(job_index == jobs.len);
+
+    var next_job = std.atomic.Value(usize).init(0);
+    const cpu_count = std.Thread.getCpuCount() catch 1;
+    const worker_count = @max(@as(usize, 1), @min(cpu_count, jobs.len));
+    const states = try allocator.alloc(WorkerState, worker_count);
+    defer allocator.free(states);
+    for (states) |*state| {
+        state.* = .{
+            .allocator = allocator,
+            .jobs = jobs,
+            .next_job = &next_job,
+            .particle_count = reference.?.particle_count,
+            .periods = .{ geometry.axial_period, geometry.circumference },
+            .options = options,
+        };
+    }
+    defer for (states) |*state| state.ratios.deinit(allocator);
+
+    const threads = try allocator.alloc(std.Thread, worker_count - 1);
+    defer allocator.free(threads);
+    var spawned: usize = 0;
+    for (threads, 0..) |*thread, index| {
+        thread.* = std.Thread.spawn(.{}, analyzeFrames, .{&states[index]}) catch |err| {
+            for (threads[0..spawned]) |started| started.join();
+            return err;
+        };
+        spawned += 1;
+    }
+    analyzeFrames(&states[worker_count - 1]);
+    for (threads) |thread| thread.join();
+    for (states) |state| if (state.failure) |err| return err;
+
+    var ratios: std.ArrayList(f64) = .empty;
+    errdefer ratios.deinit(allocator);
+    for (states) |state| try ratios.appendSlice(allocator, state.ratios.items);
 
     return .{ .ratios = try ratios.toOwnedSlice(allocator) };
+}
+
+fn analyzeFrames(state: *WorkerState) void {
+    const points = state.allocator.alloc([2]f64, state.particle_count) catch |err| {
+        state.failure = err;
+        return;
+    };
+    defer state.allocator.free(points);
+    const psi6 = state.allocator.alloc([2]f64, state.particle_count) catch |err| {
+        state.failure = err;
+        return;
+    };
+    defer state.allocator.free(psi6);
+    const eligible = state.allocator.alloc(bool, state.particle_count) catch |err| {
+        state.failure = err;
+        return;
+    };
+    defer state.allocator.free(eligible);
+
+    while (true) {
+        const job_index = state.next_job.fetchAdd(1, .monotonic);
+        if (job_index >= state.jobs.len) return;
+        const job = state.jobs[job_index];
+        decodeFrame(
+            points,
+            psi6,
+            eligible,
+            job.coordinates,
+            job.psi_real,
+            job.psi_imaginary,
+            job.mask,
+            job.local_frame,
+            state.periods[1],
+        ) catch |err| {
+            state.failure = err;
+            return;
+        };
+        const frame_result = clusters.analyzeStructuralFrame(
+            state.allocator,
+            .{
+                .points = points,
+                .psi6 = psi6,
+                .eligible = eligible,
+                .periods = state.periods,
+            },
+            state.options,
+        ) catch |err| {
+            state.failure = err;
+            return;
+        };
+        state.ratios.appendSlice(state.allocator, frame_result.ratios) catch |err| {
+            frame_result.deinit(state.allocator);
+            state.failure = err;
+            return;
+        };
+        frame_result.deinit(state.allocator);
+    }
 }
 
 fn decodeFrame(
