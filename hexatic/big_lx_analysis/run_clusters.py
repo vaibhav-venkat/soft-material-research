@@ -31,8 +31,10 @@ class CaseClusters:
 @dataclass(frozen=True)
 class ClusterSummary:
     lx: float
-    weighted_mean: float
-    weighted_mode: float
+    area_weighted_mean: float
+    area_weighted_mode: float
+    sqrt_area_weighted_mean: float
+    sqrt_area_weighted_mode: float
 
 
 def _case_metadata(manifest: Path) -> tuple[float, str]:
@@ -59,15 +61,16 @@ def _load_cases(manifests: tuple[Path, ...], options: ClusterOptions) -> list[Ca
             flush=True,
         )
         result = analyze_clusters(replicate.static_file, replicate.shard_files, options)
+        ratios = result.ratios[np.isfinite(result.ratios) & (result.ratios > 0.0)]
         if replicate.case_id not in grouped:
-            grouped[replicate.case_id] = (label, lx, [result.ratios])
+            grouped[replicate.case_id] = (label, lx, [ratios])
             continue
         previous_label, previous_lx, samples = grouped[replicate.case_id]
         if not np.isclose(previous_lx, lx, rtol=1.0e-10, atol=1.0e-12):
             raise ValueError(f"Replicates for {replicate.case_id} have different Lx values")
         if previous_label != label:
             raise ValueError(f"Replicates for {replicate.case_id} have different labels")
-        samples.append(result.ratios)
+        samples.append(ratios)
 
     cases = [
         CaseClusters(
@@ -152,35 +155,67 @@ def _plot_distributions(cases: list[CaseClusters], output: Path) -> None:
     plt.close(figure)
 
 
-def _summarize(case: CaseClusters, bins: list[float]) -> ClusterSummary:
+def _weighted_mode(
+    values: NDArray[np.float64],
+    weights: NDArray[np.float64],
+    bins: list[float],
+) -> float:
+    bin_weights, edges = np.histogram(values, bins=bins, weights=weights)
+    mode_bin = int(np.argmax(bin_weights))
+    return float((edges[mode_bin] + edges[mode_bin + 1]) / 2.0)
+
+
+def _summarize(
+    case: CaseClusters,
+    area_bins: list[float],
+    sqrt_bins: list[float],
+) -> ClusterSummary:
     area = case.area_fraction
     if area.size == 0:
-        return ClusterSummary(case.lx, np.nan, np.nan)
-    weighted_mean = float(np.average(area, weights=area))
-    bin_weights, edges = np.histogram(area, bins=bins, weights=area)
-    mode_bin = int(np.argmax(bin_weights))
-    weighted_mode = float((edges[mode_bin] + edges[mode_bin + 1]) / 2.0)
-    return ClusterSummary(case.lx, weighted_mean, weighted_mode)
+        return ClusterSummary(case.lx, np.nan, np.nan, np.nan, np.nan)
+    sqrt_area = np.sqrt(area)
+    return ClusterSummary(
+        lx=case.lx,
+        area_weighted_mean=float(np.average(area, weights=area)),
+        area_weighted_mode=_weighted_mode(area, area, area_bins),
+        sqrt_area_weighted_mean=float(np.average(sqrt_area, weights=area)),
+        sqrt_area_weighted_mode=_weighted_mode(sqrt_area, area, sqrt_bins),
+    )
 
 
 def _plot_mean_mode(cases: list[CaseClusters], output: Path) -> None:
     sns = _style()
-    bins = _common_bins(cases)
-    summaries = [_summarize(case, bins) for case in cases]
+    area_bins = _common_bins(cases)
+    sqrt_bins = _common_bins(cases, np.sqrt)
+    summaries = [_summarize(case, area_bins, sqrt_bins) for case in cases]
     lx = np.asarray([summary.lx for summary in summaries])
-    means = np.asarray([summary.weighted_mean for summary in summaries])
-    modes = np.asarray([summary.weighted_mode for summary in summaries])
-    figure, axis = plt.subplots(figsize=(7.2, 4.8), constrained_layout=True)
-    axis.plot(lx, means, marker="o", lw=2.0, label="Mean")
-    axis.plot(lx, modes, marker="s", lw=2.0, label="Mode")
-    axis.set(
-        title="Area-weighted cluster statistics versus axial length",
-        xlabel=r"Axial box length $L_x$",
-        ylabel=r"Cluster area fraction $A/SA$",
-    )
-    axis.grid(color="0.9", lw=0.7)
-    axis.legend(frameon=False)
-    sns.despine(ax=axis)
+    area_means = np.asarray([summary.area_weighted_mean for summary in summaries])
+    area_modes = np.asarray([summary.area_weighted_mode for summary in summaries])
+    sqrt_means = np.asarray([summary.sqrt_area_weighted_mean for summary in summaries])
+    sqrt_modes = np.asarray([summary.sqrt_area_weighted_mode for summary in summaries])
+    figure, axes = plt.subplots(1, 2, figsize=(10.5, 4.4), constrained_layout=True)
+    for axis, means, modes, title, ylabel in (
+        (
+            axes[0],
+            area_means,
+            area_modes,
+            "Area-weighted cluster fractions versus axial length",
+            r"Cluster area fraction $A/SA$",
+        ),
+        (
+            axes[1],
+            sqrt_means,
+            sqrt_modes,
+            "Area-weighted circumference ratios versus axial length",
+            r"Cluster circumference ratio $\sqrt{A/SA}$",
+        ),
+    ):
+        axis.plot(lx, means, marker="o", lw=2.0, label="Mean")
+        axis.plot(lx, modes, marker="s", lw=2.0, label="Mode")
+        axis.set(title=title, xlabel=r"Axial box length $L_x$", ylabel=ylabel)
+        axis.grid(color="0.9", lw=0.7)
+        axis.legend(frameon=False)
+        sns.despine(ax=axis)
     figure.savefig(
         output,
         format="svg",
@@ -191,8 +226,10 @@ def _plot_mean_mode(cases: list[CaseClusters], output: Path) -> None:
     for case, summary in zip(cases, summaries, strict=True):
         print(
             f"case={case.case_id} Lx={case.lx:.12g} replicates={case.replicate_count} "
-            f"weighted_mean={summary.weighted_mean:.12g} "
-            f"weighted_mode={summary.weighted_mode:.12g}"
+            f"area_weighted_mean={summary.area_weighted_mean:.12g} "
+            f"area_weighted_mode={summary.area_weighted_mode:.12g} "
+            f"sqrt_area_weighted_mean={summary.sqrt_area_weighted_mean:.12g} "
+            f"sqrt_area_weighted_mode={summary.sqrt_area_weighted_mode:.12g}"
         )
 
 
