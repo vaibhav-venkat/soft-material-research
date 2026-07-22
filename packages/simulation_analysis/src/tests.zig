@@ -71,23 +71,27 @@ test "shard planning covers every frame contiguously" {
 }
 
 test "SIMD cylindrical transform handles quadrants, origin, and a tail" {
-    const positions = [_]f32{
-        1, 0,  2,
-        2, 2,  0,
-        3, 0,  -2,
-        4, -2, 0,
-        5, 0,  0,
-    };
-    var coordinates: [positions.len]f32 = undefined;
-    try simulation_analysis.transformCylindrical(&positions, &coordinates);
-    const expected = [_]f32{
-        1, 0,                       2,
-        2, std.math.pi / 2.0,       2,
-        3, std.math.pi,             2,
-        4, 3.0 * std.math.pi / 2.0, 2,
-        5, 0,                       0,
-    };
-    for (expected, coordinates) |wanted, actual| {
+    var positions: simulation_analysis.CartesianPositions = .empty;
+    defer positions.deinit(std.testing.allocator);
+    try positions.resize(std.testing.allocator, 5);
+    var position_slices = positions.slice();
+    position_slices.set(0, .{ .x = 1, .y = 0, .z = 2 });
+    position_slices.set(1, .{ .x = 2, .y = 2, .z = 0 });
+    position_slices.set(2, .{ .x = 3, .y = 0, .z = -2 });
+    position_slices.set(3, .{ .x = 4, .y = -2, .z = 0 });
+    position_slices.set(4, .{ .x = 5, .y = 0, .z = 0 });
+    var coordinates: simulation_analysis.CylindricalCoordinates = .empty;
+    defer coordinates.deinit(std.testing.allocator);
+    try coordinates.resize(std.testing.allocator, positions.len);
+    try simulation_analysis.transformCylindrical(positions.slice(), coordinates.slice());
+    const result = coordinates.slice();
+    try std.testing.expectEqualSlices(f32, &.{ 1, 2, 3, 4, 5 }, result.items(.x));
+    const expected_theta = [_]f32{ 0, std.math.pi / 2.0, std.math.pi, 3.0 * std.math.pi / 2.0, 0 };
+    const expected_r = [_]f32{ 2, 2, 2, 2, 0 };
+    for (expected_theta, result.items(.theta)) |wanted, actual| {
+        try std.testing.expectApproxEqAbs(wanted, actual, 2.0e-5);
+    }
+    for (expected_r, result.items(.r)) |wanted, actual| {
         try std.testing.expectApproxEqAbs(wanted, actual, 1.0e-5);
     }
 }
@@ -125,12 +129,14 @@ test "new conversion writes static metadata and frame shards" {
     defer first_coords.deinit();
     const first_shape = try first_coords.shapeAlloc(std.testing.allocator);
     defer std.testing.allocator.free(first_shape);
-    try std.testing.expectEqualSlices(u64, &.{ 1, 3, 3 }, first_shape);
+    try std.testing.expectEqualSlices(u64, &.{ 3, 1, 3 }, first_shape);
     var first_values: [9]f32 = undefined;
     try first_coords.readAll(f32, &first_values);
-    try std.testing.expectApproxEqAbs(@as(f32, 0), first_values[1], 1.0e-5);
-    try std.testing.expectApproxEqAbs(@as(f32, std.math.pi / 2.0), first_values[4], 1.0e-5);
-    try std.testing.expectApproxEqAbs(@as(f32, std.math.pi), first_values[7], 1.0e-5);
+    try std.testing.expectEqualSlices(f32, &.{ 1, 2, 3 }, first_values[0..3]);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), first_values[3], 1.0e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, std.math.pi / 2.0), first_values[4], 2.0e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, std.math.pi), first_values[5], 2.0e-5);
+    try std.testing.expectEqualSlices(f32, &.{ 2, 2, 2 }, first_values[6..9]);
 
     const second_shard_path = try std.fs.path.join(std.testing.allocator, &.{ output, "frames_000001.h5" });
     defer std.testing.allocator.free(second_shard_path);
@@ -140,9 +146,13 @@ test "new conversion writes static metadata and frame shards" {
     defer second_coords.deinit();
     var second_values: [9]f32 = undefined;
     try second_coords.readAll(f32, &second_values);
-    try std.testing.expectApproxEqAbs(@as(f32, 3.0 * std.math.pi / 2.0), second_values[1], 1.0e-5);
+    try std.testing.expectEqualSlices(f32, &.{ 4, 5, 6 }, second_values[0..3]);
+    try std.testing.expectApproxEqAbs(@as(f32, 3.0 * std.math.pi / 2.0), second_values[3], 2.0e-5);
     try std.testing.expectApproxEqAbs(@as(f32, 0), second_values[4], 1.0e-5);
-    try std.testing.expectApproxEqAbs(@as(f32, std.math.pi / 4.0), second_values[7], 1.0e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, std.math.pi / 4.0), second_values[5], 2.0e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 2), second_values[6], 1.0e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), second_values[7], 1.0e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, @sqrt(8.0)), second_values[8], 1.0e-5);
     var inherited_box = try second_shard.openDataset("box");
     defer inherited_box.deinit();
     var box: [6]f32 = undefined;

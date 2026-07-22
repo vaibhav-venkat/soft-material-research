@@ -17,6 +17,24 @@ pub const Summary = struct {
     fields_written: usize,
 };
 
+/// One Cartesian particle position. `MultiArrayList` stores each field in a
+/// separate contiguous allocation region.
+pub const CartesianPosition = struct {
+    x: f32,
+    y: f32,
+    z: f32,
+};
+
+/// One cylindrical particle position around the x axis.
+pub const CylindricalCoordinate = struct {
+    x: f32,
+    theta: f32,
+    r: f32,
+};
+
+pub const CartesianPositions = std.MultiArrayList(CartesianPosition);
+pub const CylindricalCoordinates = std.MultiArrayList(CylindricalCoordinate);
+
 const ShardState = struct {
     input_path: []const u8,
     output_dir: []const u8,
@@ -35,6 +53,7 @@ const MissingFields = struct {
     step: bool,
     box: bool,
     coords: bool,
+    replace_coords: bool = false,
 
     fn count(self: MissingFields) usize {
         return @as(usize, @intFromBool(self.frame_index)) +
@@ -73,48 +92,48 @@ pub fn planShards(
     return ranges;
 }
 
-/// Convert flat Cartesian `(x, y, z)` values to flat cylindrical
-/// `(x, theta, r)` values around the x axis. Theta is in `[0, 2*pi)`.
-/// The x/r work is vectorized in native-width batches; atan2 remains scalar.
-pub fn transformCylindrical(positions: []const f32, coordinates: []f32) !void {
-    if (positions.len != coordinates.len or positions.len % 3 != 0) return error.BufferSizeMismatch;
+/// Convert SoA Cartesian positions to SoA cylindrical coordinates around the
+/// x axis. Theta is in `[0, 2*pi)`.
+pub fn transformCylindrical(
+    positions: CartesianPositions.Slice,
+    coordinates: CylindricalCoordinates.Slice,
+) !void {
+    if (positions.len != coordinates.len) return error.BufferSizeMismatch;
     const lane_count = std.simd.suggestVectorLength(f32) orelse 4;
     const Vector = @Vector(lane_count, f32);
     var particle: usize = 0;
-    const count = positions.len / 3;
+    const count = positions.len;
+    const input_x = positions.items(.x);
+    const input_y = positions.items(.y);
+    const input_z = positions.items(.z);
+    const output_x = coordinates.items(.x);
+    const output_theta = coordinates.items(.theta);
+    const output_r = coordinates.items(.r);
     while (particle + lane_count <= count) : (particle += lane_count) {
-        var x: Vector = undefined;
-        var y: Vector = undefined;
-        var z: Vector = undefined;
-        inline for (0..lane_count) |lane| {
-            x[lane] = positions[(particle + lane) * 3];
-            y[lane] = positions[(particle + lane) * 3 + 1];
-            z[lane] = positions[(particle + lane) * 3 + 2];
-        }
+        const x: Vector = input_x[particle..][0..lane_count].*;
+        const y: Vector = input_y[particle..][0..lane_count].*;
+        const z: Vector = input_z[particle..][0..lane_count].*;
         const radius = @sqrt(y * y + z * z);
         const angle = atan2_simd(lane_count, y, z);
-        inline for (0..lane_count) |lane| {
-            const output = (particle + lane) * 3;
-            coordinates[output] = x[lane];
-            coordinates[output + 1] = angle[lane];
-            coordinates[output + 2] = radius[lane];
-        }
+        output_x[particle..][0..lane_count].* = x;
+        output_theta[particle..][0..lane_count].* = angle;
+        output_r[particle..][0..lane_count].* = radius;
     }
     while (particle < count) : (particle += 1) {
-        const offset = particle * 3;
-        const y = positions[offset + 1];
-        const z = positions[offset + 2];
-        coordinates[offset] = positions[offset];
-        coordinates[offset + 1] = normalizedAtan2(y, z);
-        coordinates[offset + 2] = @sqrt(y * y + z * z);
+        const y = input_y[particle];
+        const z = input_z[particle];
+        output_x[particle] = input_x[particle];
+        output_theta[particle] = normalizedAtan2(y, z);
+        output_r[particle] = @sqrt(y * y + z * z);
     }
 }
 
 pub fn atan2_simd(comptime N: comptime_int, y: @Vector(N, f32), x: @Vector(N, f32)) @Vector(N, f32) {
     const V = @Vector(N, f32);
-    const zero: V  = @splat(0.0);
-    const one: V  = @splat(1.0);
+    const zero: V = @splat(0.0);
+    const one: V = @splat(1.0);
     const pi: V = @splat(std.math.pi);
+    const two_pi: V = @splat(2.0 * std.math.pi);
     const half_pi: V = @splat(std.math.pi / 2.0);
     const ax = @abs(x);
     const ay = @abs(y);
@@ -126,7 +145,7 @@ pub fn atan2_simd(comptime N: comptime_int, y: @Vector(N, f32), x: @Vector(N, f3
     const is_zero = hi == zero;
     const clamped_hi = @select(f32, is_zero, one, hi);
 
-    const r = lo/clamped_hi;
+    const r = lo / clamped_hi;
     const r2 = r * r;
     // atan(r) ~ r * P(r^2)
     var p: V = @splat(0.02084517);
@@ -140,6 +159,7 @@ pub fn atan2_simd(comptime N: comptime_int, y: @Vector(N, f32), x: @Vector(N, f3
 
     angle = @select(f32, x < zero, pi - angle, angle);
     angle = @select(f32, y < zero, -angle, angle);
+    angle = @select(f32, angle < zero, angle + two_pi, angle);
     return @select(f32, is_zero, zero, angle);
 }
 
@@ -224,7 +244,6 @@ fn normalizedAtan2(y: f32, z: f32) f32 {
     return if (angle < 0) angle + 2.0 * std.math.pi else angle;
 }
 
-
 fn frameChunk(file: *gsd.File, frame: u64, name: [:0]const u8) !gsd.Chunk {
     if (try file.findChunk(frame, name)) |chunk| return chunk;
     // if (frame != 0) if (try file.findChunk(0, name)) |chunk| return chunk;
@@ -278,13 +297,13 @@ fn writeShard(state: *ShardState, shard_index: usize) !usize {
     const frame_count_u64 = range.stop - range.start;
     const frame_count = std.math.cast(usize, frame_count_u64) orelse return error.SizeOverflow;
     const particle_count = std.math.cast(usize, state.particle_count) orelse return error.SizeOverflow;
-    const coordinate_count = std.math.mul(usize, std.math.mul(usize, frame_count, particle_count) catch return error.SizeOverflow, 3) catch return error.SizeOverflow;
+    const coordinate_count = std.math.mul(usize, frame_count, particle_count) catch return error.SizeOverflow;
     const name = try std.fmt.allocPrint(allocator, "frames_{d:0>6}.h5", .{shard_index});
     defer allocator.free(name);
     const path = try std.fs.path.join(allocator, &.{ state.output_dir, name });
     defer allocator.free(path);
 
-    const missing: MissingFields = if (state.update) try inspectMissingFields(state, allocator, path) else .{
+    const missing: MissingFields = if (state.update) try inspectMissingFields(state, allocator, path, range) else .{
         .frame_index = true,
         .step = true,
         .box = true,
@@ -298,10 +317,14 @@ fn writeShard(state: *ShardState, shard_index: usize) !usize {
     defer if (steps) |values| allocator.free(values);
     const boxes = if (missing.box) try allocator.alloc(f32, frame_count * 6) else null;
     defer if (boxes) |values| allocator.free(values);
-    const positions = if (missing.coords) try allocator.alloc(f32, particle_count * 3) else null;
-    defer if (positions) |values| allocator.free(values);
-    const coordinates = if (missing.coords) try allocator.alloc(f32, coordinate_count) else null;
-    defer if (coordinates) |values| allocator.free(values);
+    const raw_positions = if (missing.coords) try allocator.alloc(f32, particle_count * 3) else null;
+    defer if (raw_positions) |values| allocator.free(values);
+    var positions: CartesianPositions = .empty;
+    defer positions.deinit(allocator);
+    if (missing.coords) try positions.resize(allocator, particle_count);
+    var coordinates: CylindricalCoordinates = .empty;
+    defer coordinates.deinit(allocator);
+    if (missing.coords) try coordinates.resize(allocator, coordinate_count);
 
     if (missing.step or missing.box or missing.coords) {
         var input = try gsd.File.openRead(allocator, state.input_path);
@@ -310,13 +333,14 @@ fn writeShard(state: *ShardState, shard_index: usize) !usize {
             const frame = range.start + local_frame;
             if (steps) |values| try readFrameChunk(&input, u64, frame, "configuration/step", values[local_frame .. local_frame + 1]);
             if (boxes) |values| try readFrameChunk(&input, f32, 0, "configuration/box", values[local_frame * 6 ..][0..6]);
-            if (coordinates) |values| {
+            if (missing.coords) {
                 var particle_value: [1]u32 = undefined;
                 try readFrameChunk(&input, u32, 0, "particles/N", &particle_value);
                 if (particle_value[0] != state.particle_count) return error.VariableParticleCount;
-                try readFrameChunk(&input, f32, frame, "particles/position", positions.?);
-                const output = values[local_frame * particle_count * 3 ..][0 .. particle_count * 3];
-                try transformCylindrical(positions.?, output);
+                try readFrameChunk(&input, f32, frame, "particles/position", raw_positions.?);
+                deinterleaveCartesian(raw_positions.?, positions.slice());
+                const output = coordinates.slice().subslice(local_frame * particle_count, particle_count);
+                try transformCylindrical(positions.slice(), output);
             }
         }
     }
@@ -352,25 +376,64 @@ fn writeShard(state: *ShardState, shard_index: usize) !usize {
         try dataset.writeAll(f32, boxes.?);
     }
     if (missing.coords) {
-        var dataset = try file.createDataset(f32, "coords", &.{ frame_count_u64, state.particle_count, 3 }, .{ .chunk_shape = &.{ 1, state.particle_count, 3 } });
+        if (missing.replace_coords) try file.deleteLink("coords");
+        var dataset = try file.createDataset(f32, "coords", &.{ 3, frame_count_u64, state.particle_count }, .{ .chunk_shape = &.{ 1, 1, state.particle_count } });
         defer dataset.deinit();
         try dataset.writeStringAttribute("components", "x,theta,r");
+        try dataset.writeStringAttribute("layout", "component,frame,particle");
         try dataset.writeStringAttribute("transform", schema.coordinate_transform);
-        try dataset.writeAll(f32, coordinates.?);
+        const coordinate_slices = coordinates.slice();
+        try dataset.writeHyperslab(f32, &.{ 0, 0, 0 }, &.{ 1, frame_count_u64, state.particle_count }, coordinate_slices.items(.x));
+        try dataset.writeHyperslab(f32, &.{ 1, 0, 0 }, &.{ 1, frame_count_u64, state.particle_count }, coordinate_slices.items(.theta));
+        try dataset.writeHyperslab(f32, &.{ 2, 0, 0 }, &.{ 1, frame_count_u64, state.particle_count }, coordinate_slices.items(.r));
     }
     try file.flush();
     return missing.count();
 }
 
-fn inspectMissingFields(state: *ShardState, allocator: std.mem.Allocator, path: []const u8) !MissingFields {
+fn deinterleaveCartesian(values: []const f32, positions: CartesianPositions.Slice) void {
+    std.debug.assert(values.len == positions.len * 3);
+    const x = positions.items(.x);
+    const y = positions.items(.y);
+    const z = positions.items(.z);
+    for (0..positions.len) |particle| {
+        x[particle] = values[particle * 3];
+        y[particle] = values[particle * 3 + 1];
+        z[particle] = values[particle * 3 + 2];
+    }
+}
+
+fn inspectMissingFields(
+    state: *ShardState,
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    range: ShardRange,
+) !MissingFields {
     if (state.serialize_hdf5) while (!state.hdf5_mutex.tryLock()) std.atomic.spinLoopHint();
     defer if (state.serialize_hdf5) state.hdf5_mutex.unlock();
     var file = try hdf5.File.openPath(allocator, path, .read_only);
     defer file.deinit();
+    const coords_exists = try file.objectExists("coords");
+    var coords_compatible = false;
+    if (coords_exists) {
+        var dataset = try file.openDataset("coords");
+        defer dataset.deinit();
+        const shape = try dataset.shapeAlloc(allocator);
+        defer allocator.free(shape);
+        const expected_shape = [_]u64{ 3, range.stop - range.start, state.particle_count };
+        const layout_matches = if (try dataset.attributeExists("layout")) blk: {
+            const layout = try dataset.readStringAttributeAlloc(allocator, "layout");
+            defer allocator.free(layout);
+            break :blk std.mem.eql(u8, layout, "component,frame,particle");
+        } else false;
+        coords_compatible = std.mem.eql(u64, shape, &expected_shape) and
+            layout_matches and try dataset.dtype() == .f32;
+    }
     return .{
         .frame_index = !try file.objectExists("frame_index"),
         .step = !try file.objectExists("step"),
         .box = !try file.objectExists("box"),
-        .coords = !try file.objectExists("coords"),
+        .coords = !coords_compatible,
+        .replace_coords = coords_exists and !coords_compatible,
     };
 }
