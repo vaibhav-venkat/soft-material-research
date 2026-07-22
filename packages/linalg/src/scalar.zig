@@ -6,7 +6,7 @@ pub fn Complex(comptime T: type) type {
         else => @compileError("Complex components must be f32 or f64"),
     }
     return extern struct {
-        re: T,
+        re: T align(2 * @alignOf(T)),
         im: T,
 
         const Self = @This();

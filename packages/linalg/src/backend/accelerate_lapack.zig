@@ -137,6 +137,7 @@ pub fn lapackLeastSquares(
     rcond: scalar.Real(T),
     solution: *Buffer(T),
     singular_values: *Buffer(scalar.Real(T)),
+    residual_norms: *Buffer(scalar.Real(T)),
 ) !usize {
     const m = try asCInt(rows);
     const n = try asCInt(cols);
@@ -182,5 +183,28 @@ pub fn lapackLeastSquares(
         @memcpy(solution.values[column * cols ..][0..cols], b[column * rows ..][0..cols]);
     }
     @memcpy(singular_values.values[0..cols], s);
+    for (0..rhs_cols) |rhs_column| {
+        var sum: scalar.Real(T) = 0;
+        for (0..rows) |row| {
+            var predicted: T = if (comptime scalar.isComplex(T)) T.init(0, 0) else 0;
+            for (0..cols) |column| {
+                const av = coefficients.values[coefficients_offset + row + column * coefficients_leading_dimension];
+                const xv = solution.values[column + rhs_column * cols];
+                if (comptime scalar.isComplex(T)) {
+                    predicted = T.init(predicted.re + av.re * xv.re - av.im * xv.im, predicted.im + av.re * xv.im + av.im * xv.re);
+                } else predicted += av * xv;
+            }
+            const actual = right_hand_sides.values[rhs_offset + row + rhs_column * rhs_leading_dimension];
+            if (comptime scalar.isComplex(T)) {
+                const dr = predicted.re - actual.re;
+                const di = predicted.im - actual.im;
+                sum += dr * dr + di * di;
+            } else {
+                const difference = predicted - actual;
+                sum += difference * difference;
+            }
+        }
+        residual_norms.values[rhs_column] = @sqrt(sum);
+    }
     return std.math.cast(usize, rank) orelse error.BackendFailure;
 }

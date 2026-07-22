@@ -1,6 +1,5 @@
 const std = @import("std");
 const linalg = @import("linalg");
-
 const Complex32 = linalg.Complex32;
 const Complex64 = linalg.Complex64;
 const Real = linalg.Real;
@@ -58,12 +57,12 @@ fn testRealLevelOne(comptime T: type, tolerance: T) !void {
     try scale(T, 2, y.view());
     try axpy(T, -1, x.constView(), y.view());
     var output: [3]T = undefined;
-    y.copyToHost(&output);
+    try y.copyToHost(&output);
     try std.testing.expectEqualSlices(T, &[_]T{ 7, 12, 9 }, &output);
 
     try copy(T, x.constView(), y.view());
     try swap(T, x.view(), y.view());
-    x.copyToHost(&output);
+    try x.copyToHost(&output);
     try std.testing.expectEqualSlices(T, &x_values, &output);
 }
 
@@ -87,7 +86,7 @@ fn testComplexLevelOne(comptime T: type, tolerance: Real(T)) !void {
     try scale(T, T.init(0, 0.5), x.view());
     try axpy(T, T.init(1, 0), y.constView(), x.view());
     var output: [2]T = undefined;
-    x.copyToHost(&output);
+    try x.copyToHost(&output);
     try expectComplexApprox(T, T.init(0, 0), output[0], tolerance);
     try expectComplexApprox(T, T.init(0, 1), output[1], tolerance);
 }
@@ -104,7 +103,7 @@ fn testRealMatrixBlas(comptime T: type, tolerance: T) !void {
     defer y.deinit();
     try gemvInto(T, .none, 2, a.constView(), x.constView(), 0.5, y.view());
     var y_output: [2]T = undefined;
-    y.copyToHost(&y_output);
+    try y.copyToHost(&y_output);
     try std.testing.expectApproxEqAbs(@as(T, 16.5), y_output[0], tolerance);
     try std.testing.expectApproxEqAbs(@as(T, 40.5), y_output[1], tolerance);
 
@@ -113,7 +112,7 @@ fn testRealMatrixBlas(comptime T: type, tolerance: T) !void {
     var trans_y = try matvec(T, .transpose, a.constView(), trans_x.constView());
     defer trans_y.deinit();
     var trans_output: [3]T = undefined;
-    trans_y.copyToHost(&trans_output);
+    try trans_y.copyToHost(&trans_output);
     try std.testing.expectEqualSlices(T, &[_]T{ 9, 12, 15 }, &trans_output);
 
     const b_values = [_]T{ 1, 0, 1, 2, 1, 0 };
@@ -122,7 +121,7 @@ fn testRealMatrixBlas(comptime T: type, tolerance: T) !void {
     var product = try matmul(T, .none, .none, a.constView(), b.constView());
     defer product.deinit();
     var product_output: [4]T = undefined;
-    product.copyToHost(&product_output);
+    try product.copyToHost(&product_output);
     try std.testing.expectEqualSlices(T, &[_]T{ 4, 10, 4, 13 }, &product_output);
 
     var outer_x = try Vector(T).fromHost(&context, &[_]T{ 1, 2 });
@@ -133,7 +132,7 @@ fn testRealMatrixBlas(comptime T: type, tolerance: T) !void {
     defer outer.deinit();
     try gerInto(T, 1, outer_x.constView(), outer_y.constView(), outer.view());
     var outer_output: [6]T = undefined;
-    outer.copyToHost(&outer_output);
+    try outer.copyToHost(&outer_output);
     try std.testing.expectEqualSlices(T, &[_]T{ 3, 6, 4, 8, 5, 10 }, &outer_output);
 }
 
@@ -148,7 +147,7 @@ fn testComplexMatrixBlas(comptime T: type, tolerance: Real(T)) !void {
     var y = try matvec(T, .conjugate_transpose, a.constView(), x.constView());
     defer y.deinit();
     var y_output: [2]T = undefined;
-    y.copyToHost(&y_output);
+    try y.copyToHost(&y_output);
     try expectComplexApprox(T, T.init(1, 1), y_output[0], tolerance);
     try expectComplexApprox(T, T.init(-1, 2), y_output[1], tolerance);
 
@@ -157,7 +156,7 @@ fn testComplexMatrixBlas(comptime T: type, tolerance: Real(T)) !void {
     var product = try matmul(T, .none, .none, a.constView(), identity.constView());
     defer product.deinit();
     var product_output: [4]T = undefined;
-    product.copyToHost(&product_output);
+    try product.copyToHost(&product_output);
     for (a_values, product_output) |expected, actual| try expectComplexApprox(T, expected, actual, tolerance);
 
     var outer_x = try Vector(T).fromHost(&context, &[_]T{.init(1, 1)});
@@ -171,9 +170,9 @@ fn testComplexMatrixBlas(comptime T: type, tolerance: Real(T)) !void {
     try geruInto(T, T.init(1, 0), outer_x.constView(), outer_y.constView(), outer_u.view());
     try gercInto(T, T.init(1, 0), outer_x.constView(), outer_y.constView(), outer_c.view());
     var value: [1]T = undefined;
-    outer_u.copyToHost(&value);
+    try outer_u.copyToHost(&value);
     try expectComplexApprox(T, T.init(1, 3), value[0], tolerance);
-    outer_c.copyToHost(&value);
+    try outer_c.copyToHost(&value);
     try expectComplexApprox(T, T.init(3, 1), value[0], tolerance);
 }
 
@@ -192,7 +191,7 @@ fn testSvd(comptime T: type, tolerance: Real(T)) !void {
     try std.testing.expect(result.u != null);
     try std.testing.expect(result.vh != null);
     var singular_host: [2]Real(T) = undefined;
-    result.singular_values.copyToHost(&singular_host);
+    try result.singular_values.copyToHost(&singular_host);
     try std.testing.expect(singular_host[0] >= singular_host[1]);
     try std.testing.expect(singular_host[1] >= 0);
 
@@ -206,7 +205,7 @@ fn testSvd(comptime T: type, tolerance: Real(T)) !void {
     var reconstructed = try matmul(T, .none, .none, scaled_u.constView(), result.vh.?.constView());
     defer reconstructed.deinit();
     var reconstructed_host: [6]T = undefined;
-    reconstructed.copyToHost(&reconstructed_host);
+    try reconstructed.copyToHost(&reconstructed_host);
     for (values, reconstructed_host) |expected, actual| {
         if (comptime isComplex(T)) {
             try expectComplexApprox(T, expected, actual, tolerance);
@@ -220,7 +219,7 @@ fn testSvd(comptime T: type, tolerance: Real(T)) !void {
     try std.testing.expect(values_only.u == null);
     try std.testing.expect(values_only.vh == null);
     var values_only_host: [2]Real(T) = undefined;
-    values_only.singular_values.copyToHost(&values_only_host);
+    try values_only.singular_values.copyToHost(&values_only_host);
     for (singular_host, values_only_host) |expected, actual| try std.testing.expectApproxEqAbs(expected, actual, tolerance);
 }
 
@@ -246,7 +245,7 @@ fn testLeastSquares(comptime T: type, tolerance: Real(T)) !void {
     defer result.deinit();
     try std.testing.expectEqual(@as(usize, 2), result.rank);
     var solution_host: [4]T = undefined;
-    result.solution.copyToHost(&solution_host);
+    try result.solution.copyToHost(&solution_host);
     for (expected_values, solution_host) |expected_value, actual| {
         if (comptime isComplex(T)) {
             try expectComplexApprox(T, expected_value, actual, tolerance);
@@ -254,12 +253,38 @@ fn testLeastSquares(comptime T: type, tolerance: Real(T)) !void {
             try std.testing.expectApproxEqAbs(expected_value, actual, tolerance);
         }
     }
+    var residual_host: [2]Real(T) = undefined;
+    try result.residual_norms.copyToHost(&residual_host);
+    for (residual_host) |residual| try std.testing.expectApproxEqAbs(@as(Real(T), 0), residual, tolerance * 10);
+}
+
+fn testRankDeficientLeastSquares(comptime T: type, tolerance: Real(T)) !void {
+    var context = try Context.init(std.testing.allocator, .{});
+    defer context.deinit();
+    const coefficients_values = if (comptime isComplex(T))
+        [_]T{ .init(1, 0), .init(2, 0), .init(3, 0), .init(2, 0), .init(4, 0), .init(6, 0) }
+    else
+        [_]T{ 1, 2, 3, 2, 4, 6 };
+    const rhs_values = if (comptime isComplex(T))
+        [_]T{ .init(3, 1), .init(6, 2), .init(9, 3), .init(-1, 2), .init(-2, 4), .init(-3, 6) }
+    else
+        [_]T{ 3, 6, 9, -1, -2, -3 };
+    var coefficients = try Matrix(T).fromHost(&context, 3, 2, &coefficients_values);
+    defer coefficients.deinit();
+    var rhs = try Matrix(T).fromHost(&context, 3, 2, &rhs_values);
+    defer rhs.deinit();
+    var result = try leastSquares(T, coefficients.constView(), rhs.constView(), .{});
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 1), result.rank);
+    var residuals: [2]Real(T) = undefined;
+    try result.residual_norms.copyToHost(&residuals);
+    for (residuals) |residual| try std.testing.expectApproxEqAbs(@as(Real(T), 0), residual, tolerance * 20);
 }
 
 test "complex representation and conversions" {
     const value = Complex32.init(2.5, -3.0);
     try std.testing.expectEqual(@sizeOf([2]f32), @sizeOf(Complex32));
-    try std.testing.expectEqual(@alignOf(f32), @alignOf(Complex32));
+    try std.testing.expectEqual(2 * @alignOf(f32), @alignOf(Complex32));
     try std.testing.expectEqual(@as(usize, 0), @offsetOf(Complex32, "re"));
     try std.testing.expectEqual(@sizeOf(f32), @offsetOf(Complex32, "im"));
     try std.testing.expectEqual(value, Complex32.fromStd(value.toStd()));
@@ -277,7 +302,7 @@ test "backend-owned vector and matrix round trips" {
     var vector = try Vector(Complex64).fromHost(&context, &vector_values);
     defer vector.deinit();
     var vector_output: [2]Complex64 = undefined;
-    vector.copyToHost(&vector_output);
+    try vector.copyToHost(&vector_output);
     try std.testing.expectEqualSlices(Complex64, &vector_values, &vector_output);
 
     const matrix_values = [_]f64{ 1, 2, 3, 4, 5, 6 };
@@ -292,7 +317,7 @@ test "backend-owned vector and matrix round trips" {
     try std.testing.expectEqual(@as(usize, 3), submatrix.leading_dimension);
 
     var matrix_output: [6]f64 = undefined;
-    matrix.copyToHost(&matrix_output);
+    try matrix.copyToHost(&matrix_output);
     try std.testing.expectEqualSlices(f64, &matrix_values, &matrix_output);
 }
 
@@ -328,4 +353,37 @@ test "overdetermined least squares" {
     try testLeastSquares(f64, 1.0e-11);
     try testLeastSquares(Complex32, 1.0e-4);
     try testLeastSquares(Complex64, 1.0e-11);
+}
+
+test "rank-deficient least squares and residual norms" {
+    try testRankDeficientLeastSquares(f32, 5.0e-4);
+    try testRankDeficientLeastSquares(f64, 1.0e-10);
+    try testRankDeficientLeastSquares(Complex32, 5.0e-4);
+    try testRankDeficientLeastSquares(Complex64, 1.0e-10);
+}
+
+test "events and validation failures" {
+    var first = try Context.init(std.testing.allocator, .{});
+    defer first.deinit();
+    var second = try Context.init(std.testing.allocator, .{});
+    defer second.deinit();
+    var x = try Vector(f64).fromHost(&first, &[_]f64{ 1, 2 });
+    defer x.deinit();
+    var y = try Vector(f64).fromHost(&second, &[_]f64{ 3, 4 });
+    defer y.deinit();
+    try std.testing.expectError(error.ContextMismatch, copy(f64, x.constView(), y.view()));
+
+    var event = try first.recordEvent();
+    defer event.deinit();
+    try event.wait();
+    try std.testing.expect(try event.query());
+
+    var wide = try Matrix(f64).fromHost(&first, 1, 2, &[_]f64{ 1, 2 });
+    defer wide.deinit();
+    try std.testing.expectError(error.WideMatrixUnsupported, svd(f64, wide.constView(), .{}));
+    var rhs = try Matrix(f64).fromHost(&first, 1, 1, &[_]f64{1});
+    defer rhs.deinit();
+    var square = try Matrix(f64).fromHost(&first, 1, 1, &[_]f64{1});
+    defer square.deinit();
+    try std.testing.expectError(error.InvalidTolerance, leastSquares(f64, square.constView(), rhs.constView(), .{ .rcond = -1 }));
 }

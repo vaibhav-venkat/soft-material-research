@@ -44,22 +44,22 @@ pub const Context = struct {
         }
         return .{
             .allocator = allocator,
-            .inner = driver.Context.init(),
+            .inner = try driver.Context.init(options.device_ordinal),
             .device_ordinal = options.device_ordinal,
         };
     }
 
     pub fn deinit(self: *Context) void {
-        self.inner.synchronize();
+        self.inner.synchronize() catch {};
         self.inner.deinit();
     }
 
     pub fn synchronize(self: *Context) !void {
-        self.inner.synchronize();
+        try self.inner.synchronize();
     }
 
-    pub fn recordEvent(_: *Context) !Event {
-        return .{ .inner = .{} };
+    pub fn recordEvent(self: *Context) !Event {
+        return .{ .inner = try self.inner.recordEvent() };
     }
 
     pub fn backendInfo(self: *const Context) BackendInfo {
@@ -75,7 +75,7 @@ pub const Event = struct {
     }
 
     pub fn wait(self: *Event) !void {
-        self.inner.wait();
+        try self.inner.wait();
     }
 
     pub fn deinit(self: *Event) void {
@@ -166,7 +166,7 @@ pub fn Vector(comptime T: type) type {
         pub fn init(context: *Context, len: usize) !Self {
             return .{
                 .context = context,
-                .buffer = try driver.allocate(T, context.allocator, len),
+                .buffer = try driver.allocate(T, context.allocator, &context.inner, len),
                 .len = len,
             };
         }
@@ -174,12 +174,12 @@ pub fn Vector(comptime T: type) type {
         pub fn fromHost(context: *Context, values: []const T) !Self {
             var result = try Self.init(context, values.len);
             errdefer result.deinit();
-            result.copyFromHost(values);
+            try result.copyFromHost(values);
             return result;
         }
 
         pub fn deinit(self: *Self) void {
-            self.context.inner.synchronize();
+            self.context.inner.synchronize() catch {};
             driver.release(T, self.context.allocator, &self.buffer);
             self.len = 0;
         }
@@ -192,14 +192,14 @@ pub fn Vector(comptime T: type) type {
             return .{ .context = self.context, .buffer = &self.buffer, .offset = 0, .len = self.len, .stride = 1 };
         }
 
-        pub fn copyFromHost(self: *Self, values: []const T) void {
-            std.debug.assert(values.len == self.len);
-            driver.copyFromHost(T, &self.buffer, 0, 1, values);
+        pub fn copyFromHost(self: *Self, values: []const T) !void {
+            if (values.len != self.len) return error.DimensionMismatch;
+            try driver.copyFromHost(T, &self.buffer, 0, 1, values);
         }
 
-        pub fn copyToHost(self: *const Self, destination: []T) void {
-            std.debug.assert(destination.len == self.len);
-            driver.copyToHost(T, &self.buffer, 0, 1, destination);
+        pub fn copyToHost(self: *const Self, destination: []T) !void {
+            if (destination.len != self.len) return error.DimensionMismatch;
+            try driver.copyToHost(T, &self.buffer, 0, 1, destination);
         }
     };
 }
@@ -218,7 +218,7 @@ pub fn Matrix(comptime T: type) type {
         pub fn init(context: *Context, rows: usize, cols: usize) !Self {
             return .{
                 .context = context,
-                .buffer = try driver.allocate(T, context.allocator, try std.math.mul(usize, rows, cols)),
+                .buffer = try driver.allocate(T, context.allocator, &context.inner, try std.math.mul(usize, rows, cols)),
                 .rows = rows,
                 .cols = cols,
                 .leading_dimension = rows,
@@ -229,12 +229,12 @@ pub fn Matrix(comptime T: type) type {
             if (values.len != try std.math.mul(usize, rows, cols)) return error.DimensionMismatch;
             var result = try Self.init(context, rows, cols);
             errdefer result.deinit();
-            result.copyFromHost(values);
+            try result.copyFromHost(values);
             return result;
         }
 
         pub fn deinit(self: *Self) void {
-            self.context.inner.synchronize();
+            self.context.inner.synchronize() catch {};
             driver.release(T, self.context.allocator, &self.buffer);
             self.rows = 0;
             self.cols = 0;
@@ -287,14 +287,14 @@ pub fn Matrix(comptime T: type) type {
             return .{ .context = self.context, .buffer = &self.buffer, .offset = index * self.leading_dimension, .len = self.rows, .stride = 1 };
         }
 
-        pub fn copyFromHost(self: *Self, values: []const T) void {
-            std.debug.assert(values.len == self.rows * self.cols);
-            driver.copyFromHost(T, &self.buffer, 0, 1, values);
+        pub fn copyFromHost(self: *Self, values: []const T) !void {
+            if (values.len != self.rows * self.cols) return error.DimensionMismatch;
+            try driver.copyFromHost(T, &self.buffer, 0, 1, values);
         }
 
-        pub fn copyToHost(self: *const Self, destination: []T) void {
-            std.debug.assert(destination.len == self.rows * self.cols);
-            driver.copyToHost(T, &self.buffer, 0, 1, destination);
+        pub fn copyToHost(self: *const Self, destination: []T) !void {
+            if (destination.len != self.rows * self.cols) return error.DimensionMismatch;
+            try driver.copyToHost(T, &self.buffer, 0, 1, destination);
         }
     };
 }

@@ -214,3 +214,13 @@ pub fn matmul(comptime T: type, operation_a: Transpose, operation_b: Transpose, 
     try gemmInto(T, operation_a, operation_b, scalarOne(T), a, b, scalarZero(T), result.view());
     return result;
 }
+
+pub fn vecMean(comptime T: type, x: ConstVectorView(T)) !Real(T) {
+    if (x.len == 0) return error.EmptyVector;
+    if (x.len > 1 and x.stride == 0) return error.InvalidStride;
+    var sum: T = 0.0;
+    for (x.buffer.values) |val| {
+        sum += val;
+    }
+    return sum / @as(T, @floatFromInt(x.len));
+}

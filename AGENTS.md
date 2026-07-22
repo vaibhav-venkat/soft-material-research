@@ -1,6 +1,5 @@
 # Repository Guidelines
 
-**Do not add or run repository-wide legacy test suites.** Package-local Zig tests under `packages/linalg` are allowed. For all other code, use targeted syntax, import, or build checks only when they are proportionate to the change.
 
 ## Current Work
 
