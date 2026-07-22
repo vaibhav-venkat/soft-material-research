@@ -17,6 +17,7 @@ pub const Error = error{
     AttributeNotFound,
 };
 
+/// Numeric HDF5 datatype classes supported by this wrapper.
 pub const Dtype = enum {
     u8,
     u16,
@@ -29,6 +30,7 @@ pub const Dtype = enum {
     f32,
     f64,
 
+    /// Return the wrapper datatype for a supported Zig scalar type.
     pub fn of(comptime T: type) Dtype {
         return switch (T) {
             u8 => .u8,
@@ -46,18 +48,23 @@ pub const Dtype = enum {
     }
 };
 
+/// `H5Fcreate` behavior: fail on an existing path or truncate it.
 pub const CreateMode = enum { exclusive, truncate };
+/// `H5Fopen` access mode.
 pub const OpenMode = enum { read_only, read_write };
 
+/// Dataset creation properties. A non-null shape enables HDF5 chunked layout.
 pub const DatasetOptions = struct {
     chunk_shape: ?[]const u64 = null,
 };
 
+/// Owning HDF5 file identifier returned by `H5Fcreate` or `H5Fopen`.
 pub const File = struct {
     allocator: std.mem.Allocator,
     id: c.hid_t,
     open: bool,
 
+    /// Create an HDF5 file with `H5Fcreate` and default property lists.
     pub fn create(
         allocator: std.mem.Allocator,
         path: []const u8,
@@ -75,6 +82,7 @@ pub const File = struct {
         return .{ .allocator = allocator, .id = id, .open = true };
     }
 
+    /// Open an existing HDF5 file without reading any dataset payload.
     pub fn openPath(
         allocator: std.mem.Allocator,
         path: []const u8,
@@ -92,6 +100,7 @@ pub const File = struct {
         return .{ .allocator = allocator, .id = id, .open = true };
     }
 
+    /// Close the file identifier, ignoring errors for deferred cleanup.
     pub fn deinit(self: *File) void {
         if (self.open) {
             _ = c.H5Fclose(self.id);
@@ -99,16 +108,19 @@ pub const File = struct {
         }
     }
 
+    /// Close the file identifier and report an `H5Fclose` failure.
     pub fn close(self: *File) Error!void {
         if (!self.open) return;
         try requireNonnegative(c.H5Fclose(self.id));
         self.open = false;
     }
 
+    /// Flush file data and metadata globally with `H5Fflush`.
     pub fn flush(self: *File) Error!void {
         try requireNonnegative(c.H5Fflush(self.id, c.zig_h5f_scope_global()));
     }
 
+    /// Test whether a link exists at `path` using `H5Lexists`.
     pub fn objectExists(self: *File, path: []const u8) !bool {
         const path_z = try self.allocator.dupeSentinel(u8, path, 0);
         defer self.allocator.free(path_z);
@@ -117,6 +129,7 @@ pub const File = struct {
         return result > 0;
     }
 
+    /// Create a group and any missing intermediate groups with `H5Gcreate2`.
     pub fn createGroup(self: *File, path: []const u8) !Group {
         const path_z = try self.allocator.dupeSentinel(u8, path, 0);
         defer self.allocator.free(path_z);
@@ -135,6 +148,7 @@ pub const File = struct {
         return .{ .id = id, .open = true };
     }
 
+    /// Open an existing group with `H5Gopen2`.
     pub fn openGroup(self: *File, path: []const u8) !Group {
         const path_z = try self.allocator.dupeSentinel(u8, path, 0);
         defer self.allocator.free(path_z);
@@ -143,6 +157,8 @@ pub const File = struct {
         return .{ .id = id, .open = true };
     }
 
+    /// Create a fixed-shape numeric dataset. Parent groups must already exist.
+    /// Supplying `chunk_shape` selects HDF5 chunked storage.
     pub fn createDataset(
         self: *File,
         comptime T: type,
@@ -176,6 +192,7 @@ pub const File = struct {
         return .{ .allocator = self.allocator, .id = id, .open = true };
     }
 
+    /// Open a dataset handle without reading its payload.
     pub fn openDataset(self: *File, path: []const u8) !Dataset {
         const path_z = try self.allocator.dupeSentinel(u8, path, 0);
         defer self.allocator.free(path_z);
@@ -184,12 +201,14 @@ pub const File = struct {
         return .{ .allocator = self.allocator, .id = id, .open = true };
     }
 
+    /// Remove a link with `H5Ldelete`; open object handles remain valid.
     pub fn deleteLink(self: *File, path: []const u8) !void {
         const path_z = try self.allocator.dupeSentinel(u8, path, 0);
         defer self.allocator.free(path_z);
         try requireNonnegative(c.H5Ldelete(self.id, path_z.ptr, c.zig_h5p_default()));
     }
 
+    /// Rename or move a link within this file using `H5Lmove`.
     pub fn moveLink(self: *File, source: []const u8, destination: []const u8) !void {
         const source_z = try self.allocator.dupeSentinel(u8, source, 0);
         defer self.allocator.free(source_z);
@@ -205,31 +224,38 @@ pub const File = struct {
         ));
     }
 
+    /// Create or update a scalar numeric attribute on the file.
     pub fn writeAttribute(self: *File, comptime T: type, name: []const u8, value: T) !void {
         try writeNumericAttribute(self.allocator, self.id, T, name, value);
     }
 
+    /// Test for a file attribute with `H5Aexists`.
     pub fn attributeExists(self: *File, name: []const u8) !bool {
         return attributeExistsAt(self.allocator, self.id, name);
     }
 
+    /// Read a scalar numeric file attribute into native type `T`.
     pub fn readAttribute(self: *File, comptime T: type, name: []const u8) !T {
         return readNumericAttribute(self.allocator, self.id, T, name);
     }
 
+    /// Replace a file attribute with a fixed-length UTF-8 string.
     pub fn writeStringAttribute(self: *File, name: []const u8, value: []const u8) !void {
         try writeStringAttributeAt(self.allocator, self.id, name, value);
     }
 
+    /// Allocate and read a fixed-length string attribute; caller frees it.
     pub fn readStringAttributeAlloc(self: *File, allocator: std.mem.Allocator, name: []const u8) ![]u8 {
         return readStringAttributeAt(self.allocator, allocator, self.id, name);
     }
 };
 
+/// Owning HDF5 group identifier.
 pub const Group = struct {
     id: c.hid_t,
     open: bool,
 
+    /// Close the group identifier with `H5Gclose`.
     pub fn deinit(self: *Group) void {
         if (self.open) {
             _ = c.H5Gclose(self.id);
@@ -238,11 +264,13 @@ pub const Group = struct {
     }
 };
 
+/// Owning HDF5 dataset identifier with caller-buffer I/O.
 pub const Dataset = struct {
     allocator: std.mem.Allocator,
     id: c.hid_t,
     open: bool,
 
+    /// Close the dataset identifier with `H5Dclose`.
     pub fn deinit(self: *Dataset) void {
         if (self.open) {
             _ = c.H5Dclose(self.id);
@@ -250,6 +278,7 @@ pub const Dataset = struct {
         }
     }
 
+    /// Return the dataset dataspace rank.
     pub fn rank(self: *Dataset) Error!usize {
         const space = c.H5Dget_space(self.id);
         if (space < 0) return error.Hdf5Failure;
@@ -259,6 +288,7 @@ pub const Dataset = struct {
         return @intCast(value);
     }
 
+    /// Allocate the current dataspace extents; caller frees the returned slice.
     pub fn shapeAlloc(self: *Dataset, allocator: std.mem.Allocator) ![]u64 {
         const space = c.H5Dget_space(self.id);
         if (space < 0) return error.Hdf5Failure;
@@ -271,6 +301,7 @@ pub const Dataset = struct {
         return shape;
     }
 
+    /// Inspect the dataset's integer/float class, sign, and byte width.
     pub fn dtype(self: *Dataset) Error!Dtype {
         const datatype = c.H5Dget_type(self.id);
         if (datatype < 0) return error.Hdf5Failure;
@@ -303,6 +334,7 @@ pub const Dataset = struct {
         };
     }
 
+    /// Allocate the chunk dimensions, or return null for non-chunked layout.
     pub fn chunkShapeAlloc(self: *Dataset, allocator: std.mem.Allocator) !?[]u64 {
         const properties = c.H5Dget_create_plist(self.id);
         if (properties < 0) return error.Hdf5Failure;
@@ -315,6 +347,7 @@ pub const Dataset = struct {
         return result;
     }
 
+    /// Write the complete dataset from an exactly sized, type-matched buffer.
     pub fn writeAll(self: *Dataset, comptime T: type, values: []const T) !void {
         const shape = try self.shapeAlloc(self.allocator);
         defer self.allocator.free(shape);
@@ -330,6 +363,7 @@ pub const Dataset = struct {
         ));
     }
 
+    /// Read the complete dataset into an exactly sized, type-matched buffer.
     pub fn readAll(self: *Dataset, comptime T: type, destination: []T) !void {
         const shape = try self.shapeAlloc(self.allocator);
         defer self.allocator.free(shape);
@@ -345,6 +379,7 @@ pub const Dataset = struct {
         ));
     }
 
+    /// Write a contiguous hyperslab selected by per-axis offset and count.
     pub fn writeHyperslab(
         self: *Dataset,
         comptime T: type,
@@ -355,6 +390,7 @@ pub const Dataset = struct {
         try self.transferHyperslab(T, .write, offset, count, @constCast(values).ptr, values.len);
     }
 
+    /// Read a contiguous hyperslab selected by per-axis offset and count.
     pub fn readHyperslab(
         self: *Dataset,
         comptime T: type,
@@ -365,22 +401,27 @@ pub const Dataset = struct {
         try self.transferHyperslab(T, .read, offset, count, destination.ptr, destination.len);
     }
 
+    /// Create or update a scalar numeric attribute on the dataset.
     pub fn writeAttribute(self: *Dataset, comptime T: type, name: []const u8, value: T) !void {
         try writeNumericAttribute(self.allocator, self.id, T, name, value);
     }
 
+    /// Test for a dataset attribute with `H5Aexists`.
     pub fn attributeExists(self: *Dataset, name: []const u8) !bool {
         return attributeExistsAt(self.allocator, self.id, name);
     }
 
+    /// Read a scalar numeric dataset attribute into native type `T`.
     pub fn readAttribute(self: *Dataset, comptime T: type, name: []const u8) !T {
         return readNumericAttribute(self.allocator, self.id, T, name);
     }
 
+    /// Replace a dataset attribute with a fixed-length UTF-8 string.
     pub fn writeStringAttribute(self: *Dataset, name: []const u8, value: []const u8) !void {
         try writeStringAttributeAt(self.allocator, self.id, name, value);
     }
 
+    /// Allocate and read a fixed-length string attribute; caller frees it.
     pub fn readStringAttributeAlloc(self: *Dataset, allocator: std.mem.Allocator, name: []const u8) ![]u8 {
         return readStringAttributeAt(self.allocator, allocator, self.id, name);
     }
@@ -429,6 +470,7 @@ pub const Dataset = struct {
     }
 };
 
+/// Query `H5is_library_threadsafe`; this wrapper adds no implicit locking.
 pub fn isLibraryThreadSafe() Error!bool {
     try initialize();
     var result: c.hbool_t = false;

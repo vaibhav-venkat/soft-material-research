@@ -1,5 +1,11 @@
 const std = @import("std");
 
+fn hdf5Prefix(b: *std.Build) []const u8 {
+    if (b.option([]const u8, "hdf5-path", "HDF5 installation prefix")) |path| return path;
+    if (b.graph.environ_map.get("CONDA_PREFIX")) |path| return path;
+    return b.pathFromRoot("../../.pixi/envs/default");
+}
+
 fn configureHdf5(
     b: *std.Build,
     module: *std.Build.Module,
@@ -16,8 +22,7 @@ fn configureHdf5(
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const hdf5_path = b.option([]const u8, "hdf5-path", "HDF5 installation prefix") orelse
-        @panic("missing required -Dhdf5-path=/path/to/hdf5-prefix");
+    const hdf5_path = hdf5Prefix(b);
     const include_path = std.fs.path.join(b.allocator, &.{ hdf5_path, "include" }) catch @panic("out of memory");
 
     const translate = b.addTranslateC(.{

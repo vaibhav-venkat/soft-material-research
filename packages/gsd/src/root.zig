@@ -21,6 +21,7 @@ pub const Error = error{
     InvalidShape,
 };
 
+/// GSD primitive type identifiers used in chunk index entries.
 pub const Dtype = enum(u8) {
     u8 = c.GSD_TYPE_UINT8,
     u16 = c.GSD_TYPE_UINT16,
@@ -34,6 +35,7 @@ pub const Dtype = enum(u8) {
     f64 = c.GSD_TYPE_DOUBLE,
     character = c.GSD_TYPE_CHARACTER,
 
+    /// Convert a `GSD_TYPE_*` value to its Zig representation.
     pub fn fromC(value: u8) Error!Dtype {
         return switch (value) {
             c.GSD_TYPE_UINT8 => .u8,
@@ -51,6 +53,7 @@ pub const Dtype = enum(u8) {
         };
     }
 
+    /// Return the GSD type identifier for a supported Zig scalar type.
     pub fn of(comptime T: type) Dtype {
         return switch (T) {
             u8 => .u8,
@@ -67,17 +70,20 @@ pub const Dtype = enum(u8) {
         };
     }
 
+    /// Return the storage size of one value, as reported by `gsd_sizeof_type`.
     pub fn size(self: Dtype) usize {
-        return c.gsd_sizeof_type(@enumFromInt(@intFromEnum(self)));
+        return c.gsd_sizeof_type(@as(c.enum_gsd_type, @intFromEnum(self)));
     }
 };
 
+/// Access flags accepted by `gsd_open`.
 pub const OpenMode = enum {
     read_only,
     read_write,
     append,
 };
 
+/// Borrowed application and schema metadata from an open GSD handle.
 pub const Header = struct {
     application: []const u8,
     schema: []const u8,
@@ -85,6 +91,7 @@ pub const Header = struct {
     file_version: u32,
 };
 
+/// Metadata for one committed GSD chunk found by `gsd_find_chunk`.
 pub const Chunk = struct {
     entry: [*c]const c.struct_gsd_index_entry,
     frame: u64,
@@ -92,20 +99,24 @@ pub const Chunk = struct {
     columns: u32,
     dtype: Dtype,
 
+    /// Return `rows * columns`, checking conversion and multiplication overflow.
     pub fn elementCount(self: Chunk) Error!usize {
         const rows = std.math.cast(usize, self.rows) orelse return error.SizeOverflow;
         return std.math.mul(usize, rows, self.columns) catch error.SizeOverflow;
     }
 
+    /// Return the exact destination size required by `gsd_read_chunk`.
     pub fn byteLen(self: Chunk) Error!usize {
         return std.math.mul(usize, try self.elementCount(), self.dtype.size()) catch error.SizeOverflow;
     }
 };
 
+/// Owning wrapper around `struct gsd_handle`; call `deinit` or `close` once.
 pub const File = struct {
     handle: c.struct_gsd_handle,
     open: bool,
 
+    /// Open an existing GSD file with the requested C API access mode.
     pub fn openPath(allocator: std.mem.Allocator, path: []const u8, mode: OpenMode) !File {
         const path_z = try allocator.dupeSentinel(u8, path, 0);
         defer allocator.free(path_z);
@@ -115,10 +126,13 @@ pub const File = struct {
         return result;
     }
 
+    /// Open an existing GSD file read-only.
     pub fn openRead(allocator: std.mem.Allocator, path: []const u8) !File {
         return openPath(allocator, path, .read_only);
     }
 
+    /// Create and open a writable GSD file. When `exclusive` is true, fail if
+    /// the path exists; otherwise the C API replaces it.
     pub fn create(
         allocator: std.mem.Allocator,
         path: []const u8,
@@ -147,6 +161,7 @@ pub const File = struct {
         return result;
     }
 
+    /// Close an open handle, ignoring close errors for deferred cleanup.
     pub fn deinit(self: *File) void {
         if (self.open) {
             _ = c.gsd_close(&self.handle);
@@ -154,12 +169,14 @@ pub const File = struct {
         }
     }
 
+    /// Flush committed frames and close the handle, reporting C API errors.
     pub fn close(self: *File) Error!void {
         if (!self.open) return;
         try check(c.gsd_close(&self.handle));
         self.open = false;
     }
 
+    /// Return borrowed header strings valid while this file remains open.
     pub fn header(self: *const File) Header {
         return .{
             .application = cStringFromArray(&self.handle.header.application),
@@ -169,10 +186,13 @@ pub const File = struct {
         };
     }
 
+    /// Return the number of committed frames reported by `gsd_get_nframes`.
     pub fn frameCount(self: *File) u64 {
         return c.gsd_get_nframes(&self.handle);
     }
 
+    /// Find an exact frame/name chunk, returning null when it is absent.
+    /// Read/write handles only expose chunks committed by `flush`.
     pub fn findChunk(self: *File, frame: u64, name: [:0]const u8) Error!?Chunk {
         const entry = c.gsd_find_chunk(&self.handle, frame, name.ptr) orelse return null;
         return .{
@@ -184,15 +204,19 @@ pub const File = struct {
         };
     }
 
+    /// Find an exact chunk or return `error.ChunkNotFound`.
     pub fn requireChunk(self: *File, frame: u64, name: [:0]const u8) Error!Chunk {
         return (try self.findChunk(frame, name)) orelse error.ChunkNotFound;
     }
 
+    /// Read a previously found chunk into an exactly sized caller buffer.
     pub fn readChunkBytes(self: *File, chunk: Chunk, destination: []u8) Error!void {
         if (destination.len != try chunk.byteLen()) return error.BufferSizeMismatch;
         try check(c.gsd_read_chunk(&self.handle, destination.ptr, chunk.entry));
     }
 
+    /// Find and read a chunk into a typed caller buffer after exact type and
+    /// element-count checks.
     pub fn readChunkInto(
         self: *File,
         comptime T: type,
@@ -207,6 +231,8 @@ pub const File = struct {
         return chunk;
     }
 
+    /// Buffer one named `rows` by `columns` chunk in the current frame.
+    /// The chunk is not committed until `endFrame` followed by `flush`/`close`.
     pub fn writeChunk(
         self: *File,
         comptime T: type,
@@ -230,15 +256,18 @@ pub const File = struct {
         ));
     }
 
+    /// Complete the current frame; GSD 4 does not flush it automatically.
     pub fn endFrame(self: *File) Error!void {
         try check(c.gsd_end_frame(&self.handle));
     }
 
+    /// Commit buffered chunks and all previously ended frame index entries.
     pub fn flush(self: *File) Error!void {
         try check(c.gsd_flush(&self.handle));
     }
 };
 
+/// Pack a major/minor schema version with `gsd_make_version`.
 pub fn makeVersion(major: u16, minor: u16) u32 {
     return c.gsd_make_version(major, minor);
 }
