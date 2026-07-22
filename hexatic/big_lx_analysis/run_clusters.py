@@ -24,20 +24,30 @@ class CaseClusters:
     case_id: str
     label: str
     lx: float
+    lx_multiplier: int
+    circumference_diameters: float
+    surface_area: float
     replicate_count: int
     area_fraction: NDArray[np.float64]
+
+    @property
+    def absolute_area(self) -> NDArray[np.float64]:
+        """Absolute cluster area reconstructed from the stored A/SA ratio."""
+        return self.area_fraction * self.surface_area
 
 
 @dataclass(frozen=True)
 class ClusterSummary:
-    lx: float
+    lx_multiplier: int
     area_weighted_mean: float
     area_weighted_mode: float
     sqrt_area_weighted_mean: float
     sqrt_area_weighted_mode: float
+    absolute_area_weighted_mean: float
+    absolute_area_weighted_mode: float
 
 
-def _case_metadata(manifest: Path) -> tuple[float, str]:
+def _case_metadata(manifest: Path) -> tuple[float, int, float, float, str]:
     payload: Any = json.loads(manifest.read_text())
     case = payload.get("case")
     if not isinstance(case, dict):
@@ -45,15 +55,47 @@ def _case_metadata(manifest: Path) -> tuple[float, str]:
     lx = case.get("lx")
     if not isinstance(lx, (int, float)) or not np.isfinite(lx) or lx <= 0.0:
         raise ValueError(f"Manifest has an invalid Lx: {manifest}")
+    lx_multiplier = case.get("lx_multiplier")
+    if not isinstance(lx_multiplier, int) or lx_multiplier <= 0:
+        raise ValueError(f"Manifest has an invalid Lx multiplier: {manifest}")
+    circumference_diameters = case.get("circumference_diameters")
+    if (
+        not isinstance(circumference_diameters, (int, float))
+        or not np.isfinite(circumference_diameters)
+        or circumference_diameters <= 0.0
+    ):
+        raise ValueError(f"Manifest has invalid circumference diameters: {manifest}")
+    circumference = case.get("circumference")
+    if (
+        not isinstance(circumference, (int, float))
+        or not np.isfinite(circumference)
+        or circumference <= 0.0
+    ):
+        raise ValueError(f"Manifest has an invalid circumference: {manifest}")
     label = case.get("label")
-    return float(lx), label if isinstance(label, str) and label else ""
+    return (
+        float(lx),
+        lx_multiplier,
+        float(circumference_diameters),
+        float(lx) * float(circumference),
+        label if isinstance(label, str) and label else "",
+    )
 
 
 def _load_cases(manifests: tuple[Path, ...], options: ClusterOptions) -> list[CaseClusters]:
-    grouped: dict[str, tuple[str, float, list[NDArray[np.float64]]]] = {}
+    grouped: dict[
+        str,
+        tuple[str, float, int, float, float, list[NDArray[np.float64]]],
+    ] = {}
     for index, manifest in enumerate(manifests, 1):
         replicate = _load_replicate(manifest)
-        lx, metadata_label = _case_metadata(manifest)
+        (
+            lx,
+            lx_multiplier,
+            circumference_diameters,
+            surface_area,
+            metadata_label,
+        ) = _case_metadata(manifest)
         label = metadata_label or replicate.label
         print(
             f"[clusters] {index}/{len(manifests)} case={replicate.case_id} "
@@ -63,13 +105,45 @@ def _load_cases(manifests: tuple[Path, ...], options: ClusterOptions) -> list[Ca
         result = analyze_clusters(replicate.static_file, replicate.shard_files, options)
         ratios = result.ratios[np.isfinite(result.ratios) & (result.ratios > 0.0)]
         if replicate.case_id not in grouped:
-            grouped[replicate.case_id] = (label, lx, [ratios])
+            grouped[replicate.case_id] = (
+                label,
+                lx,
+                lx_multiplier,
+                circumference_diameters,
+                surface_area,
+                [ratios],
+            )
             continue
-        previous_label, previous_lx, samples = grouped[replicate.case_id]
+        (
+            previous_label,
+            previous_lx,
+            previous_multiplier,
+            previous_circumference_diameters,
+            previous_surface_area,
+            samples,
+        ) = grouped[replicate.case_id]
         if not np.isclose(previous_lx, lx, rtol=1.0e-10, atol=1.0e-12):
             raise ValueError(f"Replicates for {replicate.case_id} have different Lx values")
         if previous_label != label:
             raise ValueError(f"Replicates for {replicate.case_id} have different labels")
+        if previous_multiplier != lx_multiplier or not np.isclose(
+            previous_circumference_diameters,
+            circumference_diameters,
+            rtol=1.0e-10,
+            atol=1.0e-12,
+        ):
+            raise ValueError(
+                f"Replicates for {replicate.case_id} have different case geometry"
+            )
+        if not np.isclose(
+            previous_surface_area,
+            surface_area,
+            rtol=1.0e-10,
+            atol=1.0e-12,
+        ):
+            raise ValueError(
+                f"Replicates for {replicate.case_id} have different surface areas"
+            )
         samples.append(ratios)
 
     cases = [
@@ -77,12 +151,25 @@ def _load_cases(manifests: tuple[Path, ...], options: ClusterOptions) -> list[Ca
             case_id=case_id,
             label=label,
             lx=lx,
+            lx_multiplier=lx_multiplier,
+            circumference_diameters=circumference_diameters,
+            surface_area=surface_area,
             replicate_count=len(samples),
             area_fraction=np.concatenate(samples) if samples else np.empty(0),
         )
-        for case_id, (label, lx, samples) in grouped.items()
+        for case_id, (
+            label,
+            lx,
+            lx_multiplier,
+            circumference_diameters,
+            surface_area,
+            samples,
+        ) in grouped.items()
     ]
-    return sorted(cases, key=lambda value: value.lx)
+    return sorted(
+        cases,
+        key=lambda value: (value.circumference_diameters, value.lx_multiplier),
+    )
 
 
 def _common_bins(cases: list[CaseClusters], transform: Any = None) -> list[float]:
@@ -169,17 +256,35 @@ def _summarize(
     case: CaseClusters,
     area_bins: list[float],
     sqrt_bins: list[float],
+    absolute_bins: list[float],
 ) -> ClusterSummary:
     area = case.area_fraction
     if area.size == 0:
-        return ClusterSummary(case.lx, np.nan, np.nan, np.nan, np.nan)
+        return ClusterSummary(
+            case.lx_multiplier,
+            np.nan,
+            np.nan,
+            np.nan,
+            np.nan,
+            np.nan,
+            np.nan,
+        )
     sqrt_area = np.sqrt(area)
+    absolute_area = case.absolute_area
     return ClusterSummary(
-        lx=case.lx,
+        lx_multiplier=case.lx_multiplier,
         area_weighted_mean=float(np.average(area, weights=area)),
         area_weighted_mode=_weighted_mode(area, area, area_bins),
         sqrt_area_weighted_mean=float(np.average(sqrt_area, weights=area)),
         sqrt_area_weighted_mode=_weighted_mode(sqrt_area, area, sqrt_bins),
+        absolute_area_weighted_mean=float(
+            np.average(absolute_area, weights=absolute_area)
+        ),
+        absolute_area_weighted_mode=_weighted_mode(
+            absolute_area,
+            absolute_area,
+            absolute_bins,
+        ),
     )
 
 
@@ -187,32 +292,79 @@ def _plot_mean_mode(cases: list[CaseClusters], output: Path) -> None:
     sns = _style()
     area_bins = _common_bins(cases)
     sqrt_bins = _common_bins(cases, np.sqrt)
-    summaries = [_summarize(case, area_bins, sqrt_bins) for case in cases]
-    lx = np.asarray([summary.lx for summary in summaries])
+    absolute_values = np.concatenate(
+        [case.absolute_area for case in cases if case.absolute_area.size]
+    )
+    absolute_bins = np.histogram_bin_edges(absolute_values, bins="auto").tolist()
+    summaries = [
+        _summarize(case, area_bins, sqrt_bins, absolute_bins) for case in cases
+    ]
     area_means = np.asarray([summary.area_weighted_mean for summary in summaries])
     area_modes = np.asarray([summary.area_weighted_mode for summary in summaries])
     sqrt_means = np.asarray([summary.sqrt_area_weighted_mean for summary in summaries])
     sqrt_modes = np.asarray([summary.sqrt_area_weighted_mode for summary in summaries])
-    figure, axes = plt.subplots(1, 2, figsize=(10.5, 4.4), constrained_layout=True)
+    absolute_means = np.asarray(
+        [summary.absolute_area_weighted_mean for summary in summaries]
+    )
+    absolute_modes = np.asarray(
+        [summary.absolute_area_weighted_mode for summary in summaries]
+    )
+    figure, axes = plt.subplots(1, 3, figsize=(15.2, 4.4), constrained_layout=True)
     for axis, means, modes, title, ylabel in (
         (
             axes[0],
             area_means,
             area_modes,
-            "Area-weighted cluster fractions versus axial length",
+            "Area-weighted cluster fractions versus axial-length multiplier",
             r"Cluster area fraction $A/SA$",
         ),
         (
             axes[1],
             sqrt_means,
             sqrt_modes,
-            "Area-weighted circumference ratios versus axial length",
+            "Area-weighted circumference ratios versus axial-length multiplier",
             r"Cluster circumference ratio $\sqrt{A/SA}$",
         ),
+        (
+            axes[2],
+            absolute_means,
+            absolute_modes,
+            "Absolute cluster area versus axial-length multiplier",
+            r"Absolute cluster area $A$",
+        ),
     ):
-        axis.plot(lx, means, marker="o", lw=2.0, label="Mean")
-        axis.plot(lx, modes, marker="s", lw=2.0, label="Mode")
-        axis.set(title=title, xlabel=r"Axial box length $L_x$", ylabel=ylabel)
+        circumferences = sorted({case.circumference_diameters for case in cases})
+        colors = sns.color_palette("colorblind", n_colors=len(circumferences))
+        for color, circumference in zip(colors, circumferences, strict=True):
+            indices = [
+                index
+                for index, case in enumerate(cases)
+                if np.isclose(case.circumference_diameters, circumference)
+            ]
+            multipliers = np.asarray([cases[index].lx_multiplier for index in indices])
+            axis.plot(
+                multipliers,
+                means[indices],
+                color=color,
+                marker="o",
+                lw=2.0,
+                label=rf"Mean, $C={circumference:g}D$",
+            )
+            axis.plot(
+                multipliers,
+                modes[indices],
+                color=color,
+                marker="s",
+                ls="--",
+                lw=2.0,
+                label=rf"Mode, $C={circumference:g}D$",
+            )
+        axis.set(
+            title=title,
+            xlabel=r"Axial-length multiplier $L_x/L_{x,1}$",
+            ylabel=ylabel,
+        )
+        axis.set_xticks((1, 2, 4, 8, 16), ("1", "2", "4", "8", "16"))
         axis.grid(color="0.9", lw=0.7)
         axis.legend(frameon=False)
         sns.despine(ax=axis)
@@ -229,7 +381,9 @@ def _plot_mean_mode(cases: list[CaseClusters], output: Path) -> None:
             f"area_weighted_mean={summary.area_weighted_mean:.12g} "
             f"area_weighted_mode={summary.area_weighted_mode:.12g} "
             f"sqrt_area_weighted_mean={summary.sqrt_area_weighted_mean:.12g} "
-            f"sqrt_area_weighted_mode={summary.sqrt_area_weighted_mode:.12g}"
+            f"sqrt_area_weighted_mode={summary.sqrt_area_weighted_mode:.12g} "
+            f"absolute_area_weighted_mean={summary.absolute_area_weighted_mean:.12g} "
+            f"absolute_area_weighted_mode={summary.absolute_area_weighted_mode:.12g}"
         )
 
 
@@ -280,7 +434,14 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     distribution_output = args.output_dir / "cluster_ratio_distributions.svg"
     summary_output = args.output_dir / "cluster_mean_mode_vs_lx.svg"
-    existing = [path for path in (distribution_output, summary_output) if path.exists()]
+    existing = [
+        path
+        for path in (
+            distribution_output,
+            summary_output,
+        )
+        if path.exists()
+    ]
     if existing and not args.overwrite:
         names = ", ".join(str(path) for path in existing)
         raise FileExistsError(f"Refusing to replace {names}; pass --overwrite")
