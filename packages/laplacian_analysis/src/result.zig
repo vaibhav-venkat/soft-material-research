@@ -1,6 +1,7 @@
 //! Owned numerical results matching the Rust analysis model.
 
 const std = @import("std");
+const dynamics_analysis = @import("dynamics_analysis");
 
 pub const TransformAxes = struct {
     r: []f64,
@@ -11,7 +12,6 @@ pub const TransformAxes = struct {
         allocator.free(self.omega);
     }
 };
-
 
 /// Complex values are parallel arrays in `(omega, r)` row-major order.
 pub const LaplaceGrid = struct {
@@ -61,12 +61,14 @@ pub const DampedCosineFit = struct {
 };
 
 pub const Result = struct {
+    dynamics: dynamics_analysis.Result,
     laplace: LaplaceGrid,
     preferred_r: PreferredEstimate,
     preferred_omega: PreferredEstimate,
     fit: DampedCosineFit,
 
     pub fn deinit(self: Result, allocator: std.mem.Allocator) void {
+        self.dynamics.deinit(allocator);
         self.laplace.deinit(allocator);
         self.fit.deinit(allocator);
     }

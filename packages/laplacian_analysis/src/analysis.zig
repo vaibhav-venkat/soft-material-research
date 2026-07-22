@@ -19,7 +19,7 @@ pub fn analyze(
         dataset,
         options.dynamics,
     );
-    defer dynamics.deinit(allocator);
+    errdefer dynamics.deinit(allocator);
 
     const axes = try laplace.transformAxes(allocator, dynamics.correlation, options.transform);
     const grid = try laplace.analyzeLaplace(allocator, context, dynamics.correlation, axes);
@@ -52,6 +52,7 @@ pub fn analyze(
         options.fit,
     );
     return .{
+        .dynamics = dynamics,
         .laplace = grid,
         .preferred_r = preferred_r,
         .preferred_omega = preferred_omega,

@@ -14,7 +14,7 @@ import numpy as np
 from hexatic.constants import cylinder
 
 from .clusters import ClusterOptions, ClusterRatioMode, analyze_clusters
-from .dynamics import DynamicsOptions, DynamicsResult, analyze_dynamics
+from .dynamics import DynamicsResult
 from .laplacian import LaplacianOptions, LaplacianResult, analyze_laplacian
 from .run_dynamics import (
     _collect_manifests,
@@ -177,8 +177,6 @@ def main() -> None:
     if not replicates:
         raise ValueError("No matching replicates")
 
-    dynamics_options = DynamicsOptions(args.frame_start, args.frame_stop, args.timestep,
-                                       args.max_lag, args.device_ordinal)
     laplacian_options = LaplacianOptions(
         frame_start=args.frame_start, frame_stop=args.frame_stop, timestep=args.timestep,
         max_lag=args.max_lag, device_ordinal=args.device_ordinal,
@@ -198,8 +196,8 @@ def main() -> None:
     cluster_samples: dict[str, tuple[str, list[np.ndarray]]] = {}
     for index, replicate in enumerate(replicates, 1):
         print(f"[analysis] {index}/{len(replicates)} case={replicate.case_id}", flush=True)
-        d = analyze_dynamics(replicate.static_file, replicate.shard_files, dynamics_options)
         l = analyze_laplacian(replicate.static_file, replicate.shard_files, laplacian_options)
+        d = l.dynamics
         c = analyze_clusters(replicate.static_file, replicate.shard_files, cluster_options)
         dynamics.setdefault(replicate.case_id, (replicate.label, []))[1].append(d)
         laplace.setdefault(replicate.case_id, (replicate.label, []))[1].append(l)

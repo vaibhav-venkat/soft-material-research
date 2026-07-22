@@ -11,7 +11,16 @@ from pathlib import Path
 import numpy as np
 from numpy.typing import NDArray
 
-from ._native import F64Buffer, copy_f64, encode_paths, load_library, raise_for_status
+from ._native import (
+    F64Buffer,
+    UsizeBuffer,
+    copy_f64,
+    copy_usize,
+    encode_paths,
+    load_library,
+    raise_for_status,
+)
+from .dynamics import DynamicsResult
 
 
 @dataclass(frozen=True)
@@ -63,6 +72,7 @@ class DampedCosineFit:
 
 @dataclass(frozen=True)
 class LaplacianResult:
+    dynamics: DynamicsResult
     r: NDArray[np.float64]
     omega: NDArray[np.float64]
     values: NDArray[np.complex128]
@@ -114,6 +124,10 @@ class _NativeFit(ctypes.Structure):
 
 class _NativeResult(ctypes.Structure):
     _fields_ = [
+        ("elapsed_time", F64Buffer), ("center", F64Buffer),
+        ("velocity", F64Buffer), ("lag_indices", UsizeBuffer),
+        ("lag_times", F64Buffer), ("pearson", F64Buffer),
+        ("origin_counts", UsizeBuffer),
         ("r", F64Buffer), ("omega", F64Buffer),
         ("values_real", F64Buffer), ("values_imag", F64Buffer),
         ("shape", ctypes.c_size_t * 2),
@@ -140,7 +154,7 @@ def analyze_laplacian(
     version = library.laplacian_analysis_api_version
     version.argtypes = []
     version.restype = ctypes.c_uint32
-    if version() != 1:
+    if version() != 2:
         raise RuntimeError("laplacian_analysis native library has an incompatible ABI")
     run = library.laplacian_analysis_run
     run.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_char_p), ctypes.c_size_t,
@@ -174,6 +188,15 @@ def analyze_laplacian(
         imaginary = copy_f64(native_result.values_imag).reshape(shape)
         fit = native_result.fit
         return LaplacianResult(
+            dynamics=DynamicsResult(
+                elapsed_time=copy_f64(native_result.elapsed_time),
+                center=copy_f64(native_result.center),
+                velocity=copy_f64(native_result.velocity),
+                lag_indices=copy_usize(native_result.lag_indices),
+                lag_time=copy_f64(native_result.lag_times),
+                pearson=copy_f64(native_result.pearson),
+                origin_counts=copy_usize(native_result.origin_counts),
+            ),
             r=copy_f64(native_result.r), omega=copy_f64(native_result.omega),
             values=real + 1j * imaginary,
             preferred_r=_preferred(native_result.preferred_r),

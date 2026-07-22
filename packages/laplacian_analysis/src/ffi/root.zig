@@ -39,6 +39,7 @@ pub const COptions = extern struct {
 };
 
 pub const F64Buffer = extern struct { ptr: ?[*]f64, len: usize };
+pub const UsizeBuffer = extern struct { ptr: ?[*]usize, len: usize };
 pub const CPreferredEstimate = extern struct {
     axis: u8,
     coordinate: f64,
@@ -63,6 +64,13 @@ pub const CFit = extern struct {
     prediction: F64Buffer,
 };
 pub const CResult = extern struct {
+    elapsed_time: F64Buffer,
+    center: F64Buffer,
+    velocity: F64Buffer,
+    lag_indices: UsizeBuffer,
+    lag_times: F64Buffer,
+    pearson: F64Buffer,
+    origin_counts: UsizeBuffer,
     r: F64Buffer,
     omega: F64Buffer,
     values_real: F64Buffer,
@@ -75,7 +83,7 @@ pub const CResult = extern struct {
 };
 
 pub export fn laplacian_analysis_api_version() callconv(.c) u32 {
-    return 1;
+    return 2;
 }
 
 pub export fn laplacian_analysis_run(
@@ -115,6 +123,13 @@ pub export fn laplacian_analysis_run(
     };
 
     output.* = .{
+        .elapsed_time = toBuffer(value.dynamics.com.elapsed_time),
+        .center = toBuffer(value.dynamics.com.center),
+        .velocity = toBuffer(value.dynamics.com.velocity),
+        .lag_indices = toUsizeBuffer(value.dynamics.correlation.lag_indices),
+        .lag_times = toBuffer(value.dynamics.correlation.lag_times),
+        .pearson = toBuffer(value.dynamics.correlation.pearson),
+        .origin_counts = toUsizeBuffer(value.dynamics.correlation.origin_counts),
         .r = toBuffer(value.laplace.r),
         .omega = toBuffer(value.laplace.omega),
         .values_real = toBuffer(value.laplace.values_real),
@@ -149,6 +164,13 @@ pub export fn laplacian_analysis_release(output: *CResult) callconv(.c) void {
     };
     const owner: *Owner = @ptrCast(@alignCast(opaque_owner));
     const allocator = owner.gpa.allocator();
+    freeBuffer(allocator, output.elapsed_time);
+    freeBuffer(allocator, output.center);
+    freeBuffer(allocator, output.velocity);
+    freeUsizeBuffer(allocator, output.lag_indices);
+    freeBuffer(allocator, output.lag_times);
+    freeBuffer(allocator, output.pearson);
+    freeUsizeBuffer(allocator, output.origin_counts);
     freeBuffer(allocator, output.r);
     freeBuffer(allocator, output.omega);
     freeBuffer(allocator, output.values_real);
@@ -195,6 +217,10 @@ fn toBuffer(values: []f64) F64Buffer {
     return .{ .ptr = values.ptr, .len = values.len };
 }
 
+fn toUsizeBuffer(values: []usize) UsizeBuffer {
+    return .{ .ptr = values.ptr, .len = values.len };
+}
+
 fn toPreferred(value: @import("../result.zig").PreferredEstimate) CPreferredEstimate {
     return .{
         .axis = @intFromEnum(value.axis),
@@ -208,6 +234,10 @@ fn toPreferred(value: @import("../result.zig").PreferredEstimate) CPreferredEsti
 }
 
 fn freeBuffer(allocator: std.mem.Allocator, buffer: F64Buffer) void {
+    if (buffer.ptr) |ptr| allocator.free(ptr[0..buffer.len]);
+}
+
+fn freeUsizeBuffer(allocator: std.mem.Allocator, buffer: UsizeBuffer) void {
     if (buffer.ptr) |ptr| allocator.free(ptr[0..buffer.len]);
 }
 
