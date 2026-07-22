@@ -7,27 +7,13 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    const translate_kdtree = b.addTranslateC(.{
-        .root_source_file = b.path("vendor/kdtree/kdtree.h"),
-        .target = target,
-        .optimize = optimize,
-    });
-    translate_kdtree.addIncludePath(b.path("vendor/kdtree"));
-
     const module = b.addModule("cluster_analysis", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
     });
     module.addImport("safetensors", safetensors_dependency.module("safetensors"));
-    module.addImport("kdtree_c", translate_kdtree.createModule());
-    module.addIncludePath(b.path("vendor/kdtree"));
-    module.addCSourceFile(.{
-        .file = b.path("vendor/kdtree/kdtree.c"),
-        .flags = &.{"-std=c99"},
-    });
     module.link_libc = true;
-    module.linkSystemLibrary("m", .{});
 
     const library = b.addLibrary(.{
         .name = "cluster_analysis",

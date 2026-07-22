@@ -82,7 +82,11 @@ pub fn analyze(
 
     var next_job = std.atomic.Value(usize).init(0);
     const cpu_count = std.Thread.getCpuCount() catch 1;
-    const worker_count = @max(@as(usize, 1), @min(cpu_count, jobs.len));
+    const maximum_cluster_workers: usize = 8;
+    const worker_count = @max(
+        @as(usize, 1),
+        @min(maximum_cluster_workers, @min(cpu_count, jobs.len)),
+    );
     const states = try allocator.alloc(WorkerState, worker_count);
     defer allocator.free(states);
     for (states) |*state| {
@@ -134,6 +138,11 @@ fn analyzeFrames(state: *WorkerState) void {
         return;
     };
     defer state.allocator.free(eligible);
+    var workspace = clusters.Workspace.init(state.allocator, state.particle_count) catch |err| {
+        state.failure = err;
+        return;
+    };
+    defer workspace.deinit(state.allocator);
 
     while (true) {
         const job_index = state.next_job.fetchAdd(1, .monotonic);
@@ -153,8 +162,9 @@ fn analyzeFrames(state: *WorkerState) void {
             state.failure = err;
             return;
         };
-        const frame_result = clusters.analyzeStructuralFrame(
+        clusters.appendStructuralFrameRatios(
             state.allocator,
+            &workspace,
             .{
                 .points = points,
                 .psi6 = psi6,
@@ -162,16 +172,11 @@ fn analyzeFrames(state: *WorkerState) void {
                 .periods = state.periods,
             },
             state.options,
+            &state.ratios,
         ) catch |err| {
             state.failure = err;
             return;
         };
-        state.ratios.appendSlice(state.allocator, frame_result.ratios) catch |err| {
-            frame_result.deinit(state.allocator);
-            state.failure = err;
-            return;
-        };
-        frame_result.deinit(state.allocator);
     }
 }
 

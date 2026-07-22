@@ -10,6 +10,10 @@ pub const Options = @import("options.zig").Options;
 pub const RatioMode = @import("options.zig").RatioMode;
 pub const Result = @import("result.zig").Result;
 pub const StructuralFrame = @import("schema.zig").StructuralFrame;
+pub const Workspace = @import("clusters.zig").Workspace;
+pub const analyzeStructuralFrame = @import("clusters.zig").analyzeStructuralFrame;
+pub const analyzeStructuralFrameWithWorkspace = @import("clusters.zig").analyzeStructuralFrameWithWorkspace;
+pub const appendStructuralFrameRatios = @import("clusters.zig").appendStructuralFrameRatios;
 pub const analyze = @import("analysis.zig").analyze;
 
 comptime {

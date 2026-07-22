@@ -70,18 +70,6 @@ test "schema rejects invalid structural controls" {
     );
 }
 
-test "C k-d tree wrapper returns indices in a two-dimensional radius" {
-    var tree = try cluster_analysis.backend.kdtree.Tree2.init();
-    defer tree.deinit();
-    try tree.insert(.{ 0.0, 0.0 }, 0);
-    try tree.insert(.{ 0.5, 0.0 }, 1);
-    try tree.insert(.{ 4.0, 0.0 }, 2);
-    const found = try tree.within(std.testing.allocator, .{ 0.0, 0.0 }, 0.75);
-    defer std.testing.allocator.free(found);
-    std.mem.sort(usize, found, {}, comptime std.sort.asc(usize));
-    try std.testing.expectEqualSlices(usize, &.{ 0, 1 }, found);
-}
-
 test "FFI exposes version two and safely releases an empty result" {
     try std.testing.expectEqual(@as(u32, 2), cluster_analysis.ffi.cluster_analysis_api_version());
     var output = std.mem.zeroes(cluster_analysis.ffi.CResult);

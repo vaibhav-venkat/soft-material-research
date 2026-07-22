@@ -1,3 +1,1 @@
-//! CPU helpers used by structural clustering.
-
-pub const kdtree = @import("kdtree.zig");
+//! Backend namespace reserved for future accelerated cluster kernels.
