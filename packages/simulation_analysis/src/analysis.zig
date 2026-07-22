@@ -92,10 +92,11 @@ pub fn transformCylindrical(positions: []const f32, coordinates: []f32) !void {
             z[lane] = positions[(particle + lane) * 3 + 2];
         }
         const radius = @sqrt(y * y + z * z);
+        const angle = atan2_simd(lane_count, y, z);
         inline for (0..lane_count) |lane| {
             const output = (particle + lane) * 3;
             coordinates[output] = x[lane];
-            coordinates[output + 1] = normalizedAtan2(y[lane], z[lane]);
+            coordinates[output + 1] = angle[lane];
             coordinates[output + 2] = radius[lane];
         }
     }
@@ -107,6 +108,39 @@ pub fn transformCylindrical(positions: []const f32, coordinates: []f32) !void {
         coordinates[offset + 1] = normalizedAtan2(y, z);
         coordinates[offset + 2] = @sqrt(y * y + z * z);
     }
+}
+
+pub fn atan2_simd(comptime N: comptime_int, y: @Vector(N, f32), x: @Vector(N, f32)) @Vector(N, f32) {
+    const V = @Vector(N, f32);
+    const zero: V  = @splat(0.0);
+    const one: V  = @splat(1.0);
+    const pi: V = @splat(std.math.pi);
+    const half_pi: V = @splat(std.math.pi / 2.0);
+    const ax = @abs(x);
+    const ay = @abs(y);
+
+    const swap = ay > ax;
+    const lo = @select(f32, swap, ax, ay);
+    const hi = @select(f32, swap, ay, ax);
+
+    const is_zero = hi == zero;
+    const clamped_hi = @select(f32, is_zero, one, hi);
+
+    const r = lo/clamped_hi;
+    const r2 = r * r;
+    // atan(r) ~ r * P(r^2)
+    var p: V = @splat(0.02084517);
+    p = @mulAdd(V, p, r2, @as(V, @splat(-0.08515649)));
+    p = @mulAdd(V, p, r2, @as(V, @splat(0.18015942)));
+    p = @mulAdd(V, p, r2, @as(V, @splat(-0.33030482)));
+    p = @mulAdd(V, p, r2, @as(V, @splat(0.99986633)));
+
+    var angle = r * p;
+    angle = @select(f32, swap, half_pi - angle, angle);
+
+    angle = @select(f32, x < zero, pi - angle, angle);
+    angle = @select(f32, y < zero, -angle, angle);
+    return @select(f32, is_zero, zero, angle);
 }
 
 /// Convert the trajectory into `static.h5` plus independently writable frame
@@ -190,9 +224,10 @@ fn normalizedAtan2(y: f32, z: f32) f32 {
     return if (angle < 0) angle + 2.0 * std.math.pi else angle;
 }
 
+
 fn frameChunk(file: *gsd.File, frame: u64, name: [:0]const u8) !gsd.Chunk {
     if (try file.findChunk(frame, name)) |chunk| return chunk;
-    if (frame != 0) if (try file.findChunk(0, name)) |chunk| return chunk;
+    // if (frame != 0) if (try file.findChunk(0, name)) |chunk| return chunk;
     return error.ChunkNotFound;
 }
 
@@ -274,10 +309,10 @@ fn writeShard(state: *ShardState, shard_index: usize) !usize {
         for (0..frame_count) |local_frame| {
             const frame = range.start + local_frame;
             if (steps) |values| try readFrameChunk(&input, u64, frame, "configuration/step", values[local_frame .. local_frame + 1]);
-            if (boxes) |values| try readFrameChunk(&input, f32, frame, "configuration/box", values[local_frame * 6 ..][0..6]);
+            if (boxes) |values| try readFrameChunk(&input, f32, 0, "configuration/box", values[local_frame * 6 ..][0..6]);
             if (coordinates) |values| {
                 var particle_value: [1]u32 = undefined;
-                try readFrameChunk(&input, u32, frame, "particles/N", &particle_value);
+                try readFrameChunk(&input, u32, 0, "particles/N", &particle_value);
                 if (particle_value[0] != state.particle_count) return error.VariableParticleCount;
                 try readFrameChunk(&input, f32, frame, "particles/position", positions.?);
                 const output = values[local_frame * particle_count * 3 ..][0 .. particle_count * 3];
