@@ -87,7 +87,16 @@ def _plot_fits(
 ) -> None:
     sns = _style()
     colors = sns.color_palette("colorblind", n_colors=len(laplace))
-    figure, axis = plt.subplots(figsize=(8.2, 4.8), constrained_layout=True)
+    figure_height = max(7.0, 5.0 + 0.35 * len(laplace))
+    figure, (axis, table_axis) = plt.subplots(
+        2,
+        1,
+        figsize=(12.0, figure_height),
+        gridspec_kw={"height_ratios": (3.4, max(1.2, 0.32 * len(laplace)))},
+        constrained_layout=True,
+    )
+    table_rows: list[list[str]] = []
+    row_labels: list[str] = []
     for color, case_id in zip(colors, laplace, strict=True):
         label, fits = laplace[case_id]
         correlations = dynamics[case_id][1]
@@ -100,11 +109,62 @@ def _plot_fits(
             raise ValueError(f"Fit prediction length differs from lag grid for {case_id}")
         axis.plot(lag, observed, color=color, lw=2.0, label=f"{label} observed")
         axis.plot(lag, predicted, color=color, lw=1.6, ls="--", label=f"{label} fit")
+        parameters = np.array([
+            [value.fit.amplitude, value.fit.rate, value.fit.omega, value.fit.phase,
+             value.fit.offset, value.fit.r_squared]
+            for value in fits
+        ])
+        ddof = 1 if len(fits) > 1 else 0
+        means = parameters.mean(axis=0)
+        standard_deviations = parameters.std(axis=0, ddof=ddof)
+
+        def formatted(index: int) -> str:
+            if len(fits) == 1:
+                return f"{means[index]:.5g}"
+            return f"{means[index]:.5g} ± {standard_deviations[index]:.2g}"
+
+        boundary_count = sum(
+            value.fit.rate_at_lower_boundary
+            or value.fit.rate_at_upper_boundary
+            or value.fit.amplitude_at_upper_boundary
+            for value in fits
+        )
+        table_rows.append([
+            *(formatted(index) for index in range(6)),
+            f"{sum(value.fit.converged for value in fits)}/{len(fits)}",
+            f"{np.mean([value.fit.evaluations for value in fits]):.0f}",
+            f"{boundary_count}/{len(fits)}",
+        ])
+        row_labels.append(label)
     axis.axhline(0.0, color="0.7", lw=0.8)
     axis.set(title="Damped-cosine fits", xlabel="Lag time", ylabel="Pearson correlation")
     axis.legend(frameon=False, ncol=2)
     axis.grid(axis="y", color="0.9")
     sns.despine(ax=axis)
+    table_axis.axis("off")
+    table_axis.set_title(
+        "Damped-cosine fit parameters (mean ± SD across replicates)",
+        fontsize=10,
+        pad=8,
+    )
+    table = table_axis.table(
+        cellText=table_rows,
+        rowLabels=row_labels,
+        colLabels=("Amplitude", "Rate", r"$\omega$", "Phase", "Offset", r"$R^2$",
+                   "Converged", "Evaluations", "At bound"),
+        cellLoc="center",
+        rowLoc="right",
+        loc="center",
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(8)
+    table.scale(1.0, 1.25)
+    for (row, _column), cell in table.get_celld().items():
+        if row == 0:
+            cell.set_facecolor("0.92")
+            cell.set_text_props(weight="bold")
+        cell.set_edgecolor("0.82")
+        cell.set_linewidth(0.6)
     _save(figure, output)
 
 
@@ -156,6 +216,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--manifest", action="append", type=Path, default=[])
     parser.add_argument("--input-dir", action="append", type=Path, default=[])
     parser.add_argument("--case", action="append", default=[])
+    parser.add_argument(
+        "--circ",
+        help='Only analyze a circumference such as "60.5D"',
+    )
     parser.add_argument("--output-dir", type=Path, default=Path("big_lx_analysis_output"))
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--timestep", type=float, default=float(cylinder.SIMULATION.timestep))
@@ -184,6 +248,17 @@ def main() -> None:
     if args.case:
         selected = set(args.case)
         replicates = [value for value in replicates if value.case_id in selected]
+    if args.circ:
+        circumference = args.circ.strip().upper()
+        if circumference.endswith("D"):
+            circumference = circumference[:-1]
+        try:
+            circumference_value = float(circumference)
+        except ValueError as error:
+            raise ValueError('--circ must look like "60.5D"') from error
+        circumference_token = format(circumference_value, ".15g").replace(".", "_")
+        prefix = f"circ_{circumference_token}D_"
+        replicates = [value for value in replicates if value.case_id.startswith(prefix)]
     if not replicates:
         raise ValueError("No matching replicates")
 

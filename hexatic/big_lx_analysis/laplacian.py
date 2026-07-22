@@ -67,6 +67,9 @@ class DampedCosineFit:
     r_squared: float
     evaluations: int
     converged: bool
+    rate_at_lower_boundary: bool
+    rate_at_upper_boundary: bool
+    amplitude_at_upper_boundary: bool
     prediction: NDArray[np.float64]
 
 
@@ -204,6 +207,8 @@ def analyze_laplacian(
             fit=DampedCosineFit(
                 fit.amplitude, fit.rate, fit.omega, fit.phase, fit.offset,
                 fit.r_squared, fit.evaluations, bool(fit.converged),
+                bool(fit.rate_at_lower_boundary), bool(fit.rate_at_upper_boundary),
+                bool(fit.amplitude_at_upper_boundary),
                 copy_f64(fit.prediction),
             ),
         )
