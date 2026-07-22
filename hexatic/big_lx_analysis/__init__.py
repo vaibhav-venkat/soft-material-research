@@ -2,7 +2,13 @@
 
 from .clusters import ClusterOptions, ClusterRatioMode, ClusterResult, analyze_clusters
 from .dynamics import DynamicsOptions, DynamicsResult, analyze_dynamics
-from .laplacian import LaplacianOptions, LaplacianResult, analyze_laplacian
+from .laplacian import (
+    DampedCosineFit,
+    LaplacianOptions,
+    LaplacianResult,
+    PreferredEstimate,
+    analyze_laplacian,
+)
 
 __all__ = [
     "ClusterOptions",
@@ -10,8 +16,10 @@ __all__ = [
     "ClusterResult",
     "DynamicsOptions",
     "DynamicsResult",
+    "DampedCosineFit",
     "LaplacianOptions",
     "LaplacianResult",
+    "PreferredEstimate",
     "analyze_clusters",
     "analyze_dynamics",
     "analyze_laplacian",
