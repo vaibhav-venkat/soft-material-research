@@ -11,6 +11,7 @@ pub fn parseArgs(allocator: std.mem.Allocator, arguments: []const []const u8) !O
     var output_dir: ?[]const u8 = null;
     var worker_count: ?usize = null;
     var target_shard_bytes: usize = 256 * 1024 * 1024;
+    var timestep: f64 = 1.0e-6;
     var write_mode: WriteMode = .create;
     var mode_set = false;
     var dry_run = false;
@@ -34,6 +35,10 @@ pub fn parseArgs(allocator: std.mem.Allocator, arguments: []const []const u8) !O
             if (index >= arguments.len) return error.MissingArgumentValue;
             const mib = try std.fmt.parseInt(usize, arguments[index], 10);
             target_shard_bytes = std.math.mul(usize, mib, 1024 * 1024) catch return error.SizeOverflow;
+        } else if (std.mem.eql(u8, argument, "--timestep")) {
+            index += 1;
+            if (index >= arguments.len) return error.MissingArgumentValue;
+            timestep = try std.fmt.parseFloat(f64, arguments[index]);
         } else if (std.mem.eql(u8, argument, "--update")) {
             if (mode_set) return error.ConflictingWriteModes;
             write_mode = .update;
@@ -53,6 +58,7 @@ pub fn parseArgs(allocator: std.mem.Allocator, arguments: []const []const u8) !O
         .output_dir = output_dir orelse return error.MissingOutputDirectory,
         .worker_count = worker_count,
         .target_shard_bytes = target_shard_bytes,
+        .timestep = timestep,
         .write_mode = write_mode,
         .dry_run = dry_run,
     };

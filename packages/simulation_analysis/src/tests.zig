@@ -40,6 +40,7 @@ fn createTrajectory(allocator: std.mem.Allocator, trajectory_path: []const u8) !
 test "public defaults and field registry are fixed before implementation" {
     const options = simulation_analysis.Options{ .input_path = "input.gsd", .output_dir = "output" };
     try std.testing.expectEqual(@as(usize, 256 * 1024 * 1024), options.target_shard_bytes);
+    try std.testing.expectEqual(@as(f64, 1.0), options.timestep);
     try std.testing.expectEqual(simulation_analysis.WriteMode.create, options.write_mode);
     try std.testing.expectEqualStrings("coords", simulation_analysis.schema.base_fields[3].name);
     try std.testing.expectEqual(@as(u8, 3), simulation_analysis.schema.base_fields[3].rank);
@@ -56,6 +57,14 @@ test "option validation catches empty paths and invalid resource controls" {
             .input_path = "in.gsd",
             .output_dir = "out",
             .worker_count = 0,
+        }),
+    );
+    try std.testing.expectError(
+        error.InvalidTimestep,
+        simulation_analysis.schema.validateOptions(.{
+            .input_path = "in.gsd",
+            .output_dir = "out",
+            .timestep = 0,
         }),
     );
 }
@@ -96,21 +105,31 @@ test "SIMD cylindrical transform handles quadrants, origin, and a tail" {
     }
 }
 
-test "COM property headers accept SoA buffers and remain explicitly unimplemented" {
+test "COM unwraps axial and angular crossings and velocity uses physical timestep" {
     var coordinates: simulation_analysis.CylindricalCoordinates = .empty;
     defer coordinates.deinit(std.testing.allocator);
-    try coordinates.resize(std.testing.allocator, 2);
-    var result: simulation_analysis.properties.CylindricalFrameValues = .empty;
-    defer result.deinit(std.testing.allocator);
-    try result.resize(std.testing.allocator, 1);
-    try std.testing.expectError(
-        error.NotImplemented,
-        simulation_analysis.properties.com_unwrapped(coordinates.slice(), 2, result.slice()),
-    );
-    try std.testing.expectError(
-        error.NotImplemented,
-        simulation_analysis.properties.com_velocity_unwrapped(coordinates.slice(), &.{100}, 2, result.slice()),
-    );
+    try coordinates.resize(std.testing.allocator, 6);
+    var coordinate_slices = coordinates.slice();
+    std.mem.copyForwards(f32, coordinate_slices.items(.x), &.{ 4.5, -4.0, -4.5, -3.0, -3.5, -2.0 });
+    std.mem.copyForwards(f32, coordinate_slices.items(.theta), &.{ 6.0, 0.1, 0.2, 0.3, 0.4, 0.5 });
+    std.mem.copyForwards(f32, coordinate_slices.items(.r), &.{ 1, 1, 2, 2, 3, 3 });
+    var centers: simulation_analysis.properties.CylindricalFrameValues = .empty;
+    defer centers.deinit(std.testing.allocator);
+    try centers.resize(std.testing.allocator, 3);
+    var workspace = try simulation_analysis.properties.com.Workspace.init(std.testing.allocator, 2);
+    defer workspace.deinit();
+    try simulation_analysis.properties.com_unwrapped(&workspace, coordinates.slice(), 2, 10, centers.slice());
+    const center_slices = centers.slice();
+    try std.testing.expectEqualSlices(f32, &.{ 0.25, 1.25, 2.25 }, center_slices.items(.x));
+    try std.testing.expectEqualSlices(f32, &.{ 1, 2, 3 }, center_slices.items(.r));
+    try std.testing.expectApproxEqAbs(@as(f32, 3.05), center_slices.items(.theta)[0], 1.0e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 3.3915927), center_slices.items(.theta)[1], 1.0e-5);
+    var velocities: simulation_analysis.properties.CylindricalFrameValues = .empty;
+    defer velocities.deinit(std.testing.allocator);
+    try velocities.resize(std.testing.allocator, 3);
+    try simulation_analysis.properties.com_velocity_unwrapped(centers.slice(), &.{ 0, 2, 4 }, 0.5, velocities.slice());
+    try std.testing.expectEqualSlices(f32, &.{ 1, 1, 1 }, velocities.slice().items(.x));
+    try std.testing.expectEqualSlices(f32, &.{ 1, 1, 1 }, velocities.slice().items(.r));
 }
 
 test "new conversion writes static metadata and frame shards" {
@@ -142,8 +161,19 @@ test "new conversion writes static metadata and frame shards" {
     defer std.testing.allocator.free(first_shard_path);
     var first_shard = try hdf5.File.openPath(std.testing.allocator, first_shard_path, .read_only);
     defer first_shard.deinit();
-    try std.testing.expect(!(try first_shard.objectExists("com_unwrapped")));
-    try std.testing.expect(!(try first_shard.objectExists("com_velocity_unwrapped")));
+    try std.testing.expect(try first_shard.objectExists("com_unwrapped"));
+    try std.testing.expect(try first_shard.objectExists("com_velocity_unwrapped"));
+    var first_com = try first_shard.openDataset("com_unwrapped");
+    defer first_com.deinit();
+    const first_com_shape = try first_com.shapeAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(first_com_shape);
+    try std.testing.expectEqualSlices(u64, &.{ 3, 1 }, first_com_shape);
+    var first_velocity = try first_shard.openDataset("com_velocity_unwrapped");
+    defer first_velocity.deinit();
+    try std.testing.expectEqual(@as(f64, 1.0), try first_velocity.readAttribute(f64, "timestep"));
+    var first_velocity_values: [3]f32 = undefined;
+    try first_velocity.readAll(f32, &first_velocity_values);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.03), first_velocity_values[0], 1.0e-6);
     var first_coords = try first_shard.openDataset("coords");
     defer first_coords.deinit();
     const first_shape = try first_coords.shapeAlloc(std.testing.allocator);
@@ -161,6 +191,13 @@ test "new conversion writes static metadata and frame shards" {
     defer std.testing.allocator.free(second_shard_path);
     var second_shard = try hdf5.File.openPath(std.testing.allocator, second_shard_path, .read_only);
     defer second_shard.deinit();
+    var second_velocity = try second_shard.openDataset("com_velocity_unwrapped");
+    defer second_velocity.deinit();
+    var second_velocity_values: [3]f32 = undefined;
+    try second_velocity.readAll(f32, &second_velocity_values);
+    try std.testing.expectApproxEqAbs(first_velocity_values[0], second_velocity_values[0], 1.0e-6);
+    try std.testing.expectApproxEqAbs(first_velocity_values[1], second_velocity_values[1], 1.0e-6);
+    try std.testing.expectApproxEqAbs(first_velocity_values[2], second_velocity_values[2], 1.0e-6);
     var second_coords = try second_shard.openDataset("coords");
     defer second_coords.deinit();
     var second_values: [9]f32 = undefined;
@@ -192,7 +229,7 @@ test "update adds a missing field without replacing established data" {
         .input_path = trajectory,
         .output_dir = output,
     });
-    try std.testing.expectEqual(@as(usize, 4), created.fields_written);
+    try std.testing.expectEqual(@as(usize, 6), created.fields_written);
     const shard_path = try std.fs.path.join(std.testing.allocator, &.{ output, "frames_000000.h5" });
     defer std.testing.allocator.free(shard_path);
     {
@@ -240,12 +277,15 @@ test "CLI parses the agreed package-only conversion interface" {
         "4",
         "--target-shard-mib",
         "128",
+        "--timestep",
+        "0.000001",
         "--update",
     });
     try std.testing.expectEqualStrings("trajectory.gsd", options.input_path);
     try std.testing.expectEqualStrings("analysis", options.output_dir);
     try std.testing.expectEqual(@as(?usize, 4), options.worker_count);
     try std.testing.expectEqual(@as(usize, 128 * 1024 * 1024), options.target_shard_bytes);
+    try std.testing.expectEqual(@as(f64, 0.000001), options.timestep);
     try std.testing.expectEqual(simulation_analysis.WriteMode.update, options.write_mode);
 
     try std.testing.expectError(error.UnknownArgument, simulation_analysis.cli.parseArgs(std.testing.allocator, &.{

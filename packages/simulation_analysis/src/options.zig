@@ -11,6 +11,7 @@ pub const Options = struct {
     output_dir: []const u8,
     worker_count: ?usize = null,
     target_shard_bytes: usize = 256 * 1024 * 1024,
+    timestep: f64 = 1.0,
     write_mode: WriteMode = .create,
     dry_run: bool = false,
 };

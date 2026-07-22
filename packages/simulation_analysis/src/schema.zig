@@ -1,6 +1,7 @@
 //! Versioned output schema declarations and implemented option validation.
 
 const Options = @import("options.zig").Options;
+const std = @import("std");
 
 pub const manifest_schema = "simulation_analysis.manifest.v1";
 pub const static_schema = "simulation_analysis.static.v1";
@@ -33,4 +34,5 @@ pub fn validateOptions(options: Options) !void {
     if (options.output_dir.len == 0) return error.EmptyOutputDirectory;
     if (options.worker_count) |count| if (count == 0) return error.InvalidWorkerCount;
     if (options.target_shard_bytes == 0) return error.InvalidShardSize;
+    if (!std.math.isFinite(options.timestep) or options.timestep <= 0) return error.InvalidTimestep;
 }

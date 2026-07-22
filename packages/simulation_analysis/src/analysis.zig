@@ -42,19 +42,13 @@ const MissingFields = struct {
     step: bool,
     box: bool,
     coords: bool,
-    com_unwrapped: bool,
-    com_velocity_unwrapped: bool,
     replace_coords: bool = false,
 
-    fn baseCount(self: MissingFields) usize {
+    fn count(self: MissingFields) usize {
         return @as(usize, @intFromBool(self.frame_index)) +
             @as(usize, @intFromBool(self.step)) +
             @as(usize, @intFromBool(self.box)) +
             @as(usize, @intFromBool(self.coords));
-    }
-
-    fn any(self: MissingFields) bool {
-        return self.baseCount() != 0 or self.com_unwrapped or self.com_velocity_unwrapped;
     }
 };
 
@@ -172,6 +166,8 @@ pub fn run(allocator: std.mem.Allocator, options: Options) !Summary {
     try input.readChunkBytes(particle_chunk, std.mem.asBytes(&particle_value));
     const particle_count: u64 = particle_value[0];
     if (particle_count == 0) return error.InvalidParticleCount;
+    var box: [6]f32 = undefined;
+    try readFrameChunk(&input, f32, 0, "configuration/box", &box);
 
     const ranges = try planShards(allocator, frame_count, particle_count, options.target_shard_bytes);
     defer allocator.free(ranges);
@@ -230,6 +226,14 @@ pub fn run(allocator: std.mem.Allocator, options: Options) !Summary {
         if (state.failure) |err| return err;
         fields_written += state.fields_written;
     }
+    fields_written += try writeComProperties(
+        allocator,
+        options.output_dir,
+        ranges,
+        particle_count,
+        box[0],
+        options.timestep,
+    );
     return .{ .frame_count = frame_count, .shard_count = ranges.len, .fields_written = fields_written };
 }
 
@@ -303,41 +307,32 @@ fn writeShard(state: *ShardState, shard_index: usize) !usize {
         .step = true,
         .box = true,
         .coords = true,
-        .com_unwrapped = true,
-        .com_velocity_unwrapped = true,
     };
-    if (!missing.any()) return 0;
+    if (missing.count() == 0) return 0;
 
     const frames = if (missing.frame_index) try allocator.alloc(u64, frame_count) else null;
     defer if (frames) |values| allocator.free(values);
-    const steps = if (missing.step or missing.com_velocity_unwrapped) try allocator.alloc(u64, frame_count) else null;
+    const steps = if (missing.step) try allocator.alloc(u64, frame_count) else null;
     defer if (steps) |values| allocator.free(values);
     const boxes = if (missing.box) try allocator.alloc(f32, frame_count * 6) else null;
     defer if (boxes) |values| allocator.free(values);
-    const properties_requested = missing.com_unwrapped or missing.com_velocity_unwrapped;
-    const raw_positions = if (missing.coords or properties_requested) try allocator.alloc(f32, particle_count * 3) else null;
+    const raw_positions = if (missing.coords) try allocator.alloc(f32, particle_count * 3) else null;
     defer if (raw_positions) |values| allocator.free(values);
     var positions: CartesianPositions = .empty;
     defer positions.deinit(allocator);
-    if (missing.coords or properties_requested) try positions.resize(allocator, particle_count);
+    if (missing.coords) try positions.resize(allocator, particle_count);
     var coordinates: CylindricalCoordinates = .empty;
     defer coordinates.deinit(allocator);
-    if (missing.coords or properties_requested) try coordinates.resize(allocator, coordinate_count);
-    var centers: properties.CylindricalFrameValues = .empty;
-    defer centers.deinit(allocator);
-    if (missing.com_unwrapped) try centers.resize(allocator, frame_count);
-    var center_velocities: properties.CylindricalFrameValues = .empty;
-    defer center_velocities.deinit(allocator);
-    if (missing.com_velocity_unwrapped) try center_velocities.resize(allocator, frame_count);
+    if (missing.coords) try coordinates.resize(allocator, coordinate_count);
 
-    if (missing.step or missing.box or missing.coords or properties_requested) {
+    if (missing.step or missing.box or missing.coords) {
         var input = try gsd.File.openRead(allocator, state.input_path);
         defer input.deinit();
         for (0..frame_count) |local_frame| {
             const frame = range.start + local_frame;
             if (steps) |values| try readFrameChunk(&input, u64, frame, "configuration/step", values[local_frame .. local_frame + 1]);
             if (boxes) |values| try readFrameChunk(&input, f32, 0, "configuration/box", values[local_frame * 6 ..][0..6]);
-            if (missing.coords or properties_requested) {
+            if (missing.coords) {
                 var particle_value: [1]u32 = undefined;
                 try readFrameChunk(&input, u32, 0, "particles/N", &particle_value);
                 if (particle_value[0] != state.particle_count) return error.VariableParticleCount;
@@ -351,21 +346,6 @@ fn writeShard(state: *ShardState, shard_index: usize) !usize {
     if (frames) |values| {
         for (values, 0..) |*frame, local_frame| frame.* = range.start + local_frame;
     }
-
-    const centers_ready = if (missing.com_unwrapped) blk: {
-        properties.com_unwrapped(coordinates.slice(), particle_count, centers.slice()) catch |err| switch (err) {
-            error.NotImplemented => break :blk false,
-            else => return err,
-        };
-        break :blk true;
-    } else false;
-    const center_velocities_ready = if (missing.com_velocity_unwrapped) blk: {
-        properties.com_velocity_unwrapped(coordinates.slice(), steps.?, particle_count, center_velocities.slice()) catch |err| switch (err) {
-            error.NotImplemented => break :blk false,
-            else => return err,
-        };
-        break :blk true;
-    } else false;
 
     if (state.serialize_hdf5) while (!state.hdf5_mutex.tryLock()) std.atomic.spinLoopHint();
     defer if (state.serialize_hdf5) state.hdf5_mutex.unlock();
@@ -406,17 +386,8 @@ fn writeShard(state: *ShardState, shard_index: usize) !usize {
         try dataset.writeHyperslab(f32, &.{ 1, 0, 0 }, &.{ 1, frame_count_u64, state.particle_count }, coordinate_slices.items(.theta));
         try dataset.writeHyperslab(f32, &.{ 2, 0, 0 }, &.{ 1, frame_count_u64, state.particle_count }, coordinate_slices.items(.r));
     }
-    var property_fields_written: usize = 0;
-    if (centers_ready) {
-        try writeCylindricalFrameProperty(&file, "com_unwrapped", frame_count_u64, centers.slice());
-        property_fields_written += 1;
-    }
-    if (center_velocities_ready) {
-        try writeCylindricalFrameProperty(&file, "com_velocity_unwrapped", frame_count_u64, center_velocities.slice());
-        property_fields_written += 1;
-    }
     try file.flush();
-    return missing.baseCount() + property_fields_written;
+    return missing.count();
 }
 
 fn writeCylindricalFrameProperty(
@@ -424,14 +395,124 @@ fn writeCylindricalFrameProperty(
     name: []const u8,
     frame_count: u64,
     values: properties.CylindricalFrameValues.Slice,
+    timestep: ?f64,
 ) !void {
     var dataset = try file.createDataset(f32, name, &.{ 3, frame_count }, .{ .chunk_shape = &.{ 1, frame_count } });
     defer dataset.deinit();
     try dataset.writeStringAttribute("components", "x,theta,r");
     try dataset.writeStringAttribute("layout", "component,frame");
+    if (timestep) |value| {
+        try dataset.writeAttribute(f64, "timestep", value);
+        try dataset.writeStringAttribute("time_basis", "simulation_step*timestep");
+    }
     try dataset.writeHyperslab(f32, &.{ 0, 0 }, &.{ 1, frame_count }, values.items(.x));
     try dataset.writeHyperslab(f32, &.{ 1, 0 }, &.{ 1, frame_count }, values.items(.theta));
     try dataset.writeHyperslab(f32, &.{ 2, 0 }, &.{ 1, frame_count }, values.items(.r));
+}
+
+fn writeComProperties(
+    allocator: std.mem.Allocator,
+    output_dir: []const u8,
+    ranges: []const ShardRange,
+    particle_count_u64: u64,
+    lx: f64,
+    timestep: f64,
+) !usize {
+    var properties_missing = false;
+    for (ranges, 0..) |_, shard_index| {
+        const path = try shardPath(allocator, output_dir, shard_index);
+        defer allocator.free(path);
+        var file = try hdf5.File.openPath(allocator, path, .read_only);
+        defer file.deinit();
+        if (!try file.objectExists("com_unwrapped") or !try file.objectExists("com_velocity_unwrapped")) {
+            properties_missing = true;
+        }
+    }
+    if (!properties_missing) return 0;
+
+    const particle_count = std.math.cast(usize, particle_count_u64) orelse return error.SizeOverflow;
+    const total_frames_u64 = ranges[ranges.len - 1].stop;
+    const total_frames = std.math.cast(usize, total_frames_u64) orelse return error.SizeOverflow;
+    var centers: properties.CylindricalFrameValues = .empty;
+    defer centers.deinit(allocator);
+    try centers.resize(allocator, total_frames);
+    var velocities: properties.CylindricalFrameValues = .empty;
+    defer velocities.deinit(allocator);
+    try velocities.resize(allocator, total_frames);
+    const steps = try allocator.alloc(u64, total_frames);
+    defer allocator.free(steps);
+    var workspace = try properties.com.Workspace.init(allocator, particle_count);
+    defer workspace.deinit();
+
+    for (ranges, 0..) |range, shard_index| {
+        const path = try shardPath(allocator, output_dir, shard_index);
+        defer allocator.free(path);
+        var file = try hdf5.File.openPath(allocator, path, .read_only);
+        defer file.deinit();
+        const shard_frames_u64 = range.stop - range.start;
+        const shard_frames = std.math.cast(usize, shard_frames_u64) orelse return error.SizeOverflow;
+        const coordinate_count = std.math.mul(usize, shard_frames, particle_count) catch return error.SizeOverflow;
+        var coordinates: CylindricalCoordinates = .empty;
+        defer coordinates.deinit(allocator);
+        try coordinates.resize(allocator, coordinate_count);
+        var coordinate_dataset = try file.openDataset("coords");
+        defer coordinate_dataset.deinit();
+        const coordinate_slices = coordinates.slice();
+        try coordinate_dataset.readHyperslab(f32, &.{ 0, 0, 0 }, &.{ 1, shard_frames_u64, particle_count_u64 }, coordinate_slices.items(.x));
+        try coordinate_dataset.readHyperslab(f32, &.{ 1, 0, 0 }, &.{ 1, shard_frames_u64, particle_count_u64 }, coordinate_slices.items(.theta));
+        try coordinate_dataset.readHyperslab(f32, &.{ 2, 0, 0 }, &.{ 1, shard_frames_u64, particle_count_u64 }, coordinate_slices.items(.r));
+        const start = std.math.cast(usize, range.start) orelse return error.SizeOverflow;
+        var step_dataset = try file.openDataset("step");
+        defer step_dataset.deinit();
+        try step_dataset.readAll(u64, steps[start..][0..shard_frames]);
+        try properties.com_unwrapped(
+            &workspace,
+            coordinates.slice(),
+            particle_count,
+            lx,
+            centers.slice().subslice(start, shard_frames),
+        );
+    }
+    try properties.com_velocity_unwrapped(centers.slice(), steps, timestep, velocities.slice());
+
+    var written: usize = 0;
+    for (ranges, 0..) |range, shard_index| {
+        const path = try shardPath(allocator, output_dir, shard_index);
+        defer allocator.free(path);
+        var file = try hdf5.File.openPath(allocator, path, .read_write);
+        defer file.deinit();
+        const shard_frames_u64 = range.stop - range.start;
+        const shard_frames = std.math.cast(usize, shard_frames_u64) orelse return error.SizeOverflow;
+        const start = std.math.cast(usize, range.start) orelse return error.SizeOverflow;
+        if (!try file.objectExists("com_unwrapped")) {
+            try writeCylindricalFrameProperty(
+                &file,
+                "com_unwrapped",
+                shard_frames_u64,
+                centers.slice().subslice(start, shard_frames),
+                null,
+            );
+            written += 1;
+        }
+        if (!try file.objectExists("com_velocity_unwrapped")) {
+            try writeCylindricalFrameProperty(
+                &file,
+                "com_velocity_unwrapped",
+                shard_frames_u64,
+                velocities.slice().subslice(start, shard_frames),
+                timestep,
+            );
+            written += 1;
+        }
+        try file.flush();
+    }
+    return written;
+}
+
+fn shardPath(allocator: std.mem.Allocator, output_dir: []const u8, shard_index: usize) ![]u8 {
+    const name = try std.fmt.allocPrint(allocator, "frames_{d:0>6}.h5", .{shard_index});
+    defer allocator.free(name);
+    return std.fs.path.join(allocator, &.{ output_dir, name });
 }
 
 fn deinterleaveCartesian(values: []const f32, positions: CartesianPositions.Slice) void {
@@ -477,8 +558,6 @@ fn inspectMissingFields(
         .step = !try file.objectExists("step"),
         .box = !try file.objectExists("box"),
         .coords = !coords_compatible,
-        .com_unwrapped = !try file.objectExists("com_unwrapped"),
-        .com_velocity_unwrapped = !try file.objectExists("com_velocity_unwrapped"),
         .replace_coords = coords_exists and !coords_compatible,
     };
 }
