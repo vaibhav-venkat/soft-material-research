@@ -1,6 +1,7 @@
 """Analyze and plot structural clusters from big-Lx safetensor outputs."""
 
 from __future__ import annotations
+from hexatic.constants.cylinder import PARTICLE_DIAMETER
 
 import argparse
 from dataclasses import dataclass
@@ -293,7 +294,7 @@ def _summarize(
         )
     sqrt_area = np.sqrt(area)
     absolute_area = case.absolute_area
-    absolute_sqrt_area = np.sqrt(absolute_area)
+    absolute_circ = 2*np.pi*np.sqrt(absolute_area/np.pi)
     area_mean, area_std = _weighted_mean_std(area, area)
     sqrt_area_mean, sqrt_area_std = _weighted_mean_std(sqrt_area, area)
     absolute_area_mean, absolute_area_std = _weighted_mean_std(
@@ -301,7 +302,7 @@ def _summarize(
         absolute_area,
     )
     absolute_sqrt_area_mean, absolute_sqrt_area_std = _weighted_mean_std(
-        absolute_sqrt_area,
+        absolute_circ,
         absolute_area,
     )
     return ClusterSummary(
@@ -321,7 +322,7 @@ def _summarize(
         absolute_area_weighted_std=absolute_area_std,
         absolute_sqrt_area_weighted_mean=absolute_sqrt_area_mean,
         absolute_sqrt_area_weighted_mode=_weighted_mode(
-            absolute_sqrt_area,
+            absolute_circ,
             absolute_area,
             absolute_sqrt_bins,
         ),
@@ -368,15 +369,16 @@ def _plot_mean_mode(cases: list[CaseClusters], output: Path) -> None:
     absolute_stds = np.asarray(
         [summary.absolute_area_weighted_std for summary in summaries]
     )
-    absolute_sqrt_means = np.asarray(
+    absolute_circ_means = np.asarray(
         [summary.absolute_sqrt_area_weighted_mean for summary in summaries]
     )
-    absolute_sqrt_modes = np.asarray(
+    absolute_circ_modes = np.asarray(
         [summary.absolute_sqrt_area_weighted_mode for summary in summaries]
     )
-    absolute_sqrt_stds = np.asarray(
+    absolute_circ_stds = np.asarray(
         [summary.absolute_sqrt_area_weighted_std for summary in summaries]
     )
+    ring_value_array = 4 * np.array([case.circumference_diameters for case in cases])/(PARTICLE_DIAMETER*2)
     figure, axes = plt.subplots(1, 4, figsize=(20.0, 4.4), constrained_layout=True)
     for axis, means, modes, stds, title, ylabel in (
         (
@@ -403,13 +405,68 @@ def _plot_mean_mode(cases: list[CaseClusters], output: Path) -> None:
             "Absolute cluster area versus axial-length multiplier",
             r"Absolute cluster area $A$",
         ),
+        # (
+        #     axes[3],
+        #     absolute_circ_means,
+        #     absolute_circ_modes,
+        #     absolute_circ_stds,
+        #     "Absolute cluster circumference scale versus axial-length multiplier",
+        #     r"Absolute cluster circumference scale $\sqrt{A}$",
+        # ),
+    ):
+        circumferences = sorted({case.circumference_diameters for case in cases})
+        colors = sns.color_palette("colorblind", n_colors=len(circumferences))
+        for color, circumference in zip(colors, circumferences, strict=True):
+            indices = [
+                index
+                for index, case in enumerate(cases)
+                if np.isclose(case.circumference_diameters, circumference)
+            ]
+            multipliers = np.asarray([cases[index].lx_multiplier for index in indices])
+            axis.plot(
+                multipliers,
+                means[indices],
+                color=color,
+                marker="o",
+                lw=2.0,
+                label=rf"Mean, $C={circumference:g}D$",
+            )
+            axis.plot(
+                multipliers,
+                modes[indices],
+                color=color,
+                marker="s",
+                ls="--",
+                lw=2.0,
+                label=rf"Mode, $C={circumference:g}D$",
+            )
+            axis.plot(
+                multipliers,
+                stds[indices],
+                color=color,
+                marker="^",
+                ls=":",
+                lw=2.0,
+                label=rf"Std., $C={circumference:g}D$",
+            )
+        axis.set(
+            title=title,
+            xlabel=r"Axial-length multiplier $L_x/L_{x,1}$",
+            ylabel=ylabel,
+        )
+        axis.set_xticks((1, 2, 4, 8, 16), ("1", "2", "4", "8", "16"))
+        axis.grid(color="0.9", lw=0.7)
+        axis.legend(frameon=False)
+        sns.despine(ax=axis)
+    for axis, means, modes, stds, ring, title, ylabel in (
         (
             axes[3],
-            absolute_sqrt_means,
-            absolute_sqrt_modes,
-            absolute_sqrt_stds,
-            "Absolute cluster circumference scale versus axial-length multiplier",
-            r"Absolute cluster circumference scale $\sqrt{A}$",
+            absolute_circ_means,
+            absolute_circ_modes,
+            absolute_circ_stds,
+            ring_value_array,
+            "Absolute cluster circumference versus axial-length multiplier",
+            r"Absolute cluster circumference $2\pi\sqrt{A/pi}$",
         ),
     ):
         circumferences = sorted({case.circumference_diameters for case in cases})
@@ -446,6 +503,15 @@ def _plot_mean_mode(cases: list[CaseClusters], output: Path) -> None:
                 ls=":",
                 lw=2.0,
                 label=rf"Std., $C={circumference:g}D$",
+            )
+            axis.plot(
+               multipliers,
+               ring[indices],
+               color = color,
+               marker = "*",
+               ls="--",
+               lw = 2.0,
+               label = rf"Ring circumference, $C={circumference:g}D"
             )
         axis.set(
             title=title,
