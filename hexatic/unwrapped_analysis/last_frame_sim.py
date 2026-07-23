@@ -122,7 +122,7 @@ def _inner_lattice_positions(
     box: np.ndarray,
     cylinder_radius: float,
 ) -> np.ndarray:
-    """Build a dense rectangular lattice strictly inside the cylinder."""
+    """Build a non-overlapping rectangular lattice inside the cylinder."""
     analysis = cylinder.ANALYSIS
     lx = float(box[0])
     axial_extent = 0.5 * lx - analysis.last_frame_lattice_axial_gap
@@ -132,10 +132,29 @@ def _inner_lattice_positions(
         raise ValueError("Configured lattice gaps leave no interior lattice volume")
 
     target_spacing = analysis.last_frame_lattice_spacing
-    n_axial = max(2, round(2.0 * axial_extent / target_spacing) + 1)
-    n_transverse = max(2, round(2.0 * transverse_extent / target_spacing) + 1)
+    n_axial = max(
+        2,
+        math.floor(2.0 * axial_extent / target_spacing) + 1,
+    )
+    n_transverse = max(
+        2,
+        math.floor(2.0 * transverse_extent / target_spacing) + 1,
+    )
     x = np.linspace(-axial_extent, axial_extent, n_axial)
     transverse = np.linspace(-transverse_extent, transverse_extent, n_transverse)
+    spacings = (
+        float(np.min(np.diff(x))),
+        lx - float(x[-1] - x[0]),
+        float(np.min(np.diff(transverse))),
+    )
+    minimum_spacing = min(spacings)
+    tolerance = 1.0e-12 * max(1.0, target_spacing)
+    if minimum_spacing + tolerance < target_spacing:
+        raise ValueError(
+            "Refill lattice contains overlapping particles: minimum "
+            f"center spacing={minimum_spacing:.12g}, required "
+            f"spacing={target_spacing:.12g}"
+        )
     xv, yv, zv = np.meshgrid(x, transverse, transverse, indexing="ij")
     return np.column_stack((xv.ravel(), yv.ravel(), zv.ravel()))
 
