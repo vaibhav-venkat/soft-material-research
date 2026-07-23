@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 import itertools
 import math
+import multiprocessing
 from pathlib import Path
 
 import gsd.hoomd
@@ -372,6 +374,7 @@ def run_case(
     overwrite: bool = False,
     device_name: str = "gpu",
     gpu_id: int | None = None,
+    variant_gpu_ids: tuple[int, int] | None = None,
     analysis_backend: str = "auto",
     require_analysis_gpu: bool = False,
     particle_block_size: int = 2048,
@@ -381,6 +384,13 @@ def run_case(
         raise ValueError("run_steps must be non-negative")
     if trajectory_write_period < 1:
         raise ValueError("trajectory_write_period must be positive")
+    if variant_gpu_ids is not None:
+        if device_name != "gpu":
+            raise ValueError("--variant-gpu-ids requires --device gpu")
+        if gpu_id is not None:
+            raise ValueError("gpu_id and variant_gpu_ids are mutually exclusive")
+        if variant_gpu_ids[0] == variant_gpu_ids[1]:
+            raise ValueError("variant_gpu_ids must name two distinct GPUs")
 
     source_gsd = case.trajectory_gsd if input_gsd is None else input_gsd
     if not source_gsd.is_file():
@@ -434,18 +444,50 @@ def run_case(
                 )
         cases_and_paths.append((flip_shell, analysis_case, paths))
 
-    for flip_shell, analysis_case, paths in cases_and_paths:
-        _run_variant(
-            case,
-            analysis_case,
-            source_gsd,
-            paths,
-            flip_shell,
-            run_steps,
-            trajectory_write_period,
-            device_name,
-            gpu_id,
+    if variant_gpu_ids is None:
+        for flip_shell, analysis_case, paths in cases_and_paths:
+            _run_variant(
+                case,
+                analysis_case,
+                source_gsd,
+                paths,
+                flip_shell,
+                run_steps,
+                trajectory_write_period,
+                device_name,
+                gpu_id,
+            )
+    else:
+        print(
+            "[last-frame] running variants concurrently on GPUs "
+            f"{variant_gpu_ids[0]} and {variant_gpu_ids[1]}",
+            flush=True,
         )
+        spawn_context = multiprocessing.get_context("spawn")
+        with ProcessPoolExecutor(
+            max_workers=2,
+            mp_context=spawn_context,
+        ) as executor:
+            futures = [
+                executor.submit(
+                    _run_variant,
+                    case,
+                    analysis_case,
+                    source_gsd,
+                    paths,
+                    flip_shell,
+                    run_steps,
+                    trajectory_write_period,
+                    device_name,
+                    variant_gpu_id,
+                )
+                for (
+                    (flip_shell, analysis_case, paths),
+                    variant_gpu_id,
+                ) in zip(cases_and_paths, variant_gpu_ids, strict=True)
+            ]
+            for future in futures:
+                future.result()
 
     for _flip_shell, analysis_case, _paths in cases_and_paths:
         print(
@@ -467,8 +509,8 @@ def run_case(
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Refill the last input frame and sequentially simulate both its "
-            "original and antipodally flipped frozen shells."
+            "Refill the last input frame and simulate both its original and "
+            "antipodally flipped frozen shells."
         )
     )
     parser.add_argument("--case", required=True)
@@ -498,7 +540,23 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--device", choices=("cpu", "gpu"), default="gpu")
     parser.add_argument("--overwrite", action="store_true")
-    parser.add_argument("--gpu-id", type=int, default=None)
+    gpu_group = parser.add_mutually_exclusive_group()
+    gpu_group.add_argument(
+        "--gpu-id",
+        type=int,
+        default=None,
+        help="GPU used for both variants, which run sequentially.",
+    )
+    gpu_group.add_argument(
+        "--variant-gpu-ids",
+        type=int,
+        nargs=2,
+        metavar=("UNFLIPPED_GPU", "FLIPPED_GPU"),
+        help=(
+            "Run the unflipped and flipped simulations concurrently on two "
+            "distinct GPUs. Analysis remains sequential."
+        ),
+    )
     parser.add_argument(
         "--analysis-backend",
         choices=("auto", "jax", "numpy"),
@@ -521,6 +579,11 @@ def main() -> None:
         overwrite=args.overwrite,
         device_name=args.device,
         gpu_id=args.gpu_id,
+        variant_gpu_ids=(
+            tuple(args.variant_gpu_ids)
+            if args.variant_gpu_ids is not None
+            else None
+        ),
         analysis_backend=args.analysis_backend,
         require_analysis_gpu=args.require_analysis_gpu,
         particle_block_size=args.particle_block_size,
