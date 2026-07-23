@@ -397,7 +397,11 @@ def _summarize(
     )
 
 
-def _plot_mean_mode(cases: list[CaseClusters], output: Path) -> None:
+def _plot_mean_mode(
+    cases: list[CaseClusters],
+    output: Path,
+    particle_diameter: float,
+) -> None:
     sns = _style()
     area_bins = _common_bins(cases)
     circumference_ratio_values = np.concatenate(
@@ -458,7 +462,12 @@ def _plot_mean_mode(cases: list[CaseClusters], output: Path) -> None:
     absolute_circ_stds = np.asarray(
         [summary.absolute_sqrt_area_weighted_std for summary in summaries]
     )
-    ring_value_array = np.asarray([case.circumference for case in cases])
+    ring_value_array = np.asarray(
+        [
+            2.0 * case.circumference + np.pi * particle_diameter
+            for case in cases
+        ]
+    )
     figure, axes = plt.subplots(1, 4, figsize=(20.0, 4.4), constrained_layout=True)
     for axis, means, modes, stds, title, ylabel in (
         (
@@ -591,7 +600,7 @@ def _plot_mean_mode(cases: list[CaseClusters], output: Path) -> None:
                marker = "*",
                ls="--",
                lw = 2.0,
-               label = rf"Ring circumference, $C={circumference:g}D"
+               label = rf"Thin-ring hull $2C+\pi D$, $C={circumference:g}D$"
             )
         axis.set(
             title=title,
@@ -692,7 +701,7 @@ def main() -> None:
         names = ", ".join(str(path) for path in existing)
         raise FileExistsError(f"Refusing to replace {names}; pass --overwrite")
     _plot_distributions(cases, distribution_output)
-    _plot_mean_mode(cases, summary_output)
+    _plot_mean_mode(cases, summary_output, options.particle_diameter)
     print(f"wrote {distribution_output}")
     print(f"wrote {summary_output}")
 
