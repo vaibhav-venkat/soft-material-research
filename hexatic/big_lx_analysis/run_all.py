@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 import shutil
 
@@ -13,7 +14,8 @@ import numpy as np
 
 from hexatic.constants import cylinder
 
-from .clusters import ClusterOptions, ClusterRatioMode, analyze_clusters
+from .cluster_circ import cluster_hulls
+from .clusters import ClusterOptions, analyze_clusters
 from .dynamics import DynamicsResult
 from .laplacian import LaplacianOptions, LaplacianResult, analyze_laplacian
 from .run_dynamics import (
@@ -235,7 +237,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--misorientation-degrees", type=float, default=5.0)
     parser.add_argument("--neighbor-radius-diameters", type=float, default=1.7272)
     parser.add_argument("--minimum-particles", type=int, default=2)
-    parser.add_argument("--particle-diameter", type=float, default=1.0)
+    parser.add_argument(
+        "--particle-diameter",
+        type=float,
+        default=float(cylinder.PARTICLE_DIAMETER),
+    )
     return parser.parse_args()
 
 
@@ -276,7 +282,6 @@ def main() -> None:
         misorientation_degrees=args.misorientation_degrees,
         neighbor_radius_diameters=args.neighbor_radius_diameters,
         minimum_particles=args.minimum_particles, particle_diameter=args.particle_diameter,
-        ratio_mode=ClusterRatioMode.AREA_FRACTION,
     )
     dynamics: dict[str, tuple[str, list[DynamicsResult]]] = {}
     laplace: dict[str, tuple[str, list[LaplacianResult]]] = {}
@@ -286,9 +291,25 @@ def main() -> None:
         l = analyze_laplacian(replicate.static_file, replicate.shard_files, laplacian_options)
         d = l.dynamics
         c = analyze_clusters(replicate.static_file, replicate.shard_files, cluster_options)
+        case_metadata = json.loads(replicate.manifest.read_text())["case"]
+        lx = float(case_metadata["lx"])
+        circumference = float(case_metadata["circumference"])
+        hulls = cluster_hulls(
+            c.clusters,
+            particle_diameter=args.particle_diameter,
+        )
+        area_ratios = np.asarray(
+            [hull.area / (lx * circumference) for hull in hulls],
+            dtype=np.float64,
+        )
+        area_ratios = area_ratios[
+            np.isfinite(area_ratios) & (area_ratios > 0.0)
+        ]
         dynamics.setdefault(replicate.case_id, (replicate.label, []))[1].append(d)
         laplace.setdefault(replicate.case_id, (replicate.label, []))[1].append(l)
-        cluster_samples.setdefault(replicate.case_id, (replicate.label, []))[1].append(c.ratios)
+        cluster_samples.setdefault(replicate.case_id, (replicate.label, []))[1].append(
+            area_ratios
+        )
 
     summaries = {case_id: _summarize(case_id, label, values)
                  for case_id, (label, values) in sorted(dynamics.items())}

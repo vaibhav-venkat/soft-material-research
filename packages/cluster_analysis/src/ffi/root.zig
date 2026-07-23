@@ -17,17 +17,18 @@ pub const COptions = extern struct {
     neighbor_radius_diameters: f64,
     minimum_particles: usize,
     particle_diameter: f64,
-    ratio_mode: u8,
 };
 
 pub const F64Buffer = extern struct { ptr: ?[*]f64, len: usize };
+pub const UsizeBuffer = extern struct { ptr: ?[*]usize, len: usize };
 pub const CResult = extern struct {
-    ratios: F64Buffer,
+    points: F64Buffer,
+    offsets: UsizeBuffer,
     owner: ?*anyopaque,
 };
 
 pub export fn cluster_analysis_api_version() callconv(.c) u32 {
-    return 2;
+    return 3;
 }
 
 pub export fn cluster_analysis_run(
@@ -38,9 +39,7 @@ pub export fn cluster_analysis_run(
     output: *CResult,
 ) callconv(.c) c_int {
     output.* = std.mem.zeroes(CResult);
-    if (path_count == 0 or c_options.ratio_mode > @intFromEnum(options_module.RatioMode.sqrt_area_fraction)) {
-        return 1;
-    }
+    if (path_count == 0) return 1;
     const owner = std.heap.page_allocator.create(Owner) catch return 2;
     owner.* = .{ .gpa = .{} };
     var keep_owner = false;
@@ -62,7 +61,11 @@ pub export fn cluster_analysis_run(
         else => 3,
     };
     output.* = .{
-        .ratios = .{ .ptr = value.ratios.ptr, .len = value.ratios.len },
+        .points = .{
+            .ptr = if (value.points.len == 0) null else @ptrCast(value.points.ptr),
+            .len = value.points.len * 2,
+        },
+        .offsets = .{ .ptr = value.offsets.ptr, .len = value.offsets.len },
         .owner = owner,
     };
     keep_owner = true;
@@ -75,7 +78,13 @@ pub export fn cluster_analysis_release(output: *CResult) callconv(.c) void {
         return;
     };
     const owner: *Owner = @ptrCast(@alignCast(opaque_owner));
-    if (output.ratios.ptr) |ptr| owner.gpa.allocator().free(ptr[0..output.ratios.len]);
+    if (output.points.ptr) |ptr| {
+        const point_ptr: [*][2]f64 = @ptrCast(@alignCast(ptr));
+        owner.gpa.allocator().free(point_ptr[0 .. output.points.len / 2]);
+    }
+    if (output.offsets.ptr) |ptr| {
+        owner.gpa.allocator().free(ptr[0..output.offsets.len]);
+    }
     output.* = std.mem.zeroes(CResult);
     destroyOwner(owner);
 }
@@ -89,7 +98,6 @@ fn fromCOptions(value: COptions) options_module.Options {
         .neighbor_radius_diameters = value.neighbor_radius_diameters,
         .minimum_particles = value.minimum_particles,
         .particle_diameter = value.particle_diameter,
-        .ratio_mode = @enumFromInt(value.ratio_mode),
     };
 }
 

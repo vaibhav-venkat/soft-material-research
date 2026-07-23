@@ -23,7 +23,8 @@ const WorkerState = struct {
     particle_count: usize,
     periods: [2]f64,
     options: Options,
-    ratios: std.ArrayList(f64) = .empty,
+    points: std.ArrayList([2]f64) = .empty,
+    offsets: std.ArrayList(usize) = .empty,
     failure: ?anyerror = null,
 };
 
@@ -99,7 +100,10 @@ pub fn analyze(
             .options = options,
         };
     }
-    defer for (states) |*state| state.ratios.deinit(allocator);
+    defer for (states) |*state| {
+        state.points.deinit(allocator);
+        state.offsets.deinit(allocator);
+    };
 
     const threads = try allocator.alloc(std.Thread, worker_count - 1);
     defer allocator.free(threads);
@@ -115,11 +119,23 @@ pub fn analyze(
     for (threads) |thread| thread.join();
     for (states) |state| if (state.failure) |err| return err;
 
-    var ratios: std.ArrayList(f64) = .empty;
-    errdefer ratios.deinit(allocator);
-    for (states) |state| try ratios.appendSlice(allocator, state.ratios.items);
+    var points: std.ArrayList([2]f64) = .empty;
+    errdefer points.deinit(allocator);
+    var offsets: std.ArrayList(usize) = .empty;
+    errdefer offsets.deinit(allocator);
+    try offsets.append(allocator, 0);
+    for (states) |state| {
+        const base = points.items.len;
+        try points.appendSlice(allocator, state.points.items);
+        for (state.offsets.items[1..]) |offset| {
+            try offsets.append(allocator, base + offset);
+        }
+    }
 
-    return .{ .ratios = try ratios.toOwnedSlice(allocator) };
+    return .{
+        .points = try points.toOwnedSlice(allocator),
+        .offsets = try offsets.toOwnedSlice(allocator),
+    };
 }
 
 fn analyzeFrames(state: *WorkerState) void {
@@ -143,6 +159,10 @@ fn analyzeFrames(state: *WorkerState) void {
         return;
     };
     defer workspace.deinit(state.allocator);
+    state.offsets.append(state.allocator, 0) catch |err| {
+        state.failure = err;
+        return;
+    };
 
     while (true) {
         const job_index = state.next_job.fetchAdd(1, .monotonic);
@@ -162,7 +182,7 @@ fn analyzeFrames(state: *WorkerState) void {
             state.failure = err;
             return;
         };
-        clusters.appendStructuralFrameRatios(
+        clusters.appendStructuralFrameClusters(
             state.allocator,
             &workspace,
             .{
@@ -172,7 +192,8 @@ fn analyzeFrames(state: *WorkerState) void {
                 .periods = state.periods,
             },
             state.options,
-            &state.ratios,
+            &state.points,
+            &state.offsets,
         ) catch |err| {
             state.failure = err;
             return;

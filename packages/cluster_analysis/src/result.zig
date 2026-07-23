@@ -2,11 +2,15 @@
 
 const std = @import("std");
 
-/// One ratio per structural cluster, pooled over the selected frames.
+/// Ragged, periodically unwrapped cluster coordinates pooled over selected frames.
+///
+/// Cluster `i` occupies `points[offsets[i]..offsets[i + 1]]`.
 pub const Result = struct {
-    ratios: []f64,
+    points: [][2]f64,
+    offsets: []usize,
 
     pub fn deinit(self: Result, allocator: std.mem.Allocator) void {
-        allocator.free(self.ratios);
+        allocator.free(self.offsets);
+        allocator.free(self.points);
     }
 };

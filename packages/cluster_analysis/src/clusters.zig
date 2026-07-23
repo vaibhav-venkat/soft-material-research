@@ -21,27 +21,43 @@ pub const Workspace = struct {
     seen: []usize,
     parent: []usize,
     component_sizes: []usize,
+    component_offsets: []usize,
+    component_cursors: []usize,
+    degrees: []usize,
+    adjacency_offsets: []usize,
+    adjacency_cursors: []usize,
+    queue: []usize,
     order: []StructuralOrder,
+    unwrapped: [][2]f64,
     rank: []u8,
     present: []bool,
+    assigned: []bool,
     spatial_edges: std.ArrayList([2]usize) = .empty,
+    adjacency: std.ArrayList(usize) = .empty,
 
     pub fn init(allocator: std.mem.Allocator, particle_count: usize) !Workspace {
         if (particle_count == 0) return error.NoParticles;
-        const storage_len = try std.math.mul(usize, particle_count, 5);
+        const storage_len = try std.math.mul(usize, particle_count, 11);
         const usize_storage = try allocator.alloc(usize, storage_len);
         errdefer allocator.free(usize_storage);
         const order = try allocator.alloc(StructuralOrder, particle_count);
         errdefer allocator.free(order);
+        const unwrapped = try allocator.alloc([2]f64, particle_count);
+        errdefer allocator.free(unwrapped);
         const rank = try allocator.alloc(u8, particle_count);
         errdefer allocator.free(rank);
         const present = try allocator.alloc(bool, particle_count);
         errdefer allocator.free(present);
+        const assigned = try allocator.alloc(bool, particle_count);
+        errdefer allocator.free(assigned);
 
         var spatial_edges: std.ArrayList([2]usize) = .empty;
         errdefer spatial_edges.deinit(allocator);
         const expected_edges = try std.math.mul(usize, particle_count, 4);
         try spatial_edges.ensureTotalCapacity(allocator, expected_edges);
+        var adjacency: std.ArrayList(usize) = .empty;
+        errdefer adjacency.deinit(allocator);
+        try adjacency.ensureTotalCapacity(allocator, 2 * expected_edges);
 
         return .{
             .particle_count = particle_count,
@@ -51,17 +67,29 @@ pub const Workspace = struct {
             .seen = usize_storage[2 * particle_count .. 3 * particle_count],
             .parent = usize_storage[3 * particle_count .. 4 * particle_count],
             .component_sizes = usize_storage[4 * particle_count .. 5 * particle_count],
+            .component_offsets = usize_storage[5 * particle_count .. 6 * particle_count],
+            .component_cursors = usize_storage[6 * particle_count .. 7 * particle_count],
+            .degrees = usize_storage[7 * particle_count .. 8 * particle_count],
+            .adjacency_offsets = usize_storage[8 * particle_count .. 9 * particle_count],
+            .adjacency_cursors = usize_storage[9 * particle_count .. 10 * particle_count],
+            .queue = usize_storage[10 * particle_count .. 11 * particle_count],
             .order = order,
+            .unwrapped = unwrapped,
             .rank = rank,
             .present = present,
+            .assigned = assigned,
             .spatial_edges = spatial_edges,
+            .adjacency = adjacency,
         };
     }
 
     pub fn deinit(self: *Workspace, allocator: std.mem.Allocator) void {
+        self.adjacency.deinit(allocator);
         self.spatial_edges.deinit(allocator);
+        allocator.free(self.assigned);
         allocator.free(self.present);
         allocator.free(self.rank);
+        allocator.free(self.unwrapped);
         allocator.free(self.order);
         allocator.free(self.usize_storage);
         self.* = undefined;
@@ -116,19 +144,33 @@ pub fn analyzeStructuralFrameWithWorkspace(
     frame: schema.StructuralFrame,
     options: Options,
 ) !Result {
-    var ratios: std.ArrayList(f64) = .empty;
-    errdefer ratios.deinit(allocator);
-    try appendStructuralFrameRatios(allocator, workspace, frame, options, &ratios);
-    return .{ .ratios = try ratios.toOwnedSlice(allocator) };
+    var points: std.ArrayList([2]f64) = .empty;
+    errdefer points.deinit(allocator);
+    var offsets: std.ArrayList(usize) = .empty;
+    errdefer offsets.deinit(allocator);
+    try offsets.append(allocator, 0);
+    try appendStructuralFrameClusters(
+        allocator,
+        workspace,
+        frame,
+        options,
+        &points,
+        &offsets,
+    );
+    return .{
+        .points = try points.toOwnedSlice(allocator),
+        .offsets = try offsets.toOwnedSlice(allocator),
+    };
 }
 
-/// Append one frame's samples directly to a worker-owned output buffer.
-pub fn appendStructuralFrameRatios(
+/// Append one frame's ragged cluster coordinates to worker-owned buffers.
+pub fn appendStructuralFrameClusters(
     allocator: std.mem.Allocator,
     workspace: *Workspace,
     frame: schema.StructuralFrame,
     options: Options,
-    ratios: *std.ArrayList(f64),
+    points: *std.ArrayList([2]f64),
+    offsets: *std.ArrayList(usize),
 ) !void {
     try schema.validateOptions(options);
     try schema.validateStructuralFrame(frame);
@@ -191,6 +233,7 @@ pub fn appendStructuralFrameRatios(
     components.reset();
     @memset(workspace.present, false);
     const maximum_misorientation = options.misorientation_degrees * std.math.pi / 180.0;
+    var accepted_edge_count: usize = 0;
     for (workspace.spatial_edges.items) |edge| {
         const left = edge[0];
         const right = edge[1];
@@ -202,7 +245,10 @@ pub fn appendStructuralFrameRatios(
         components.unionSets(left, right);
         workspace.present[left] = true;
         workspace.present[right] = true;
+        workspace.spatial_edges.items[accepted_edge_count] = edge;
+        accepted_edge_count += 1;
     }
+    workspace.spatial_edges.items.len = accepted_edge_count;
 
     @memset(workspace.component_sizes, 0);
     for (workspace.present, 0..) |is_present, particle_index| {
@@ -210,16 +256,82 @@ pub fn appendStructuralFrameRatios(
         workspace.component_sizes[components.find(particle_index)] += 1;
     }
 
-    const particle_area = std.math.pi * options.particle_diameter * options.particle_diameter / 4.0;
-    const surface_area = frame.periods[0] * frame.periods[1];
-    for (workspace.component_sizes) |component_size| {
+    try unwrapAcceptedComponents(allocator, workspace, frame, &components);
+
+    const frame_point_start = points.items.len;
+    var selected_point_count: usize = 0;
+    @memset(workspace.component_offsets, empty_cell);
+    for (workspace.component_sizes, 0..) |component_size, root| {
         if (component_size < options.minimum_particles) continue;
-        const count: f64 = @floatFromInt(component_size);
-        const area_fraction = count * particle_area / surface_area;
-        try ratios.append(allocator, switch (options.ratio_mode) {
-            .area_fraction => area_fraction,
-            .sqrt_area_fraction => @sqrt(area_fraction),
-        });
+        workspace.component_offsets[root] = frame_point_start + selected_point_count;
+        workspace.component_cursors[root] = workspace.component_offsets[root];
+        selected_point_count = try std.math.add(usize, selected_point_count, component_size);
+        try offsets.append(allocator, frame_point_start + selected_point_count);
+    }
+    try points.resize(allocator, frame_point_start + selected_point_count);
+    for (workspace.present, workspace.unwrapped, 0..) |is_present, point, particle_index| {
+        if (!is_present) continue;
+        const root = components.find(particle_index);
+        if (workspace.component_offsets[root] == empty_cell) continue;
+        points.items[workspace.component_cursors[root]] = point;
+        workspace.component_cursors[root] += 1;
+    }
+}
+
+fn unwrapAcceptedComponents(
+    allocator: std.mem.Allocator,
+    workspace: *Workspace,
+    frame: schema.StructuralFrame,
+    components: *DisjointSet,
+) !void {
+    @memset(workspace.degrees, 0);
+    for (workspace.spatial_edges.items) |edge| {
+        workspace.degrees[edge[0]] += 1;
+        workspace.degrees[edge[1]] += 1;
+    }
+    var adjacency_count: usize = 0;
+    for (workspace.degrees, 0..) |degree, particle_index| {
+        workspace.adjacency_offsets[particle_index] = adjacency_count;
+        workspace.adjacency_cursors[particle_index] = adjacency_count;
+        adjacency_count = try std.math.add(usize, adjacency_count, degree);
+    }
+    try workspace.adjacency.resize(allocator, adjacency_count);
+    for (workspace.spatial_edges.items) |edge| {
+        workspace.adjacency.items[workspace.adjacency_cursors[edge[0]]] = edge[1];
+        workspace.adjacency_cursors[edge[0]] += 1;
+        workspace.adjacency.items[workspace.adjacency_cursors[edge[1]]] = edge[0];
+        workspace.adjacency_cursors[edge[1]] += 1;
+    }
+
+    @memset(workspace.assigned, false);
+    for (workspace.present, 0..) |is_present, seed| {
+        if (!is_present or workspace.assigned[seed]) continue;
+        const root = components.find(seed);
+        if (workspace.component_sizes[root] < 2) continue;
+        workspace.assigned[seed] = true;
+        workspace.unwrapped[seed] = frame.points[seed];
+        var queue_start: usize = 0;
+        var queue_stop: usize = 1;
+        workspace.queue[0] = seed;
+        while (queue_start < queue_stop) : (queue_start += 1) {
+            const left = workspace.queue[queue_start];
+            const start = workspace.adjacency_offsets[left];
+            const stop = start + workspace.degrees[left];
+            for (workspace.adjacency.items[start..stop]) |right| {
+                if (workspace.assigned[right]) continue;
+                var displacement: [2]f64 = undefined;
+                for (0..2) |axis| {
+                    displacement[axis] = frame.points[right][axis] - frame.points[left][axis];
+                    displacement[axis] -= frame.periods[axis] *
+                        @round(displacement[axis] / frame.periods[axis]);
+                    workspace.unwrapped[right][axis] =
+                        workspace.unwrapped[left][axis] + displacement[axis];
+                }
+                workspace.assigned[right] = true;
+                workspace.queue[queue_stop] = right;
+                queue_stop += 1;
+            }
+        }
     }
 }
 

@@ -1,4 +1,4 @@
-"""Python binding for structural crystal-cluster ratio samples."""
+"""Python binding for structural crystal-cluster point samples."""
 
 from __future__ import annotations
 
@@ -6,20 +6,22 @@ import ctypes
 import os
 from collections.abc import Sequence
 from dataclasses import dataclass
-from enum import IntEnum
 from pathlib import Path
 
 import numpy as np
 from numpy.typing import NDArray
 
-from ._native import F64Buffer, copy_f64, encode_paths, load_library, raise_for_status
+from hexatic.constants.cylinder import PARTICLE_DIAMETER
 
-
-class ClusterRatioMode(IntEnum):
-    """Normalization applied to each cluster area."""
-
-    AREA_FRACTION = 0
-    SQRT_AREA_FRACTION = 1
+from ._native import (
+    F64Buffer,
+    UsizeBuffer,
+    copy_f64,
+    copy_usize,
+    encode_paths,
+    load_library,
+    raise_for_status,
+)
 
 
 @dataclass(frozen=True)
@@ -30,15 +32,22 @@ class ClusterOptions:
     misorientation_degrees: float = 5.0
     neighbor_radius_diameters: float = 1.7272
     minimum_particles: int = 2
-    particle_diameter: float = 1.0
-    ratio_mode: ClusterRatioMode = ClusterRatioMode.SQRT_AREA_FRACTION
+    particle_diameter: float = PARTICLE_DIAMETER
 
 
 @dataclass(frozen=True)
 class ClusterResult:
-    """One selected area ratio per structural cluster."""
+    """Ragged, periodically unwrapped `(x, r theta)` cluster centers."""
 
-    ratios: NDArray[np.float64]
+    points: NDArray[np.float64]
+    offsets: NDArray[np.intp]
+
+    @property
+    def clusters(self) -> tuple[NDArray[np.float64], ...]:
+        return tuple(
+            self.points[start:stop]
+            for start, stop in zip(self.offsets[:-1], self.offsets[1:], strict=True)
+        )
 
 
 class _NativeOptions(ctypes.Structure):
@@ -51,12 +60,15 @@ class _NativeOptions(ctypes.Structure):
         ("neighbor_radius_diameters", ctypes.c_double),
         ("minimum_particles", ctypes.c_size_t),
         ("particle_diameter", ctypes.c_double),
-        ("ratio_mode", ctypes.c_uint8),
     ]
 
 
 class _NativeResult(ctypes.Structure):
-    _fields_ = [("ratios", F64Buffer), ("owner", ctypes.c_void_p)]
+    _fields_ = [
+        ("points", F64Buffer),
+        ("offsets", UsizeBuffer),
+        ("owner", ctypes.c_void_p),
+    ]
 
 
 def analyze_clusters(
@@ -64,12 +76,12 @@ def analyze_clusters(
     safetensor_files: str | Path | Sequence[str | Path],
     options: ClusterOptions = ClusterOptions(),
 ) -> ClusterResult:
-    """Run Zig structural clustering and copy its ratio samples into NumPy."""
+    """Run Zig structural clustering and copy its ragged point samples."""
     library = load_library("cluster_analysis")
     version = library.cluster_analysis_api_version
     version.argtypes = []
     version.restype = ctypes.c_uint32
-    if version() != 2:
+    if version() != 3:
         raise RuntimeError("cluster_analysis native library has an incompatible ABI")
 
     run = library.cluster_analysis_run
@@ -96,7 +108,6 @@ def analyze_clusters(
         options.neighbor_radius_diameters,
         options.minimum_particles,
         options.particle_diameter,
-        int(options.ratio_mode),
     )
     native_result = _NativeResult()
     status = run(
@@ -108,6 +119,10 @@ def analyze_clusters(
     )
     raise_for_status(status, "cluster_analysis")
     try:
-        return ClusterResult(ratios=copy_f64(native_result.ratios))
+        points = copy_f64(native_result.points).reshape((-1, 2))
+        offsets = copy_usize(native_result.offsets)
+        if offsets.size == 0 or offsets[0] != 0 or offsets[-1] != points.shape[0]:
+            raise RuntimeError("cluster_analysis returned invalid cluster offsets")
+        return ClusterResult(points=points, offsets=offsets)
     finally:
         release(ctypes.byref(native_result))

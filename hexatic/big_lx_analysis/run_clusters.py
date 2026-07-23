@@ -16,7 +16,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 from numpy.typing import NDArray
 
-from .clusters import ClusterOptions, ClusterRatioMode, analyze_clusters
+from .cluster_circ import cluster_hulls
+from .clusters import ClusterOptions, analyze_clusters
 from .run_dynamics import _collect_manifests, _load_replicate, _style
 
 
@@ -27,14 +28,21 @@ class CaseClusters:
     lx: float
     lx_multiplier: int
     circumference_diameters: float
+    circumference: float
     surface_area: float
     replicate_count: int
     area_fraction: NDArray[np.float64]
+    absolute_circumference: NDArray[np.float64]
 
     @property
     def absolute_area(self) -> NDArray[np.float64]:
-        """Absolute cluster area reconstructed from the stored A/SA ratio."""
+        """Absolute convex particle-hull area."""
         return self.area_fraction * self.surface_area
+
+    @property
+    def circumference_ratio(self) -> NDArray[np.float64]:
+        """Particle-hull perimeter normalized by the surface-area length scale."""
+        return self.absolute_circumference / np.sqrt(self.surface_area)
 
 
 @dataclass(frozen=True)
@@ -54,7 +62,7 @@ class ClusterSummary:
     absolute_sqrt_area_weighted_std: float
 
 
-def _case_metadata(manifest: Path) -> tuple[float, int, float, float, str]:
+def _case_metadata(manifest: Path) -> tuple[float, int, float, float, float, str]:
     payload: Any = json.loads(manifest.read_text())
     case = payload.get("case")
     if not isinstance(case, dict):
@@ -84,6 +92,7 @@ def _case_metadata(manifest: Path) -> tuple[float, int, float, float, str]:
         float(lx),
         lx_multiplier,
         float(circumference_diameters),
+        float(circumference),
         float(lx) * float(circumference),
         label if isinstance(label, str) and label else "",
     )
@@ -92,7 +101,16 @@ def _case_metadata(manifest: Path) -> tuple[float, int, float, float, str]:
 def _load_cases(manifests: tuple[Path, ...], options: ClusterOptions) -> list[CaseClusters]:
     grouped: dict[
         str,
-        tuple[str, float, int, float, float, list[NDArray[np.float64]]],
+        tuple[
+            str,
+            float,
+            int,
+            float,
+            float,
+            float,
+            list[NDArray[np.float64]],
+            list[NDArray[np.float64]],
+        ],
     ] = {}
     for index, manifest in enumerate(manifests, 1):
         replicate = _load_replicate(manifest)
@@ -100,6 +118,7 @@ def _load_cases(manifests: tuple[Path, ...], options: ClusterOptions) -> list[Ca
             lx,
             lx_multiplier,
             circumference_diameters,
+            circumference,
             surface_area,
             metadata_label,
         ) = _case_metadata(manifest)
@@ -110,15 +129,33 @@ def _load_cases(manifests: tuple[Path, ...], options: ClusterOptions) -> list[Ca
             flush=True,
         )
         result = analyze_clusters(replicate.static_file, replicate.shard_files, options)
-        ratios = result.ratios[np.isfinite(result.ratios) & (result.ratios > 0.0)]
+        hulls = cluster_hulls(
+            result.clusters,
+            particle_diameter=options.particle_diameter,
+        )
+        areas = np.asarray([hull.area for hull in hulls], dtype=np.float64)
+        circumferences = np.asarray(
+            [hull.circumference for hull in hulls],
+            dtype=np.float64,
+        )
+        valid = (
+            np.isfinite(areas)
+            & (areas > 0.0)
+            & np.isfinite(circumferences)
+            & (circumferences > 0.0)
+        )
+        ratios = areas[valid] / surface_area
+        circumferences = circumferences[valid]
         if replicate.case_id not in grouped:
             grouped[replicate.case_id] = (
                 label,
                 lx,
                 lx_multiplier,
                 circumference_diameters,
+                circumference,
                 surface_area,
                 [ratios],
+                [circumferences],
             )
             continue
         (
@@ -126,8 +163,10 @@ def _load_cases(manifests: tuple[Path, ...], options: ClusterOptions) -> list[Ca
             previous_lx,
             previous_multiplier,
             previous_circumference_diameters,
+            previous_circumference,
             previous_surface_area,
             samples,
+            circumference_samples,
         ) = grouped[replicate.case_id]
         if not np.isclose(previous_lx, lx, rtol=1.0e-10, atol=1.0e-12):
             raise ValueError(f"Replicates for {replicate.case_id} have different Lx values")
@@ -143,6 +182,15 @@ def _load_cases(manifests: tuple[Path, ...], options: ClusterOptions) -> list[Ca
                 f"Replicates for {replicate.case_id} have different case geometry"
             )
         if not np.isclose(
+            previous_circumference,
+            circumference,
+            rtol=1.0e-10,
+            atol=1.0e-12,
+        ):
+            raise ValueError(
+                f"Replicates for {replicate.case_id} have different circumferences"
+            )
+        if not np.isclose(
             previous_surface_area,
             surface_area,
             rtol=1.0e-10,
@@ -152,6 +200,7 @@ def _load_cases(manifests: tuple[Path, ...], options: ClusterOptions) -> list[Ca
                 f"Replicates for {replicate.case_id} have different surface areas"
             )
         samples.append(ratios)
+        circumference_samples.append(circumferences)
 
     cases = [
         CaseClusters(
@@ -160,17 +209,25 @@ def _load_cases(manifests: tuple[Path, ...], options: ClusterOptions) -> list[Ca
             lx=lx,
             lx_multiplier=lx_multiplier,
             circumference_diameters=circumference_diameters,
+            circumference=circumference,
             surface_area=surface_area,
             replicate_count=len(samples),
             area_fraction=np.concatenate(samples) if samples else np.empty(0),
+            absolute_circumference=(
+                np.concatenate(circumference_samples)
+                if circumference_samples
+                else np.empty(0)
+            ),
         )
         for case_id, (
             label,
             lx,
             lx_multiplier,
             circumference_diameters,
+            circumference,
             surface_area,
             samples,
+            circumference_samples,
         ) in grouped.items()
     ]
     return sorted(
@@ -194,7 +251,13 @@ def _plot_distributions(cases: list[CaseClusters], output: Path) -> None:
     sns = _style()
     colors = sns.color_palette("colorblind", n_colors=len(cases))
     area_bins = _common_bins(cases)
-    sqrt_bins = _common_bins(cases, np.sqrt)
+    circumference_values = np.concatenate(
+        [case.circumference_ratio for case in cases if case.area_fraction.size]
+    )
+    circumference_bins = np.histogram_bin_edges(
+        circumference_values,
+        bins="auto",
+    ).tolist()
     figure, axes = plt.subplots(1, 2, figsize=(10.5, 4.4), constrained_layout=True)
     for color, case in zip(colors, cases, strict=True):
         area = case.area_fraction
@@ -215,13 +278,13 @@ def _plot_distributions(cases: list[CaseClusters], output: Path) -> None:
             ax=axes[0],
         )
         sns.histplot(
-            x=np.sqrt(area),
+            x=case.circumference_ratio,
             weights=area,
             stat="probability",
             element="step",
             fill=False,
             common_norm=False,
-            bins=sqrt_bins,
+            bins=circumference_bins,
             color=color,
             label=label,
             ax=axes[1],
@@ -233,7 +296,7 @@ def _plot_distributions(cases: list[CaseClusters], output: Path) -> None:
     )
     axes[1].set(
         title="Area-weighted structural-cluster circumference ratios",
-        xlabel=r"$\sqrt{A/SA}$",
+        xlabel=r"$P/\sqrt{SA}$",
         ylabel="Area-weighted probability",
     )
     for axis in axes:
@@ -292,11 +355,11 @@ def _summarize(
             np.nan,
             np.nan,
         )
-    sqrt_area = np.sqrt(area)
+    circumference_ratio = case.circumference_ratio
     absolute_area = case.absolute_area
-    absolute_circ = 2*np.pi*np.sqrt(absolute_area/np.pi)
+    absolute_circ = case.absolute_circumference
     area_mean, area_std = _weighted_mean_std(area, area)
-    sqrt_area_mean, sqrt_area_std = _weighted_mean_std(sqrt_area, area)
+    sqrt_area_mean, sqrt_area_std = _weighted_mean_std(circumference_ratio, area)
     absolute_area_mean, absolute_area_std = _weighted_mean_std(
         absolute_area,
         absolute_area,
@@ -311,7 +374,11 @@ def _summarize(
         area_weighted_mode=_weighted_mode(area, area, area_bins),
         area_weighted_std=area_std,
         sqrt_area_weighted_mean=sqrt_area_mean,
-        sqrt_area_weighted_mode=_weighted_mode(sqrt_area, area, sqrt_bins),
+        sqrt_area_weighted_mode=_weighted_mode(
+            circumference_ratio,
+            area,
+            sqrt_bins,
+        ),
         sqrt_area_weighted_std=sqrt_area_std,
         absolute_area_weighted_mean=absolute_area_mean,
         absolute_area_weighted_mode=_weighted_mode(
@@ -333,13 +400,26 @@ def _summarize(
 def _plot_mean_mode(cases: list[CaseClusters], output: Path) -> None:
     sns = _style()
     area_bins = _common_bins(cases)
-    sqrt_bins = _common_bins(cases, np.sqrt)
+    circumference_ratio_values = np.concatenate(
+        [case.circumference_ratio for case in cases if case.area_fraction.size]
+    )
+    sqrt_bins = np.histogram_bin_edges(
+        circumference_ratio_values,
+        bins="auto",
+    ).tolist()
     absolute_values = np.concatenate(
         [case.absolute_area for case in cases if case.absolute_area.size]
     )
     absolute_bins = np.histogram_bin_edges(absolute_values, bins="auto").tolist()
+    absolute_circ_values = np.concatenate(
+        [
+            case.absolute_circumference
+            for case in cases
+            if case.absolute_circumference.size
+        ]
+    )
     absolute_sqrt_bins = np.histogram_bin_edges(
-        np.sqrt(absolute_values),
+        absolute_circ_values,
         bins="auto",
     ).tolist()
     summaries = [
@@ -378,7 +458,7 @@ def _plot_mean_mode(cases: list[CaseClusters], output: Path) -> None:
     absolute_circ_stds = np.asarray(
         [summary.absolute_sqrt_area_weighted_std for summary in summaries]
     )
-    ring_value_array = 4 * np.array([case.circumference_diameters for case in cases])/(PARTICLE_DIAMETER*2)
+    ring_value_array = np.asarray([case.circumference for case in cases])
     figure, axes = plt.subplots(1, 4, figsize=(20.0, 4.4), constrained_layout=True)
     for axis, means, modes, stds, title, ylabel in (
         (
@@ -395,7 +475,7 @@ def _plot_mean_mode(cases: list[CaseClusters], output: Path) -> None:
             sqrt_modes,
             sqrt_stds,
             "Area-weighted circumference ratios versus axial-length multiplier",
-            r"Cluster circumference ratio $\sqrt{A/SA}$",
+            r"Cluster circumference ratio $P/\sqrt{SA}$",
         ),
         (
             axes[2],
@@ -466,7 +546,7 @@ def _plot_mean_mode(cases: list[CaseClusters], output: Path) -> None:
             absolute_circ_stds,
             ring_value_array,
             "Absolute cluster circumference versus axial-length multiplier",
-            r"Absolute cluster circumference $2\pi\sqrt{A/pi}$",
+            r"Convex particle-hull circumference $P$",
         ),
     ):
         circumferences = sorted({case.circumference_diameters for case in cases})
@@ -563,7 +643,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--misorientation-degrees", type=float, default=5.0)
     parser.add_argument("--neighbor-radius-diameters", type=float, default=1.7272)
     parser.add_argument("--minimum-particles", type=int, default=2)
-    parser.add_argument("--particle-diameter", type=float, default=1.0)
+    parser.add_argument(
+        "--particle-diameter",
+        type=float,
+        default=PARTICLE_DIAMETER,
+    )
     return parser.parse_args()
 
 
@@ -591,7 +675,6 @@ def main() -> None:
         neighbor_radius_diameters=args.neighbor_radius_diameters,
         minimum_particles=args.minimum_particles,
         particle_diameter=args.particle_diameter,
-        ratio_mode=ClusterRatioMode.AREA_FRACTION,
     )
     cases = _load_cases(manifests, options)
     args.output_dir.mkdir(parents=True, exist_ok=True)

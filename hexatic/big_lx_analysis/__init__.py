@@ -1,6 +1,6 @@
 """Plot-oriented Python frontend for the Zig big-Lx analysis packages."""
 
-from .clusters import ClusterOptions, ClusterRatioMode, ClusterResult, analyze_clusters
+from .clusters import ClusterOptions, ClusterResult, analyze_clusters
 from .dynamics import DynamicsOptions, DynamicsResult, analyze_dynamics
 from .laplacian import (
     DampedCosineFit,
@@ -12,7 +12,6 @@ from .laplacian import (
 
 __all__ = [
     "ClusterOptions",
-    "ClusterRatioMode",
     "ClusterResult",
     "DynamicsOptions",
     "DynamicsResult",
