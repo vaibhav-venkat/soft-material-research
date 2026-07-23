@@ -131,7 +131,15 @@ def _inner_lattice_positions(
     if axial_extent <= 0.0 or transverse_extent <= 0.0:
         raise ValueError("Configured lattice gaps leave no interior lattice volume")
 
-    target_spacing = analysis.last_frame_lattice_spacing
+    # Keep the artificial bulk refill well outside the singular WCA core.
+    # The denser near-contact spacing can become unstable after active
+    # particles first collide, even when the initial frame has no overlaps.
+    # Both variants call this deterministic construction with the same box,
+    # so their refill coordinates and particle counts remain identical.
+    target_spacing = max(
+        analysis.last_frame_lattice_spacing,
+        cylinder.SIMULATION.lattice_spacing,
+    )
     n_axial = max(
         2,
         math.floor(2.0 * axial_extent / target_spacing) + 1,
