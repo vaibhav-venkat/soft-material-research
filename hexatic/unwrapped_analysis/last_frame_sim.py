@@ -29,6 +29,7 @@ class LastFrameCase:
     radius: float
     circumference: float
     lx: float
+    lx_multiplier: int
     n_particles: int
     run_steps: int
     trajectory_write_period: int
@@ -37,10 +38,6 @@ class LastFrameCase:
     @property
     def circumference_diameters(self) -> float:
         return self.circumference / cylinder.PARTICLE_DIAMETER
-
-    @property
-    def lx_multiplier(self) -> int:
-        return 1
 
     @property
     def wall_radius(self) -> float:
@@ -77,9 +74,30 @@ class LastFrameCase:
         }
 
 
-def _variant_id(case: UnwrappedCase, flip_shell: bool) -> str:
+def _variant_id(
+    case: UnwrappedCase,
+    lx_multiplier: int,
+    flip_shell: bool,
+) -> str:
     suffix = "_last_frame_flipped" if flip_shell else "_last_frame"
-    return f"{case.case_id}{suffix}"
+    return f"{case.case_id}_lx_{lx_multiplier}x{suffix}"
+
+
+def _infer_lx_multiplier(case: UnwrappedCase, lx: float) -> int:
+    ratio = lx / case.perfect_hexatic_lx
+    multiplier = int(round(ratio))
+    if multiplier < 1 or not np.isclose(
+        ratio,
+        multiplier,
+        rtol=1.0e-6,
+        atol=1.0e-6,
+    ):
+        raise ValueError(
+            f"Input Lx={lx:.12g} is not an integer multiple of the "
+            f"{case.case_id} base Lx={case.perfect_hexatic_lx:.12g}; "
+            f"observed ratio={ratio:.12g}"
+        )
+    return multiplier
 
 
 def random_uniform_quaternions(
@@ -369,6 +387,7 @@ def run_case(
         raise FileNotFoundError(f"Missing trajectory GSD: {source_gsd}")
 
     lx, n_particles = _refilled_geometry(case, source_gsd)
+    lx_multiplier = _infer_lx_multiplier(case, lx)
     variants = (
         (False, "unflipped"),
         (True, "flipped"),
@@ -376,11 +395,15 @@ def run_case(
     cases_and_paths: list[tuple[bool, LastFrameCase, CasePaths]] = []
     for flip_shell, variant_name in variants:
         analysis_case = LastFrameCase(
-            case_id=_variant_id(case, flip_shell),
-            label=f"{case.label or case.case_id}, {variant_name} frozen shell",
+            case_id=_variant_id(case, lx_multiplier, flip_shell),
+            label=(
+                f"{case.label or case.case_id}, Lx = {lx_multiplier}x, "
+                f"{variant_name} frozen shell"
+            ),
             radius=case.radius,
             circumference=case.circumference,
             lx=lx,
+            lx_multiplier=lx_multiplier,
             n_particles=n_particles,
             run_steps=run_steps,
             trajectory_write_period=trajectory_write_period,
