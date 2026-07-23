@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import itertools
 import math
 from pathlib import Path
@@ -10,17 +11,75 @@ import hoomd
 import numpy as np
 
 from hexatic.constants import cylinder
+from hexatic.big_lx.analyze_case import analyze_case
+from hexatic.big_lx.cases import CasePaths
+from hexatic.big_lx.storage import write_json_atomic
 
-from .cases import GSD_DIR, UnwrappedCase, ensure_output_dirs, get_case
+from .cases import UnwrappedCase, get_case
+
+DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent / "last_frame_output"
+RUN_STEPS = int(1e8)
+TRAJECTORY_WRITE_PERIOD = int(1e5)
 
 
-def _output_gsd(case: UnwrappedCase) -> Path:
-    return GSD_DIR / f"trajectory_{case.case_id}_last_frame.gsd"
+@dataclass(frozen=True)
+class LastFrameCase:
+    case_id: str
+    label: str
+    radius: float
+    circumference: float
+    lx: float
+    n_particles: int
+    run_steps: int
+    trajectory_write_period: int
+    seed: int
+
+    @property
+    def circumference_diameters(self) -> float:
+        return self.circumference / cylinder.PARTICLE_DIAMETER
+
+    @property
+    def lx_multiplier(self) -> int:
+        return 1
+
+    @property
+    def wall_radius(self) -> float:
+        clearance = (
+            cylinder.SIMULATION.wall_clearance_epsilon
+            * cylinder.ANALYSIS.particle_diameter
+        )
+        return (
+            self.radius
+            + cylinder.ANALYSIS.wall_cutoff
+            + clearance
+        )
+
+    def as_metadata(self) -> dict[str, object]:
+        return {
+            "case_id": self.case_id,
+            "label": self.label,
+            "circumference_diameters": self.circumference_diameters,
+            "circumference": self.circumference,
+            "radius": self.radius,
+            "wall_radius": self.wall_radius,
+            "lx_multiplier": self.lx_multiplier,
+            "base_lx": self.lx,
+            "lx": self.lx,
+            "base_n_particles": self.n_particles,
+            "n_particles": self.n_particles,
+            "particle_diameter": cylinder.PARTICLE_DIAMETER,
+            "run_steps": self.run_steps,
+            "trajectory_write_period": self.trajectory_write_period,
+            "seed": self.seed,
+            "variant": (
+                "flipped" if self.case_id.endswith("_flipped") else "unflipped"
+            ),
+        }
 
 
-def _ensure_can_write(path: Path, overwrite: bool) -> None:
-    if path.exists() and not overwrite:
-        raise FileExistsError(f"Refusing to overwrite existing file: {path}")
+def _variant_id(case: UnwrappedCase, flip_shell: bool) -> str:
+    suffix = "_last_frame_flipped" if flip_shell else "_last_frame"
+    return f"{case.case_id}{suffix}"
 
 
 def random_uniform_quaternions(
@@ -61,11 +120,16 @@ def _inner_lattice_positions(
     return np.column_stack((xv.ravel(), yv.ravel(), zv.ravel()))
 
 
-def _write_refilled_initial_frame(case: UnwrappedCase, output_gsd: Path) -> tuple[int, int]:
+def _write_refilled_initial_frame(
+    case: UnwrappedCase,
+    input_gsd: Path,
+    output_gsd: Path,
+    flip_shell: bool,
+) -> tuple[int, int]:
     analysis = cylinder.ANALYSIS
-    with gsd.hoomd.open(name=str(case.trajectory_gsd), mode="r") as trajectory:
+    with gsd.hoomd.open(name=str(input_gsd), mode="r") as trajectory:
         if len(trajectory) == 0:
-            raise ValueError(f"Trajectory contains no frames: {case.trajectory_gsd}")
+            raise ValueError(f"Trajectory contains no frames: {input_gsd}")
         source = trajectory[-1]
 
     source_positions = np.asarray(source.particles.position)
@@ -100,9 +164,10 @@ def _write_refilled_initial_frame(case: UnwrappedCase, output_gsd: Path) -> tupl
     )
     typeids[n_shell:] = simulation.center_particle_type_id
     frame.particles.typeid = typeids
-    frame.particles.position = np.vstack(
-        (source_positions[shell_indices], lattice_positions)
-    )
+    shell_positions = source_positions[shell_indices]
+    if flip_shell:
+        shell_positions = -shell_positions
+    frame.particles.position = np.vstack((shell_positions, lattice_positions))
     frame.particles.orientation = np.vstack(
         (
             np.asarray(source.particles.orientation)[shell_indices],
@@ -126,23 +191,44 @@ def _write_refilled_initial_frame(case: UnwrappedCase, output_gsd: Path) -> tupl
     return n_shell, n_inner
 
 
-def run_case(
+def _refilled_geometry(
     case: UnwrappedCase,
-    run_steps: int = cylinder.SIMULATION.last_frame_run_steps,
-    overwrite: bool = False,
-    device_name: str = "gpu",
-    gpu_id: int | None = None,
+    input_gsd: Path,
+) -> tuple[float, int]:
+    with gsd.hoomd.open(name=str(input_gsd), mode="r") as trajectory:
+        if len(trajectory) == 0:
+            raise ValueError(f"Trajectory contains no frames: {input_gsd}")
+        source = trajectory[-1]
+    positions = np.asarray(source.particles.position)
+    radial_distance = np.linalg.norm(positions[:, 1:3], axis=1)
+    n_shell = int(
+        np.count_nonzero(
+            radial_distance
+            > case.radius - cylinder.ANALYSIS.frozen_shell_delta
+        )
+    )
+    box = np.asarray(source.configuration.box, dtype=np.float64)
+    n_inner = len(_inner_lattice_positions(box, case.radius))
+    return float(box[0]), n_shell + n_inner
+
+
+def _run_variant(
+    source_case: UnwrappedCase,
+    analysis_case: LastFrameCase,
+    source_gsd: Path,
+    paths: CasePaths,
+    flip_shell: bool,
+    run_steps: int,
+    write_period: int,
+    device_name: str,
+    gpu_id: int | None,
 ) -> None:
-    if run_steps < 0:
-        raise ValueError("run_steps must be non-negative")
-
-    ensure_output_dirs()
-    if not case.trajectory_gsd.exists():
-        raise FileNotFoundError(f"Missing trajectory GSD: {case.trajectory_gsd}")
-
-    output_gsd = _output_gsd(case)
-    _ensure_can_write(output_gsd, overwrite)
-    n_shell, n_inner = _write_refilled_initial_frame(case, output_gsd)
+    n_shell, n_inner = _write_refilled_initial_frame(
+        source_case,
+        source_gsd,
+        paths.initial_gsd,
+        flip_shell,
+    )
 
     analysis = cylinder.ANALYSIS
     simulation = cylinder.SIMULATION
@@ -151,8 +237,8 @@ def run_case(
         if device_name == "cpu"
         else hoomd.device.GPU(gpu_id=gpu_id)
     )
-    sim = hoomd.Simulation(device=device, seed=case.seed)
-    sim.create_state_from_gsd(filename=str(output_gsd), frame=0)
+    sim = hoomd.Simulation(device=device, seed=analysis_case.seed)
+    sim.create_state_from_gsd(filename=str(paths.initial_gsd), frame=0)
 
     center = hoomd.filter.Type([simulation.center_particle_type])
     integrator = hoomd.md.Integrator(dt=simulation.timestep)
@@ -181,7 +267,7 @@ def run_case(
 
     walls = [
         hoomd.wall.Cylinder(
-            radius=case.wall_radius,
+            radius=analysis_case.wall_radius,
             axis=(1, 0, 0),
             inside=True,
             open=True,
@@ -217,36 +303,187 @@ def run_case(
     )
     sim.operations += rot_diff
 
+    logger = hoomd.logging.Logger(categories=["particle"])
+    logger.add(lj, quantities=["forces", "virials"])
+    logger.add(lj_wall, quantities=["forces", "virials"])
     gsd_writer = hoomd.write.GSD(
-        filename=str(output_gsd),
-        trigger=hoomd.trigger.Periodic(case.trajectory_write_period),
-        mode="ab",
+        filename=str(paths.trajectory_gsd),
+        trigger=hoomd.trigger.Periodic(write_period),
+        mode="wb",
         dynamic=["property", "particles/orientation"],
+        logger=logger,
     )
     sim.operations.writers.append(gsd_writer)
 
     print(
-        f"case={case.case_id} source={case.trajectory_gsd} "
+        f"case={analysis_case.case_id} source={source_gsd} source_frame=last "
         f"lattice={n_inner} shell={n_shell} total={sim.state.N_particles} "
         f"shell_delta={analysis.frozen_shell_delta:.12g} steps={run_steps} "
-        f"device={device_name} output={output_gsd}"
+        f"write_period={write_period} flip_shell={flip_shell} "
+        f"device={device_name} output={paths.trajectory_gsd}"
     )
     sim.run(run_steps)
+    with gsd.hoomd.open(name=str(paths.trajectory_gsd), mode="r") as trajectory:
+        frame_count = len(trajectory)
+        final_step = (
+            int(trajectory[-1].configuration.step) if frame_count else None
+        )
+    write_json_atomic(paths.metadata_json, analysis_case.as_metadata())
+    write_json_atomic(
+        paths.simulation_complete_json,
+        {
+            "case_id": analysis_case.case_id,
+            "status": "complete",
+            "frame_count": frame_count,
+            "final_step": final_step,
+            "seed": analysis_case.seed,
+            "source_gsd": str(source_gsd),
+            "source_frame": "last",
+            "flip_shell": flip_shell,
+            "trajectory_gsd": str(paths.trajectory_gsd),
+        },
+    )
+
+
+def run_case(
+    case: UnwrappedCase,
+    input_gsd: Path | None = None,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+    run_steps: int = RUN_STEPS,
+    trajectory_write_period: int = TRAJECTORY_WRITE_PERIOD,
+    overwrite: bool = False,
+    device_name: str = "gpu",
+    gpu_id: int | None = None,
+    analysis_backend: str = "auto",
+    require_analysis_gpu: bool = False,
+    particle_block_size: int = 2048,
+    target_shard_mib: int = 256,
+) -> None:
+    if run_steps < 0:
+        raise ValueError("run_steps must be non-negative")
+    if trajectory_write_period < 1:
+        raise ValueError("trajectory_write_period must be positive")
+
+    source_gsd = case.trajectory_gsd if input_gsd is None else input_gsd
+    if not source_gsd.is_file():
+        raise FileNotFoundError(f"Missing trajectory GSD: {source_gsd}")
+
+    lx, n_particles = _refilled_geometry(case, source_gsd)
+    variants = (
+        (False, "unflipped"),
+        (True, "flipped"),
+    )
+    cases_and_paths: list[tuple[bool, LastFrameCase, CasePaths]] = []
+    for flip_shell, variant_name in variants:
+        analysis_case = LastFrameCase(
+            case_id=_variant_id(case, flip_shell),
+            label=f"{case.label or case.case_id}, {variant_name} frozen shell",
+            radius=case.radius,
+            circumference=case.circumference,
+            lx=lx,
+            n_particles=n_particles,
+            run_steps=run_steps,
+            trajectory_write_period=trajectory_write_period,
+            seed=case.seed,
+        )
+        paths = CasePaths(analysis_case, output_dir)
+        paths.ensure_parent_dirs()
+        if source_gsd.resolve() == paths.trajectory_gsd.resolve():
+            raise ValueError(
+                f"Input and output GSD paths must differ: {paths.trajectory_gsd}"
+            )
+        if not overwrite:
+            existing = [
+                path
+                for path in (
+                    paths.initial_gsd,
+                    paths.trajectory_gsd,
+                    paths.metadata_json,
+                    paths.simulation_complete_json,
+                    paths.analysis_dir,
+                )
+                if path.exists()
+            ]
+            if existing:
+                raise FileExistsError(
+                    "Refusing to overwrite existing outputs: "
+                    + ", ".join(str(path) for path in existing)
+                )
+        cases_and_paths.append((flip_shell, analysis_case, paths))
+
+    for flip_shell, analysis_case, paths in cases_and_paths:
+        _run_variant(
+            case,
+            analysis_case,
+            source_gsd,
+            paths,
+            flip_shell,
+            run_steps,
+            trajectory_write_period,
+            device_name,
+            gpu_id,
+        )
+
+    for _flip_shell, analysis_case, _paths in cases_and_paths:
+        print(
+            f"[last-frame] analyzing case={analysis_case.case_id} "
+            f"backend={analysis_backend}",
+            flush=True,
+        )
+        analyze_case(
+            analysis_case,
+            output_root=output_dir,
+            backend_name=analysis_backend,
+            require_gpu=require_analysis_gpu,
+            particle_block_size=particle_block_size,
+            target_shard_mib=target_shard_mib,
+            overwrite=overwrite,
+        )
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Refill the interior of an unwrapped case with a Cartesian lattice."
+        description=(
+            "Refill the last input frame and sequentially simulate both its "
+            "original and antipodally flipped frozen shells."
+        )
     )
     parser.add_argument("--case", required=True)
     parser.add_argument(
+        "--input-gsd",
+        type=Path,
+        help="Input trajectory; defaults to the selected case trajectory.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=DEFAULT_OUTPUT_DIR,
+        help=(
+            "Output root containing initial/, gsd/, metadata/, logs/, and "
+            "safetensors_output/."
+        ),
+    )
+    parser.add_argument(
         "--steps",
         type=int,
-        default=cylinder.SIMULATION.last_frame_run_steps,
+        default=RUN_STEPS,
+    )
+    parser.add_argument(
+        "--trajectory-write-period",
+        type=int,
+        default=TRAJECTORY_WRITE_PERIOD,
     )
     parser.add_argument("--device", choices=("cpu", "gpu"), default="gpu")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--gpu-id", type=int, default=None)
+    parser.add_argument(
+        "--analysis-backend",
+        choices=("auto", "jax", "numpy"),
+        default="auto",
+    )
+    parser.add_argument("--require-analysis-gpu", action="store_true")
+    parser.add_argument("--particle-block-size", type=int, default=2048)
+    parser.add_argument("--target-shard-mib", type=int, default=256)
     return parser.parse_args()
 
 
@@ -254,10 +491,17 @@ def main() -> None:
     args = _parse_args()
     run_case(
         get_case(args.case),
+        input_gsd=args.input_gsd,
+        output_dir=args.output_dir,
         run_steps=args.steps,
+        trajectory_write_period=args.trajectory_write_period,
         overwrite=args.overwrite,
         device_name=args.device,
         gpu_id=args.gpu_id,
+        analysis_backend=args.analysis_backend,
+        require_analysis_gpu=args.require_analysis_gpu,
+        particle_block_size=args.particle_block_size,
+        target_shard_mib=args.target_shard_mib,
     )
 
 
