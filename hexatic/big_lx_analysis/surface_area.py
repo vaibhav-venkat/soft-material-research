@@ -223,6 +223,7 @@ def main() -> None:
         x="elapsed_time",
         y="density",
         hue="case_label",
+        errorbar=None,
         ax=ax,
     )
     ax.set(
