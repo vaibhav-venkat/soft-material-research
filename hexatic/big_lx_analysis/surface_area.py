@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import matplotlib
@@ -21,6 +22,22 @@ def _load_static_lx(static_file: Path) -> float:
     """Read the axial box length from a static.safetensors file."""
     with safe_open(static_file, framework="np") as f:
         return float(f.get_tensor("lx").item())
+
+
+def _load_circumference(manifest: Path) -> float:
+    """Read the physical circumference from a manifest."""
+    payload = json.loads(manifest.read_text())
+    case = payload.get("case")
+    if not isinstance(case, dict):
+        raise ValueError(f"Manifest has no case metadata: {manifest}")
+    circumference = case.get("circumference")
+    if (
+        not isinstance(circumference, (int, float))
+        or not np.isfinite(circumference)
+        or circumference <= 0.0
+    ):
+        raise ValueError(f"Manifest has an invalid circumference: {manifest}")
+    return float(circumference)
 
 
 def _recompute_shell_mask_from_coords(
@@ -43,6 +60,7 @@ def _load_shell_density(
     timestep: float,
     particle_diameter: float,
     lx: float,
+    circumference: float,
     cylinder_radius: float | None,
     shell_delta: float,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
@@ -68,8 +86,8 @@ def _load_shell_density(
     -------
     elapsed_time: (T,) float64
         Simulation time of each frame (relative to the first frame).
-    density: (T,) float64
-        Shell surface-area density ``N_shell * pi(D/2)^2 / L_x``.
+        density: (T,) float64
+        Shell surface-area density ``N_shell * pi(D/2)^2 / (C * L_x)``.
     """
     particle_area = np.pi * (particle_diameter / 2.0) ** 2
 
@@ -100,7 +118,7 @@ def _load_shell_density(
 
     steps_all = np.concatenate(loaded_steps, axis=0)   # (T,)
     n_shell = np.concatenate(shell_counts, axis=0).astype(np.float64)  # (T,)
-    density = n_shell * particle_area / lx
+    density = n_shell * particle_area / (circumference * lx)
 
     initial_step = int(steps_all[0])
     elapsed = np.asarray(steps_all - initial_step, dtype=np.float64) * timestep
@@ -194,6 +212,7 @@ def main() -> None:
     rows: list[dict[str, float | str]] = []
     for r in replicates:
         lx = _load_static_lx(r.static_file)
+        circumference = _load_circumference(r.manifest)
         cylinder_radius: float | None = None
         with safe_open(r.static_file, framework="np") as f:
             if "radius" in f.keys():
@@ -204,6 +223,7 @@ def main() -> None:
             timestep=args.timestep,
             particle_diameter=args.particle_diameter,
             lx=lx,
+            circumference=circumference,
             cylinder_radius=cylinder_radius,
             shell_delta=args.shell_delta,
         )
@@ -229,7 +249,7 @@ def main() -> None:
     ax.set(
         title="Shell surface-area density",
         xlabel="Simulation time",
-        ylabel=r"$N_{\mathrm{shell}}\,\pi\,(D/2)^2\,/\,L_x$",
+        ylabel=r"$N_{\mathrm{shell}}\,\pi\,(D/2)^2\,/\,(C L_x)$",
     )
     ax.grid(axis="y", color="0.9", lw=0.7)
     sns.move_legend(ax, "best", frameon=False, title=None)
