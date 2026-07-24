@@ -68,6 +68,12 @@ passive-dense-pipeline = "python -um hexatic.confinement_comparison.passive_dens
 passive-dense-dry-run = "python -um hexatic.confinement_comparison.passive_dense.run_pipeline --all --dry-run"
 passive-dense-laplace = "python -um hexatic.confinement_comparison.passive_dense.analyze_laplace"
 passive-dense-com = "python -um hexatic.confinement_comparison.passive_dense.plot_com"
+new-sims-gpu-check = "python -um hexatic.new_sims.gpu_check"
+new-sims-validate = "python -um hexatic.new_sims.validate_cases"
+new-sims-simulate = "python -um hexatic.new_sims.simulate_case"
+new-sims-analysis = "python -um hexatic.new_sims.analyze_case"
+new-sims-pipeline = "python -um hexatic.new_sims.run_pipeline"
+new-sims-dry-run = "python -um hexatic.new_sims.run_pipeline --dry-run"
 [dependencies]
 python = "3.13.*"
 cmake = "*"
