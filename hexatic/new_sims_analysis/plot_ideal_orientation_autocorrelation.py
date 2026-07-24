@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import json
 from pathlib import Path
 from typing import Any
@@ -16,8 +17,18 @@ from numpy.typing import NDArray
 from safetensors import safe_open
 import seaborn as sns
 from scipy.signal import fftconvolve
+from scipy.stats import linregress
+
+from hexatic.constants import cylinder
 
 IDEAL_CASE_ID = "ideal_abp_cylinder"
+
+
+@dataclass(frozen=True)
+class ExponentialFit:
+    amplitude: float
+    rate: float
+    r_squared: float
 
 
 def _load_manifest(shard_dir: Path) -> dict[str, Any]:
@@ -41,7 +52,7 @@ def _load_polarization(
     shard_dir: Path,
     manifest: dict[str, Any],
     frame_limit: int,
-) -> NDArray[np.float32]:
+) -> tuple[NDArray[np.float32], NDArray[np.int64]]:
     polarization_order = manifest.get("polarization_order")
     if polarization_order is not None and polarization_order != ["x", "y", "z"]:
         raise ValueError(
@@ -53,6 +64,7 @@ def _load_polarization(
         raise ValueError("manifest contains no safetensor shards")
 
     arrays: list[NDArray[np.float32]] = []
+    step_arrays: list[NDArray[np.int64]] = []
     tensor_name: str | None = None
     loaded_frames = 0
     expected_start = 0
@@ -88,8 +100,17 @@ def _load_polarization(
             elif current_name != tensor_name:
                 raise ValueError("orientation tensor name changes between shards")
             values = np.asarray(shard.get_tensor(current_name), dtype=np.float32)
+            if "step" not in keys:
+                raise KeyError(f"{shard_path} has no 'step' tensor")
+            steps = np.asarray(shard.get_tensor("step"), dtype=np.int64)
         values = _cartesian_directions(values, current_name)
-        arrays.append(values[: frame_limit - loaded_frames])
+        if steps.ndim != 1 or len(steps) != len(values):
+            raise ValueError(
+                f"expected one simulation step per frame in {shard_path}"
+            )
+        take = frame_limit - loaded_frames
+        arrays.append(values[:take])
+        step_arrays.append(steps[:take])
         loaded_frames += min(len(values), frame_limit - loaded_frames)
         expected_start = stop
         if loaded_frames >= frame_limit:
@@ -97,7 +118,7 @@ def _load_polarization(
 
     if not arrays:
         raise ValueError("no polarization frames were loaded")
-    return np.concatenate(arrays, axis=0)
+    return np.concatenate(arrays, axis=0), np.concatenate(step_arrays)
 
 
 def _cartesian_directions(
@@ -178,29 +199,90 @@ def _orientation_autocorrelations(
     return q_corr / q_corr[0], qx_corr / qx_corr[0]
 
 
+def _lag_times(
+    steps: NDArray[np.int64],
+    max_lag: int,
+    timestep: float,
+) -> NDArray[np.float64]:
+    if len(steps) < 2:
+        raise ValueError("at least two frames are required to determine time spacing")
+    step_spacing = np.diff(steps)
+    if np.any(step_spacing <= 0) or not np.all(step_spacing == step_spacing[0]):
+        raise ValueError("simulation frames must have uniform, increasing step spacing")
+    return (
+        np.arange(max_lag + 1, dtype=np.float64)
+        * float(step_spacing[0])
+        * timestep
+    )
+
+
+def _fit_exponential(
+    time: NDArray[np.float64],
+    correlation: NDArray[np.float64],
+    tau_r: float,
+) -> ExponentialFit:
+    # Restrict the logarithmic regression to C > 0; nonpositive noisy tail
+    # values have no real logarithm and are intentionally excluded.
+    positive = np.isfinite(correlation) & (correlation > 0.0)
+    if np.count_nonzero(positive) < 2:
+        raise ValueError("exponential regression needs at least two positive C values")
+    scaled_time = time[positive] / tau_r
+    result = linregress(scaled_time, np.log(correlation[positive]))
+    return ExponentialFit(
+        amplitude=float(np.exp(result.intercept)),
+        rate=float(-result.slope),
+        r_squared=float(result.rvalue**2),
+    )
+
+
 def _plot(
+    lag_time: NDArray[np.float64],
     q_corr: NDArray[np.float64],
     qx_corr: NDArray[np.float64],
+    q_fit: ExponentialFit,
+    qx_fit: ExponentialFit,
+    tau_r: float,
     output: Path,
 ) -> None:
     sns.set_theme(context="paper", style="ticks", font_scale=1.1)
     color = sns.color_palette("colorblind")[0]
-    lags = np.arange(len(q_corr))
     figure, axes = plt.subplots(
         2, 1, figsize=(7.2, 7.0), sharex=True, constrained_layout=True
     )
-    axes[0].plot(lags, q_corr, color=color, linewidth=2.0)
+    fits = (q_fit, qx_fit)
+    correlations = (q_corr, qx_corr)
+    for axis, correlation, fit in zip(axes, correlations, fits, strict=True):
+        axis.plot(lag_time, correlation, color=color, linewidth=2.0, label="Data")
+        axis.plot(
+            lag_time,
+            fit.amplitude * np.exp(-fit.rate * lag_time / tau_r),
+            color="0.2",
+            linestyle="--",
+            linewidth=1.5,
+            label="Log-linear fit",
+        )
+        axis.text(
+            0.98,
+            0.95,
+            f"A = {fit.amplitude:.6g}\n"
+            f"b = {fit.rate:.6g}\n"
+            f"$R^2$ = {fit.r_squared:.6g}",
+            transform=axis.transAxes,
+            horizontalalignment="right",
+            verticalalignment="top",
+        )
+        axis.legend(frameon=False)
+
     axes[0].set_title(r"Orientation autocorrelation")
     axes[0].set_ylabel(r"$C_q(\Delta t)$")
-    axes[1].plot(lags, qx_corr, color=color, linewidth=2.0)
     axes[1].set_title(r"Axial-orientation autocorrelation")
     axes[1].set_ylabel(r"$C_{q_x}(\Delta t)$")
-    axes[1].set_xlabel(r"Lag $\Delta t$ (frames)")
+    axes[1].set_xlabel(r"Lag time $\Delta t$")
 
     for axis in axes:
         axis.axhline(0.0, color="0.65", linewidth=0.8, zorder=0)
         axis.grid(axis="y", color="0.9", linewidth=0.7)
-        axis.set_xlim(0, len(q_corr) - 1)
+        axis.set_xlim(0.0, lag_time[-1])
         sns.despine(ax=axis)
 
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -248,10 +330,26 @@ def main() -> None:
         parser.error("--max-lag must be nonnegative")
 
     manifest = _load_manifest(args.shard_dir)
-    q = _load_polarization(args.shard_dir, manifest, args.frames)
+    q, steps = _load_polarization(args.shard_dir, manifest, args.frames)
     q_corr, qx_corr = _orientation_autocorrelations(q, args.max_lag)
-    _plot(q_corr, qx_corr, args.output)
+    case = manifest["case"]
+    timestep = float(case.get("timestep", cylinder.SIMULATION.timestep))
+    tau_r = float(cylinder.SIMULATION.tau_r)
+    if timestep <= 0.0 or tau_r <= 0.0:
+        raise ValueError("timestep and tau_r must be positive")
+    lag_time = _lag_times(steps, args.max_lag, timestep)
+    q_fit = _fit_exponential(lag_time, q_corr, tau_r)
+    qx_fit = _fit_exponential(lag_time, qx_corr, tau_r)
+    _plot(lag_time, q_corr, qx_corr, q_fit, qx_fit, tau_r, args.output)
     print(f"wrote {args.output} using {len(q)} frames and {q.shape[1]} particles")
+    print(
+        f"q: A={q_fit.amplitude:.8g}, b={q_fit.rate:.8g}, "
+        f"R^2={q_fit.r_squared:.8g}"
+    )
+    print(
+        f"q_x: A={qx_fit.amplitude:.8g}, b={qx_fit.rate:.8g}, "
+        f"R^2={qx_fit.r_squared:.8g}"
+    )
 
 
 if __name__ == "__main__":
