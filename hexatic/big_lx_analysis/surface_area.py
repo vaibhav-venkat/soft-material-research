@@ -162,6 +162,10 @@ def main() -> None:
             "(default: cylinder.SHELL_DELTA)"
         ),
     )
+    parser.add_argument(
+        "--circ",
+        help='Only include cases with a given circumference, e.g. "60.5D"',
+    )
     args = parser.parse_args()
 
     manifests = _collect_manifests(args.manifest, args.input_dir)
@@ -172,6 +176,17 @@ def main() -> None:
         missing = selected - {r.case_id for r in replicates}
         if missing:
             raise ValueError(f"Requested cases not found: {sorted(missing)}")
+    if args.circ:
+        circumference = args.circ.strip().upper()
+        if circumference.endswith("D"):
+            circumference = circumference[:-1]
+        try:
+            circumference_value = float(circumference)
+        except ValueError as error:
+            raise ValueError('--circ must look like "60.5D"') from error
+        circumference_token = format(circumference_value, ".15g").replace(".", "_")
+        prefix = f"circ_{circumference_token}D_"
+        replicates = [r for r in replicates if r.case_id.startswith(prefix)]
     if not replicates:
         raise ValueError("No matching replicates found")
 
@@ -208,7 +223,6 @@ def main() -> None:
         x="elapsed_time",
         y="density",
         hue="case_label",
-        errorbar="sd",
         ax=ax,
     )
     ax.set(
