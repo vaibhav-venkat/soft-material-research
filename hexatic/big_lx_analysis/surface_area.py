@@ -76,6 +76,8 @@ def _load_shell_density(
         Diameter of a single particle.
     lx:
         Axial box length from static.safetensors.
+    circumference:
+        Physical cylinder circumference ``C = 2 * pi * R``.
     cylinder_radius:
         Cylinder radius from static.safetensors; required for the fallback
         recomputation when *hexatic_shell_mask* is absent.
@@ -86,8 +88,9 @@ def _load_shell_density(
     -------
     elapsed_time: (T,) float64
         Simulation time of each frame (relative to the first frame).
-        density: (T,) float64
-        Shell surface-area density ``N_shell * pi(D/2)^2 / (C * L_x)``.
+    area_fraction: (T,) float64
+        Shell particle area fraction
+        ``N_shell * pi * D^2 / 4 / (2 * pi * R * L_x)``.
     """
     particle_area = np.pi * (particle_diameter / 2.0) ** 2
 
@@ -118,11 +121,13 @@ def _load_shell_density(
 
     steps_all = np.concatenate(loaded_steps, axis=0)   # (T,)
     n_shell = np.concatenate(shell_counts, axis=0).astype(np.float64)  # (T,)
-    density = n_shell * particle_area / (circumference * lx)
+    film_area = n_shell * particle_area
+    cylinder_surface_area = circumference * lx
+    area_fraction = film_area / cylinder_surface_area
 
     initial_step = int(steps_all[0])
     elapsed = np.asarray(steps_all - initial_step, dtype=np.float64) * timestep
-    return elapsed, density
+    return elapsed, area_fraction
 
 
 def main() -> None:
@@ -217,8 +222,17 @@ def main() -> None:
         with safe_open(r.static_file, framework="np") as f:
             if "radius" in f.keys():
                 cylinder_radius = float(f.get_tensor("radius").item())
+        if cylinder_radius is not None and not np.isclose(
+            circumference,
+            2.0 * np.pi * cylinder_radius,
+            rtol=1e-6,
+            atol=1e-8,
+        ):
+            raise ValueError(
+                f"Manifest circumference and static radius disagree for {r.case_id}"
+            )
 
-        elapsed, density = _load_shell_density(
+        elapsed, area_fraction = _load_shell_density(
             r.shard_files,
             timestep=args.timestep,
             particle_diameter=args.particle_diameter,
@@ -227,10 +241,10 @@ def main() -> None:
             cylinder_radius=cylinder_radius,
             shell_delta=args.shell_delta,
         )
-        for t, d in zip(elapsed, density):
+        for t, fraction in zip(elapsed, area_fraction):
             rows.append({
                 "elapsed_time": t,
-                "density": d,
+                "area_fraction": fraction,
                 "case_label": r.label,
             })
 
@@ -241,15 +255,15 @@ def main() -> None:
     sns.lineplot(
         data=df,
         x="elapsed_time",
-        y="density",
+        y="area_fraction",
         hue="case_label",
         errorbar=None,
         ax=ax,
     )
     ax.set(
-        title="Shell surface-area density",
+        title="Shell particle area fraction",
         xlabel="Simulation time",
-        ylabel=r"$N_{\mathrm{shell}}\,\pi\,(D/2)^2\,/\,(C L_x)$",
+        ylabel=r"$N_{\mathrm{film}}\,\pi D^2/4\,/\,(2\pi R L_x)$",
     )
     ax.grid(axis="y", color="0.9", lw=0.7)
     sns.move_legend(ax, "best", frameon=False, title=None)
