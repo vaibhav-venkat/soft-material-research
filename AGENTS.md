@@ -3,6 +3,8 @@
 
 ## Current Work
 
+**UPDATE**: We are doing analysis on the big_lx cases, contained within `big_lx_analysis` which uses solely safetensors. 
+
 The active simulation work is `hexatic/unwrapped_analysis`: the sweep now uses an **exact, twisted triangular-lattice supercell**. It is the replacement for the earlier experimentally sheared `simulate_case.py` route. The supercell gives a genuinely twisted cylinder while retaining perfect hexatic order at initialization, so it needs neither an overlap-prone coordinate shear nor a high-drag relaxation ramp.
 
 `hexatic/rho_fitting` remains the established analysis workflow for the radius `15D` trajectory. It now fits 3D cylindrical mechanical moment closures, assesses the closure in divergence space, and validates it by rolling out the fitted PDE. Treat the simulation work and the `rho_fitting` analysis inputs as separate unless new supercell trajectories are deliberately promoted into the fitting pipeline.
