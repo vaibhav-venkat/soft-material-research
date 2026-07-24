@@ -217,7 +217,7 @@ def main() -> None:
         ylabel=r"$N_{\mathrm{shell}}\,\pi\,(D/2)^2\,/\,L_x$",
     )
     ax.grid(axis="y", color="0.9", lw=0.7)
-    sns.move_legend(ax, frameon=False, title=None)
+    sns.move_legend(ax, "best", frameon=False, title=None)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     output_path = args.output_dir / "shell_surface_area_density.svg"
