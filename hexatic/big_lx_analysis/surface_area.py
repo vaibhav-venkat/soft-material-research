@@ -265,6 +265,8 @@ def main() -> None:
         xlabel="Simulation time",
         ylabel=r"$N_{\mathrm{film}}\,\pi D^2/4\,/\,(2\pi R L_x)$",
     )
+    ax.axhline(0.142, color="tab:blue", linestyle="--", label="y = 0.142")
+    ax.axhline(0.88295, color="tab:red", linestyle="--", label="y = 0.88295")
     ax.grid(axis="y", color="0.9", lw=0.7)
     sns.move_legend(ax, "best", frameon=False, title=None)
 
