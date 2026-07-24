@@ -220,14 +220,20 @@ def _fit_exponential(
     time: NDArray[np.float64],
     correlation: NDArray[np.float64],
     tau_r: float,
+    minimum_correlation: float,
 ) -> ExponentialFit:
-    # Restrict the logarithmic regression to C > 0; nonpositive noisy tail
-    # values have no real logarithm and are intentionally excluded.
-    positive = np.isfinite(correlation) & (correlation > 0.0)
-    if np.count_nonzero(positive) < 2:
-        raise ValueError("exponential regression needs at least two positive C values")
-    scaled_time = time[positive] / tau_r
-    result = linregress(scaled_time, np.log(correlation[positive]))
+    # Fit only the initial contiguous decay. Once the correlation reaches the
+    # threshold (or crosses zero), later positive noise excursions stay excluded.
+    invalid = ~np.isfinite(correlation) | (correlation <= minimum_correlation)
+    stopping_points = np.flatnonzero(invalid)
+    stop = int(stopping_points[0]) if stopping_points.size else len(correlation)
+    if stop < 2:
+        raise ValueError(
+            "exponential regression needs at least two initial correlation "
+            f"values above {minimum_correlation}"
+        )
+    scaled_time = time[:stop] / tau_r
+    result = linregress(scaled_time, np.log(correlation[:stop]))
     return ExponentialFit(
         amplitude=float(np.exp(result.intercept)),
         rate=float(-result.slope),
@@ -323,11 +329,22 @@ def main() -> None:
         default=Path("ideal_orientation_autocorrelation.svg"),
         help="Output SVG path.",
     )
+    parser.add_argument(
+        "--fit-min-correlation",
+        type=float,
+        default=0.01,
+        help=(
+            "Stop the initial-decay fit when C first reaches this value "
+            "(default: 0.01)."
+        ),
+    )
     args = parser.parse_args()
     if args.frames < 1:
         parser.error("--frames must be positive")
     if args.max_lag < 0:
         parser.error("--max-lag must be nonnegative")
+    if not 0.0 < args.fit_min_correlation < 1.0:
+        parser.error("--fit-min-correlation must be between 0 and 1")
 
     manifest = _load_manifest(args.shard_dir)
     q, steps = _load_polarization(args.shard_dir, manifest, args.frames)
@@ -338,8 +355,12 @@ def main() -> None:
     if timestep <= 0.0 or tau_r <= 0.0:
         raise ValueError("timestep and tau_r must be positive")
     lag_time = _lag_times(steps, args.max_lag, timestep)
-    q_fit = _fit_exponential(lag_time, q_corr, tau_r)
-    qx_fit = _fit_exponential(lag_time, qx_corr, tau_r)
+    q_fit = _fit_exponential(
+        lag_time, q_corr, tau_r, args.fit_min_correlation
+    )
+    qx_fit = _fit_exponential(
+        lag_time, qx_corr, tau_r, args.fit_min_correlation
+    )
     _plot(lag_time, q_corr, qx_corr, q_fit, qx_fit, tau_r, args.output)
     print(f"wrote {args.output} using {len(q)} frames and {q.shape[1]} particles")
     print(
