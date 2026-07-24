@@ -58,4 +58,7 @@ printf '  launcher_log=%s\n' "$launcher_log"
 export CONDA_OVERRIDE_CUDA="$cuda_version"
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
+CUDA_VISIBLE_DEVICES="$gpu_ids" \
+    pixi run -e big-lx-cuda12 new-sims-gpu-check
+
 "${command[@]}" 2>&1 | tee -a "$launcher_log"
