@@ -189,15 +189,18 @@ def _finite_difference(
 def _pearson_correlation(
     velocity: NDArray[np.float64],
     max_lag: int,
-) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+) -> NDArray[np.float64]:
     """Lagged Pearson correlation of a velocity series.
 
-    Returns (lag_time, pearson) arrays of length max_lag + 1.
+    Returns pearson array of length max_lag + 1 where
     pearson[t] = corr(v[0 : T-t], v[t : T]).
     """
     n = len(velocity)
     if max_lag > n - 2:
-        max_lag = n - 2
+        raise ValueError(
+            f"max_lag ({max_lag}) exceeds available lags "
+            f"({n - 2} for {n} samples)"
+        )
     if max_lag < 0:
         raise ValueError("max_lag must be nonnegative")
 
@@ -358,21 +361,33 @@ def main() -> None:
         else:
             timestep = args.timestep
 
-        frames_needed = min(args.frames, sum(
-            entry["frame_stop"] - entry["frame_start"]
-            for entry in manifest.get("shards", [])
-        ))
-        if args.max_lag >= frames_needed:
-            raise ValueError(
-                f"--max-lag ({args.max_lag}) must be smaller than the "
-                f"number of loaded frames ({frames_needed})"
-            )
-
         com_x, steps, lx = _load_com_x(input_dir, manifest, args.frames)
+        print(
+            f"[correlation] loaded {len(com_x)} frames, "
+            f"lx={lx:.6g}",
+            flush=True,
+        )
         elapsed = _elapsed_time(steps, timestep)
         velocity = _finite_difference(com_x, elapsed)
-        pearson = _pearson_correlation(velocity, args.max_lag)
-        lag_time = _lag_times(steps, args.max_lag, timestep)
+
+        # Cap max_lag to what the velocity series actually supports, then
+        # use the same effective value for Pearson *and* lag-time arrays.
+        available_max_lag = len(velocity) - 2
+        if available_max_lag < 0:
+            raise ValueError(
+                f"need at least 2 velocity samples (got {len(velocity)})"
+            )
+        effective_max_lag = args.max_lag
+        if effective_max_lag > available_max_lag:
+            print(
+                f"[correlation] capping --max-lag {effective_max_lag} -> "
+                f"{available_max_lag} (only {len(velocity)} velocity samples)",
+                flush=True,
+            )
+            effective_max_lag = available_max_lag
+
+        pearson = _pearson_correlation(velocity, effective_max_lag)
+        lag_time = _lag_times(steps, effective_max_lag, timestep)
 
         # Sanitise the label into a filename-safe slug.
         slug = label.replace("/", "_").replace(" ", "_")
