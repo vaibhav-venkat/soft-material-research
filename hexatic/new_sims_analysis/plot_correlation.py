@@ -102,9 +102,10 @@ def _load_com_x(
         take = frame_limit - loaded_frames
         coords = coords[:take]
         steps = steps[:take]
+        actual_take = coords.shape[0]
 
         x_wrapped = coords[:, :, 0]  # shape: (frames, particles)
-        for local_frame in range(x_wrapped.shape[0]):
+        for local_frame in range(actual_take):
             frame_x = x_wrapped[local_frame]
             if not np.all(np.isfinite(frame_x)):
                 raise ValueError(
@@ -121,7 +122,7 @@ def _load_com_x(
             com_x_frames.append(float(np.mean(unwrapped)))
             step_frames.append(int(steps[local_frame]))
 
-        loaded_frames += take
+        loaded_frames += actual_take
         expected_start = stop
         if loaded_frames >= frame_limit:
             break
