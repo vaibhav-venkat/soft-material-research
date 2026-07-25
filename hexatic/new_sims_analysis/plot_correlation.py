@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -88,16 +89,28 @@ def _load_com_x(
             coords = np.asarray(shard.get_tensor("coords"), dtype=np.float64)
             steps = np.asarray(shard.get_tensor("step"), dtype=np.int64)
 
-        if coords.ndim != 3:
+        if coords.ndim != 3 or coords.shape[1] == 0 or coords.shape[2] == 0:
             raise ValueError(
                 f"expected coords shape (frames, particles, components), "
                 f"got {coords.shape}"
             )
         n_frames_in_shard = coords.shape[0]
         n_particles = coords.shape[1]
+        if steps.ndim != 1 or len(steps) != n_frames_in_shard:
+            raise ValueError(
+                f"expected one simulation step per frame in {shard_path}"
+            )
+        if n_frames_in_shard != stop - start:
+            raise ValueError(
+                f"shard range [{start}, {stop}) does not match "
+                f"{n_frames_in_shard} stored frames in {shard_path}"
+            )
         if previous_wrapped is None:
-            previous_wrapped = np.zeros(n_particles, dtype=np.float64)
-            unwrapped = np.zeros(n_particles, dtype=np.float64)
+            previous_wrapped = np.empty(n_particles, dtype=np.float64)
+            unwrapped = np.empty(n_particles, dtype=np.float64)
+        elif n_particles != len(previous_wrapped):
+            raise ValueError("particle count changes between shards")
+        assert unwrapped is not None
 
         take = frame_limit - loaded_frames
         coords = coords[:take]
@@ -111,15 +124,31 @@ def _load_com_x(
                 raise ValueError(
                     f"non-finite x coordinate at frame {start + local_frame}"
                 )
-            # Unwrap: displacement from previous wrapped position, minus
-            # nearest integer number of box lengths.
-            displacement = frame_x - previous_wrapped
-            unwrapped += displacement - lx * np.rint(displacement / lx)
+            if loaded_frames == 0 and local_frame == 0:
+                # The native big-Lx implementation takes the first stored
+                # coordinates as the unwrapped reference frame.
+                unwrapped[:] = frame_x
+            else:
+                # Displacement from the previous wrapped position, minus the
+                # nearest integer number of box lengths.
+                displacement = frame_x - previous_wrapped
+                scaled = displacement / lx
+                nearest_integer = np.copysign(
+                    np.floor(np.abs(scaled) + 0.5),
+                    scaled,
+                )
+                unwrapped += displacement - lx * nearest_integer
             previous_wrapped[:] = frame_x
 
-            # COM = mean of unwrapped x (Kahan compensated summation for
-            # robustness, though the particle count is modest here).
-            com_x_frames.append(float(np.mean(unwrapped)))
+            # Match the native big-Lx Kahan summation order.
+            total = 0.0
+            compensation = 0.0
+            for coordinate in unwrapped:
+                corrected = float(coordinate) - compensation
+                updated = total + corrected
+                compensation = (updated - total) - corrected
+                total = updated
+            com_x_frames.append(total / n_particles)
             step_frames.append(int(steps[local_frame]))
 
         loaded_frames += actual_take
@@ -129,6 +158,10 @@ def _load_com_x(
 
     if not com_x_frames:
         raise ValueError("no frames were loaded")
+    if len(com_x_frames) < 3:
+        raise ValueError(
+            "at least three frames are required for velocity correlation"
+        )
     return (
         np.array(com_x_frames, dtype=np.float64),
         np.array(step_frames, dtype=np.int64),
@@ -150,6 +183,12 @@ def _finite_difference(
         raise ValueError("values and coordinates must have the same length")
     if n < 2:
         raise ValueError("need at least two samples for derivative")
+    if not np.all(np.isfinite(values)):
+        raise ValueError("values contain non-finite samples")
+    if not np.all(np.isfinite(coords)):
+        raise ValueError("coordinates contain non-finite samples")
+    if np.any(np.diff(coords) <= 0.0):
+        raise ValueError("coordinates must be strictly increasing")
     derivative = np.empty(n, dtype=np.float64)
 
     if n == 2:
@@ -197,6 +236,10 @@ def _pearson_correlation(
     pearson[t] = corr(v[0 : T-t], v[t : T]).
     """
     n = len(velocity)
+    if n < 3:
+        raise ValueError("need at least three velocity samples")
+    if not np.all(np.isfinite(velocity)):
+        raise ValueError("velocity contains non-finite samples")
     if max_lag > n - 2:
         raise ValueError(
             f"max_lag ({max_lag}) exceeds available lags "
@@ -229,22 +272,26 @@ def _pearson_correlation(
 
 
 def _lag_times(
-    steps: NDArray[np.int64],
+    elapsed_time: NDArray[np.float64],
     max_lag: int,
-    timestep: float,
 ) -> NDArray[np.float64]:
-    if len(steps) < 2:
-        raise ValueError("at least two frames are required to determine time spacing")
-    step_spacing = np.diff(steps)
-    if np.any(step_spacing <= 0) or not np.all(step_spacing == step_spacing[0]):
-        raise ValueError(
-            "simulation frames must have uniform, increasing step spacing"
-        )
-    return (
-        np.arange(max_lag + 1, dtype=np.float64)
-        * float(step_spacing[0])
-        * timestep
+    """Return the native big-Lx lag grid after validating uniform spacing."""
+    if len(elapsed_time) < 3:
+        raise ValueError("at least three frames are required")
+    spacing = float(elapsed_time[1] - elapsed_time[0])
+    if not np.isfinite(spacing) or spacing <= 0.0:
+        raise ValueError("invalid simulation time spacing")
+    actual_spacing = np.diff(elapsed_time)
+    tolerance = np.maximum(
+        1.0e-12,
+        1.0e-10 * np.maximum(np.abs(spacing), np.abs(actual_spacing)),
     )
+    if (
+        not np.all(np.isfinite(elapsed_time))
+        or np.any(np.abs(actual_spacing - spacing) > tolerance)
+    ):
+        raise ValueError("simulation frames must have uniform, increasing spacing")
+    return np.arange(max_lag + 1, dtype=np.float64) * spacing
 
 
 def _elapsed_time(
@@ -255,9 +302,22 @@ def _elapsed_time(
     return (steps.astype(np.float64) - float(initial)) * timestep
 
 
-def _label_from_dir(input_dir: Path) -> str:
-    """Derive a compact plot label from the input directory name."""
-    return input_dir.resolve().name
+def _case_identity(
+    input_dir: Path,
+    manifest: dict[str, Any],
+) -> tuple[str, str]:
+    """Return the same case label used by big-Lx and a safe output slug."""
+    case = manifest["case"]
+    case_id = case.get("case_id")
+    label = case.get("label")
+    if not isinstance(case_id, str) or not case_id:
+        case_id = input_dir.resolve().name
+    if not isinstance(label, str) or not label:
+        label = case_id
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", case_id).strip("._")
+    if not slug:
+        raise ValueError(f"cannot derive an output filename for {input_dir}")
+    return label, slug
 
 
 def _plot_correlation(
@@ -276,7 +336,7 @@ def _plot_correlation(
     axis.set_ylabel("Pearson correlation")
     axis.set_ylim(-1.05, 1.05)
     axis.grid(axis="y", color="0.9", lw=0.7)
-    axis.legend(frameon=False)
+    axis.legend(frameon=False, ncol=2)
     sns.despine(ax=axis)
     output.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(
@@ -332,35 +392,43 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--timestep",
         type=_positive_float,
-        default=float(cylinder.SIMULATION.timestep),
-        help="Simulation timestep (default from cylinder constants).",
+        default=None,
+        help=(
+            "Override the simulation timestep (default: case metadata, then "
+            "the cylinder constant)."
+        ),
     )
     return parser.parse_args()
 
 
 def main() -> None:
     args = _parse_args()
-    if args.frames < 2:
-        raise ValueError("--frames must be at least 2")
+    if args.frames < 3:
+        raise ValueError("--frames must be at least 3")
 
     for index, input_dir in enumerate(args.input_dir, start=1):
-        label = _label_from_dir(input_dir)
         print(
             f"[correlation] {index}/{len(args.input_dir)} dir={input_dir}",
             flush=True,
         )
         manifest = _load_manifest(input_dir)
+        label, slug = _case_identity(input_dir, manifest)
 
-        # Honour the per-case timestep stored in the case metadata if
-        # available, otherwise use the CLI default.
+        # An explicit CLI value wins; otherwise use the recorded case value,
+        # falling back to the same cylinder constant as big-Lx.
         case_meta = manifest.get("case", {})
         stored_timestep = case_meta.get("timestep")
-        if stored_timestep is not None:
+        if args.timestep is not None:
+            timestep = args.timestep
+        elif stored_timestep is not None:
             timestep = float(stored_timestep)
             if timestep <= 0.0 or not np.isfinite(timestep):
-                timestep = args.timestep
+                raise ValueError(
+                    f"invalid timestep in manifest for {input_dir}: "
+                    f"{stored_timestep!r}"
+                )
         else:
-            timestep = args.timestep
+            timestep = float(cylinder.SIMULATION.timestep)
 
         com_x, steps, lx = _load_com_x(input_dir, manifest, args.frames)
         print(
@@ -388,10 +456,8 @@ def main() -> None:
             effective_max_lag = available_max_lag
 
         pearson = _pearson_correlation(velocity, effective_max_lag)
-        lag_time = _lag_times(steps, effective_max_lag, timestep)
+        lag_time = _lag_times(elapsed, effective_max_lag)
 
-        # Sanitise the label into a filename-safe slug.
-        slug = label.replace("/", "_").replace(" ", "_")
         output_path = args.output_dir / f"velocity_correlation_{slug}.svg"
         _plot_correlation(lag_time, pearson, label, output_path)
         print(f"[correlation] wrote {output_path}", flush=True)
