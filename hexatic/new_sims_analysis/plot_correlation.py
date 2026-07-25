@@ -17,20 +17,59 @@ import seaborn as sns
 
 from hexatic.constants import cylinder
 
+SUPPORTED_MANIFEST_SCHEMAS = {
+    "hexatic.big_lx.analysis.v1",
+    "hexatic.new_sims.analysis.v1",
+}
+
 
 def _load_manifest(shard_dir: Path) -> dict[str, Any]:
     manifest_path = shard_dir / "manifest.json"
     if not manifest_path.is_file():
         raise FileNotFoundError(f"missing manifest: {manifest_path}")
     manifest = json.loads(manifest_path.read_text())
-    if manifest.get("schema") != "hexatic.new_sims.analysis.v1":
-        raise ValueError(f"unsupported manifest schema in {manifest_path}")
+    schema = manifest.get("schema")
+    if schema not in SUPPORTED_MANIFEST_SCHEMAS:
+        supported = ", ".join(sorted(SUPPORTED_MANIFEST_SCHEMAS))
+        raise ValueError(
+            f"unsupported manifest schema {schema!r} in {manifest_path}; "
+            f"expected one of: {supported}"
+        )
     if manifest.get("complete") is not True:
         raise ValueError(f"analysis manifest is incomplete: {manifest_path}")
     case = manifest.get("case")
     if not isinstance(case, dict):
         raise ValueError(f"missing case metadata in {manifest_path}")
     return manifest
+
+
+def _load_lx(static_path: Path) -> float:
+    """Load axial box length from either supported static-tensor schema."""
+    if not static_path.is_file():
+        raise FileNotFoundError(f"missing static tensors: {static_path}")
+    with safe_open(static_path, framework="np") as static_file:
+        keys = set(static_file.keys())
+        if "lx" in keys:
+            lx_tensor = np.asarray(static_file.get_tensor("lx"))
+            if lx_tensor.size != 1:
+                raise ValueError(
+                    f"expected scalar 'lx' tensor in {static_path}, "
+                    f"got shape {lx_tensor.shape}"
+                )
+            lx = float(lx_tensor.reshape(-1)[0])
+        elif "box" in keys:
+            box = np.asarray(static_file.get_tensor("box"))
+            if box.ndim != 1 or box.size < 1:
+                raise ValueError(
+                    f"expected one-dimensional 'box' tensor in {static_path}, "
+                    f"got shape {box.shape}"
+                )
+            lx = float(box[0])
+        else:
+            raise KeyError(f"{static_path} has neither 'lx' nor 'box' tensor")
+    if not np.isfinite(lx) or lx <= 0.0:
+        raise ValueError(f"invalid axial box length lx={lx}")
+    return lx
 
 
 def _load_com_x(
@@ -44,15 +83,7 @@ def _load_com_x(
     unwrapped axial particle coordinates and lx is the axial box length.
     """
     static_path = shard_dir / "static.safetensors"
-    if not static_path.is_file():
-        raise FileNotFoundError(f"missing static tensors: {static_path}")
-    with safe_open(static_path, framework="np") as static_file:
-        if "box" not in static_file.keys():
-            raise KeyError(f"{static_path} has no 'box' tensor")
-        box = np.asarray(static_file.get_tensor("box"), dtype=np.float64)
-    lx = float(box[0])
-    if not np.isfinite(lx) or lx <= 0.0:
-        raise ValueError(f"invalid axial box length lx={lx}")
+    lx = _load_lx(static_path)
 
     shards = manifest.get("shards")
     if not isinstance(shards, list) or not shards:
