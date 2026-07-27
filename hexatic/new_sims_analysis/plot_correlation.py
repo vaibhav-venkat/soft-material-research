@@ -546,7 +546,7 @@ def _plot_correlation(
     lag_time: NDArray[np.float64],
     velocity_x: NDArray[np.float64],
     orientation_self_x: NDArray[np.float64],
-    orientation_collective_x: NDArray[np.float64],
+    orientation_distinct_x: NDArray[np.float64],
     normalize: bool,
     label: str,
     output: Path,
@@ -564,10 +564,10 @@ def _plot_correlation(
             r"$(U_0^2/N)C_{q_x}^{\mathrm{self}}(\tau)$",
         ),
         (
-            orientation_collective_x,
+            orientation_distinct_x,
             palette[2],
             ":",
-            r"$U_0^2 C_{\bar q_x}(\tau)$",
+            r"$(U_0^2/N^2)\sum_{i\ne j}C_{q_{i,x}q_{j,x}}(\tau)$",
         ),
     )
     for correlation, color, style, name in curves:
@@ -714,7 +714,6 @@ def main() -> None:
             )
             effective_max_lag = available_max_lag
 
-        mean_q = q.mean(axis=1, dtype=np.float64)
         normalize = not args.unnormalize
 
         # Construct all three curves first in physical velocity-squared units.
@@ -722,7 +721,7 @@ def main() -> None:
         #
         #   C_Vx = (U0^2 / N) C_qx_self + cross-particle contribution,
         #
-        # while U0^2 C_bar_qx contains both the self and cross terms.
+        # with the third curve showing the cross-particle contribution alone.
         velocity_x = _normalized_autocorrelation(
             velocity[:, 0], effective_max_lag, normalize=False
         )
@@ -730,15 +729,15 @@ def main() -> None:
             q[:, :, :1], effective_max_lag, normalize=False
         )
         orientation_self_x *= u0**2 / q.shape[1]
-        orientation_collective_x = _normalized_autocorrelation(
-            mean_q[:, 0], effective_max_lag, normalize=False
+        orientation_distinct_x = _distinct_particle_correlation(
+            q[:, :, :1], effective_max_lag, normalize=False
         )
-        orientation_collective_x *= u0**2
+        orientation_distinct_x *= u0**2
         if normalize:
             curves = {
                 "C_Vx": velocity_x,
                 "C_qx_self": orientation_self_x,
-                "C_bar_qx": orientation_collective_x,
+                "C_qx_distinct": orientation_distinct_x,
             }
             for name, correlation in curves.items():
                 if correlation[0] == 0.0:
@@ -753,7 +752,7 @@ def main() -> None:
             lag_time,
             velocity_x,
             orientation_self_x,
-            orientation_collective_x,
+            orientation_distinct_x,
             normalize,
             label,
             output_path,
