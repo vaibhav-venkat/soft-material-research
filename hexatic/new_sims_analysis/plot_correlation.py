@@ -545,11 +545,8 @@ def _case_identity(
 def _plot_correlation(
     lag_time: NDArray[np.float64],
     velocity_x: NDArray[np.float64],
-    velocity_3d: NDArray[np.float64],
-    orientation_x: NDArray[np.float64],
-    orientation_3d: NDArray[np.float64],
-    orientation_distinct: NDArray[np.float64],
-    orientation_self: NDArray[np.float64],
+    orientation_self_x: NDArray[np.float64],
+    orientation_collective_x: NDArray[np.float64],
     normalize: bool,
     label: str,
     output: Path,
@@ -559,26 +556,18 @@ def _plot_correlation(
     figure, axis = plt.subplots(figsize=(8.2, 5.2), constrained_layout=True)
 
     curves = (
-        (velocity_x, palette[0], "-", r"COM velocity $v_x$"),
-        (velocity_3d, palette[1], "-", r"COM velocity $\vec{v}\cdot\vec{v}$"),
-        (orientation_x, palette[2], "--", r"Orientation $U_0 q_x$"),
+        (velocity_x, palette[0], "-", r"$C_{V_x}(\tau)$"),
         (
-            orientation_3d,
-            palette[3],
+            orientation_self_x,
+            palette[1],
             "--",
-            r"Orientation $U_0\,\vec{q}_i\cdot\vec{q}_j$, all $i,j$",
+            r"$(U_0^2/N)C_{q_x}^{\mathrm{self}}(\tau)$",
         ),
         (
-            orientation_distinct,
-            palette[4],
+            orientation_collective_x,
+            palette[2],
             ":",
-            r"Orientation $U_0\,\vec{q}_i\cdot\vec{q}_j$, $j \neq i$",
-        ),
-        (
-            orientation_self,
-            palette[5],
-            "-.",
-            r"Orientation $U_0\,\vec{q}_i(t)\cdot\vec{q}_i(t+\Delta t)$",
+            r"$U_0^2 C_{\bar q_x}(\tau)$",
         ),
     )
     for correlation, color, style, name in curves:
@@ -592,7 +581,7 @@ def _plot_correlation(
     )
     axis.set_title(f"{title} — {label}")
     axis.set_xlabel("Lag time")
-    axis.set_ylabel(f"{title} (orientation curves $\\times U_0$)")
+    axis.set_ylabel(title)
     axis.set_xlim(0.0, lag_time[-1])
     axis.grid(axis="y", color="0.9", lw=0.7)
     axis.legend(frameon=False, ncol=2)
@@ -725,43 +714,46 @@ def main() -> None:
             )
             effective_max_lag = available_max_lag
 
-        # The full double sum over particle pairs factorizes exactly through
-        # the per-frame mean orientation, so these two curves cost O(T N).
         mean_q = q.mean(axis=1, dtype=np.float64)
         normalize = not args.unnormalize
+
+        # Construct all three curves first in physical velocity-squared units.
+        # In unnormalized mode this preserves
+        #
+        #   C_Vx = (U0^2 / N) C_qx_self + cross-particle contribution,
+        #
+        # while U0^2 C_bar_qx contains both the self and cross terms.
         velocity_x = _normalized_autocorrelation(
-            velocity[:, 0], effective_max_lag, normalize=normalize
+            velocity[:, 0], effective_max_lag, normalize=False
         )
-        velocity_3d = _normalized_autocorrelation(
-            velocity, effective_max_lag, normalize=normalize
+        orientation_self_x = _self_particle_orientation_correlation(
+            q[:, :, :1], effective_max_lag, normalize=False
         )
-        orientation_x = _normalized_autocorrelation(
-            mean_q[:, 0], effective_max_lag, normalize=normalize
+        orientation_self_x *= u0**2 / q.shape[1]
+        orientation_collective_x = _normalized_autocorrelation(
+            mean_q[:, 0], effective_max_lag, normalize=False
         )
-        orientation_3d = _normalized_autocorrelation(
-            mean_q, effective_max_lag, normalize=normalize
-        )
-        orientation_distinct = _distinct_particle_correlation(
-            q, effective_max_lag, normalize=normalize
-        )
-        orientation_self = _self_particle_orientation_correlation(
-            q, effective_max_lag, normalize=normalize
-        )
-        orientation_x *= u0
-        orientation_3d *= u0
-        orientation_distinct *= u0
-        orientation_self *= u0
+        orientation_collective_x *= u0**2
+        if normalize:
+            curves = {
+                "C_Vx": velocity_x,
+                "C_qx_self": orientation_self_x,
+                "C_bar_qx": orientation_collective_x,
+            }
+            for name, correlation in curves.items():
+                if correlation[0] == 0.0:
+                    raise ValueError(
+                        f"cannot normalize {name} with zero lag-0 value"
+                    )
+                correlation /= correlation[0]
         lag_time = _lag_times(elapsed, effective_max_lag)
 
         output_path = args.output_dir / f"velocity_correlation_{slug}.svg"
         _plot_correlation(
             lag_time,
             velocity_x,
-            velocity_3d,
-            orientation_x,
-            orientation_3d,
-            orientation_distinct,
-            orientation_self,
+            orientation_self_x,
+            orientation_collective_x,
             normalize,
             label,
             output_path,
