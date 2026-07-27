@@ -472,6 +472,41 @@ def _distinct_particle_correlation(
     return distinct / distinct[0]
 
 
+def _self_particle_orientation_correlation(
+    q: NDArray[np.float32],
+    max_lag: int,
+) -> NDArray[np.float64]:
+    """Return the lagged Pearson correlation of each particle with itself.
+
+    Particle and Cartesian-component axes are treated as independent vector
+    components, so the summed products are ``q_i(t) . q_i(t + lag)`` with no
+    cross-particle terms. Particle chunks keep the centered temporaries small.
+    """
+    n_frames, n_particles, _ = q.shape
+    if max_lag < 0 or max_lag > n_frames - 2:
+        raise ValueError(f"max_lag {max_lag} out of range for {n_frames} frames")
+
+    pearson = np.empty(max_lag + 1, dtype=np.float64)
+    for lag in range(max_lag + 1):
+        sample_count = n_frames - lag
+        covariance = 0.0
+        variance_left = 0.0
+        variance_right = 0.0
+        for start in range(0, n_particles, 512):
+            left = q[:sample_count, start : start + 512].astype(np.float64)
+            right = q[lag:, start : start + 512].astype(np.float64)
+            left -= left.mean(axis=0, keepdims=True)
+            right -= right.mean(axis=0, keepdims=True)
+            covariance += float(np.sum(left * right))
+            variance_left += float(np.sum(left * left))
+            variance_right += float(np.sum(right * right))
+        if variance_left <= 0.0 or variance_right <= 0.0:
+            raise ValueError(f"constant orientation window at lag={lag}")
+        coefficient = covariance / np.sqrt(variance_left * variance_right)
+        pearson[lag] = float(np.clip(coefficient, -1.0, 1.0))
+    return pearson
+
+
 def _lag_times(
     elapsed_time: NDArray[np.float64],
     max_lag: int,
@@ -528,6 +563,7 @@ def _plot_correlation(
     orientation_x: NDArray[np.float64],
     orientation_3d: NDArray[np.float64],
     orientation_distinct: NDArray[np.float64],
+    orientation_self: NDArray[np.float64],
     label: str,
     output: Path,
 ) -> None:
@@ -550,6 +586,12 @@ def _plot_correlation(
             palette[4],
             ":",
             r"Orientation $\vec{q}_i\cdot\vec{q}_j$, $j \neq i$",
+        ),
+        (
+            orientation_self,
+            palette[5],
+            "-.",
+            r"Orientation $\vec{q}_i(t)\cdot\vec{q}_i(t+\Delta t)$",
         ),
     )
     for correlation, color, style, name in curves:
@@ -694,6 +736,9 @@ def main() -> None:
         orientation_distinct = _distinct_particle_correlation(
             q, effective_max_lag
         )
+        orientation_self = _self_particle_orientation_correlation(
+            q, effective_max_lag
+        )
         lag_time = _lag_times(elapsed, effective_max_lag)
 
         output_path = args.output_dir / f"velocity_correlation_{slug}.svg"
@@ -704,6 +749,7 @@ def main() -> None:
             orientation_x,
             orientation_3d,
             orientation_distinct,
+            orientation_self,
             label,
             output_path,
         )
