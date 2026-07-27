@@ -91,7 +91,11 @@ def _hexatic_fields(
 
     if case.is_2d:
         groups = (np.arange(n_particles, dtype=np.int64),)
-        lengths = (case.lx, case.circumference, 0.0)
+        lengths = (
+            case.lx if "x" in case.periodic_axes else 0.0,
+            case.circumference if "y" in case.periodic_axes else 0.0,
+            0.0,
+        )
         plane_axes = (0, 1)
         cylinder_surface = False
     elif case.kind == CaseKind.X_WALLED_PRISM:
@@ -165,8 +169,7 @@ def analyze_frame(
         "step": np.asarray(int(step), dtype=np.int64),
         "coords": np.asarray(coords, dtype=np.float32),
     }
-    if not case.is_2d:
-        result["polarization"] = np.asarray(directions, dtype=np.float32)
+    result["polarization"] = np.asarray(directions, dtype=np.float32)
     if case.has_hexatic:
         real, imaginary, valid = _hexatic_fields(positions, case, backend)
         result.update(
@@ -247,15 +250,13 @@ def analyze_case(
                 if case.is_2d
                 else ["x", "y", "z"]
             ),
-            "polarization_order": (
-                None if case.is_2d else ["x", "y", "z"]
-            ),
+            "polarization_order": ["x", "y", "z"],
             "hexatic_definition": (
                 None
                 if not case.has_hexatic
                 else "six-neighbor tangent-plane psi6"
                 if not case.is_2d
-                else "six-neighbor periodic planar psi6"
+                else "six-neighbor planar psi6 with case periodic axes"
             ),
             "complete": False,
             "shards": [],

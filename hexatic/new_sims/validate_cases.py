@@ -62,17 +62,19 @@ def validate() -> None:
             "z" in case.periodic_axes,
         )
         minimum = _minimum_distance(positions, case.stored_box, periodic)
-        if minimum <= cylinder.ANALYSIS.wall_cutoff:
+        if case.has_pair_interaction and minimum <= cylinder.ANALYSIS.wall_cutoff:
             raise AssertionError(
                 f"{case.case_id}: initial separation {minimum} is inside LJ cutoff"
             )
+        if minimum <= 0.0:
+            raise AssertionError(f"{case.case_id}: duplicate initial positions")
         if case.is_cylinder:
             radial = np.linalg.norm(positions[:, 1:3], axis=1)
             if np.max(radial) >= case.wall_radius - cylinder.ANALYSIS.wall_cutoff:
                 raise AssertionError(f"{case.case_id}: particle begins inside wall force")
             if case.is_tracer and not np.allclose(radial, case.radius, atol=1e-8):
                 raise AssertionError(f"{case.case_id}: twisted film radius changed")
-        if case.kind == CaseKind.X_WALLED_PRISM:
+        if case.has_x_walls:
             clearance = 0.5 * case.lx - np.max(np.abs(positions[:, 0]))
             if clearance <= cylinder.ANALYSIS.wall_cutoff:
                 raise AssertionError(f"{case.case_id}: insufficient x-wall clearance")

@@ -105,7 +105,18 @@ def _unwrapped_plane(case: NewSimCase) -> np.ndarray:
     wrapped, _ = generate_unwrapped_lattice(case.base)
     theta = np.mod(np.arctan2(wrapped[:, 1], wrapped[:, 2]), 2.0 * np.pi)
     y = theta * case.radius - 0.5 * case.circumference
-    return np.column_stack((wrapped[:, 0], y, np.zeros(case.n_particles)))
+    x = wrapped[:, 0].copy()
+    if case.kind == CaseKind.IDEAL_2D_X_WALLS:
+        clearance = (
+            cylinder.ANALYSIS.wall_cutoff
+            + cylinder.SIMULATION.wall_clearance_epsilon
+            * cylinder.PARTICLE_DIAMETER
+        )
+        available_lx = case.lx - 2.0 * clearance
+        if available_lx <= 0.0:
+            raise ValueError("x-walled 2D box has no wall-free axial span")
+        x *= available_lx / case.lx
+    return np.column_stack((x, y, np.zeros(case.n_particles)))
 
 
 def _active_ids(positions: np.ndarray, case: NewSimCase) -> tuple[np.ndarray, dict[str, float]]:
@@ -171,4 +182,3 @@ def generate_initial_arrays(
     }
     metadata.update(errors)
     return positions, orientations, active_ids, metadata
-

@@ -74,6 +74,7 @@ new-sims-simulate = "python -um hexatic.new_sims.simulate_case"
 new-sims-analysis = "python -um hexatic.new_sims.analyze_case"
 new-sims-pipeline = "python -um hexatic.new_sims.run_pipeline"
 new-sims-dry-run = "python -um hexatic.new_sims.run_pipeline --dry-run"
+new-sims-2d-plot = "python -um hexatic.new_sims_analysis.plot_2d_correlation"
 [dependencies]
 python = "3.13.*"
 cmake = "*"

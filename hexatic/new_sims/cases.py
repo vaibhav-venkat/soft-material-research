@@ -21,6 +21,8 @@ class CaseKind(StrEnum):
     IDEAL_ABP_CYLINDER = "ideal_abp_cylinder"
     X_WALLED_PRISM = "x_walled_prism"
     PERIODIC_2D_PLANE = "periodic_2d_plane"
+    IDEAL_2D_X_WALLS = "ideal_2d_x_walls"
+    IDEAL_2D_PERIODIC = "ideal_2d_periodic"
     PERIODIC_3D_BULK = "periodic_3d_bulk"
     SINGLE_ACTIVE_TRACER_CYLINDER = "single_active_tracer_cylinder"
     INVERSION_ACTIVE_PAIR_CYLINDER = "inversion_active_pair_cylinder"
@@ -89,7 +91,26 @@ class NewSimCase:
 
     @property
     def is_2d(self) -> bool:
-        return self.kind == CaseKind.PERIODIC_2D_PLANE
+        return self.kind in {
+            CaseKind.PERIODIC_2D_PLANE,
+            CaseKind.IDEAL_2D_X_WALLS,
+            CaseKind.IDEAL_2D_PERIODIC,
+        }
+
+    @property
+    def has_x_walls(self) -> bool:
+        return self.kind in {
+            CaseKind.X_WALLED_PRISM,
+            CaseKind.IDEAL_2D_X_WALLS,
+        }
+
+    @property
+    def has_pair_interaction(self) -> bool:
+        return self.kind not in {
+            CaseKind.IDEAL_ABP_CYLINDER,
+            CaseKind.IDEAL_2D_X_WALLS,
+            CaseKind.IDEAL_2D_PERIODIC,
+        }
 
     @property
     def active_count(self) -> int:
@@ -103,6 +124,8 @@ class NewSimCase:
     def periodic_axes(self) -> tuple[str, ...]:
         if self.kind == CaseKind.X_WALLED_PRISM:
             return "y", "z"
+        if self.kind == CaseKind.IDEAL_2D_X_WALLS:
+            return ("y",)
         if self.is_2d:
             return "x", "y"
         if self.kind == CaseKind.PERIODIC_3D_BULK:
@@ -111,7 +134,7 @@ class NewSimCase:
 
     @property
     def wall_faces(self) -> tuple[str, ...]:
-        if self.kind == CaseKind.X_WALLED_PRISM:
+        if self.has_x_walls:
             return "+x", "-x"
         if self.is_cylinder:
             return ("radial",)
@@ -127,6 +150,10 @@ class NewSimCase:
             CaseKind.IDEAL_ABP_CYLINDER: "ideal non-interacting ABPs in a cylinder",
             CaseKind.X_WALLED_PRISM: "active prism with x walls and periodic y/z",
             CaseKind.PERIODIC_2D_PLANE: "fully periodic unwrapped 2D ABPs",
+            CaseKind.IDEAL_2D_X_WALLS: (
+                "non-interacting 2D ABPs with x walls and periodic y"
+            ),
+            CaseKind.IDEAL_2D_PERIODIC: "non-interacting fully periodic 2D ABPs",
             CaseKind.PERIODIC_3D_BULK: "fully periodic 3D ABPs",
             CaseKind.SINGLE_ACTIVE_TRACER_CYLINDER: (
                 "one active tracer in a passive twisted cylinder film"
@@ -168,18 +195,28 @@ class NewSimCase:
             "dimensions": self.dimensions,
             "periodic_axes": self.periodic_axes,
             "wall_faces": self.wall_faces,
+            "wall_interaction": bool(self.wall_faces),
+            "wall_interaction_epsilon": (
+                None
+                if not self.wall_faces
+                else PASSIVE_STIFFNESS_MULTIPLIER * PASSIVE_KT
+                if self.is_tracer
+                else standard_epsilon
+            ),
             "has_hexatic": self.has_hexatic,
             "initialization": (
                 "exact_wrapped_twisted_triangular_supercell"
                 if self.is_tracer
-                else "exact_unwrapped_triangular_supercell_random_polarization"
+                else "x_compressed_flattened_triangular_supercell_random_planar_polarization"
+                if self.kind == CaseKind.IDEAL_2D_X_WALLS
+                else "flattened_triangular_supercell_random_planar_polarization"
                 if self.is_2d
                 else "bulk_lattice_random_uniform_3d_polarization"
             ),
-            "pair_interaction": self.kind != CaseKind.IDEAL_ABP_CYLINDER,
+            "pair_interaction": self.has_pair_interaction,
             "interaction_epsilon": (
                 None
-                if self.kind == CaseKind.IDEAL_ABP_CYLINDER
+                if not self.has_pair_interaction
                 else PASSIVE_STIFFNESS_MULTIPLIER * PASSIVE_KT
                 if self.is_tracer
                 else standard_epsilon
@@ -263,4 +300,3 @@ def get_case(case_id: str) -> NewSimCase:
             return case
     known = ", ".join(case.case_id for case in SWEEP_CASES)
     raise KeyError(f"Unknown new simulation {case_id!r}; known cases: {known}")
-

@@ -93,7 +93,7 @@ def _standard_epsilon() -> float:
 
 
 def _pair_force(case: NewSimCase) -> hoomd.md.pair.LJ | None:
-    if case.kind == CaseKind.IDEAL_ABP_CYLINDER:
+    if not case.has_pair_interaction:
         return None
     neighbor_list = hoomd.md.nlist.Cell(
         buffer=cylinder.SIMULATION.neighbor_list_buffer
@@ -115,9 +115,9 @@ PASSIVE_EPSILON = PASSIVE_STIFFNESS_MULTIPLIER * PASSIVE_KT
 
 
 def _wall_force(case: NewSimCase) -> hoomd.md.external.wall.LJ | None:
-    if case.kind in {CaseKind.PERIODIC_2D_PLANE, CaseKind.PERIODIC_3D_BULK}:
+    if not case.wall_faces:
         return None
-    if case.kind == CaseKind.X_WALLED_PRISM:
+    if case.has_x_walls:
         half = 0.5 * case.lx
         walls = [
             hoomd.wall.Plane(origin=(-half, 0, 0), normal=(1, 0, 0)),
@@ -141,7 +141,7 @@ def _wall_force(case: NewSimCase) -> hoomd.md.external.wall.LJ | None:
             "sigma": cylinder.ANALYSIS.sigma,
             "r_cut": cylinder.ANALYSIS.wall_cutoff,
         }
-        if case.kind == CaseKind.X_WALLED_PRISM:
+        if case.has_x_walls:
             parameters["r_extrap"] = 0.98 * cylinder.ANALYSIS.wall_cutoff
         wall.params[particle_type] = parameters
     return wall
