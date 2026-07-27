@@ -561,36 +561,38 @@ def _plot_correlation(
     curves = (
         (velocity_x, palette[0], "-", r"COM velocity $v_x$"),
         (velocity_3d, palette[1], "-", r"COM velocity $\vec{v}\cdot\vec{v}$"),
-        (orientation_x, palette[2], "--", r"Orientation $q_x$"),
+        (orientation_x, palette[2], "--", r"Orientation $U_0 q_x$"),
         (
             orientation_3d,
             palette[3],
             "--",
-            r"Orientation $\vec{q}_i\cdot\vec{q}_j$, all $i,j$",
+            r"Orientation $U_0\,\vec{q}_i\cdot\vec{q}_j$, all $i,j$",
         ),
         (
             orientation_distinct,
             palette[4],
             ":",
-            r"Orientation $\vec{q}_i\cdot\vec{q}_j$, $j \neq i$",
+            r"Orientation $U_0\,\vec{q}_i\cdot\vec{q}_j$, $j \neq i$",
         ),
         (
             orientation_self,
             palette[5],
             "-.",
-            r"Orientation $\vec{q}_i(t)\cdot\vec{q}_i(t+\Delta t)$",
+            r"Orientation $U_0\,\vec{q}_i(t)\cdot\vec{q}_i(t+\Delta t)$",
         ),
     )
     for correlation, color, style, name in curves:
         axis.plot(lag_time, correlation, color=color, ls=style, lw=2.0, label=name)
 
     axis.axhline(0.0, color="0.65", lw=0.9)
-    title = "Normalized autocorrelation" if normalize else "Autocorrelation"
+    title = (
+        "Normalized autocorrelation"
+        if normalize
+        else "Unnormalized autocorrelation"
+    )
     axis.set_title(f"{title} — {label}")
     axis.set_xlabel("Lag time")
-    axis.set_ylabel(title)
-    if normalize:
-        axis.set_ylim(-1.05, 1.05)
+    axis.set_ylabel(f"{title} (orientation curves $\\times U_0$)")
     axis.set_xlim(0.0, lag_time[-1])
     axis.grid(axis="y", color="0.9", lw=0.7)
     axis.legend(frameon=False, ncol=2)
@@ -692,6 +694,9 @@ def main() -> None:
                 )
         else:
             timestep = float(cylinder.SIMULATION.timestep)
+        u0 = float(case_meta.get("u0", cylinder.SIMULATION.u0))
+        if not np.isfinite(u0) or u0 <= 0.0:
+            raise ValueError(f"invalid U0 in manifest for {input_dir}: {u0!r}")
 
         com, q, steps, lx = _load_frame_series(
             input_dir, manifest, args.frames
@@ -742,6 +747,10 @@ def main() -> None:
         orientation_self = _self_particle_orientation_correlation(
             q, effective_max_lag, normalize=normalize
         )
+        orientation_x *= u0
+        orientation_3d *= u0
+        orientation_distinct *= u0
+        orientation_self *= u0
         lag_time = _lag_times(elapsed, effective_max_lag)
 
         output_path = args.output_dir / f"velocity_correlation_{slug}.svg"
