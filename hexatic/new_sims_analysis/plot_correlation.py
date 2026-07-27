@@ -370,19 +370,14 @@ def _finite_difference_vector(
     )
 
 
-def _pearson_correlation(
+def _normalized_autocorrelation(
     series: NDArray[np.float64],
     max_lag: int,
 ) -> NDArray[np.float64]:
-    """Lagged Pearson correlation of a scalar or vector series.
+    """Unbiased, lag-zero-normalized autocorrelation of a scalar or vector.
 
     ``series`` is either (frames,) or (frames, components). For the vector
-    case the products below are dot products summed over components, so the
-    result is the natural generalization of the scalar coefficient and
-    reduces to it exactly when there is one component.
-
-    Returns an array of length max_lag + 1 where
-    ``pearson[t] = corr(series[0 : T-t], series[t : T])``.
+    case, products are dot products summed over components.
     """
     if series.ndim == 1:
         series = series[:, None]
@@ -401,21 +396,15 @@ def _pearson_correlation(
             f"({n - 2} for {n} samples)"
         )
 
-    pearson = np.empty(max_lag + 1, dtype=np.float64)
+    correlation = np.empty(max_lag + 1, dtype=np.float64)
     for lag in range(max_lag + 1):
         sample_count = n - lag
         left = series[:sample_count]
         right = series[lag : lag + sample_count]
-        left_centered = left - left.mean(axis=0)
-        right_centered = right - right.mean(axis=0)
-        covariance = float(np.sum(left_centered * right_centered))
-        variance_left = float(np.sum(left_centered * left_centered))
-        variance_right = float(np.sum(right_centered * right_centered))
-        if variance_left <= 0.0 or variance_right <= 0.0:
-            raise ValueError(f"constant (zero-variance) window at lag={lag}")
-        coefficient = covariance / np.sqrt(variance_left * variance_right)
-        pearson[lag] = float(np.clip(coefficient, -1.0, 1.0))
-    return pearson
+        correlation[lag] = float(np.sum(left * right)) / sample_count
+    if correlation[0] == 0.0:
+        raise ValueError("cannot normalize an autocorrelation with zero lag value")
+    return correlation / correlation[0]
 
 
 def _distinct_particle_correlation(
@@ -432,36 +421,28 @@ def _distinct_particle_correlation(
     term factorizes through the per-frame mean and is cheap; the self term
     does not factorize, so it needs one FFT per particle chunk.
 
-    Unlike the other curves this is not a Pearson coefficient of any single
-    series -- a difference of two bilinear forms has no single variance to
-    divide by -- so it uses global time means and a lag-0 normalization. It is
-    a reference for curve *shape*, not a value comparable coefficient by
-    coefficient.
+    Like the other curves, the unbiased lagged product is normalized by its
+    lag-zero value.
     """
     n_frames, n_particles, _ = q.shape
     if max_lag < 0 or max_lag > n_frames - 2:
         raise ValueError(f"max_lag {max_lag} out of range for {n_frames} frames")
 
-    # Centering each particle on its own time mean makes the mean of the
-    # centered orientations equal the centered per-frame mean, so the full and
-    # self terms below share one consistent normalization.
     pair_counts = np.arange(
         n_frames, n_frames - max_lag - 1, -1, dtype=np.float64
     )
 
     mean_q = q.mean(axis=1, dtype=np.float64)
-    centered_mean = mean_q - mean_q.mean(axis=0)
     full = np.empty(max_lag + 1, dtype=np.float64)
     for lag in range(max_lag + 1):
         count = n_frames - lag
-        full[lag] = np.sum(centered_mean[:count] * centered_mean[lag:])
+        full[lag] = np.sum(mean_q[:count] * mean_q[lag:])
     full /= pair_counts
 
     # Chunk the particles so a long run does not need one huge FFT temporary.
     self_total = np.zeros(max_lag + 1, dtype=np.float64)
     for start in range(0, n_particles, 512):
         chunk = q[:, start : start + 512].astype(np.float64)
-        chunk -= chunk.mean(axis=0, keepdims=True)
         raw = fftconvolve(chunk, chunk[::-1], mode="full", axes=0)
         self_total += raw[n_frames - 1 : n_frames + max_lag].sum(axis=(1, 2))
     self_term = self_total / (pair_counts * n_particles**2)
@@ -476,35 +457,27 @@ def _self_particle_orientation_correlation(
     q: NDArray[np.float32],
     max_lag: int,
 ) -> NDArray[np.float64]:
-    """Return the lagged Pearson correlation of each particle with itself.
+    """Return the normalized autocorrelation of each particle with itself.
 
-    Particle and Cartesian-component axes are treated as independent vector
-    components, so the summed products are ``q_i(t) . q_i(t + lag)`` with no
-    cross-particle terms. Particle chunks keep the centered temporaries small.
+    The averaged products are ``q_i(t) . q_i(t + lag)`` with no cross-particle
+    terms. FFT particle chunks compute all requested lags together.
     """
     n_frames, n_particles, _ = q.shape
     if max_lag < 0 or max_lag > n_frames - 2:
         raise ValueError(f"max_lag {max_lag} out of range for {n_frames} frames")
 
-    pearson = np.empty(max_lag + 1, dtype=np.float64)
-    for lag in range(max_lag + 1):
-        sample_count = n_frames - lag
-        covariance = 0.0
-        variance_left = 0.0
-        variance_right = 0.0
-        for start in range(0, n_particles, 512):
-            left = q[:sample_count, start : start + 512].astype(np.float64)
-            right = q[lag:, start : start + 512].astype(np.float64)
-            left -= left.mean(axis=0, keepdims=True)
-            right -= right.mean(axis=0, keepdims=True)
-            covariance += float(np.sum(left * right))
-            variance_left += float(np.sum(left * left))
-            variance_right += float(np.sum(right * right))
-        if variance_left <= 0.0 or variance_right <= 0.0:
-            raise ValueError(f"constant orientation window at lag={lag}")
-        coefficient = covariance / np.sqrt(variance_left * variance_right)
-        pearson[lag] = float(np.clip(coefficient, -1.0, 1.0))
-    return pearson
+    total = np.zeros(max_lag + 1, dtype=np.float64)
+    for start in range(0, n_particles, 512):
+        chunk = q[:, start : start + 512]
+        raw = fftconvolve(chunk, chunk[::-1], mode="full", axes=0)
+        total += raw[n_frames - 1 : n_frames + max_lag].sum(axis=(1, 2))
+    pair_counts = np.arange(
+        n_frames, n_frames - max_lag - 1, -1, dtype=np.float64
+    )
+    correlation = total / (pair_counts * n_particles)
+    if correlation[0] == 0.0:
+        raise ValueError("self-particle autocorrelation has zero lag-0 value")
+    return correlation / correlation[0]
 
 
 def _lag_times(
@@ -598,9 +571,9 @@ def _plot_correlation(
         axis.plot(lag_time, correlation, color=color, ls=style, lw=2.0, label=name)
 
     axis.axhline(0.0, color="0.65", lw=0.9)
-    axis.set_title(f"Lagged Pearson correlation — {label}")
+    axis.set_title(f"Normalized autocorrelation — {label}")
     axis.set_xlabel("Lag time")
-    axis.set_ylabel("Pearson correlation")
+    axis.set_ylabel("Normalized autocorrelation")
     axis.set_ylim(-1.05, 1.05)
     axis.set_xlim(0.0, lag_time[-1])
     axis.grid(axis="y", color="0.9", lw=0.7)
@@ -711,7 +684,7 @@ def main() -> None:
         velocity = _finite_difference_vector(com, elapsed)
 
         # Cap max_lag to what the velocity series actually supports, then
-        # use the same effective value for Pearson *and* lag-time arrays.
+        # use the same effective value for correlation and lag-time arrays.
         available_max_lag = len(velocity) - 2
         if available_max_lag < 0:
             raise ValueError(
@@ -729,10 +702,18 @@ def main() -> None:
         # The full double sum over particle pairs factorizes exactly through
         # the per-frame mean orientation, so these two curves cost O(T N).
         mean_q = q.mean(axis=1, dtype=np.float64)
-        velocity_x = _pearson_correlation(velocity[:, 0], effective_max_lag)
-        velocity_3d = _pearson_correlation(velocity, effective_max_lag)
-        orientation_x = _pearson_correlation(mean_q[:, 0], effective_max_lag)
-        orientation_3d = _pearson_correlation(mean_q, effective_max_lag)
+        velocity_x = _normalized_autocorrelation(
+            velocity[:, 0], effective_max_lag
+        )
+        velocity_3d = _normalized_autocorrelation(
+            velocity, effective_max_lag
+        )
+        orientation_x = _normalized_autocorrelation(
+            mean_q[:, 0], effective_max_lag
+        )
+        orientation_3d = _normalized_autocorrelation(
+            mean_q, effective_max_lag
+        )
         orientation_distinct = _distinct_particle_correlation(
             q, effective_max_lag
         )
