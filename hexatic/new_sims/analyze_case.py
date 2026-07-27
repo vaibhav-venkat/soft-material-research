@@ -153,14 +153,21 @@ def analyze_frame(
             f"got {frame.particles.N}"
         )
     positions = np.asarray(frame.particles.position, dtype=np.float32)
+    images = _particle_images(frame, case.n_particles)
     orientation = np.asarray(frame.particles.orientation, dtype=np.float32)
     directions = backend.directions(orientation).astype(np.float32)
     if case.is_cylinder:
         coords = _cylinder_coords(positions, backend)
     elif case.is_2d:
-        coords = positions[:, :2]
+        coords = positions[:, :2].copy()
+        for axis, axis_name in enumerate(("x", "y")):
+            if axis_name in case.periodic_axes:
+                coords[:, axis] += images[:, axis] * case.stored_box[axis]
     else:
-        coords = positions
+        coords = positions.copy()
+        for axis, axis_name in enumerate(("x", "y", "z")):
+            if axis_name in case.periodic_axes:
+                coords[:, axis] += images[:, axis] * case.stored_box[axis]
     step = frame.configuration.step
     if step is None:
         raise ValueError("trajectory frame has no simulation step")
@@ -249,6 +256,11 @@ def analyze_case(
                 else ["x", "y"]
                 if case.is_2d
                 else ["x", "y", "z"]
+            ),
+            "coordinate_storage": (
+                "wrapped_cylindrical"
+                if case.is_cylinder
+                else "cartesian_unwrapped_on_periodic_axes"
             ),
             "polarization_order": ["x", "y", "z"],
             "hexatic_definition": (

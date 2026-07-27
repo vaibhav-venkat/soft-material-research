@@ -32,6 +32,7 @@ class FullMsd:
     effective_tau_r: float
     theoretical_diffusivity: float
     x_only: bool
+    coordinates_preunwrapped: bool
 
 
 @dataclass(frozen=True)
@@ -133,7 +134,11 @@ def _load_full_msd(
     theoretical_diffusivity = (
         cylinder.SIMULATION.u0**2
         * effective_tau_r
-        / (dimensions * (dimensions - 1))
+        / dimensions
+    )
+    coordinates_preunwrapped = (
+        manifest.get("coordinate_storage")
+        == "cartesian_unwrapped_on_periodic_axes"
     )
     coordinate_order = tuple(manifest["coordinate_order"][:dimensions])
     expected_order = ("x", "y") if dimensions == 2 else ("x", "y", "z")
@@ -221,6 +226,8 @@ def _load_full_msd(
     for axis_index, axis_name in enumerate(coordinate_order):
         if x_only and axis_name != "x":
             continue
+        if coordinates_preunwrapped:
+            continue
         if axis_name not in periodic_axis_set or len(unwrapped_positions) <= 1:
             continue
         length = box_lengths[axis_index]
@@ -258,6 +265,7 @@ def _load_full_msd(
         effective_tau_r=effective_tau_r,
         theoretical_diffusivity=theoretical_diffusivity,
         x_only=x_only,
+        coordinates_preunwrapped=coordinates_preunwrapped,
     )
 
 
@@ -341,7 +349,7 @@ def _plot(
             linestyle=":",
             linewidth=2.0,
             label=(
-                rf"{label}: $U_0^2\tau_r/[d(d-1)]"
+                rf"{label}: $U_0^2\tau_p/d"
                 rf"={result.theoretical_diffusivity:.6g}$"
             ),
         )
@@ -486,6 +494,7 @@ def main() -> None:
             f"periodic_axes={','.join(result.periodic_axes) or 'none'} "
             f"d={result.dimensions} tau_r={result.effective_tau_r:.8g} "
             f"mode={'x-only' if result.x_only else 'full'} "
+            f"preunwrapped={result.coordinates_preunwrapped} "
             f"fitted_{'Dx' if result.x_only else 'D'}={fit.diffusivity:.8g} "
             f"theory_D={result.theoretical_diffusivity:.8g} "
             f"final_msd={result.mean_squared_displacement[-1]:.8g}"
