@@ -362,7 +362,7 @@ def _plot(
     else:
         msd_axis.set_title("Full-coordinate mean-squared displacement")
         msd_axis.set_ylabel(
-            r"$\langle|\mathbf r_i(t_0+\Delta t)-\mathbf r_i(t_0)|^2"
+            r"$\langle|\mathbf{r}_i(t_0+\Delta t)-\mathbf{r}_i(t_0)|^2"
             r"\rangle_{i,t_0}$"
         )
     diffusivity_axis.set_title("Long-time effective diffusion")
