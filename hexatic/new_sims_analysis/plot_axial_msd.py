@@ -1,4 +1,4 @@
-"""Plot axial mean-squared displacement from new-sims safetensor shards."""
+"""Plot full-coordinate mean-squared displacement from new-sims shards."""
 
 from __future__ import annotations
 
@@ -22,12 +22,23 @@ from hexatic.constants import cylinder
 
 
 @dataclass(frozen=True)
-class AxialMsd:
+class FullMsd:
     case_id: str
     elapsed_time: NDArray[np.float64]
     mean_squared_displacement: NDArray[np.float64]
     n_particles: int
-    periodic_x: bool
+    periodic_axes: tuple[str, ...]
+    dimensions: int
+    effective_tau_r: float
+    theoretical_diffusivity: float
+    x_only: bool
+
+
+@dataclass(frozen=True)
+class LongTimeFit:
+    slope: float
+    intercept: float
+    diffusivity: float
 
 
 def _load_manifest(shard_dir: Path) -> dict[str, Any]:
@@ -54,7 +65,7 @@ def _load_manifest(shard_dir: Path) -> dict[str, Any]:
     return manifest
 
 
-def _load_lx(shard_dir: Path) -> float:
+def _load_box_lengths(shard_dir: Path, dimensions: int) -> NDArray[np.float64]:
     static_path = shard_dir / "static.safetensors"
     if not static_path.is_file():
         raise FileNotFoundError(f"missing static tensors: {static_path}")
@@ -62,37 +73,40 @@ def _load_lx(shard_dir: Path) -> float:
         if "box" not in set(source.keys()):
             raise KeyError(f"{static_path} has no 'box' tensor")
         box = np.asarray(source.get_tensor("box"), dtype=np.float64)
-    if box.ndim != 1 or box.size < 1:
+    if box.ndim != 1 or box.size < dimensions:
         raise ValueError(f"invalid box shape {box.shape} in {static_path}")
-    lx = float(box[0])
-    if not np.isfinite(lx) or lx <= 0.0:
-        raise ValueError(f"invalid axial box length lx={lx} in {static_path}")
-    return lx
+    lengths = box[:dimensions].copy()
+    if not np.all(np.isfinite(lengths)) or np.any(lengths <= 0.0):
+        raise ValueError(f"invalid box lengths {lengths} in {static_path}")
+    return lengths
 
 
-def _freud_axial_msd(
-    unwrapped_x: NDArray[np.float64],
+def _freud_full_msd(
+    unwrapped_positions: NDArray[np.float64],
     particle_chunk: int,
 ) -> NDArray[np.float64]:
     calculator = freud.msd.MSD(box=None, mode="window")
     first_chunk = True
-    for start in range(0, unwrapped_x.shape[1], particle_chunk):
-        stop = min(start + particle_chunk, unwrapped_x.shape[1])
+    for start in range(0, unwrapped_positions.shape[1], particle_chunk):
+        stop = min(start + particle_chunk, unwrapped_positions.shape[1])
         positions = np.zeros(
-            (unwrapped_x.shape[0], stop - start, 3),
+            (unwrapped_positions.shape[0], stop - start, 3),
             dtype=np.float64,
         )
-        positions[:, :, 0] = unwrapped_x[:, start:stop]
+        positions[:, :, : unwrapped_positions.shape[2]] = (
+            unwrapped_positions[:, start:stop]
+        )
         calculator.compute(positions, reset=first_chunk)
         first_chunk = False
     return np.asarray(calculator.msd, dtype=np.float64)
 
 
-def _load_axial_msd(
+def _load_full_msd(
     shard_dir: Path,
     frame_limit: int | None,
     particle_chunk: int,
-) -> AxialMsd:
+    x_only: bool,
+) -> FullMsd:
     manifest = _load_manifest(shard_dir)
     case = manifest["case"]
     case_id = case.get("case_id")
@@ -101,8 +115,37 @@ def _load_axial_msd(
     periodic_axes = case.get("periodic_axes", [])
     if not isinstance(periodic_axes, list):
         raise ValueError(f"invalid periodic_axes for case {case_id}")
-    periodic_x = "x" in periodic_axes
-    lx = _load_lx(shard_dir)
+    dimensions = int(case.get("dimensions", len(manifest["coordinate_order"])))
+    if dimensions not in {2, 3}:
+        raise ValueError(f"expected dimensions 2 or 3 for case {case_id}")
+    diffusion_period = int(
+        case.get(
+            "rotational_diffusion_period",
+            cylinder.SIMULATION.rotational_diffusion_period,
+        )
+    )
+    if diffusion_period < 1:
+        raise ValueError(
+            f"invalid rotational_diffusion_period={diffusion_period} "
+            f"for case {case_id}"
+        )
+    effective_tau_r = float(cylinder.SIMULATION.tau_r * diffusion_period)
+    theoretical_diffusivity = (
+        cylinder.SIMULATION.u0**2
+        * effective_tau_r
+        / (dimensions * (dimensions - 1))
+    )
+    coordinate_order = tuple(manifest["coordinate_order"][:dimensions])
+    expected_order = ("x", "y") if dimensions == 2 else ("x", "y", "z")
+    if coordinate_order != expected_order:
+        raise ValueError(
+            f"expected coordinate order {expected_order}, got {coordinate_order}"
+        )
+    periodic_axis_set = set(periodic_axes)
+    unknown_periodic = periodic_axis_set.difference(coordinate_order)
+    if unknown_periodic:
+        raise ValueError(f"unknown periodic axes for {case_id}: {unknown_periodic}")
+    box_lengths = _load_box_lengths(shard_dir, dimensions)
     timestep = float(case.get("timestep", cylinder.SIMULATION.timestep))
     if not np.isfinite(timestep) or timestep <= 0.0:
         raise ValueError(f"invalid timestep={timestep} for case {case_id}")
@@ -111,7 +154,7 @@ def _load_axial_msd(
     if not isinstance(shards, list) or not shards:
         raise ValueError(f"manifest contains no shards: {shard_dir}")
 
-    axial_arrays: list[NDArray[np.float64]] = []
+    coordinate_arrays: list[NDArray[np.float64]] = []
     step_arrays: list[NDArray[np.int64]] = []
     loaded_frames = 0
     expected_start = 0
@@ -136,14 +179,18 @@ def _load_axial_msd(
                 raise KeyError(f"{shard_path} must contain 'coords' and 'step'")
             coords = np.asarray(source.get_tensor("coords"), dtype=np.float64)
             shard_steps = np.asarray(source.get_tensor("step"), dtype=np.int64)
-        if coords.ndim != 3 or coords.shape[1] < 1 or coords.shape[2] < 1:
+        if (
+            coords.ndim != 3
+            or coords.shape[1] < 1
+            or coords.shape[2] < dimensions
+        ):
             raise ValueError(f"invalid coords shape {coords.shape} in {shard_path}")
         if shard_steps.ndim != 1 or len(shard_steps) != len(coords):
             raise ValueError(f"step/coordinate length mismatch in {shard_path}")
         if len(coords) != stop - start:
             raise ValueError(f"shard range does not match tensors in {shard_path}")
-        if not np.all(np.isfinite(coords[:, :, 0])):
-            raise ValueError(f"non-finite axial coordinate in {shard_path}")
+        if not np.all(np.isfinite(coords[:, :, :dimensions])):
+            raise ValueError(f"non-finite coordinate in {shard_path}")
         if n_particles is None:
             n_particles = coords.shape[1]
         elif coords.shape[1] != n_particles:
@@ -152,16 +199,16 @@ def _load_axial_msd(
         take = len(coords)
         if frame_limit is not None:
             take = min(take, frame_limit - loaded_frames)
-        axial_arrays.append(coords[:take, :, 0].copy())
+        coordinate_arrays.append(coords[:take, :, :dimensions].copy())
         step_arrays.append(shard_steps[:take].copy())
         loaded_frames += take
         expected_start = stop
         if frame_limit is not None and loaded_frames >= frame_limit:
             break
 
-    if n_particles is None or not axial_arrays:
+    if n_particles is None or not coordinate_arrays:
         raise ValueError(f"no frames loaded from {shard_dir}")
-    unwrapped_x = np.concatenate(axial_arrays, axis=0)
+    unwrapped_positions = np.concatenate(coordinate_arrays, axis=0)
     step_values = np.concatenate(step_arrays)
     step_spacing = np.diff(step_values)
     if np.any(step_spacing <= 0):
@@ -171,57 +218,166 @@ def _load_axial_msd(
             f"Freud windowed MSD requires uniform frame spacing in {shard_dir}"
         )
 
-    if periodic_x and len(unwrapped_x) > 1:
-        previous_wrapped = unwrapped_x[0].copy()
-        for frame_index in range(1, len(unwrapped_x)):
-            current_wrapped = unwrapped_x[frame_index].copy()
+    for axis_index, axis_name in enumerate(coordinate_order):
+        if x_only and axis_name != "x":
+            continue
+        if axis_name not in periodic_axis_set or len(unwrapped_positions) <= 1:
+            continue
+        length = box_lengths[axis_index]
+        previous_wrapped = unwrapped_positions[0, :, axis_index].copy()
+        for frame_index in range(1, len(unwrapped_positions)):
+            current_wrapped = unwrapped_positions[
+                frame_index, :, axis_index
+            ].copy()
             displacement = current_wrapped - previous_wrapped
-            displacement -= lx * np.rint(displacement / lx)
-            unwrapped_x[frame_index] = (
-                unwrapped_x[frame_index - 1] + displacement
+            displacement -= length * np.rint(displacement / length)
+            unwrapped_positions[frame_index, :, axis_index] = (
+                unwrapped_positions[frame_index - 1, :, axis_index]
+                + displacement
             )
             previous_wrapped = current_wrapped
 
     # Freud's FFT result is translation invariant. Centering every particle's
     # fully unwrapped path at zero avoids cancellation from large box coordinates.
-    unwrapped_x -= unwrapped_x[0]
-    mean_squared_displacement = _freud_axial_msd(
-        unwrapped_x,
+    if x_only:
+        unwrapped_positions = unwrapped_positions[:, :, :1]
+    unwrapped_positions -= unwrapped_positions[0]
+    mean_squared_displacement = _freud_full_msd(
+        unwrapped_positions,
         particle_chunk,
     )
     frame_time = float(step_spacing[0]) * timestep if len(step_spacing) else 0.0
     elapsed_time = np.arange(len(step_values), dtype=np.float64) * frame_time
-    return AxialMsd(
+    return FullMsd(
         case_id=case_id,
         elapsed_time=elapsed_time,
         mean_squared_displacement=mean_squared_displacement,
         n_particles=n_particles,
-        periodic_x=periodic_x,
+        periodic_axes=tuple(periodic_axes),
+        dimensions=dimensions,
+        effective_tau_r=effective_tau_r,
+        theoretical_diffusivity=theoretical_diffusivity,
+        x_only=x_only,
     )
 
 
-def _plot(series: list[tuple[str, AxialMsd]], output: Path) -> None:
+def _long_time_fit(result: FullMsd, linear_start: float) -> LongTimeFit:
+    selected = result.elapsed_time >= linear_start
+    if np.count_nonzero(selected) < 2:
+        raise ValueError(
+            f"case {result.case_id} has fewer than two frames at or after "
+            f"t={linear_start:g}"
+        )
+    design = np.column_stack(
+        (
+            result.elapsed_time[selected],
+            np.ones(np.count_nonzero(selected), dtype=np.float64),
+        )
+    )
+    slope, intercept = np.linalg.lstsq(
+        design,
+        result.mean_squared_displacement[selected],
+        rcond=None,
+    )[0]
+    return LongTimeFit(
+        slope=float(slope),
+        intercept=float(intercept),
+        diffusivity=(
+            0.5 * float(slope)
+            if result.x_only
+            else float(slope) / (2.0 * result.dimensions)
+        ),
+    )
+
+
+def _plot(
+    series: list[tuple[str, FullMsd]],
+    output: Path,
+    linear_start: float,
+) -> list[tuple[str, FullMsd, LongTimeFit]]:
     sns.set_theme(context="paper", style="ticks", font_scale=1.1)
     colors = sns.color_palette("colorblind", n_colors=len(series))
-    figure, axis = plt.subplots(figsize=(7.2, 4.8), constrained_layout=True)
+    figure, axes = plt.subplots(
+        2,
+        1,
+        figsize=(7.4, 7.2),
+        sharex=True,
+        constrained_layout=True,
+    )
+    msd_axis, diffusivity_axis = axes
+    fitted: list[tuple[str, FullMsd, LongTimeFit]] = []
     for color, (label, result) in zip(colors, series, strict=True):
-        axis.plot(
+        fit = _long_time_fit(result, linear_start)
+        fitted.append((label, result, fit))
+        msd_axis.plot(
             result.elapsed_time,
             result.mean_squared_displacement,
             color=color,
             linewidth=2.0,
             label=label,
         )
-    axis.set_title("Axial mean-squared displacement")
-    axis.set_xlabel(r"Elapsed time $t$")
-    axis.set_ylabel(
-        r"$\langle[x_i(t_0+\Delta t)-x_i(t_0)]^2\rangle_{i,t_0}$"
+        fit_time = result.elapsed_time[result.elapsed_time >= linear_start]
+        msd_axis.plot(
+            fit_time,
+            fit.slope * fit_time + fit.intercept,
+            color=color,
+            linestyle="--",
+            linewidth=1.4,
+            label=f"{label} linear fit",
+        )
+        diffusivity_axis.axhline(
+            fit.diffusivity,
+            color=color,
+            linewidth=2.0,
+            label=(
+                rf"{label}: fitted $D_x={fit.diffusivity:.6g}$"
+                if result.x_only
+                else rf"{label}: fitted $D={fit.diffusivity:.6g}$"
+            ),
+        )
+        diffusivity_axis.axhline(
+            result.theoretical_diffusivity,
+            color=color,
+            linestyle=":",
+            linewidth=2.0,
+            label=(
+                rf"{label}: $U_0^2\tau_r/[d(d-1)]"
+                rf"={result.theoretical_diffusivity:.6g}$"
+            ),
+        )
+
+    msd_axis.axvline(
+        linear_start,
+        color="0.45",
+        linestyle="-.",
+        linewidth=1.0,
+        label=rf"fit start $t={linear_start:g}$",
     )
-    axis.grid(color="0.9", linewidth=0.7)
-    axis.legend(frameon=False)
-    axis.set_xlim(left=0.0)
-    axis.set_ylim(bottom=0.0)
-    sns.despine(ax=axis)
+    x_only = series[0][1].x_only
+    if x_only:
+        msd_axis.set_title("Axial mean-squared displacement")
+        msd_axis.set_ylabel(
+            r"$\langle[x_i(t_0+\Delta t)-x_i(t_0)]^2\rangle_{i,t_0}$"
+        )
+    else:
+        msd_axis.set_title("Full-coordinate mean-squared displacement")
+        msd_axis.set_ylabel(
+            r"$\langle|\mathbf r_i(t_0+\Delta t)-\mathbf r_i(t_0)|^2"
+            r"\rangle_{i,t_0}$"
+        )
+    diffusivity_axis.set_title("Long-time effective diffusion")
+    diffusivity_axis.set_xlabel(r"Lag time $\Delta t$")
+    diffusivity_axis.set_ylabel(
+        r"$D_x=\frac{1}{2}\,d\,\mathrm{MSD}_x/dt$"
+        if x_only
+        else r"$D=\frac{1}{2d}\,d\,\mathrm{MSD}/dt$"
+    )
+    for axis in axes:
+        axis.grid(color="0.9", linewidth=0.7)
+        axis.legend(frameon=False, fontsize="small")
+        axis.set_xlim(left=0.0)
+        axis.set_ylim(bottom=0.0)
+        sns.despine(ax=axis)
     output.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(
         output,
@@ -231,12 +387,13 @@ def _plot(series: list[tuple[str, AxialMsd]], output: Path) -> None:
         metadata={"Creator": "hexatic.new_sims_analysis"},
     )
     plt.close(figure)
+    return fitted
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Plot axial particle mean-squared displacement from one or more "
+            "Plot full-coordinate particle mean-squared displacement from one or more "
             "new-sims safetensor output directories."
         )
     )
@@ -269,22 +426,46 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--linear-start",
+        type=float,
+        default=40.0,
+        help=(
+            "Fit the long-time MSD slope from this time onward "
+            "(default: 40)."
+        ),
+    )
+    parser.add_argument(
+        "--x-only",
+        action="store_true",
+        help=(
+            "Use only axial x displacement and fit D_x=slope/2 instead of "
+            "using the full d-dimensional displacement (default: false)."
+        ),
+    )
+    parser.add_argument(
         "--output",
         type=Path,
-        default=Path("axial_msd.png"),
+        default=Path("full_msd.png"),
     )
     args = parser.parse_args()
     if args.frames is not None and args.frames < 1:
         parser.error("--frames must be positive")
     if args.particle_chunk < 1:
         parser.error("--particle-chunk must be positive")
+    if args.linear_start < 0.0:
+        parser.error("--linear-start must be nonnegative")
     if args.output.suffix.lower() != ".png":
         parser.error("--output must end in .png")
     if args.label is not None and len(args.label) != len(args.shard_dir):
         parser.error("provide exactly one --label per --shard-dir")
 
     results = [
-        _load_axial_msd(shard_dir, args.frames, args.particle_chunk)
+        _load_full_msd(
+            shard_dir,
+            args.frames,
+            args.particle_chunk,
+            args.x_only,
+        )
         for shard_dir in args.shard_dir
     ]
     labels = (
@@ -292,12 +473,21 @@ def main() -> None:
         if args.label is not None
         else [result.case_id for result in results]
     )
-    _plot(list(zip(labels, results, strict=True)), args.output)
+    fitted = _plot(
+        list(zip(labels, results, strict=True)),
+        args.output,
+        args.linear_start,
+    )
     print(f"wrote {args.output}")
-    for label, result in zip(labels, results, strict=True):
+    for label, result, fit in fitted:
         print(
             f"{label}: frames={len(result.elapsed_time)} "
-            f"particles={result.n_particles} periodic_x={result.periodic_x} "
+            f"particles={result.n_particles} "
+            f"periodic_axes={','.join(result.periodic_axes) or 'none'} "
+            f"d={result.dimensions} tau_r={result.effective_tau_r:.8g} "
+            f"mode={'x-only' if result.x_only else 'full'} "
+            f"fitted_{'Dx' if result.x_only else 'D'}={fit.diffusivity:.8g} "
+            f"theory_D={result.theoretical_diffusivity:.8g} "
             f"final_msd={result.mean_squared_displacement[-1]:.8g}"
         )
 
