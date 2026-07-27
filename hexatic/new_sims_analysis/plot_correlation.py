@@ -373,11 +373,14 @@ def _finite_difference_vector(
 def _normalized_autocorrelation(
     series: NDArray[np.float64],
     max_lag: int,
+    *,
+    normalize: bool = True,
 ) -> NDArray[np.float64]:
-    """Unbiased, lag-zero-normalized autocorrelation of a scalar or vector.
+    """Return the unbiased autocorrelation of a scalar or vector series.
 
     ``series`` is either (frames,) or (frames, components). For the vector
-    case, products are dot products summed over components.
+    case, products are dot products summed over components. When ``normalize``
+    is true, divide the result by its lag-zero value.
     """
     if series.ndim == 1:
         series = series[:, None]
@@ -402,6 +405,8 @@ def _normalized_autocorrelation(
         left = series[:sample_count]
         right = series[lag : lag + sample_count]
         correlation[lag] = float(np.sum(left * right)) / sample_count
+    if not normalize:
+        return correlation
     if correlation[0] == 0.0:
         raise ValueError("cannot normalize an autocorrelation with zero lag value")
     return correlation / correlation[0]
@@ -410,8 +415,10 @@ def _normalized_autocorrelation(
 def _distinct_particle_correlation(
     q: NDArray[np.float32],
     max_lag: int,
+    *,
+    normalize: bool = True,
 ) -> NDArray[np.float64]:
-    """Distinct-particle orientation correlation, normalized to 1 at lag 0.
+    """Return the unbiased distinct-particle orientation correlation.
 
     Returns the j != i part of the double sum,
 
@@ -421,8 +428,7 @@ def _distinct_particle_correlation(
     term factorizes through the per-frame mean and is cheap; the self term
     does not factorize, so it needs one FFT per particle chunk.
 
-    Like the other curves, the unbiased lagged product is normalized by its
-    lag-zero value.
+    When ``normalize`` is true, divide the result by its lag-zero value.
     """
     n_frames, n_particles, _ = q.shape
     if max_lag < 0 or max_lag > n_frames - 2:
@@ -448,6 +454,8 @@ def _distinct_particle_correlation(
     self_term = self_total / (pair_counts * n_particles**2)
 
     distinct = full - self_term
+    if not normalize:
+        return distinct
     if distinct[0] == 0.0:
         raise ValueError("distinct-particle correlation has zero lag-0 value")
     return distinct / distinct[0]
@@ -456,11 +464,14 @@ def _distinct_particle_correlation(
 def _self_particle_orientation_correlation(
     q: NDArray[np.float32],
     max_lag: int,
+    *,
+    normalize: bool = True,
 ) -> NDArray[np.float64]:
-    """Return the normalized autocorrelation of each particle with itself.
+    """Return the unbiased autocorrelation of each particle with itself.
 
     The averaged products are ``q_i(t) . q_i(t + lag)`` with no cross-particle
-    terms. FFT particle chunks compute all requested lags together.
+    terms. FFT particle chunks compute all requested lags together. When
+    ``normalize`` is true, divide the result by its lag-zero value.
     """
     n_frames, n_particles, _ = q.shape
     if max_lag < 0 or max_lag > n_frames - 2:
@@ -475,6 +486,8 @@ def _self_particle_orientation_correlation(
         n_frames, n_frames - max_lag - 1, -1, dtype=np.float64
     )
     correlation = total / (pair_counts * n_particles)
+    if not normalize:
+        return correlation
     if correlation[0] == 0.0:
         raise ValueError("self-particle autocorrelation has zero lag-0 value")
     return correlation / correlation[0]
@@ -537,6 +550,7 @@ def _plot_correlation(
     orientation_3d: NDArray[np.float64],
     orientation_distinct: NDArray[np.float64],
     orientation_self: NDArray[np.float64],
+    normalize: bool,
     label: str,
     output: Path,
 ) -> None:
@@ -571,10 +585,12 @@ def _plot_correlation(
         axis.plot(lag_time, correlation, color=color, ls=style, lw=2.0, label=name)
 
     axis.axhline(0.0, color="0.65", lw=0.9)
-    axis.set_title(f"Normalized autocorrelation — {label}")
+    title = "Normalized autocorrelation" if normalize else "Autocorrelation"
+    axis.set_title(f"{title} — {label}")
     axis.set_xlabel("Lag time")
-    axis.set_ylabel("Normalized autocorrelation")
-    axis.set_ylim(-1.05, 1.05)
+    axis.set_ylabel(title)
+    if normalize:
+        axis.set_ylim(-1.05, 1.05)
     axis.set_xlim(0.0, lag_time[-1])
     axis.grid(axis="y", color="0.9", lw=0.7)
     axis.legend(frameon=False, ncol=2)
@@ -640,6 +656,11 @@ def _parse_args() -> argparse.Namespace:
             "the cylinder constant)."
         ),
     )
+    parser.add_argument(
+        "--unnormalize",
+        action="store_true",
+        help="Plot unbiased autocorrelations without dividing by lag zero.",
+    )
     return parser.parse_args()
 
 
@@ -702,23 +723,24 @@ def main() -> None:
         # The full double sum over particle pairs factorizes exactly through
         # the per-frame mean orientation, so these two curves cost O(T N).
         mean_q = q.mean(axis=1, dtype=np.float64)
+        normalize = not args.unnormalize
         velocity_x = _normalized_autocorrelation(
-            velocity[:, 0], effective_max_lag
+            velocity[:, 0], effective_max_lag, normalize=normalize
         )
         velocity_3d = _normalized_autocorrelation(
-            velocity, effective_max_lag
+            velocity, effective_max_lag, normalize=normalize
         )
         orientation_x = _normalized_autocorrelation(
-            mean_q[:, 0], effective_max_lag
+            mean_q[:, 0], effective_max_lag, normalize=normalize
         )
         orientation_3d = _normalized_autocorrelation(
-            mean_q, effective_max_lag
+            mean_q, effective_max_lag, normalize=normalize
         )
         orientation_distinct = _distinct_particle_correlation(
-            q, effective_max_lag
+            q, effective_max_lag, normalize=normalize
         )
         orientation_self = _self_particle_orientation_correlation(
-            q, effective_max_lag
+            q, effective_max_lag, normalize=normalize
         )
         lag_time = _lag_times(elapsed, effective_max_lag)
 
@@ -731,6 +753,7 @@ def main() -> None:
             orientation_3d,
             orientation_distinct,
             orientation_self,
+            normalize,
             label,
             output_path,
         )
