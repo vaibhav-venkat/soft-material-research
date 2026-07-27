@@ -221,8 +221,18 @@ def main() -> None:
             "2D active particles."
         )
     )
-    parser.add_argument("--walled-shard-dir", type=Path, required=True)
-    parser.add_argument("--periodic-shard-dir", type=Path, required=True)
+    parser.add_argument(
+        "--walled-shard-dir",
+        type=Path,
+        default=None,
+        help="Analysis directory for ideal_2d_x_walls.",
+    )
+    parser.add_argument(
+        "--periodic-shard-dir",
+        type=Path,
+        default=None,
+        help="Analysis directory for ideal_2d_periodic.",
+    )
     parser.add_argument("--frames", type=int, default=1000)
     parser.add_argument("--max-lag", type=int, default=900)
     parser.add_argument(
@@ -251,11 +261,16 @@ def main() -> None:
         parser.error("--max-lag must be nonnegative")
     if not 0.0 < args.fit_min_correlation < 1.0:
         parser.error("--fit-min-correlation must be between 0 and 1")
+    if args.walled_shard_dir is None and args.periodic_shard_dir is None:
+        parser.error(
+            "provide --walled-shard-dir, --periodic-shard-dir, or both"
+        )
 
-    directories = {
-        CaseKind.IDEAL_2D_X_WALLS.value: args.walled_shard_dir,
-        CaseKind.IDEAL_2D_PERIODIC.value: args.periodic_shard_dir,
-    }
+    directories: dict[str, Path] = {}
+    if args.walled_shard_dir is not None:
+        directories[CaseKind.IDEAL_2D_X_WALLS.value] = args.walled_shard_dir
+    if args.periodic_shard_dir is not None:
+        directories[CaseKind.IDEAL_2D_PERIODIC.value] = args.periodic_shard_dir
     results = {
         case_id: _load_correlation(
             shard_dir,
