@@ -76,6 +76,7 @@ new-sims-pipeline = "python -um hexatic.new_sims.run_pipeline"
 new-sims-dry-run = "python -um hexatic.new_sims.run_pipeline --dry-run"
 new-sims-2d-plot = "python -um hexatic.new_sims_analysis.plot_2d_correlation"
 new-sims-3d-plot = "python -um hexatic.new_sims_analysis.plot_3d_correlation"
+new-sims-axial-msd = "python -um hexatic.new_sims_analysis.plot_axial_msd"
 [dependencies]
 python = "3.13.*"
 cmake = "*"
@@ -101,6 +102,7 @@ rust-analyzer = "*"
 ty = ">=0.0.56,<0.0.57"
 rust-src = ">=1.96.0,<2"
 hdf5 = ">=1.14,<2"
+freud = ">=3.5.0,<4"
 
 [pypi-dependencies]
 pysindy = { version = ">=2.1.0, <3", extras = ["miosr", "sbr", "cvxpy"] }
