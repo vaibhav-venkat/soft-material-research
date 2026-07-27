@@ -72,15 +72,61 @@ def _load_lx(static_path: Path) -> float:
     return lx
 
 
-def _load_com_x(
+def _axial_directions(
+    shard: Any,
+    shard_path: Path,
+) -> NDArray[np.float64]:
+    """Return the axial component of the per-particle orientation vectors.
+
+    ``new_sims`` shards store these as ``polarization`` and ``big_lx`` shards
+    as ``active_direction``; both are Cartesian unit vectors whose component 0
+    is the axial (x) direction.
+    """
+    keys = set(shard.keys())
+    name = (
+        "polarization"
+        if "polarization" in keys
+        else "active_direction"
+        if "active_direction" in keys
+        else None
+    )
+    if name is None:
+        raise KeyError(
+            f"{shard_path} has neither 'polarization' nor 'active_direction'; "
+            f"orientation correlation is undefined for this case"
+        )
+    directions = np.asarray(shard.get_tensor(name), dtype=np.float64)
+    if directions.ndim != 3 or directions.shape[2] != 3:
+        raise ValueError(
+            f"expected {name} shape (frames, particles, 3) in {shard_path}, "
+            f"got {directions.shape}"
+        )
+    if not np.all(np.isfinite(directions)):
+        raise ValueError(f"{name} contains non-finite values in {shard_path}")
+    norms = np.linalg.norm(directions, axis=2)
+    if not np.allclose(norms, 1.0, rtol=2e-4, atol=2e-4):
+        raise ValueError(f"{name} in {shard_path} is not unit-normalized")
+    return directions[:, :, 0]
+
+
+def _load_frame_series(
     shard_dir: Path,
     manifest: dict[str, Any],
     frame_limit: int,
-) -> tuple[NDArray[np.float64], NDArray[np.int64], float]:
-    """Load unwrapped COM x positions and simulation steps.
+) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.int64], float]:
+    """Load unwrapped COM x positions, mean axial orientation, and steps.
 
-    Returns (com_x, steps, lx) where com_x is the per-frame mean of
-    unwrapped axial particle coordinates and lx is the axial box length.
+    Returns (com_x, mean_qx, steps, lx) where com_x is the per-frame mean of
+    unwrapped axial particle coordinates, mean_qx is the per-frame mean axial
+    orientation component, and lx is the axial box length.
+
+    ``mean_qx`` is the exact factorization of the cross-particle orientation
+    correlation: because
+
+        1/N^2 sum_i sum_j q_i,x(t1) q_j,x(t2) = mean_qx(t1) * mean_qx(t2),
+
+    the naive O(T N^2) double sum reduces to an O(T N) per-frame mean with no
+    approximation.
     """
     static_path = shard_dir / "static.safetensors"
     lx = _load_lx(static_path)
@@ -90,6 +136,7 @@ def _load_com_x(
         raise ValueError("manifest contains no safetensor shards")
 
     com_x_frames: list[float] = []
+    mean_qx_frames: list[float] = []
     step_frames: list[int] = []
     loaded_frames = 0
     expected_start = 0
@@ -119,6 +166,7 @@ def _load_com_x(
                 raise KeyError(f"{shard_path} has no 'step' tensor")
             coords = np.asarray(shard.get_tensor("coords"), dtype=np.float64)
             steps = np.asarray(shard.get_tensor("step"), dtype=np.int64)
+            axial_directions = _axial_directions(shard, shard_path)
 
         if coords.ndim != 3 or coords.shape[1] == 0 or coords.shape[2] == 0:
             raise ValueError(
@@ -127,6 +175,11 @@ def _load_com_x(
             )
         n_frames_in_shard = coords.shape[0]
         n_particles = coords.shape[1]
+        if axial_directions.shape != (n_frames_in_shard, n_particles):
+            raise ValueError(
+                f"orientation shape {axial_directions.shape} does not match "
+                f"coords shape {coords.shape[:2]} in {shard_path}"
+            )
         if steps.ndim != 1 or len(steps) != n_frames_in_shard:
             raise ValueError(
                 f"expected one simulation step per frame in {shard_path}"
@@ -146,6 +199,7 @@ def _load_com_x(
         take = frame_limit - loaded_frames
         coords = coords[:take]
         steps = steps[:take]
+        axial_directions = axial_directions[:take]
         actual_take = coords.shape[0]
 
         x_wrapped = coords[:, :, 0]  # shape: (frames, particles)
@@ -180,6 +234,9 @@ def _load_com_x(
                 compensation = (updated - total) - corrected
                 total = updated
             com_x_frames.append(total / n_particles)
+            # No native reference implementation to bit-match here, so a plain
+            # float64 mean is enough for the orientation series.
+            mean_qx_frames.append(float(np.mean(axial_directions[local_frame])))
             step_frames.append(int(steps[local_frame]))
 
         loaded_frames += actual_take
@@ -195,6 +252,7 @@ def _load_com_x(
         )
     return (
         np.array(com_x_frames, dtype=np.float64),
+        np.array(mean_qx_frames, dtype=np.float64),
         np.array(step_frames, dtype=np.int64),
         lx,
     )
@@ -353,22 +411,61 @@ def _case_identity(
 
 def _plot_correlation(
     lag_time: NDArray[np.float64],
-    pearson: NDArray[np.float64],
+    velocity_pearson: NDArray[np.float64],
+    propulsion_pearson: NDArray[np.float64],
+    residual_pearson: NDArray[np.float64],
     label: str,
     output: Path,
 ) -> None:
     sns.set_theme(context="paper", style="ticks", font_scale=1.1)
-    color = sns.color_palette("colorblind")[0]
-    figure, axis = plt.subplots(figsize=(8.2, 4.8), constrained_layout=True)
-    axis.plot(lag_time, pearson, color=color, lw=2.0, label=label)
-    axis.axhline(0.0, color="0.65", lw=0.9)
-    axis.set_title("Lagged axial COM-velocity Pearson correlation")
-    axis.set_xlabel("Lag time")
-    axis.set_ylabel("Pearson correlation")
-    axis.set_ylim(-1.05, 1.05)
-    axis.grid(axis="y", color="0.9", lw=0.7)
-    axis.legend(frameon=False, ncol=2)
-    sns.despine(ax=axis)
+    palette = sns.color_palette("colorblind")
+    figure, axes = plt.subplots(
+        2, 1, figsize=(8.2, 8.0), sharex=True, constrained_layout=True
+    )
+
+    axes[0].plot(
+        lag_time,
+        velocity_pearson,
+        color=palette[0],
+        lw=2.0,
+        label=r"COM velocity $V_x$",
+    )
+    axes[0].plot(
+        lag_time,
+        propulsion_pearson,
+        color=palette[1],
+        lw=2.0,
+        label=r"Propulsion $U_0 \langle q_x \rangle$",
+    )
+    axes[0].plot(
+        lag_time,
+        residual_pearson,
+        color=palette[2],
+        lw=2.0,
+        label=r"Residual $V_x - U_0 \langle q_x \rangle$",
+    )
+    axes[0].set_title(f"Lagged axial Pearson correlation — {label}")
+    axes[0].set_ylabel("Pearson correlation")
+    axes[0].set_ylim(-1.05, 1.05)
+
+    axes[1].plot(
+        lag_time,
+        velocity_pearson - propulsion_pearson,
+        color=palette[3],
+        lw=2.0,
+        label=r"$C_{V_x} - C_{U_0 \langle q_x \rangle}$",
+    )
+    axes[1].set_title("Correlation difference")
+    axes[1].set_ylabel("Difference")
+    axes[1].set_xlabel("Lag time")
+
+    for axis in axes:
+        axis.axhline(0.0, color="0.65", lw=0.9)
+        axis.grid(axis="y", color="0.9", lw=0.7)
+        axis.set_xlim(0.0, lag_time[-1])
+        axis.legend(frameon=False, ncol=2)
+        sns.despine(ax=axis)
+
     output.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(
         output,
@@ -429,6 +526,15 @@ def _parse_args() -> argparse.Namespace:
             "the cylinder constant)."
         ),
     )
+    parser.add_argument(
+        "--u0",
+        type=_positive_float,
+        default=float(cylinder.SIMULATION.u0),
+        help=(
+            "Self-propulsion speed used to split the COM velocity into "
+            "propulsion and residual parts (default: the cylinder constant)."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -461,7 +567,9 @@ def main() -> None:
         else:
             timestep = float(cylinder.SIMULATION.timestep)
 
-        com_x, steps, lx = _load_com_x(input_dir, manifest, args.frames)
+        com_x, mean_qx, steps, lx = _load_frame_series(
+            input_dir, manifest, args.frames
+        )
         print(
             f"[correlation] loaded {len(com_x)} frames, "
             f"lx={lx:.6g}",
@@ -486,11 +594,25 @@ def main() -> None:
             )
             effective_max_lag = available_max_lag
 
+        # v_x(t) = U_0 <q_x>(t) + <F_x>(t)/gamma holds frame by frame, so the
+        # residual isolates the force (plus thermal-noise) contribution.
+        propulsion = args.u0 * mean_qx
+        residual = velocity - propulsion
+
         pearson = _pearson_correlation(velocity, effective_max_lag)
+        propulsion_pearson = _pearson_correlation(propulsion, effective_max_lag)
+        residual_pearson = _pearson_correlation(residual, effective_max_lag)
         lag_time = _lag_times(elapsed, effective_max_lag)
 
         output_path = args.output_dir / f"velocity_correlation_{slug}.svg"
-        _plot_correlation(lag_time, pearson, label, output_path)
+        _plot_correlation(
+            lag_time,
+            pearson,
+            propulsion_pearson,
+            residual_pearson,
+            label,
+            output_path,
+        )
         print(f"[correlation] wrote {output_path}", flush=True)
 
     print(f"[correlation] done — {len(args.input_dir)} plot(s) in {args.output_dir}")
