@@ -219,9 +219,7 @@ def make_simulation(
     active.active_torque[active_type] = (0.0, 0.0, 0.0)
     integrator.forces.append(active)
     simulation.operations += active.create_diffusion_updater(
-        trigger=hoomd.trigger.Periodic(
-            cylinder.SIMULATION.rotational_diffusion_period
-        ),
+        trigger=hoomd.trigger.Periodic(case.rotational_diffusion_period),
         rotational_diffusion=1.0 / cylinder.SIMULATION.tau_r,
     )
 

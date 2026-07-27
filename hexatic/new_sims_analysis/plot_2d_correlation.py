@@ -33,7 +33,11 @@ CASE_LABELS = {
 }
 
 
-def _load_manifest(shard_dir: Path, expected_case_id: str) -> dict[str, Any]:
+def _load_manifest(
+    shard_dir: Path,
+    expected_case_id: str,
+    expected_coordinate_order: tuple[str, ...],
+) -> dict[str, Any]:
     manifest_path = shard_dir / "manifest.json"
     if not manifest_path.is_file():
         raise FileNotFoundError(f"missing manifest: {manifest_path}")
@@ -50,8 +54,11 @@ def _load_manifest(shard_dir: Path, expected_case_id: str) -> dict[str, Any]:
             f"expected case {expected_case_id!r} in {manifest_path}, "
             f"got {case.get('case_id')!r}"
         )
-    if manifest.get("coordinate_order") != ["x", "y"]:
-        raise ValueError(f"expected planar coordinate order in {manifest_path}")
+    if manifest.get("coordinate_order") != list(expected_coordinate_order):
+        raise ValueError(
+            f"expected coordinate order {list(expected_coordinate_order)!r} "
+            f"in {manifest_path}"
+        )
     return manifest
 
 
@@ -61,6 +68,7 @@ def _load_correlation(
     frame_limit: int,
     max_lag: int,
     minimum_correlation: float,
+    coordinate_order: tuple[str, ...],
 ) -> tuple[
     NDArray[np.float64],
     NDArray[np.float64],
@@ -70,7 +78,7 @@ def _load_correlation(
     int,
     int,
 ]:
-    manifest = _load_manifest(shard_dir, case_id)
+    manifest = _load_manifest(shard_dir, case_id, coordinate_order)
     q, steps = _load_polarization(shard_dir, manifest, frame_limit)
     q_corr, qx_corr = _orientation_autocorrelations(q, max_lag)
     case = manifest["case"]
@@ -104,6 +112,8 @@ def _plot(
         ],
     ],
     output: Path,
+    case_labels: dict[str, str],
+    title: str,
 ) -> None:
     sns.set_theme(context="paper", style="ticks", font_scale=1.1)
     colors = sns.color_palette("colorblind", n_colors=len(results))
@@ -115,7 +125,7 @@ def _plot(
         zip(colors, results.items(), strict=True)
     ):
         lag_time, q_corr, qx_corr, q_fit, qx_fit, _, _ = result
-        label = CASE_LABELS[case_id]
+        label = case_labels[case_id]
         final_time = max(final_time, float(lag_time[-1]))
         for axis, correlation, fit in zip(
             axes, (q_corr, qx_corr), (q_fit, qx_fit), strict=True
@@ -144,7 +154,7 @@ def _plot(
                 verticalalignment="bottom",
             )
 
-    axes[0].set_title(r"2D orientation autocorrelation")
+    axes[0].set_title(title)
     axes[0].set_ylabel(r"$C_q(\Delta t)$")
     axes[1].set_title(r"Axial-orientation autocorrelation")
     axes[1].set_ylabel(r"$C_{q_x}(\Delta t)$")
@@ -182,9 +192,10 @@ def _write_report(
     ],
     report: Path,
     minimum_correlation: float,
+    title: str,
 ) -> None:
     lines = [
-        "# Ideal 2D orientation-correlation fits",
+        f"# {title}",
         "",
         "The normalized, time-origin-averaged correlations use",
         "",
@@ -278,16 +289,27 @@ def main() -> None:
             args.frames,
             args.max_lag,
             args.fit_min_correlation,
+            ("x", "y"),
         )
         for case_id, shard_dir in directories.items()
     }
-    _plot(results, args.output)
+    _plot(
+        results,
+        args.output,
+        CASE_LABELS,
+        "2D orientation autocorrelation",
+    )
     report = (
         args.report
         if args.report is not None
         else args.output.with_name(f"{args.output.stem}_report.md")
     )
-    _write_report(results, report, args.fit_min_correlation)
+    _write_report(
+        results,
+        report,
+        args.fit_min_correlation,
+        "Ideal 2D orientation-correlation fits",
+    )
     print(f"wrote {args.output}")
     print(f"wrote {report}")
     for case_id, result in results.items():

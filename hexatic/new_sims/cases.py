@@ -24,6 +24,8 @@ class CaseKind(StrEnum):
     IDEAL_2D_X_WALLS = "ideal_2d_x_walls"
     IDEAL_2D_PERIODIC = "ideal_2d_periodic"
     PERIODIC_3D_BULK = "periodic_3d_bulk"
+    IDEAL_3D_BULK_PERIOD_10 = "ideal_3d_bulk_period_10"
+    IDEAL_3D_BULK_PERIOD_1 = "ideal_3d_bulk_period_1"
     SINGLE_ACTIVE_TRACER_CYLINDER = "single_active_tracer_cylinder"
     INVERSION_ACTIVE_PAIR_CYLINDER = "inversion_active_pair_cylinder"
 
@@ -110,7 +112,23 @@ class NewSimCase:
             CaseKind.IDEAL_ABP_CYLINDER,
             CaseKind.IDEAL_2D_X_WALLS,
             CaseKind.IDEAL_2D_PERIODIC,
+            CaseKind.IDEAL_3D_BULK_PERIOD_10,
+            CaseKind.IDEAL_3D_BULK_PERIOD_1,
         }
+
+    @property
+    def is_3d_bulk(self) -> bool:
+        return self.kind in {
+            CaseKind.PERIODIC_3D_BULK,
+            CaseKind.IDEAL_3D_BULK_PERIOD_10,
+            CaseKind.IDEAL_3D_BULK_PERIOD_1,
+        }
+
+    @property
+    def rotational_diffusion_period(self) -> int:
+        if self.kind == CaseKind.IDEAL_3D_BULK_PERIOD_1:
+            return 1
+        return cylinder.SIMULATION.rotational_diffusion_period
 
     @property
     def active_count(self) -> int:
@@ -128,7 +146,7 @@ class NewSimCase:
             return ("y",)
         if self.is_2d:
             return "x", "y"
-        if self.kind == CaseKind.PERIODIC_3D_BULK:
+        if self.is_3d_bulk:
             return "x", "y", "z"
         return ("x",)
 
@@ -142,7 +160,7 @@ class NewSimCase:
 
     @property
     def has_hexatic(self) -> bool:
-        return self.kind != CaseKind.PERIODIC_3D_BULK
+        return not self.is_3d_bulk
 
     @property
     def label(self) -> str:
@@ -155,6 +173,12 @@ class NewSimCase:
             ),
             CaseKind.IDEAL_2D_PERIODIC: "non-interacting fully periodic 2D ABPs",
             CaseKind.PERIODIC_3D_BULK: "fully periodic 3D ABPs",
+            CaseKind.IDEAL_3D_BULK_PERIOD_10: (
+                "non-interacting fully periodic 3D ABPs with diffusion period 10"
+            ),
+            CaseKind.IDEAL_3D_BULK_PERIOD_1: (
+                "non-interacting fully periodic 3D ABPs with diffusion period 1"
+            ),
             CaseKind.SINGLE_ACTIVE_TRACER_CYLINDER: (
                 "one active tracer in a passive twisted cylinder film"
             ),
@@ -225,6 +249,7 @@ class NewSimCase:
                 cylinder.SIMULATION.gamma * cylinder.SIMULATION.u0
             ),
             "rotational_diffusion": 1.0 / cylinder.SIMULATION.tau_r,
+            "rotational_diffusion_period": self.rotational_diffusion_period,
             "timestep": cylinder.SIMULATION.timestep,
         }
         if self.is_tracer:
