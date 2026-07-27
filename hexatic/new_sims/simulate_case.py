@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import replace
+import json
 import os
 from pathlib import Path
 
@@ -27,6 +28,15 @@ from .geometry import generate_initial_arrays
 def _prepare_outputs(paths: CasePaths, overwrite: bool) -> bool:
     paths.ensure_parent_dirs()
     if paths.simulation_complete_json.exists() and not overwrite:
+        if paths.metadata_json.is_file():
+            existing_metadata = json.loads(paths.metadata_json.read_text())
+            existing_seed = existing_metadata.get("seed")
+            if existing_seed != paths.case.seed:
+                raise FileExistsError(
+                    f"case {paths.case.case_id} is already complete with "
+                    f"seed={existing_seed}; requested seed={paths.case.seed}. "
+                    "Use a different output root or pass --overwrite."
+                )
         print(f"[new_sims.simulation] skipping complete case={paths.case.case_id}")
         return False
     outputs = (
