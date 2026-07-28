@@ -104,16 +104,16 @@ if [[ "$pipeline_status" -ne 0 ]]; then
     exit "$pipeline_status"
 fi
 
-pixi run -e big-lx-cuda12 python -u \
-    -m hexatic.new_sims_analysis.plot_3d_correlation \
-    --period-10-shard-dir \
-    "$output_root/safetensors_output/ideal_3d_bulk_period_10" \
-    --period-1-shard-dir \
-    "$output_root/safetensors_output/ideal_3d_bulk_period_1" \
-    --frames "$plot_frames" \
-    --max-lag "$plot_max_lag" \
-    --output "$output_root/plots/3d_orientation_correlation.svg" \
-    --report "$output_root/plots/3d_orientation_correlation_report.md"
+# plot_correlation treats repeated --input-dir as seeds of one case, so the two
+# periods are separate runs rather than one shared figure.
+for period_case in ideal_3d_bulk_period_10 ideal_3d_bulk_period_1; do
+    pixi run -e big-lx-cuda12 python -u \
+        -m hexatic.new_sims_analysis.plot_correlation \
+        --input-dir "$output_root/safetensors_output/$period_case" \
+        --frames "$plot_frames" \
+        --max-lag "$plot_max_lag" \
+        --output-dir "$output_root/plots"
+done
 
 printf 'All ideal 3D runs, analyses, and correlation plotting completed\n'
 printf 'Output root: %s\n' "$output_root"

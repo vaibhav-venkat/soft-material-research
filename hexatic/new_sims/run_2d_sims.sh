@@ -136,21 +136,19 @@ run_case_pipeline() {
 
 if (( run_x_wall )); then
     case_id="ideal_2d_x_walls"
-    plot_input_flag="--walled-shard-dir"
 else
     case_id="ideal_2d_periodic"
-    plot_input_flag="--periodic-shard-dir"
 fi
 
 run_case_pipeline "$case_id"
 
 pixi run -e big-lx-cuda12 python -u \
-    -m hexatic.new_sims_analysis.plot_2d_correlation \
-    "$plot_input_flag" "$output_root/safetensors_output/$case_id" \
+    -m hexatic.new_sims_analysis.plot_correlation \
+    --2d \
+    --input-dir "$output_root/safetensors_output/$case_id" \
     --frames "$plot_frames" \
     --max-lag "$plot_max_lag" \
-    --output "$output_root/plots/2d_orientation_correlation.svg" \
-    --report "$output_root/plots/2d_orientation_correlation_report.md"
+    --output-dir "$output_root/plots"
 
 printf '%s simulation, analysis, and correlation plotting completed for seed %s\n' \
     "$case_id" "$seed"

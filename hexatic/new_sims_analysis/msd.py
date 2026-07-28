@@ -1,0 +1,117 @@
+"""Center-of-mass mean squared displacement, its power-law fit, and its plot."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+from numpy.typing import NDArray
+import seaborn as sns
+
+
+def _msd_from_com(com: NDArray[np.float64]) -> NDArray[np.float64]:
+    """Return one seed's squared COM displacement from its first frame."""
+    displacement = com - com[0]
+    return np.sum(displacement**2, axis=1, dtype=np.float64)
+
+
+def _msd_variants(
+    com: NDArray[np.float64],
+    cylindrical: bool,
+) -> list[tuple[str, str, NDArray[np.float64]]]:
+    """Return the ``(suffix, title, coordinates)`` MSD variants for one seed.
+
+    Cartesian cases give one variant. Cylindrical cases give two: the COM
+    mapped back to Cartesian ``(x, y, z)``, whose transverse part is bounded by
+    the cylinder radius, and the unrolled surface coordinates ``(x, r theta)``,
+    which keep the unwrapped azimuthal drift as an arc length.
+    """
+    if not cylindrical:
+        return [("", "", com)]
+    x, theta, r = com[:, 0], com[:, 1], com[:, 2]
+    cartesian = np.stack(
+        [x, r * np.cos(theta), r * np.sin(theta)], axis=1
+    )
+    unrolled = np.stack([x, r * theta], axis=1)
+    return [
+        ("_cartesian", r" — Cartesian $(x, y, z)$", cartesian),
+        ("_unrolled", r" — surface $(x, r\theta)$", unrolled),
+    ]
+
+
+def _fit_msd_power_law(
+    tau: NDArray[np.float64],
+    msd: NDArray[np.float64],
+    tau_start: float,
+) -> tuple[float, float, NDArray[np.float64], NDArray[np.float64]]:
+    """Fit ``MSD = A t^alpha`` for ``tau > tau_start`` with ``t = tau - tau_start``.
+
+    The fit is a least-squares line through ``log MSD = log A + alpha log t``,
+    so both ``A`` and ``alpha`` come from every point in the window rather than
+    pinning ``A`` to a single frame. Returns ``(alpha, A, tau_fit, msd_fit)``.
+    """
+    shifted = tau - tau_start
+    usable = (shifted > 0.0) & (msd > 0.0)
+    if np.count_nonzero(usable) < 2:
+        raise ValueError(
+            f"need at least two positive MSD samples after tau={tau_start}"
+        )
+    log_t = np.log(shifted[usable])
+    log_msd = np.log(msd[usable])
+    alpha, log_a = np.polyfit(log_t, log_msd, 1)
+    amplitude = float(np.exp(log_a))
+    tau_fit = tau[usable]
+    return float(alpha), amplitude, tau_fit, amplitude * shifted[usable] ** alpha
+
+
+def _plot_msd(
+    tau: NDArray[np.float64],
+    msd: NDArray[np.float64],
+    tau_fit: NDArray[np.float64],
+    msd_fit: NDArray[np.float64],
+    alpha: float,
+    n_seeds: int,
+    label: str,
+    output: Path,
+) -> None:
+    sns.set_theme(context="paper", style="ticks", font_scale=1.1)
+    palette = sns.color_palette("colorblind")
+    figure, axis = plt.subplots(figsize=(8.2, 5.2), constrained_layout=True)
+
+    axis.plot(
+        tau,
+        msd,
+        color=palette[0],
+        lw=2.0,
+        label=r"$\langle (\mathrm{COM}(t)-\mathrm{COM}(0))^2 \rangle$",
+    )
+    # Offset the fit slightly so it reads as a separate guide line.
+    offset_fit = msd_fit * 1.15
+    axis.plot(tau_fit, offset_fit, color=palette[3], ls="--", lw=1.8)
+    anchor = len(tau_fit) // 2
+    axis.annotate(
+        rf"$\alpha = {alpha:.3f}$",
+        xy=(tau_fit[anchor], offset_fit[anchor]),
+        xytext=(6, 10),
+        textcoords="offset points",
+        color=palette[3],
+    )
+
+    axis.set_title(f"Center-of-mass MSD — {label} ({n_seeds} seeds)")
+    axis.set_xlabel(r"$\tau$")
+    axis.set_ylabel("MSD")
+    axis.set_xlim(tau[0], tau[-1])
+    axis.grid(axis="y", color="0.9", lw=0.7)
+    axis.legend(frameon=False)
+    sns.despine(ax=axis)
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(
+        output,
+        format="svg",
+        bbox_inches="tight",
+        metadata={"Creator": "hexatic.new_sims_analysis"},
+    )
+    figure.savefig(output.with_suffix(".png"), dpi=300, bbox_inches="tight")
+    plt.close(figure)
