@@ -315,7 +315,13 @@ def main() -> None:
             )
 
     for suffix, curves in seed_msd.items():
-        msd = np.mean(np.asarray(curves, dtype=np.float64), axis=0)
+        # The COM averages out N independent trajectories, so its MSD is the
+        # single-particle MSD over N. Scaling back up recovers a per-particle
+        # diffusion constant; exact only because these particles do not interact.
+        msd = (
+            np.mean(np.asarray(curves, dtype=np.float64), axis=0)
+            * reference_particles
+        )
         fits = [
             _fit_msd_power_law(
                 lag_time, msd, tau_min, tau_max, msd_dimensions[suffix]
@@ -328,6 +334,7 @@ def main() -> None:
             msd,
             fits,
             len(curves),
+            reference_particles,
             f"{label}{msd_titles[suffix]}",
             msd_path,
         )

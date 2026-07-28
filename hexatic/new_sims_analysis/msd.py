@@ -141,6 +141,7 @@ def _plot_msd(
     msd: NDArray[np.float64],
     fits: Sequence[MsdFit],
     n_seeds: int,
+    n_particles: int,
     label: str,
     output: Path,
 ) -> None:
@@ -159,8 +160,8 @@ def _plot_msd(
         color=palette[0],
         lw=2.0,
         label=(
-            r"$\langle (\mathrm{COM}(t_0+\Delta t)"
-            r"-\mathrm{COM}(t_0))^2 \rangle_{t_0}$"
+            rf"$N\,\langle (\mathrm{{COM}}(t_0+\Delta t)"
+            rf"-\mathrm{{COM}}(t_0))^2 \rangle_{{t_0}}$, $N = {n_particles}$"
         ),
     )
     # On log-log a "slight offset" has to be multiplicative: a constant factor
@@ -225,7 +226,7 @@ def _plot_msd(
     axis.set_yscale("log")
     axis.set_title(f"Center-of-mass MSD — {label} ({n_seeds} seeds)")
     axis.set_xlabel(r"lag time $\Delta t$")
-    axis.set_ylabel("MSD")
+    axis.set_ylabel("MSD (per-particle equivalent)")
     axis.set_xlim(float(tau[visible][0]), float(tau[visible][-1]))
     axis.grid(which="major", color="0.85", lw=0.7)
     axis.grid(which="minor", color="0.94", lw=0.5)
