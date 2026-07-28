@@ -18,14 +18,8 @@ import seaborn as sns
 
 from hexatic.constants import cylinder
 
-SUPPORTED_MANIFEST_SCHEMAS = {
-    "hexatic.big_lx.analysis.v1",
-    "hexatic.new_sims.analysis.v1",
-}
-
-# Cylindrical component order used throughout: (axial, azimuthal, radial)
-# for coordinates, matching the ``coords`` tensor layout (x, theta, r).
-CYLINDRICAL_COORDINATE_ORDER = ["x", "theta", "r"]
+MANIFEST_SCHEMA = "hexatic.new_sims.analysis.v1"
+CARTESIAN_COORDINATE_ORDER = ["x", "y", "z"]
 
 
 def _load_manifest(shard_dir: Path) -> dict[str, Any]:
@@ -34,110 +28,26 @@ def _load_manifest(shard_dir: Path) -> dict[str, Any]:
         raise FileNotFoundError(f"missing manifest: {manifest_path}")
     manifest = json.loads(manifest_path.read_text())
     schema = manifest.get("schema")
-    if schema not in SUPPORTED_MANIFEST_SCHEMAS:
-        supported = ", ".join(sorted(SUPPORTED_MANIFEST_SCHEMAS))
+    if schema != MANIFEST_SCHEMA:
         raise ValueError(
             f"unsupported manifest schema {schema!r} in {manifest_path}; "
-            f"expected one of: {supported}"
+            f"expected {MANIFEST_SCHEMA!r}"
         )
     if manifest.get("complete") is not True:
         raise ValueError(f"analysis manifest is incomplete: {manifest_path}")
     case = manifest.get("case")
     if not isinstance(case, dict):
         raise ValueError(f"missing case metadata in {manifest_path}")
-    # big_lx runs are always cylindrical and record no coordinate_order; the
-    # new_sims schema records one, and only the cylindrical layout is
-    # supported here.
     coordinate_order = manifest.get("coordinate_order")
-    if (
-        coordinate_order is not None
-        and list(coordinate_order) != CYLINDRICAL_COORDINATE_ORDER
-    ):
+    if coordinate_order != CARTESIAN_COORDINATE_ORDER:
         raise ValueError(
-            f"expected cylindrical coordinate_order "
-            f"{CYLINDRICAL_COORDINATE_ORDER}, got {coordinate_order!r}"
+            f"expected 3D Cartesian coordinate_order "
+            f"{CARTESIAN_COORDINATE_ORDER}, got {coordinate_order!r}"
         )
+    dimensions = case.get("dimensions")
+    if dimensions is not None and int(dimensions) != 3:
+        raise ValueError(f"expected a 3D case, got dimensions={dimensions!r}")
     return manifest
-
-
-def _load_lx(static_path: Path) -> float:
-    """Load axial box length from either supported static-tensor schema."""
-    if not static_path.is_file():
-        raise FileNotFoundError(f"missing static tensors: {static_path}")
-    with safe_open(static_path, framework="np") as static_file:
-        keys = set(static_file.keys())
-        if "lx" in keys:
-            lx_tensor = np.asarray(static_file.get_tensor("lx"))
-            if lx_tensor.size != 1:
-                raise ValueError(
-                    f"expected scalar 'lx' tensor in {static_path}, "
-                    f"got shape {lx_tensor.shape}"
-                )
-            lx = float(lx_tensor.reshape(-1)[0])
-        elif "box" in keys:
-            box = np.asarray(static_file.get_tensor("box"))
-            if box.ndim != 1 or box.size < 1:
-                raise ValueError(
-                    f"expected one-dimensional 'box' tensor in {static_path}, "
-                    f"got shape {box.shape}"
-                )
-            lx = float(box[0])
-        else:
-            raise KeyError(f"{static_path} has neither 'lx' nor 'box' tensor")
-    if not np.isfinite(lx) or lx <= 0.0:
-        raise ValueError(f"invalid axial box length lx={lx}")
-    return lx
-
-
-class _PeriodicComUnwrapper:
-    """Streaming unwrap of a wrapped periodic coordinate into a COM series.
-
-    Mirrors the native big-Lx implementation: the first frame pushed becomes
-    the unwrapped reference, later frames advance by the minimum-image
-    displacement, and each mean uses the same Kahan summation order. Used for
-    the axial coordinate (period lx) and the azimuthal one (period 2 pi).
-    """
-
-    def __init__(self, n_particles: int, period: float) -> None:
-        if n_particles < 1:
-            raise ValueError("need at least one particle")
-        if not np.isfinite(period) or period <= 0.0:
-            raise ValueError(f"invalid period {period}")
-        self._n_particles = n_particles
-        self._period = period
-        self._previous = np.empty(n_particles, dtype=np.float64)
-        self._unwrapped = np.empty(n_particles, dtype=np.float64)
-        self._started = False
-
-    def push(self, values: NDArray[np.float64], frame_index: int) -> float:
-        if len(values) != self._n_particles:
-            raise ValueError(f"particle count changes at frame {frame_index}")
-        if not np.all(np.isfinite(values)):
-            raise ValueError(f"non-finite coordinate at frame {frame_index}")
-        if not self._started:
-            self._unwrapped[:] = values
-            self._started = True
-        else:
-            # Displacement from the previous wrapped position, minus the
-            # nearest integer number of periods.
-            displacement = values - self._previous
-            scaled = displacement / self._period
-            nearest_integer = np.copysign(
-                np.floor(np.abs(scaled) + 0.5),
-                scaled,
-            )
-            self._unwrapped += displacement - self._period * nearest_integer
-        self._previous[:] = values
-
-        # Match the native big-Lx Kahan summation order.
-        total = 0.0
-        compensation = 0.0
-        for coordinate in self._unwrapped:
-            corrected = float(coordinate) - compensation
-            updated = total + corrected
-            compensation = (updated - total) - corrected
-            total = updated
-        return total / self._n_particles
 
 
 def _cartesian_directions(
@@ -146,21 +56,13 @@ def _cartesian_directions(
 ) -> NDArray[np.float64]:
     """Load the per-particle Cartesian orientation vectors from a shard.
 
-    ``new_sims`` shards store these as ``polarization`` and ``big_lx`` shards
-    as ``active_direction``; both are Cartesian (x, y, z) unit vectors.
+    The stored polarization values are Cartesian (x, y, z) unit vectors.
     """
     keys = set(shard.keys())
-    name = (
-        "polarization"
-        if "polarization" in keys
-        else "active_direction"
-        if "active_direction" in keys
-        else None
-    )
+    name = "polarization" if "polarization" in keys else None
     if name is None:
         raise KeyError(
-            f"{shard_path} has neither 'polarization' nor 'active_direction'; "
-            f"orientation correlation is undefined for this case"
+            f"{shard_path} has no 'polarization' tensor"
         )
     directions = np.asarray(shard.get_tensor(name), dtype=np.float64)
     if directions.ndim != 3 or directions.shape[2] != 3:
@@ -184,22 +86,16 @@ def _load_frame_series(
     NDArray[np.float64],
     NDArray[np.float32],
     NDArray[np.int64],
-    float,
 ]:
     """Load the per-frame COM coordinates and per-particle orientations.
 
-    Returns ``(com, q, steps, lx)`` where ``com`` is ``(frames, 3)`` in
-    cylindrical (x, theta, r) component order and ``q`` is
-    ``(frames, particles, 3)`` in Cartesian (x, y, z) components. The axial
-    coordinate is unwrapped over the box length and the azimuthal one over
-    2 pi; the radial coordinate needs no unwrapping.
+    Returns ``(com, q, steps)``. Both COM and orientations use Cartesian
+    ``(x, y, z)`` components. New-sims bulk coordinates are already unwrapped
+    on periodic axes.
 
     Note that ``q`` holds every particle for every frame, so memory scales as
     frames x particles; ``--frames`` is the knob for keeping it bounded.
     """
-    static_path = shard_dir / "static.safetensors"
-    lx = _load_lx(static_path)
-
     shards = manifest.get("shards")
     if not isinstance(shards, list) or not shards:
         raise ValueError("manifest contains no safetensor shards")
@@ -209,10 +105,6 @@ def _load_frame_series(
     step_frames: list[int] = []
     loaded_frames = 0
     expected_start = 0
-    # Per-particle unwrapping state, initialised on the first frame.
-    axial_unwrapper: _PeriodicComUnwrapper | None = None
-    azimuthal_unwrapper: _PeriodicComUnwrapper | None = None
-
     for entry in shards:
         if not isinstance(entry, dict):
             raise ValueError("invalid shard entry in manifest")
@@ -258,29 +150,18 @@ def _load_frame_series(
                 f"shard range [{start}, {stop}) does not match "
                 f"{n_frames_in_shard} stored frames in {shard_path}"
             )
-        if axial_unwrapper is None:
-            axial_unwrapper = _PeriodicComUnwrapper(n_particles, lx)
-            azimuthal_unwrapper = _PeriodicComUnwrapper(
-                n_particles, 2.0 * np.pi
-            )
-        assert azimuthal_unwrapper is not None
-
         take = frame_limit - loaded_frames
         coords = coords[:take]
         steps = steps[:take]
         directions = directions[:take]
         actual_take = coords.shape[0]
 
-        theta = coords[:, :, 1]
         q_arrays.append(directions.astype(np.float32))
 
         for local_frame in range(actual_take):
-            frame_index = start + local_frame
             com_frames.append(
-                (
-                    axial_unwrapper.push(coords[local_frame, :, 0], frame_index),
-                    azimuthal_unwrapper.push(theta[local_frame], frame_index),
-                    float(np.mean(coords[local_frame, :, 2])),
+                tuple(
+                    np.mean(coords[local_frame], axis=0, dtype=np.float64)
                 )
             )
             step_frames.append(int(steps[local_frame]))
@@ -298,7 +179,6 @@ def _load_frame_series(
         np.array(com_frames, dtype=np.float64),
         np.concatenate(q_arrays, axis=0),
         np.array(step_frames, dtype=np.int64),
-        lx,
     )
 
 
@@ -556,18 +436,18 @@ def _plot_correlation(
     figure, axis = plt.subplots(figsize=(8.2, 5.2), constrained_layout=True)
 
     curves = (
-        (velocity_x, palette[0], "-", r"$C_{V_x}(\tau)$"),
+        (velocity_x, palette[0], "-", r"$C_{\mathbf{V}}(\tau)$"),
         (
             orientation_self_x,
             palette[1],
             "--",
-            r"$(U_0^2/N)C_{q_x}^{\mathrm{self}}(\tau)$",
+            r"$(U_0^2/N)C_{\mathbf{q}}^{\mathrm{self}}(\tau)$",
         ),
         (
             orientation_distinct_x,
             palette[2],
             ":",
-            r"$(U_0^2/N^2)\sum_{i\ne j}C_{q_{i,x}q_{j,x}}(\tau)$",
+            r"$(U_0^2/N^2)\sum_{i\ne j}C_{\mathbf{q}_i\mathbf{q}_j}(\tau)$",
         ),
     )
     for correlation, color, style, name in curves:
@@ -594,6 +474,7 @@ def _plot_correlation(
         bbox_inches="tight",
         metadata={"Creator": "hexatic.new_sims_analysis"},
     )
+    figure.savefig(output.with_suffix(".png"), dpi=300, bbox_inches="tight")
     plt.close(figure)
 
 
@@ -618,13 +499,16 @@ def _parse_args() -> argparse.Namespace:
         action="append",
         type=Path,
         required=True,
-        help="Safetensor output directory (repeatable); one SVG per input.",
+        help=(
+            "Safetensor output directory for one random seed (repeatable). "
+            "All directories are treated as one simulation ensemble."
+        ),
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
         default=Path("correlation_output"),
-        help="Directory for output SVGs (default: correlation_output/).",
+        help="Directory for the output SVG and PNG (default: correlation_output/).",
     )
     parser.add_argument(
         "--frames",
@@ -660,16 +544,30 @@ def main() -> None:
     if args.frames < 3:
         raise ValueError("--frames must be at least 3")
 
+    seed_data = []
+    reference_steps: NDArray[np.int64] | None = None
+    reference_timestep: float | None = None
+    reference_u0: float | None = None
+    reference_particles: int | None = None
+    label: str | None = None
+    slug: str | None = None
+
     for index, input_dir in enumerate(args.input_dir, start=1):
         print(
-            f"[correlation] {index}/{len(args.input_dir)} dir={input_dir}",
+            f"[correlation] loading seed {index}/{len(args.input_dir)} "
+            f"dir={input_dir}",
             flush=True,
         )
         manifest = _load_manifest(input_dir)
-        label, slug = _case_identity(input_dir, manifest)
+        seed_label, seed_slug = _case_identity(input_dir, manifest)
+        if label is None:
+            label, slug = seed_label, seed_slug
+        elif seed_slug != slug:
+            raise ValueError(
+                "all --input-dir manifests must describe the same case: "
+                f"expected {slug!r}, got {seed_slug!r} for {input_dir}"
+            )
 
-        # An explicit CLI value wins; otherwise use the recorded case value,
-        # falling back to the same cylinder constant as big-Lx.
         case_meta = manifest.get("case", {})
         stored_timestep = case_meta.get("timestep")
         if args.timestep is not None:
@@ -687,79 +585,95 @@ def main() -> None:
         if not np.isfinite(u0) or u0 <= 0.0:
             raise ValueError(f"invalid U0 in manifest for {input_dir}: {u0!r}")
 
-        com, q, steps, lx = _load_frame_series(
-            input_dir, manifest, args.frames
-        )
+        com, q, steps = _load_frame_series(input_dir, manifest, args.frames)
         print(
             f"[correlation] loaded {len(com)} frames, "
-            f"{q.shape[1]} particles, lx={lx:.6g}",
+            f"{q.shape[1]} particles",
             flush=True,
         )
-        elapsed = _elapsed_time(steps, timestep)
+        if reference_steps is None:
+            reference_steps = steps
+            reference_timestep = timestep
+            reference_u0 = u0
+            reference_particles = q.shape[1]
+        else:
+            if not np.array_equal(steps, reference_steps):
+                raise ValueError(
+                    f"seed frame steps do not match in {input_dir}"
+                )
+            if timestep != reference_timestep or u0 != reference_u0:
+                raise ValueError(
+                    f"seed timestep or U0 does not match in {input_dir}"
+                )
+            if q.shape[1] != reference_particles:
+                raise ValueError(
+                    f"seed particle count does not match in {input_dir}"
+                )
+        seed_data.append((com, q))
+
+    assert reference_steps is not None
+    assert reference_timestep is not None
+    assert reference_u0 is not None
+    assert reference_particles is not None
+    assert label is not None and slug is not None
+
+    elapsed = _elapsed_time(reference_steps, reference_timestep)
+    effective_max_lag = min(args.max_lag, len(reference_steps) - 2)
+    if effective_max_lag != args.max_lag:
+        print(
+            f"[correlation] capping --max-lag {args.max_lag} -> "
+            f"{effective_max_lag}",
+            flush=True,
+        )
+
+    seed_curves = []
+    for com, q in seed_data:
         velocity = _finite_difference_vector(com, elapsed)
-
-        # Cap max_lag to what the velocity series actually supports, then
-        # use the same effective value for correlation and lag-time arrays.
-        available_max_lag = len(velocity) - 2
-        if available_max_lag < 0:
-            raise ValueError(
-                f"need at least 2 velocity samples (got {len(velocity)})"
-            )
-        effective_max_lag = args.max_lag
-        if effective_max_lag > available_max_lag:
-            print(
-                f"[correlation] capping --max-lag {effective_max_lag} -> "
-                f"{available_max_lag} (only {len(velocity)} velocity samples)",
-                flush=True,
-            )
-            effective_max_lag = available_max_lag
-
-        normalize = not args.unnormalize
-
-        # Construct all three curves first in physical velocity-squared units.
-        # In unnormalized mode this preserves
-        #
-        #   C_Vx = (U0^2 / N) C_qx_self + cross-particle contribution,
-        #
-        # with the third curve showing the cross-particle contribution alone.
-        velocity_x = _normalized_autocorrelation(
-            velocity[:, 0], effective_max_lag, normalize=False
+        velocity_correlation = _normalized_autocorrelation(
+            velocity, effective_max_lag, normalize=False
         )
-        orientation_self_x = _self_particle_orientation_correlation(
-            q[:, :, :1], effective_max_lag, normalize=False
+        self_correlation = _self_particle_orientation_correlation(
+            q, effective_max_lag, normalize=False
         )
-        orientation_self_x *= u0**2 / q.shape[1]
-        orientation_distinct_x = _distinct_particle_correlation(
-            q[:, :, :1], effective_max_lag, normalize=False
+        self_correlation *= reference_u0**2 / reference_particles
+        distinct_correlation = _distinct_particle_correlation(
+            q, effective_max_lag, normalize=False
         )
-        orientation_distinct_x *= u0**2
-        if normalize:
-            curves = {
-                "C_Vx": velocity_x,
-                "C_qx_self": orientation_self_x,
-                "C_qx_distinct": orientation_distinct_x,
-            }
-            for name, correlation in curves.items():
-                if correlation[0] == 0.0:
-                    raise ValueError(
-                        f"cannot normalize {name} with zero lag-0 value"
-                    )
-                correlation /= correlation[0]
-        lag_time = _lag_times(elapsed, effective_max_lag)
+        distinct_correlation *= reference_u0**2
+        seed_curves.append(
+            (velocity_correlation, self_correlation, distinct_correlation)
+        )
 
-        output_path = args.output_dir / f"velocity_correlation_{slug}.svg"
-        _plot_correlation(
-            lag_time,
-            velocity_x,
-            orientation_self_x,
-            orientation_distinct_x,
-            normalize,
-            label,
-            output_path,
-        )
-        print(f"[correlation] wrote {output_path}", flush=True)
+    velocity_correlation, self_correlation, distinct_correlation = np.mean(
+        np.asarray(seed_curves, dtype=np.float64), axis=0
+    )
+    normalize = not args.unnormalize
+    if normalize:
+        for name, correlation in (
+            ("C_V", velocity_correlation),
+            ("C_q_self", self_correlation),
+            ("C_q_distinct", distinct_correlation),
+        ):
+            if correlation[0] == 0.0:
+                raise ValueError(f"cannot normalize {name} with zero lag-0 value")
+            correlation /= correlation[0]
 
-    print(f"[correlation] done — {len(args.input_dir)} plot(s) in {args.output_dir}")
+    lag_time = _lag_times(elapsed, effective_max_lag)
+    output_path = args.output_dir / f"velocity_correlation_{slug}.svg"
+    _plot_correlation(
+        lag_time,
+        velocity_correlation,
+        self_correlation,
+        distinct_correlation,
+        normalize,
+        f"{label} ({len(seed_data)} seeds)",
+        output_path,
+    )
+    print(f"[correlation] wrote {output_path}", flush=True)
+    print(f"[correlation] wrote {output_path.with_suffix('.png')}", flush=True)
+    print(
+        f"[correlation] done — averaged {len(seed_data)} seed(s) into one plot"
+    )
 
 
 if __name__ == "__main__":
