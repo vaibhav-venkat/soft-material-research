@@ -6,15 +6,25 @@ IFS=$'\n\t'
 trap 'status=$?; printf "run_2d_sims.sh failed at line %s (status %s)\n" "$LINENO" "$status" >&2; exit "$status"' ERR
 
 usage() {
-    printf 'Usage: %s --output-root PATH --seed INTEGER [--gpu-id INTEGER]\n' "$0" >&2
-    printf 'Example: %s --output-root /mnt/drive3/vaibhav_data/ideal_seed_7 --seed 7 --gpu-id 0\n' "$0" >&2
+    printf 'Usage: %s (--x-wall | --periodic) --output-root PATH --seed INTEGER [--gpu-id INTEGER]\n' "$0" >&2
+    printf 'Example: %s --periodic --output-root /mnt/drive3/vaibhav_data/ideal_seed_7 --seed 7 --gpu-id 0\n' "$0" >&2
 }
 
 output_root=""
 seed=""
 gpu_id="0"
+run_x_wall=0
+run_periodic=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --x-wall)
+            run_x_wall=1
+            shift
+            ;;
+        --periodic)
+            run_periodic=1
+            shift
+            ;;
         --output-root)
             [[ $# -ge 2 ]] || { usage; exit 2; }
             output_root="$2"
@@ -43,6 +53,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$output_root" || -z "$seed" ]]; then
+    usage
+    exit 2
+fi
+if (( run_x_wall + run_periodic != 1 )); then
+    printf 'Specify exactly one of --x-wall or --periodic\n' >&2
     usage
     exit 2
 fi
@@ -119,33 +134,24 @@ run_case_pipeline() {
     printf 'Completed simulation and analysis for %s\n' "$case_id"
 }
 
-run_case_pipeline ideal_2d_x_walls &
-walled_pid=$!
-run_case_pipeline ideal_2d_periodic &
-periodic_pid=$!
+if (( run_x_wall )); then
+    case_id="ideal_2d_x_walls"
+    plot_input_flag="--walled-shard-dir"
+else
+    case_id="ideal_2d_periodic"
+    plot_input_flag="--periodic-shard-dir"
+fi
 
-pipeline_status=0
-if ! wait "$walled_pid"; then
-    printf 'ideal_2d_x_walls failed; inspect %s/logs\n' "$output_root" >&2
-    pipeline_status=1
-fi
-if ! wait "$periodic_pid"; then
-    printf 'ideal_2d_periodic failed; inspect %s/logs\n' "$output_root" >&2
-    pipeline_status=1
-fi
-if [[ "$pipeline_status" -ne 0 ]]; then
-    exit "$pipeline_status"
-fi
+run_case_pipeline "$case_id"
 
 pixi run -e big-lx-cuda12 python -u \
     -m hexatic.new_sims_analysis.plot_2d_correlation \
-    --walled-shard-dir "$output_root/safetensors_output/ideal_2d_x_walls" \
-    --periodic-shard-dir "$output_root/safetensors_output/ideal_2d_periodic" \
+    "$plot_input_flag" "$output_root/safetensors_output/$case_id" \
     --frames "$plot_frames" \
     --max-lag "$plot_max_lag" \
     --output "$output_root/plots/2d_orientation_correlation.svg" \
     --report "$output_root/plots/2d_orientation_correlation_report.md"
 
-printf 'All 2D runs, analyses, and correlation plotting completed for seed %s\n' \
-    "$seed"
+printf '%s simulation, analysis, and correlation plotting completed for seed %s\n' \
+    "$case_id" "$seed"
 printf 'Output root: %s\n' "$output_root"
