@@ -151,6 +151,7 @@ def main() -> None:
     ] = []
     seed_msd: dict[str, list[NDArray[np.float64]]] = {}
     msd_titles: dict[str, str] = {}
+    msd_dimensions: dict[str, int] = {}
     reference_steps: NDArray[np.int64] | None = None
     reference_timestep: float | None = None
     reference_u0: float | None = None
@@ -238,6 +239,7 @@ def main() -> None:
                 _msd_from_com(coords, effective_max_lag)
             )
             msd_titles[suffix] = title
+            msd_dimensions[suffix] = coords.shape[1]
         seed_curves.append(
             _correlation_curves(
                 com,
@@ -315,7 +317,9 @@ def main() -> None:
     for suffix, curves in seed_msd.items():
         msd = np.mean(np.asarray(curves, dtype=np.float64), axis=0)
         fits = [
-            _fit_msd_power_law(lag_time, msd, tau_min, tau_max)
+            _fit_msd_power_law(
+                lag_time, msd, tau_min, tau_max, msd_dimensions[suffix]
+            )
             for tau_min, tau_max in fit_windows
         ]
         msd_path = args.output_dir / f"msd{suffix}_{slug}.svg"
@@ -331,7 +335,8 @@ def main() -> None:
             print(
                 f"[correlation] MSD{suffix} fit over "
                 f"[{fit.tau_min:g}, {fit.tau_max:g}]: "
-                f"alpha={fit.alpha:.4f}, A={fit.amplitude:.4g}",
+                f"alpha={fit.alpha:.4f}, A={fit.amplitude:.4g}, "
+                f"D={fit.diffusion:.4g} (d={fit.dimensions})",
                 flush=True,
             )
         print(f"[correlation] wrote {msd_path}", flush=True)

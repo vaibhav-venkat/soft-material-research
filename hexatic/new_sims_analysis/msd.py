@@ -60,14 +60,25 @@ def _msd_variants(
 
 @dataclass(frozen=True)
 class MsdFit:
-    """One power-law fit of the MSD over the lag window ``[tau_min, tau_max]``."""
+    """Fits of the MSD over the lag window ``[tau_min, tau_max]``.
+
+    Two fits are carried side by side: the free power law ``A tau^alpha``, and
+    a forced-linear fit that assumes alpha = 1 regardless of what the power law
+    actually found. The linear fit uses the conventional ``MSD = 2 d D tau``,
+    so ``diffusion`` is the raw slope over ``2 d`` and is directly comparable
+    with a literature diffusion constant.
+    """
 
     tau_min: float
     tau_max: float
     alpha: float
     amplitude: float
+    dimensions: int
+    slope: float
+    diffusion: float
     tau: NDArray[np.float64]
     msd: NDArray[np.float64]
+    msd_linear: NDArray[np.float64]
 
 
 def _fit_msd_power_law(
@@ -75,6 +86,7 @@ def _fit_msd_power_law(
     msd: NDArray[np.float64],
     tau_min: float,
     tau_max: float,
+    dimensions: int,
 ) -> MsdFit:
     """Fit ``MSD = A tau^alpha`` over the closed lag window ``[tau_min, tau_max]``.
 
@@ -100,16 +112,27 @@ def _fit_msd_power_law(
             f"[{tau_min}, {tau_max}]; the available lags span "
             f"[{tau[tau > 0.0].min() if np.any(tau > 0.0) else 0.0}, {tau.max()}]"
         )
+    if dimensions < 1:
+        raise ValueError(f"dimensions must be at least 1, got {dimensions}")
     tau_fit = tau[usable]
-    alpha, log_a = np.polyfit(np.log(tau_fit), np.log(msd[usable]), 1)
+    msd_fit = msd[usable]
+    alpha, log_a = np.polyfit(np.log(tau_fit), np.log(msd_fit), 1)
     amplitude = float(np.exp(log_a))
+
+    # Forced alpha = 1: least squares through the origin, since MSD(0) = 0 is
+    # exact rather than a fitted quantity. Converted with MSD = 2 d D tau.
+    slope = float(np.dot(tau_fit, msd_fit) / np.dot(tau_fit, tau_fit))
     return MsdFit(
         tau_min=float(tau_min),
         tau_max=float(tau_max),
         alpha=float(alpha),
         amplitude=amplitude,
+        dimensions=int(dimensions),
+        slope=slope,
+        diffusion=slope / (2.0 * float(dimensions)),
         tau=tau_fit,
         msd=amplitude * tau_fit ** float(alpha),
+        msd_linear=slope * tau_fit,
     )
 
 
@@ -145,10 +168,16 @@ def _plot_msd(
     # data instead of being sheared the way an additive offset would.
     for index, fit in enumerate(fits):
         color = palette[(index + 3) % len(palette)]
-        offset_fit = fit.msd * (1.18 * 1.12**index)
+        offset = 1.18 * 1.12**index
+        # Anchor at the geometric middle so the labels sit mid-line.
+        anchor = int(
+            np.argmin(np.abs(np.log(fit.tau) - np.mean(np.log(fit.tau))))
+        )
+
+        above = fit.msd * offset
         axis.plot(
             fit.tau,
-            offset_fit,
+            above,
             color=color,
             ls="--",
             lw=1.8,
@@ -157,16 +186,38 @@ def _plot_msd(
                 rf"($\Delta t \in [{fit.tau_min:g}, {fit.tau_max:g}]$)"
             ),
         )
-        # Anchor at the geometric middle so the label sits mid-line.
-        anchor = int(
-            np.argmin(np.abs(np.log(fit.tau) - np.mean(np.log(fit.tau))))
-        )
         axis.annotate(
             rf"$\alpha = {fit.alpha:.3f}$",
-            xy=(fit.tau[anchor], offset_fit[anchor]),
+            xy=(fit.tau[anchor], above[anchor]),
             xytext=(-8, 10),
             textcoords="offset points",
             ha="right",
+            color=color,
+        )
+
+        # The forced-linear fit gets the reciprocal offset, so it sits the same
+        # distance below the data as the power law sits above it.
+        below = fit.msd_linear / offset
+        axis.plot(
+            fit.tau,
+            below,
+            color=color,
+            ls="-.",
+            lw=1.8,
+            label=(
+                rf"$D = {fit.diffusion:.4g}$  "
+                rf"($\mathrm{{MSD}} = 2dD\,\Delta t$, $d = {fit.dimensions}$)"
+            ),
+        )
+        axis.annotate(
+            rf"$D = {fit.diffusion:.4g}$",
+            xy=(fit.tau[anchor], below[anchor]),
+            # The fit line rises to the right, so below-right clears it just as
+            # above-left clears it for the alpha label.
+            xytext=(8, -10),
+            textcoords="offset points",
+            ha="left",
+            va="top",
             color=color,
         )
 
