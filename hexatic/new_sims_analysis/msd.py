@@ -61,24 +61,27 @@ def _fit_msd_power_law(
     msd: NDArray[np.float64],
     tau_start: float,
 ) -> tuple[float, float, NDArray[np.float64], NDArray[np.float64]]:
-    """Fit ``MSD = A t^alpha`` for lag ``tau > tau_start``, ``t = tau - tau_start``.
+    """Fit ``MSD = A tau^alpha`` over the lag window ``tau > tau_start``.
 
-    The fit is a least-squares line through ``log MSD = log A + alpha log t``,
+    ``tau_start`` only selects the window; the regression runs against the lag
+    time itself. Shifting the origin to ``tau - tau_start`` would bias alpha
+    badly, because ``A tau^alpha`` is scale-free only about tau = 0: a purely
+    diffusive ``MSD = c tau`` re-expressed as ``c (t + tau_start)`` is concave
+    in ``t`` and fits as alpha well below one.
+
+    The fit is a least-squares line through ``log MSD = log A + alpha log tau``,
     so both ``A`` and ``alpha`` come from every point in the window rather than
     pinning ``A`` to a single frame. Returns ``(alpha, A, tau_fit, msd_fit)``.
     """
-    shifted = tau - tau_start
-    usable = (shifted > 0.0) & (msd > 0.0)
+    usable = (tau > tau_start) & (tau > 0.0) & (msd > 0.0)
     if np.count_nonzero(usable) < 2:
         raise ValueError(
             f"need at least two positive MSD samples after tau={tau_start}"
         )
-    log_t = np.log(shifted[usable])
-    log_msd = np.log(msd[usable])
-    alpha, log_a = np.polyfit(log_t, log_msd, 1)
-    amplitude = float(np.exp(log_a))
     tau_fit = tau[usable]
-    return float(alpha), amplitude, tau_fit, amplitude * shifted[usable] ** alpha
+    alpha, log_a = np.polyfit(np.log(tau_fit), np.log(msd[usable]), 1)
+    amplitude = float(np.exp(log_a))
+    return float(alpha), amplitude, tau_fit, amplitude * tau_fit**alpha
 
 
 def _plot_msd(

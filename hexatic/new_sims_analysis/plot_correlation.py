@@ -99,8 +99,8 @@ def _parse_args() -> argparse.Namespace:
         type=_positive_float,
         default=50.0,
         help=(
-            "Lag time tau after which the MSD is fitted to A t^alpha with "
-            "t = tau - msd_fit_start (default: 50.0)."
+            "Only lags above this are used when fitting MSD = A tau^alpha; "
+            "the fit runs against tau itself (default: 50.0)."
         ),
     )
     parser.add_argument(
