@@ -19,11 +19,16 @@ import seaborn as sns
 from hexatic.constants import cylinder
 
 MANIFEST_SCHEMA = "hexatic.new_sims.analysis.v1"
+PLANAR_COORDINATE_ORDER = ["x", "y"]
 CARTESIAN_COORDINATE_ORDER = ["x", "y", "z"]
 CYLINDRICAL_COORDINATE_ORDER = ["x", "theta", "r"]
 
 
-def _load_manifest(shard_dir: Path) -> dict[str, Any]:
+def _load_manifest(
+    shard_dir: Path,
+    *,
+    allow_2d: bool,
+) -> dict[str, Any]:
     manifest_path = shard_dir / "manifest.json"
     if not manifest_path.is_file():
         raise FileNotFoundError(f"missing manifest: {manifest_path}")
@@ -40,14 +45,22 @@ def _load_manifest(shard_dir: Path) -> dict[str, Any]:
     if not isinstance(case, dict):
         raise ValueError(f"missing case metadata in {manifest_path}")
     coordinate_order = manifest.get("coordinate_order")
-    if coordinate_order not in (
+    supported_orders = [
         CARTESIAN_COORDINATE_ORDER,
         CYLINDRICAL_COORDINATE_ORDER,
-    ):
+    ]
+    if allow_2d:
+        supported_orders.append(PLANAR_COORDINATE_ORDER)
+    if coordinate_order not in supported_orders:
+        expected = (
+            f"{PLANAR_COORDINATE_ORDER}, "
+            if allow_2d
+            else ""
+        )
         raise ValueError(
-            "expected either 3D Cartesian coordinate_order "
-            f"{CARTESIAN_COORDINATE_ORDER} or cylindrical coordinate_order "
-            f"{CYLINDRICAL_COORDINATE_ORDER}, got {coordinate_order!r}"
+            f"expected coordinate_order {expected}"
+            f"{CARTESIAN_COORDINATE_ORDER}, or "
+            f"{CYLINDRICAL_COORDINATE_ORDER}; got {coordinate_order!r}"
         )
     dimensions = case.get("dimensions")
     if (
@@ -158,7 +171,7 @@ def _load_frame_series(
     if not isinstance(shards, list) or not shards:
         raise ValueError("manifest contains no safetensor shards")
 
-    com_frames: list[tuple[float, float, float]] = []
+    com_frames: list[NDArray[np.float64] | tuple[float, float, float]] = []
     q_arrays: list[NDArray[np.float32]] = []
     step_frames: list[int] = []
     loaded_frames = 0
@@ -193,17 +206,23 @@ def _load_frame_series(
             steps = np.asarray(shard.get_tensor("step"), dtype=np.int64)
             directions = _cartesian_directions(shard, shard_path)
 
-        if coords.ndim != 3 or coords.shape[1] == 0 or coords.shape[2] != 3:
+        coordinate_count = len(manifest["coordinate_order"])
+        if (
+            coords.ndim != 3
+            or coords.shape[1] == 0
+            or coords.shape[2] != coordinate_count
+        ):
             raise ValueError(
-                f"expected coords shape (frames, particles, 3), "
+                "expected coords shape "
+                f"(frames, particles, {coordinate_count}), "
                 f"got {coords.shape}"
             )
         n_frames_in_shard = coords.shape[0]
         n_particles = coords.shape[1]
-        if directions.shape != coords.shape:
+        if directions.shape[:2] != coords.shape[:2]:
             raise ValueError(
-                f"orientation shape {directions.shape} does not match coords "
-                f"shape {coords.shape} in {shard_path}"
+                f"orientation frame/particle shape {directions.shape[:2]} "
+                f"does not match coords shape {coords.shape[:2]} in {shard_path}"
             )
         if steps.ndim != 1 or len(steps) != n_frames_in_shard:
             raise ValueError(
@@ -246,10 +265,8 @@ def _load_frame_series(
                 )
             else:
                 com_frames.append(
-                    tuple(
-                        np.mean(
-                            coords[local_frame], axis=0, dtype=np.float64
-                        )
+                    np.mean(
+                        coords[local_frame], axis=0, dtype=np.float64
                     )
                 )
             step_frames.append(int(steps[local_frame]))
@@ -567,6 +584,7 @@ def _plot_correlation(
     orientation_distinct_x: NDArray[np.float64],
     normalize: bool,
     cylindrical: bool,
+    planar: bool,
     label: str,
     output: Path,
 ) -> None:
@@ -609,7 +627,14 @@ def _plot_correlation(
         if normalize
         else "Unnormalized autocorrelation"
     )
-    axis.set_title(f"{title} — {label}")
+    geometry = (
+        "2D Cartesian"
+        if planar
+        else "cylindrical"
+        if cylindrical
+        else "3D Cartesian"
+    )
+    axis.set_title(f"{title} — {label} ({geometry})")
     axis.set_xlabel("Lag time")
     axis.set_ylabel(title)
     axis.set_xlim(0.0, lag_time[-1])
@@ -702,6 +727,15 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--2d",
+        dest="two_d",
+        action="store_true",
+        help=(
+            "Enable 2D Cartesian inputs with coordinate order ['x', 'y']; "
+            "velocity and orientation correlations use both planar components."
+        ),
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=Path("correlation_output"),
@@ -755,6 +789,7 @@ def _correlation_curves(
     max_lag: int,
     u0: float,
     cylindrical: bool,
+    planar: bool,
 ) -> tuple[
     NDArray[np.float64],
     NDArray[np.float64],
@@ -762,8 +797,15 @@ def _correlation_curves(
 ]:
     """Reduce one seed to its velocity, self, and distinct correlations."""
     velocity = _finite_difference_vector(com, elapsed)
-    velocity_signal = velocity[:, :1] if cylindrical else velocity
-    orientation_signal = q[:, :, :1] if cylindrical else q
+    if cylindrical:
+        velocity_signal = velocity[:, :1]
+        orientation_signal = q[:, :, :1]
+    elif planar:
+        velocity_signal = velocity
+        orientation_signal = q[:, :, :2]
+    else:
+        velocity_signal = velocity
+        orientation_signal = q
     velocity_correlation = _normalized_autocorrelation(
         velocity_signal, max_lag, normalize=False
     )
@@ -806,14 +848,19 @@ def main() -> None:
             f"dir={input_dir}",
             flush=True,
         )
-        manifest = _load_manifest(input_dir)
+        manifest = _load_manifest(input_dir, allow_2d=args.two_d)
         coordinate_order = manifest["coordinate_order"]
+        if args.two_d and coordinate_order != PLANAR_COORDINATE_ORDER:
+            raise ValueError(
+                f"--2d requires coordinate_order {PLANAR_COORDINATE_ORDER}, "
+                f"got {coordinate_order!r} for {input_dir}"
+            )
         if reference_coordinate_order is None:
             reference_coordinate_order = coordinate_order
         elif coordinate_order != reference_coordinate_order:
             raise ValueError(
                 "all --input-dir values must use the same geometry; cannot "
-                "mix Cartesian and cylindrical seeds"
+                "mix 2D Cartesian, 3D Cartesian, and cylindrical seeds"
             )
         seed_label, seed_slug = _case_identity(input_dir, manifest)
         if label is None:
@@ -875,6 +922,7 @@ def main() -> None:
                 effective_max_lag,
                 u0,
                 coordinate_order == CYLINDRICAL_COORDINATE_ORDER,
+                coordinate_order == PLANAR_COORDINATE_ORDER,
             )
         )
 
@@ -885,6 +933,7 @@ def main() -> None:
     assert reference_coordinate_order is not None
     assert label is not None and slug is not None
     cylindrical = reference_coordinate_order == CYLINDRICAL_COORDINATE_ORDER
+    planar = reference_coordinate_order == PLANAR_COORDINATE_ORDER
 
     elapsed = _elapsed_time(reference_steps, reference_timestep)
     effective_max_lag = min(args.max_lag, len(reference_steps) - 2)
@@ -918,6 +967,7 @@ def main() -> None:
         distinct_correlation,
         normalize,
         cylindrical,
+        planar,
         f"{label} ({len(seed_curves)} seeds)",
         output_path,
     )
