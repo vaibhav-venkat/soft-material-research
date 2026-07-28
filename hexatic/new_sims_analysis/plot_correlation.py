@@ -95,12 +95,23 @@ def _parse_args() -> argparse.Namespace:
         help="Plot unbiased autocorrelations without dividing by lag zero.",
     )
     parser.add_argument(
-        "--msd-fit-start",
+        "--tau-min",
         type=_positive_float,
-        default=50.0,
+        nargs="+",
+        default=[50.0],
         help=(
-            "Only lags above this are used when fitting MSD = A tau^alpha; "
-            "the fit runs against tau itself (default: 50.0)."
+            "Lower lag bound(s) of the MSD fit windows (default: 50). Pair "
+            "elementwise with --tau-max; one fit is plotted per window."
+        ),
+    )
+    parser.add_argument(
+        "--tau-max",
+        type=_positive_float,
+        nargs="+",
+        default=None,
+        help=(
+            "Upper lag bound(s) of the MSD fit windows, one per --tau-min "
+            "(default: the longest available lag for every window)."
         ),
     )
     parser.add_argument(
@@ -124,6 +135,12 @@ def main() -> None:
         raise ValueError("--frames must be at least 3")
     if args.laplace_r_points < 2 or args.laplace_omega_points < 2:
         raise ValueError("Laplace grid dimensions must each be at least 2")
+    # Check the window pairing before loading anything, so a typo fails fast.
+    if args.tau_max is not None and len(args.tau_max) != len(args.tau_min):
+        raise ValueError(
+            f"--tau-min and --tau-max must have the same number of values; "
+            f"got {len(args.tau_min)} and {len(args.tau_max)}"
+        )
 
     seed_curves: list[
         tuple[
@@ -280,28 +297,43 @@ def main() -> None:
     )
     print(f"[correlation] wrote {output_path}", flush=True)
     print(f"[correlation] wrote {output_path.with_suffix('.png')}", flush=True)
+    # An omitted --tau-max means "run each window out to the longest lag".
+    longest_lag = float(lag_time[-1])
+    tau_max_values = (
+        args.tau_max
+        if args.tau_max is not None
+        else [longest_lag] * len(args.tau_min)
+    )
+    fit_windows = list(zip(args.tau_min, tau_max_values, strict=True))
+    for tau_min, tau_max in fit_windows:
+        if tau_min >= longest_lag:
+            raise ValueError(
+                f"--tau-min {tau_min:g} is at or beyond the longest available "
+                f"lag {longest_lag:g}; raise --frames or --max-lag"
+            )
+
     for suffix, curves in seed_msd.items():
         msd = np.mean(np.asarray(curves, dtype=np.float64), axis=0)
-        # TEMPORARY: power-law fit disabled; plotting the MSD curve only.
-        # alpha, amplitude, tau_fit, msd_fit = _fit_msd_power_law(
-        #     lag_time, msd, args.msd_fit_start
-        # )
+        fits = [
+            _fit_msd_power_law(lag_time, msd, tau_min, tau_max)
+            for tau_min, tau_max in fit_windows
+        ]
         msd_path = args.output_dir / f"msd{suffix}_{slug}.svg"
         _plot_msd(
             lag_time,
             msd,
-            None,
-            None,
-            float("nan"),
+            fits,
             len(curves),
             f"{label}{msd_titles[suffix]}",
             msd_path,
         )
-        # print(
-        #     f"[correlation] MSD{suffix} fit for tau > {args.msd_fit_start}: "
-        #     f"alpha={alpha:.4f}, A={amplitude:.4g}",
-        #     flush=True,
-        # )
+        for fit in fits:
+            print(
+                f"[correlation] MSD{suffix} fit over "
+                f"[{fit.tau_min:g}, {fit.tau_max:g}]: "
+                f"alpha={fit.alpha:.4f}, A={fit.amplitude:.4g}",
+                flush=True,
+            )
         print(f"[correlation] wrote {msd_path}", flush=True)
         print(f"[correlation] wrote {msd_path.with_suffix('.png')}", flush=True)
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -56,40 +58,65 @@ def _msd_variants(
     ]
 
 
+@dataclass(frozen=True)
+class MsdFit:
+    """One power-law fit of the MSD over the lag window ``[tau_min, tau_max]``."""
+
+    tau_min: float
+    tau_max: float
+    alpha: float
+    amplitude: float
+    tau: NDArray[np.float64]
+    msd: NDArray[np.float64]
+
+
 def _fit_msd_power_law(
     tau: NDArray[np.float64],
     msd: NDArray[np.float64],
-    tau_start: float,
-) -> tuple[float, float, NDArray[np.float64], NDArray[np.float64]]:
-    """Fit ``MSD = A tau^alpha`` over the lag window ``tau > tau_start``.
+    tau_min: float,
+    tau_max: float,
+) -> MsdFit:
+    """Fit ``MSD = A tau^alpha`` over the closed lag window ``[tau_min, tau_max]``.
 
-    ``tau_start`` only selects the window; the regression runs against the lag
-    time itself. Shifting the origin to ``tau - tau_start`` would bias alpha
-    badly, because ``A tau^alpha`` is scale-free only about tau = 0: a purely
-    diffusive ``MSD = c tau`` re-expressed as ``c (t + tau_start)`` is concave
-    in ``t`` and fits as alpha well below one.
+    The window only selects points; the regression runs against the lag time
+    itself. Shifting the origin to ``tau - tau_min`` would bias alpha badly,
+    because ``A tau^alpha`` is scale-free only about tau = 0: a purely diffusive
+    ``MSD = c tau`` re-expressed as ``c (t + tau_min)`` is concave in ``t`` and
+    fits as alpha well below one.
 
     The fit is a least-squares line through ``log MSD = log A + alpha log tau``,
-    so both ``A`` and ``alpha`` come from every point in the window rather than
-    pinning ``A`` to a single frame. Returns ``(alpha, A, tau_fit, msd_fit)``.
+    so both ``A`` and ``alpha`` come from every point in the window.
     """
-    usable = (tau > tau_start) & (tau > 0.0) & (msd > 0.0)
+    if not np.isfinite(tau_min) or tau_min <= 0.0:
+        raise ValueError(f"tau_min must be finite and positive, got {tau_min}")
+    if tau_max <= tau_min:
+        raise ValueError(
+            f"tau_max ({tau_max}) must exceed tau_min ({tau_min})"
+        )
+    usable = (tau >= tau_min) & (tau <= tau_max) & (tau > 0.0) & (msd > 0.0)
     if np.count_nonzero(usable) < 2:
         raise ValueError(
-            f"need at least two positive MSD samples after tau={tau_start}"
+            "need at least two positive MSD samples in the lag window "
+            f"[{tau_min}, {tau_max}]; the available lags span "
+            f"[{tau[tau > 0.0].min() if np.any(tau > 0.0) else 0.0}, {tau.max()}]"
         )
     tau_fit = tau[usable]
     alpha, log_a = np.polyfit(np.log(tau_fit), np.log(msd[usable]), 1)
     amplitude = float(np.exp(log_a))
-    return float(alpha), amplitude, tau_fit, amplitude * tau_fit**alpha
+    return MsdFit(
+        tau_min=float(tau_min),
+        tau_max=float(tau_max),
+        alpha=float(alpha),
+        amplitude=amplitude,
+        tau=tau_fit,
+        msd=amplitude * tau_fit ** float(alpha),
+    )
 
 
 def _plot_msd(
     tau: NDArray[np.float64],
     msd: NDArray[np.float64],
-    tau_fit: NDArray[np.float64],
-    msd_fit: NDArray[np.float64],
-    alpha: float,
+    fits: Sequence[MsdFit],
     n_seeds: int,
     label: str,
     output: Path,
@@ -113,26 +140,35 @@ def _plot_msd(
             r"-\mathrm{COM}(t_0))^2 \rangle_{t_0}$"
         ),
     )
-    # TEMPORARY: power-law fit overlay disabled; MSD curve only.
-    # axis.plot(
-    #     tau_fit,
-    #     msd_fit,
-    #     color=palette[3],
-    #     ls="--",
-    #     lw=1.8,
-    # )
-    # # Anchor at the geometric middle so the label sits mid-line on log axes.
-    # anchor = int(
-    #     np.argmin(np.abs(np.log(tau_fit) - np.mean(np.log(tau_fit))))
-    # )
-    # axis.annotate(
-    #     rf"$\alpha = {alpha:.3f}$",
-    #     xy=(tau_fit[anchor], msd_fit[anchor]),
-    #     xytext=(-8, 12),
-    #     textcoords="offset points",
-    #     ha="right",
-    #     color=palette[3],
-    # )
+    # On log-log a "slight offset" has to be multiplicative: a constant factor
+    # is a constant vertical shift, so the dashed line stays parallel to the
+    # data instead of being sheared the way an additive offset would.
+    for index, fit in enumerate(fits):
+        color = palette[(index + 3) % len(palette)]
+        offset_fit = fit.msd * (1.18 * 1.12**index)
+        axis.plot(
+            fit.tau,
+            offset_fit,
+            color=color,
+            ls="--",
+            lw=1.8,
+            label=(
+                rf"$\alpha = {fit.alpha:.3f}$  "
+                rf"($\Delta t \in [{fit.tau_min:g}, {fit.tau_max:g}]$)"
+            ),
+        )
+        # Anchor at the geometric middle so the label sits mid-line.
+        anchor = int(
+            np.argmin(np.abs(np.log(fit.tau) - np.mean(np.log(fit.tau))))
+        )
+        axis.annotate(
+            rf"$\alpha = {fit.alpha:.3f}$",
+            xy=(fit.tau[anchor], offset_fit[anchor]),
+            xytext=(-8, 10),
+            textcoords="offset points",
+            ha="right",
+            color=color,
+        )
 
     axis.set_xscale("log")
     axis.set_yscale("log")
