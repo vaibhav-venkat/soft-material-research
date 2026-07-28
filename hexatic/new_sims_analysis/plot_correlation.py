@@ -195,7 +195,7 @@ def _load_frame_series(
 
         if coords.ndim != 3 or coords.shape[1] == 0 or coords.shape[2] != 3:
             raise ValueError(
-                f"expected cylindrical coords shape (frames, particles, 3), "
+                f"expected coords shape (frames, particles, 3), "
                 f"got {coords.shape}"
             )
         n_frames_in_shard = coords.shape[0]
@@ -447,7 +447,7 @@ def _self_particle_orientation_correlation(
 
     total = np.zeros(max_lag + 1, dtype=np.float64)
     for start in range(0, n_particles, 512):
-        chunk = q[:, start : start + 512]
+        chunk = q[:, start : start + 512].astype(np.float64)
         raw = fftconvolve(chunk, chunk[::-1], mode="full", axes=0)
         total += raw[n_frames - 1 : n_frames + max_lag].sum(axis=(1, 2))
     pair_counts = np.arange(
@@ -748,6 +748,36 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _correlation_curves(
+    com: NDArray[np.float64],
+    q: NDArray[np.float32],
+    elapsed: NDArray[np.float64],
+    max_lag: int,
+    u0: float,
+    cylindrical: bool,
+) -> tuple[
+    NDArray[np.float64],
+    NDArray[np.float64],
+    NDArray[np.float64],
+]:
+    """Reduce one seed to its velocity, self, and distinct correlations."""
+    velocity = _finite_difference_vector(com, elapsed)
+    velocity_signal = velocity[:, :1] if cylindrical else velocity
+    orientation_signal = q[:, :, :1] if cylindrical else q
+    velocity_correlation = _normalized_autocorrelation(
+        velocity_signal, max_lag, normalize=False
+    )
+    self_correlation = _self_particle_orientation_correlation(
+        orientation_signal, max_lag, normalize=False
+    )
+    self_correlation *= u0**2 / q.shape[1]
+    distinct_correlation = _distinct_particle_correlation(
+        orientation_signal, max_lag, normalize=False
+    )
+    distinct_correlation *= u0**2
+    return velocity_correlation, self_correlation, distinct_correlation
+
+
 def main() -> None:
     args = _parse_args()
     if args.frames < 3:
@@ -755,7 +785,13 @@ def main() -> None:
     if args.laplace_r_points < 2 or args.laplace_omega_points < 2:
         raise ValueError("Laplace grid dimensions must each be at least 2")
 
-    seed_data = []
+    seed_curves: list[
+        tuple[
+            NDArray[np.float64],
+            NDArray[np.float64],
+            NDArray[np.float64],
+        ]
+    ] = []
     reference_steps: NDArray[np.int64] | None = None
     reference_timestep: float | None = None
     reference_u0: float | None = None
@@ -829,7 +865,18 @@ def main() -> None:
                 raise ValueError(
                     f"seed particle count does not match in {input_dir}"
                 )
-        seed_data.append((com, q))
+        elapsed = _elapsed_time(steps, timestep)
+        effective_max_lag = min(args.max_lag, len(steps) - 2)
+        seed_curves.append(
+            _correlation_curves(
+                com,
+                q,
+                elapsed,
+                effective_max_lag,
+                u0,
+                coordinate_order == CYLINDRICAL_COORDINATE_ORDER,
+            )
+        )
 
     assert reference_steps is not None
     assert reference_timestep is not None
@@ -846,26 +893,6 @@ def main() -> None:
             f"[correlation] capping --max-lag {args.max_lag} -> "
             f"{effective_max_lag}",
             flush=True,
-        )
-
-    seed_curves = []
-    for com, q in seed_data:
-        velocity = _finite_difference_vector(com, elapsed)
-        velocity_signal = velocity[:, :1] if cylindrical else velocity
-        orientation_signal = q[:, :, :1] if cylindrical else q
-        velocity_correlation = _normalized_autocorrelation(
-            velocity_signal, effective_max_lag, normalize=False
-        )
-        self_correlation = _self_particle_orientation_correlation(
-            orientation_signal, effective_max_lag, normalize=False
-        )
-        self_correlation *= reference_u0**2 / reference_particles
-        distinct_correlation = _distinct_particle_correlation(
-            orientation_signal, effective_max_lag, normalize=False
-        )
-        distinct_correlation *= reference_u0**2
-        seed_curves.append(
-            (velocity_correlation, self_correlation, distinct_correlation)
         )
 
     velocity_correlation, self_correlation, distinct_correlation = np.mean(
@@ -891,7 +918,7 @@ def main() -> None:
         distinct_correlation,
         normalize,
         cylindrical,
-        f"{label} ({len(seed_data)} seeds)",
+        f"{label} ({len(seed_curves)} seeds)",
         output_path,
     )
     print(f"[correlation] wrote {output_path}", flush=True)
@@ -914,7 +941,7 @@ def main() -> None:
     print(f"[correlation] wrote {laplace_path}", flush=True)
     print(f"[correlation] wrote {laplace_path.with_suffix('.png')}", flush=True)
     print(
-        f"[correlation] done — averaged {len(seed_data)} seed(s) into one "
+        f"[correlation] done — averaged {len(seed_curves)} seed(s) into one "
         "correlation plot and one Laplace heatmap"
     )
 
