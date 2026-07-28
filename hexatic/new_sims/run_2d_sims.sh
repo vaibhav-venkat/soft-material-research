@@ -6,31 +6,58 @@ IFS=$'\n\t'
 trap 'status=$?; printf "run_2d_sims.sh failed at line %s (status %s)\n" "$LINENO" "$status" >&2; exit "$status"' ERR
 
 usage() {
-    printf 'Usage: %s OUTPUT_ROOT [GPU_IDS]\n' "$0" >&2
-    printf 'Example: %s /mnt/drive3/vaibhav_data/new_sims_2d 0,1\n' "$0" >&2
+    printf 'Usage: %s --output-root PATH --seed INTEGER [--gpu-id INTEGER]\n' "$0" >&2
+    printf 'Example: %s --output-root /mnt/drive3/vaibhav_data/ideal_seed_7 --seed 7 --gpu-id 0\n' "$0" >&2
 }
 
-if [[ $# -lt 1 || $# -gt 2 ]]; then
+output_root=""
+seed=""
+gpu_id="0"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --output-root)
+            [[ $# -ge 2 ]] || { usage; exit 2; }
+            output_root="$2"
+            shift 2
+            ;;
+        --seed)
+            [[ $# -ge 2 ]] || { usage; exit 2; }
+            seed="$2"
+            shift 2
+            ;;
+        --gpu-id)
+            [[ $# -ge 2 ]] || { usage; exit 2; }
+            gpu_id="$2"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            printf 'Unknown argument: %s\n' "$1" >&2
+            usage
+            exit 2
+            ;;
+    esac
+done
+
+if [[ -z "$output_root" || -z "$seed" ]]; then
     usage
+    exit 2
+fi
+if [[ ! "$seed" =~ ^[0-9]+$ ]]; then
+    printf -- '--seed must be a non-negative integer\n' >&2
+    exit 2
+fi
+if [[ ! "$gpu_id" =~ ^[0-9]+$ ]]; then
+    printf -- '--gpu-id must be a non-negative integer\n' >&2
     exit 2
 fi
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/../.." && pwd)"
 cd "$repo_root"
-
-output_root="$1"
-gpu_ids="${2:-0,1}"
-if [[ ! "$gpu_ids" =~ ^[0-9]+,[0-9]+$ ]]; then
-    printf 'GPU_IDS must contain exactly two comma-separated non-negative IDs\n' >&2
-    exit 2
-fi
-gpu_walled="${gpu_ids%%,*}"
-gpu_periodic="${gpu_ids##*,}"
-if [[ "$gpu_walled" == "$gpu_periodic" ]]; then
-    printf 'GPU_IDS must name two distinct GPUs\n' >&2
-    exit 2
-fi
 
 run_steps="${RUN_STEPS:-100000000}"
 write_period="${TRAJECTORY_WRITE_PERIOD:-100000}"
@@ -40,6 +67,11 @@ plot_max_lag="${PLOT_MAX_LAG:-900}"
 cuda_version="${CONDA_OVERRIDE_CUDA:-12.9}"
 
 mkdir -p "$output_root/logs" "$output_root/plots"
+
+if [[ "${OVERWRITE:-0}" == 1 && "${RESUME_ANALYSIS:-0}" == 1 ]]; then
+    printf 'OVERWRITE and RESUME_ANALYSIS cannot both be 1\n' >&2
+    exit 2
+fi
 
 simulation_flags=()
 analysis_flags=()
@@ -53,20 +85,21 @@ fi
 export CONDA_OVERRIDE_CUDA="$cuda_version"
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
-CUDA_VISIBLE_DEVICES="$gpu_ids" \
+CUDA_VISIBLE_DEVICES="$gpu_id" \
     pixi run -e big-lx-cuda12 new-sims-gpu-check
 
 run_case_pipeline() {
     local case_id="$1"
-    local physical_gpu="$2"
     local simulation_log="$output_root/logs/${case_id}_simulation.log"
     local analysis_log="$output_root/logs/${case_id}_analysis.log"
 
-    printf 'Starting %s on physical GPU %s\n' "$case_id" "$physical_gpu"
-    CUDA_VISIBLE_DEVICES="$physical_gpu" \
+    printf 'Starting %s for seed %s on physical GPU %s\n' \
+        "$case_id" "$seed" "$gpu_id"
+    CUDA_VISIBLE_DEVICES="$gpu_id" \
         pixi run -e big-lx-cuda12 python -u -m hexatic.new_sims.simulate_case \
         --case "$case_id" \
         --output-root "$output_root" \
+        --seed "$seed" \
         --run-steps "$run_steps" \
         --trajectory-write-period "$write_period" \
         --device gpu \
@@ -74,7 +107,7 @@ run_case_pipeline() {
         "${simulation_flags[@]}" \
         >"$simulation_log" 2>&1
 
-    CUDA_VISIBLE_DEVICES="$physical_gpu" \
+    CUDA_VISIBLE_DEVICES="$gpu_id" \
         pixi run -e big-lx-cuda12 python -u -m hexatic.new_sims.analyze_case \
         --case "$case_id" \
         --output-root "$output_root" \
@@ -86,9 +119,9 @@ run_case_pipeline() {
     printf 'Completed simulation and analysis for %s\n' "$case_id"
 }
 
-run_case_pipeline ideal_2d_x_walls "$gpu_walled" &
+run_case_pipeline ideal_2d_x_walls &
 walled_pid=$!
-run_case_pipeline ideal_2d_periodic "$gpu_periodic" &
+run_case_pipeline ideal_2d_periodic &
 periodic_pid=$!
 
 pipeline_status=0
@@ -113,5 +146,6 @@ pixi run -e big-lx-cuda12 python -u \
     --output "$output_root/plots/2d_orientation_correlation.svg" \
     --report "$output_root/plots/2d_orientation_correlation_report.md"
 
-printf 'All 2D runs, analyses, and correlation plotting completed\n'
+printf 'All 2D runs, analyses, and correlation plotting completed for seed %s\n' \
+    "$seed"
 printf 'Output root: %s\n' "$output_root"
