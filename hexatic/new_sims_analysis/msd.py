@@ -108,13 +108,11 @@ def _plot_msd(
             r"-\mathrm{COM}(t_0))^2 \rangle_{t_0}$"
         ),
     )
-    # Offset the fit slightly so it reads as a separate guide line.
-    offset_fit = msd_fit * 1.15
-    axis.plot(tau_fit, offset_fit, color=palette[3], ls="--", lw=1.8)
+    axis.plot(tau_fit, msd_fit, color=palette[3], ls="--", lw=1.8)
     anchor = len(tau_fit) // 2
     axis.annotate(
         rf"$\alpha = {alpha:.3f}$",
-        xy=(tau_fit[anchor], offset_fit[anchor]),
+        xy=(tau_fit[anchor], msd_fit[anchor]),
         xytext=(6, 10),
         textcoords="offset points",
         color=palette[3],
