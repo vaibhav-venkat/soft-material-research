@@ -98,9 +98,14 @@ def _plot_msd(
     palette = sns.color_palette("colorblind")
     figure, axis = plt.subplots(figsize=(8.2, 5.2), constrained_layout=True)
 
+    # Log axes cannot show zero lag or a zero/negative MSD, so drop those
+    # points rather than letting matplotlib clip them silently.
+    visible = (tau > 0.0) & (msd > 0.0)
+    if not np.any(visible):
+        raise ValueError("no positive MSD samples to plot on log-log axes")
     axis.plot(
-        tau,
-        msd,
+        tau[visible],
+        msd[visible],
         color=palette[0],
         lw=2.0,
         label=(
@@ -108,21 +113,35 @@ def _plot_msd(
             r"-\mathrm{COM}(t_0))^2 \rangle_{t_0}$"
         ),
     )
-    axis.plot(tau_fit, msd_fit, color=palette[3], ls="--", lw=1.8)
-    anchor = len(tau_fit) // 2
-    axis.annotate(
-        rf"$\alpha = {alpha:.3f}$",
-        xy=(tau_fit[anchor], msd_fit[anchor]),
-        xytext=(6, 10),
-        textcoords="offset points",
-        color=palette[3],
-    )
+    # TEMPORARY: power-law fit overlay disabled; MSD curve only.
+    # axis.plot(
+    #     tau_fit,
+    #     msd_fit,
+    #     color=palette[3],
+    #     ls="--",
+    #     lw=1.8,
+    # )
+    # # Anchor at the geometric middle so the label sits mid-line on log axes.
+    # anchor = int(
+    #     np.argmin(np.abs(np.log(tau_fit) - np.mean(np.log(tau_fit))))
+    # )
+    # axis.annotate(
+    #     rf"$\alpha = {alpha:.3f}$",
+    #     xy=(tau_fit[anchor], msd_fit[anchor]),
+    #     xytext=(-8, 12),
+    #     textcoords="offset points",
+    #     ha="right",
+    #     color=palette[3],
+    # )
 
+    axis.set_xscale("log")
+    axis.set_yscale("log")
     axis.set_title(f"Center-of-mass MSD — {label} ({n_seeds} seeds)")
     axis.set_xlabel(r"lag time $\Delta t$")
     axis.set_ylabel("MSD")
-    axis.set_xlim(tau[0], tau[-1])
-    axis.grid(axis="y", color="0.9", lw=0.7)
+    axis.set_xlim(float(tau[visible][0]), float(tau[visible][-1]))
+    axis.grid(which="major", color="0.85", lw=0.7)
+    axis.grid(which="minor", color="0.94", lw=0.5)
     axis.legend(frameon=False)
     sns.despine(ax=axis)
 

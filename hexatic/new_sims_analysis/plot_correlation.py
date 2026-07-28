@@ -282,25 +282,26 @@ def main() -> None:
     print(f"[correlation] wrote {output_path.with_suffix('.png')}", flush=True)
     for suffix, curves in seed_msd.items():
         msd = np.mean(np.asarray(curves, dtype=np.float64), axis=0)
-        alpha, amplitude, tau_fit, msd_fit = _fit_msd_power_law(
-            lag_time, msd, args.msd_fit_start
-        )
+        # TEMPORARY: power-law fit disabled; plotting the MSD curve only.
+        # alpha, amplitude, tau_fit, msd_fit = _fit_msd_power_law(
+        #     lag_time, msd, args.msd_fit_start
+        # )
         msd_path = args.output_dir / f"msd{suffix}_{slug}.svg"
         _plot_msd(
             lag_time,
             msd,
-            tau_fit,
-            msd_fit,
-            alpha,
+            None,
+            None,
+            float("nan"),
             len(curves),
             f"{label}{msd_titles[suffix]}",
             msd_path,
         )
-        print(
-            f"[correlation] MSD{suffix} fit for tau > {args.msd_fit_start}: "
-            f"alpha={alpha:.4f}, A={amplitude:.4g}",
-            flush=True,
-        )
+        # print(
+        #     f"[correlation] MSD{suffix} fit for tau > {args.msd_fit_start}: "
+        #     f"alpha={alpha:.4f}, A={amplitude:.4g}",
+        #     flush=True,
+        # )
         print(f"[correlation] wrote {msd_path}", flush=True)
         print(f"[correlation] wrote {msd_path.with_suffix('.png')}", flush=True)
 
