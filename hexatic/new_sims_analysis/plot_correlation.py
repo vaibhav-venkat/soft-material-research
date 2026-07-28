@@ -20,6 +20,7 @@ from hexatic.constants import cylinder
 
 MANIFEST_SCHEMA = "hexatic.new_sims.analysis.v1"
 CARTESIAN_COORDINATE_ORDER = ["x", "y", "z"]
+CYLINDRICAL_COORDINATE_ORDER = ["x", "theta", "r"]
 
 
 def _load_manifest(shard_dir: Path) -> dict[str, Any]:
@@ -39,15 +40,72 @@ def _load_manifest(shard_dir: Path) -> dict[str, Any]:
     if not isinstance(case, dict):
         raise ValueError(f"missing case metadata in {manifest_path}")
     coordinate_order = manifest.get("coordinate_order")
-    if coordinate_order != CARTESIAN_COORDINATE_ORDER:
+    if coordinate_order not in (
+        CARTESIAN_COORDINATE_ORDER,
+        CYLINDRICAL_COORDINATE_ORDER,
+    ):
         raise ValueError(
-            f"expected 3D Cartesian coordinate_order "
-            f"{CARTESIAN_COORDINATE_ORDER}, got {coordinate_order!r}"
+            "expected either 3D Cartesian coordinate_order "
+            f"{CARTESIAN_COORDINATE_ORDER} or cylindrical coordinate_order "
+            f"{CYLINDRICAL_COORDINATE_ORDER}, got {coordinate_order!r}"
         )
     dimensions = case.get("dimensions")
-    if dimensions is not None and int(dimensions) != 3:
+    if (
+        coordinate_order == CARTESIAN_COORDINATE_ORDER
+        and dimensions is not None
+        and int(dimensions) != 3
+    ):
         raise ValueError(f"expected a 3D case, got dimensions={dimensions!r}")
     return manifest
+
+
+def _load_lx(static_path: Path) -> float:
+    if not static_path.is_file():
+        raise FileNotFoundError(f"missing static tensors: {static_path}")
+    with safe_open(static_path, framework="np") as static_file:
+        keys = set(static_file.keys())
+        if "lx" in keys:
+            value = np.asarray(static_file.get_tensor("lx"))
+            if value.size != 1:
+                raise ValueError(f"expected scalar lx in {static_path}")
+            lx = float(value.reshape(-1)[0])
+        elif "box" in keys:
+            box = np.asarray(static_file.get_tensor("box"))
+            if box.ndim != 1 or box.size < 1:
+                raise ValueError(f"invalid box tensor in {static_path}")
+            lx = float(box[0])
+        else:
+            raise KeyError(f"{static_path} has neither 'lx' nor 'box' tensor")
+    if not np.isfinite(lx) or lx <= 0.0:
+        raise ValueError(f"invalid axial box length lx={lx}")
+    return lx
+
+
+class _PeriodicComUnwrapper:
+    def __init__(self, n_particles: int, period: float) -> None:
+        self._n_particles = n_particles
+        self._period = period
+        self._previous = np.empty(n_particles, dtype=np.float64)
+        self._unwrapped = np.empty(n_particles, dtype=np.float64)
+        self._started = False
+
+    def push(self, values: NDArray[np.float64], frame_index: int) -> float:
+        if len(values) != self._n_particles:
+            raise ValueError(f"particle count changes at frame {frame_index}")
+        if not np.all(np.isfinite(values)):
+            raise ValueError(f"non-finite coordinate at frame {frame_index}")
+        if not self._started:
+            self._unwrapped[:] = values
+            self._started = True
+        else:
+            displacement = values - self._previous
+            scaled = displacement / self._period
+            nearest_integer = np.copysign(
+                np.floor(np.abs(scaled) + 0.5), scaled
+            )
+            self._unwrapped += displacement - self._period * nearest_integer
+        self._previous[:] = values
+        return float(np.mean(self._unwrapped, dtype=np.float64))
 
 
 def _cartesian_directions(
@@ -90,8 +148,8 @@ def _load_frame_series(
     """Load the per-frame COM coordinates and per-particle orientations.
 
     Returns ``(com, q, steps)``. Both COM and orientations use Cartesian
-    ``(x, y, z)`` components. New-sims bulk coordinates are already unwrapped
-    on periodic axes.
+    ``(x, y, z)`` components for bulk inputs. Cylindrical coordinates use
+    ``(x, theta, r)`` and are unwrapped along x and theta before taking COM.
 
     Note that ``q`` holds every particle for every frame, so memory scales as
     frames x particles; ``--frames`` is the knob for keeping it bounded.
@@ -105,6 +163,12 @@ def _load_frame_series(
     step_frames: list[int] = []
     loaded_frames = 0
     expected_start = 0
+    cylindrical = (
+        manifest["coordinate_order"] == CYLINDRICAL_COORDINATE_ORDER
+    )
+    lx = _load_lx(shard_dir / "static.safetensors") if cylindrical else None
+    axial_unwrapper: _PeriodicComUnwrapper | None = None
+    azimuthal_unwrapper: _PeriodicComUnwrapper | None = None
     for entry in shards:
         if not isinstance(entry, dict):
             raise ValueError("invalid shard entry in manifest")
@@ -150,6 +214,12 @@ def _load_frame_series(
                 f"shard range [{start}, {stop}) does not match "
                 f"{n_frames_in_shard} stored frames in {shard_path}"
             )
+        if cylindrical and axial_unwrapper is None:
+            assert lx is not None
+            axial_unwrapper = _PeriodicComUnwrapper(n_particles, lx)
+            azimuthal_unwrapper = _PeriodicComUnwrapper(
+                n_particles, 2.0 * np.pi
+            )
         take = frame_limit - loaded_frames
         coords = coords[:take]
         steps = steps[:take]
@@ -159,11 +229,29 @@ def _load_frame_series(
         q_arrays.append(directions.astype(np.float32))
 
         for local_frame in range(actual_take):
-            com_frames.append(
-                tuple(
-                    np.mean(coords[local_frame], axis=0, dtype=np.float64)
+            if cylindrical:
+                assert axial_unwrapper is not None
+                assert azimuthal_unwrapper is not None
+                frame_index = start + local_frame
+                com_frames.append(
+                    (
+                        axial_unwrapper.push(
+                            coords[local_frame, :, 0], frame_index
+                        ),
+                        azimuthal_unwrapper.push(
+                            coords[local_frame, :, 1], frame_index
+                        ),
+                        float(np.mean(coords[local_frame, :, 2])),
+                    )
                 )
-            )
+            else:
+                com_frames.append(
+                    tuple(
+                        np.mean(
+                            coords[local_frame], axis=0, dtype=np.float64
+                        )
+                    )
+                )
             step_frames.append(int(steps[local_frame]))
 
         loaded_frames += actual_take
@@ -396,6 +484,56 @@ def _lag_times(
     return np.arange(max_lag + 1, dtype=np.float64) * spacing
 
 
+def _simpson_weights(sample_count: int, spacing: float) -> NDArray[np.float64]:
+    """Match the Laplace-analysis Simpson rule, including an even-size tail."""
+    if sample_count < 2 or not np.isfinite(spacing) or spacing <= 0.0:
+        raise ValueError("Laplace transform needs at least two uniform samples")
+    weights = np.zeros(sample_count, dtype=np.float64)
+    if sample_count == 2:
+        weights[:] = spacing / 2.0
+        return weights
+    simpson_count = sample_count - 1 if sample_count % 2 == 0 else sample_count
+    weights[:simpson_count:2] = 2.0 * spacing / 3.0
+    weights[1:simpson_count:2] = 4.0 * spacing / 3.0
+    weights[0] = spacing / 3.0
+    weights[simpson_count - 1] = spacing / 3.0
+    if sample_count % 2 == 0:
+        weights[-1] += 5.0 * spacing / 12.0
+        weights[-2] += 2.0 * spacing / 3.0
+        weights[-3] -= spacing / 12.0
+    return weights
+
+
+def _laplace_transform(
+    lag_time: NDArray[np.float64],
+    correlation: NDArray[np.float64],
+    r_points: int,
+    omega_points: int,
+) -> tuple[
+    NDArray[np.float64],
+    NDArray[np.float64],
+    NDArray[np.complex128],
+]:
+    """Evaluate the same complex Laplace grid as big_lx_analysis."""
+    if len(lag_time) != len(correlation) or len(lag_time) < 2:
+        raise ValueError("Laplace inputs must have the same length of at least two")
+    spacing = float(lag_time[1] - lag_time[0])
+    duration = float(lag_time[-1] - lag_time[0])
+    if duration <= 0.0:
+        raise ValueError("Laplace correlation must span positive lag time")
+    omega_max = min(np.pi / spacing, 20.0 * np.pi / duration)
+    r = np.linspace(-10.0 / duration, 0.0, r_points, dtype=np.float64)
+    omega = np.linspace(
+        -omega_max, omega_max, omega_points, dtype=np.float64
+    )
+    weights = _simpson_weights(len(lag_time), spacing)
+    weighted_correlation = weights * correlation
+    envelope = np.exp(r[:, None] * lag_time[None, :])
+    phase = np.exp(1j * omega[:, None] * lag_time[None, :])
+    values = (phase * weighted_correlation[None, :]) @ envelope.T
+    return r, omega, np.asarray(values, dtype=np.complex128)
+
+
 def _elapsed_time(
     steps: NDArray[np.int64],
     timestep: float,
@@ -428,6 +566,7 @@ def _plot_correlation(
     orientation_self_x: NDArray[np.float64],
     orientation_distinct_x: NDArray[np.float64],
     normalize: bool,
+    cylindrical: bool,
     label: str,
     output: Path,
 ) -> None:
@@ -435,19 +574,30 @@ def _plot_correlation(
     palette = sns.color_palette("colorblind")
     figure, axis = plt.subplots(figsize=(8.2, 5.2), constrained_layout=True)
 
+    velocity_name = r"$C_{V_x}(\tau)$" if cylindrical else r"$C_{\mathbf{V}}(\tau)$"
+    self_name = (
+        r"$(U_0^2/N)C_{q_x}^{\mathrm{self}}(\tau)$"
+        if cylindrical
+        else r"$(U_0^2/N)C_{\mathbf{q}}^{\mathrm{self}}(\tau)$"
+    )
+    distinct_name = (
+        r"$(U_0^2/N^2)\sum_{i\ne j}C_{q_{i,x}q_{j,x}}(\tau)$"
+        if cylindrical
+        else r"$(U_0^2/N^2)\sum_{i\ne j}C_{\mathbf{q}_i\mathbf{q}_j}(\tau)$"
+    )
     curves = (
-        (velocity_x, palette[0], "-", r"$C_{\mathbf{V}}(\tau)$"),
+        (velocity_x, palette[0], "-", velocity_name),
         (
             orientation_self_x,
             palette[1],
             "--",
-            r"$(U_0^2/N)C_{\mathbf{q}}^{\mathrm{self}}(\tau)$",
+            self_name,
         ),
         (
             orientation_distinct_x,
             palette[2],
             ":",
-            r"$(U_0^2/N^2)\sum_{i\ne j}C_{\mathbf{q}_i\mathbf{q}_j}(\tau)$",
+            distinct_name,
         ),
     )
     for correlation, color, style, name in curves:
@@ -467,6 +617,53 @@ def _plot_correlation(
     axis.legend(frameon=False, ncol=2)
     sns.despine(ax=axis)
 
+    output.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(
+        output,
+        format="svg",
+        bbox_inches="tight",
+        metadata={"Creator": "hexatic.new_sims_analysis"},
+    )
+    figure.savefig(output.with_suffix(".png"), dpi=300, bbox_inches="tight")
+    plt.close(figure)
+
+
+def _plot_laplace(
+    r: NDArray[np.float64],
+    omega: NDArray[np.float64],
+    values: NDArray[np.complex128],
+    output: Path,
+) -> None:
+    """Copy the big_lx_analysis three-panel Laplace heatmap."""
+    sns.set_theme(context="paper", style="ticks")
+    figure, axes = plt.subplots(
+        1,
+        3,
+        figsize=(12.0, 3.4),
+        squeeze=False,
+        constrained_layout=True,
+    )
+    fields = (
+        np.log10(np.maximum(np.abs(values), np.finfo(float).tiny)),
+        values.real,
+        values.imag,
+    )
+    titles = (
+        r"$\log_{10}|L(r,\omega)|$",
+        r"$\Re L(r,\omega)$",
+        r"$\Im L(r,\omega)$",
+    )
+    for column, (field, title) in enumerate(zip(fields, titles, strict=True)):
+        axis = axes[0, column]
+        image = axis.pcolormesh(
+            r, omega, field, shading="auto", cmap="viridis"
+        )
+        figure.colorbar(image, ax=axis, pad=0.02)
+        axis.set_xlabel(r"decay coordinate $r$")
+        if column == 0:
+            axis.set_ylabel(r"angular frequency $\omega$")
+        axis.set_title(title)
+        sns.despine(ax=axis)
     output.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(
         output,
@@ -536,6 +733,18 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Plot unbiased autocorrelations without dividing by lag zero.",
     )
+    parser.add_argument(
+        "--laplace-r-points",
+        type=int,
+        default=161,
+        help="Number of Laplace decay-coordinate samples (default: 161).",
+    )
+    parser.add_argument(
+        "--laplace-omega-points",
+        type=int,
+        default=241,
+        help="Number of Laplace angular-frequency samples (default: 241).",
+    )
     return parser.parse_args()
 
 
@@ -543,12 +752,15 @@ def main() -> None:
     args = _parse_args()
     if args.frames < 3:
         raise ValueError("--frames must be at least 3")
+    if args.laplace_r_points < 2 or args.laplace_omega_points < 2:
+        raise ValueError("Laplace grid dimensions must each be at least 2")
 
     seed_data = []
     reference_steps: NDArray[np.int64] | None = None
     reference_timestep: float | None = None
     reference_u0: float | None = None
     reference_particles: int | None = None
+    reference_coordinate_order: list[str] | None = None
     label: str | None = None
     slug: str | None = None
 
@@ -559,6 +771,14 @@ def main() -> None:
             flush=True,
         )
         manifest = _load_manifest(input_dir)
+        coordinate_order = manifest["coordinate_order"]
+        if reference_coordinate_order is None:
+            reference_coordinate_order = coordinate_order
+        elif coordinate_order != reference_coordinate_order:
+            raise ValueError(
+                "all --input-dir values must use the same geometry; cannot "
+                "mix Cartesian and cylindrical seeds"
+            )
         seed_label, seed_slug = _case_identity(input_dir, manifest)
         if label is None:
             label, slug = seed_label, seed_slug
@@ -615,7 +835,9 @@ def main() -> None:
     assert reference_timestep is not None
     assert reference_u0 is not None
     assert reference_particles is not None
+    assert reference_coordinate_order is not None
     assert label is not None and slug is not None
+    cylindrical = reference_coordinate_order == CYLINDRICAL_COORDINATE_ORDER
 
     elapsed = _elapsed_time(reference_steps, reference_timestep)
     effective_max_lag = min(args.max_lag, len(reference_steps) - 2)
@@ -629,15 +851,17 @@ def main() -> None:
     seed_curves = []
     for com, q in seed_data:
         velocity = _finite_difference_vector(com, elapsed)
+        velocity_signal = velocity[:, :1] if cylindrical else velocity
+        orientation_signal = q[:, :, :1] if cylindrical else q
         velocity_correlation = _normalized_autocorrelation(
-            velocity, effective_max_lag, normalize=False
+            velocity_signal, effective_max_lag, normalize=False
         )
         self_correlation = _self_particle_orientation_correlation(
-            q, effective_max_lag, normalize=False
+            orientation_signal, effective_max_lag, normalize=False
         )
         self_correlation *= reference_u0**2 / reference_particles
         distinct_correlation = _distinct_particle_correlation(
-            q, effective_max_lag, normalize=False
+            orientation_signal, effective_max_lag, normalize=False
         )
         distinct_correlation *= reference_u0**2
         seed_curves.append(
@@ -666,13 +890,32 @@ def main() -> None:
         self_correlation,
         distinct_correlation,
         normalize,
+        cylindrical,
         f"{label} ({len(seed_data)} seeds)",
         output_path,
     )
     print(f"[correlation] wrote {output_path}", flush=True)
     print(f"[correlation] wrote {output_path.with_suffix('.png')}", flush=True)
+    laplace_correlation = velocity_correlation.copy()
+    if not normalize:
+        if laplace_correlation[0] == 0.0:
+            raise ValueError(
+                "cannot normalize the velocity correlation for its Laplace transform"
+            )
+        laplace_correlation /= laplace_correlation[0]
+    r, omega, laplace_values = _laplace_transform(
+        lag_time,
+        laplace_correlation,
+        args.laplace_r_points,
+        args.laplace_omega_points,
+    )
+    laplace_path = args.output_dir / f"laplace_transform_{slug}.svg"
+    _plot_laplace(r, omega, laplace_values, laplace_path)
+    print(f"[correlation] wrote {laplace_path}", flush=True)
+    print(f"[correlation] wrote {laplace_path.with_suffix('.png')}", flush=True)
     print(
-        f"[correlation] done — averaged {len(seed_data)} seed(s) into one plot"
+        f"[correlation] done — averaged {len(seed_data)} seed(s) into one "
+        "correlation plot and one Laplace heatmap"
     )
 
 
