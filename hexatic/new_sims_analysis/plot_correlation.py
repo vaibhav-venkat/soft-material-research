@@ -99,8 +99,8 @@ def _parse_args() -> argparse.Namespace:
         type=_positive_float,
         default=50.0,
         help=(
-            "Simulation time tau after which the MSD is fitted to A t^alpha "
-            "with t = tau - msd_fit_start (default: 50.0)."
+            "Lag time tau after which the MSD is fitted to A t^alpha with "
+            "t = tau - msd_fit_start (default: 50.0)."
         ),
     )
     parser.add_argument(
@@ -217,7 +217,9 @@ def main() -> None:
         for suffix, title, coords in _msd_variants(
             com, coordinate_order == CYLINDRICAL_COORDINATE_ORDER
         ):
-            seed_msd.setdefault(suffix, []).append(_msd_from_com(coords))
+            seed_msd.setdefault(suffix, []).append(
+                _msd_from_com(coords, effective_max_lag)
+            )
             msd_titles[suffix] = title
         seed_curves.append(
             _correlation_curves(
@@ -281,11 +283,11 @@ def main() -> None:
     for suffix, curves in seed_msd.items():
         msd = np.mean(np.asarray(curves, dtype=np.float64), axis=0)
         alpha, amplitude, tau_fit, msd_fit = _fit_msd_power_law(
-            elapsed, msd, args.msd_fit_start
+            lag_time, msd, args.msd_fit_start
         )
         msd_path = args.output_dir / f"msd{suffix}_{slug}.svg"
         _plot_msd(
-            elapsed,
+            lag_time,
             msd,
             tau_fit,
             msd_fit,

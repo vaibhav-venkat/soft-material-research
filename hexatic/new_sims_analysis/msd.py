@@ -10,10 +10,26 @@ from numpy.typing import NDArray
 import seaborn as sns
 
 
-def _msd_from_com(com: NDArray[np.float64]) -> NDArray[np.float64]:
-    """Return one seed's squared COM displacement from its first frame."""
-    displacement = com - com[0]
-    return np.sum(displacement**2, axis=1, dtype=np.float64)
+def _msd_from_com(
+    com: NDArray[np.float64],
+    max_lag: int,
+) -> NDArray[np.float64]:
+    """Return one seed's lag-averaged COM mean squared displacement.
+
+    ``MSD(dt) = <(COM(t0 + dt) - COM(t0))^2>`` averaged over every available
+    time origin ``t0``, which is what makes the curve smooth and essentially
+    monotonic; a single origin gives one sample per lag and wanders instead.
+    Sample counts fall off as the lag approaches the trajectory length, so the
+    tail is still the noisiest part.
+    """
+    n_frames = len(com)
+    if max_lag < 0 or max_lag > n_frames - 1:
+        raise ValueError(f"max_lag {max_lag} out of range for {n_frames} frames")
+    msd = np.empty(max_lag + 1, dtype=np.float64)
+    for lag in range(max_lag + 1):
+        displacement = com[lag:] - com[: n_frames - lag]
+        msd[lag] = np.mean(np.sum(displacement**2, axis=1))
+    return msd
 
 
 def _msd_variants(
@@ -45,7 +61,7 @@ def _fit_msd_power_law(
     msd: NDArray[np.float64],
     tau_start: float,
 ) -> tuple[float, float, NDArray[np.float64], NDArray[np.float64]]:
-    """Fit ``MSD = A t^alpha`` for ``tau > tau_start`` with ``t = tau - tau_start``.
+    """Fit ``MSD = A t^alpha`` for lag ``tau > tau_start``, ``t = tau - tau_start``.
 
     The fit is a least-squares line through ``log MSD = log A + alpha log t``,
     so both ``A`` and ``alpha`` come from every point in the window rather than
@@ -84,7 +100,10 @@ def _plot_msd(
         msd,
         color=palette[0],
         lw=2.0,
-        label=r"$\langle (\mathrm{COM}(t)-\mathrm{COM}(0))^2 \rangle$",
+        label=(
+            r"$\langle (\mathrm{COM}(t_0+\Delta t)"
+            r"-\mathrm{COM}(t_0))^2 \rangle_{t_0}$"
+        ),
     )
     # Offset the fit slightly so it reads as a separate guide line.
     offset_fit = msd_fit * 1.15
@@ -99,7 +118,7 @@ def _plot_msd(
     )
 
     axis.set_title(f"Center-of-mass MSD — {label} ({n_seeds} seeds)")
-    axis.set_xlabel(r"$\tau$")
+    axis.set_xlabel(r"lag time $\Delta t$")
     axis.set_ylabel("MSD")
     axis.set_xlim(tau[0], tau[-1])
     axis.grid(axis="y", color="0.9", lw=0.7)
