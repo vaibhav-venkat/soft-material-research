@@ -6,14 +6,12 @@ IFS=$'\n\t'
 trap 'status=$?; printf "run_new_sims.sh failed at line %s (status %s)\n" "$LINENO" "$status" >&2; exit "$status"' ERR
 
 usage() {
-    printf 'Usage: %s --output-root PATH --seed INTEGER --period INTEGER --tau-r FLOAT [--gpu-id INTEGER]\n' "$0" >&2
-    printf 'Example: %s --output-root /mnt/drive3/vaibhav_data/ideal_seed_7 --seed 7 --period 10 --tau-r 100 --gpu-id 0\n' "$0" >&2
+    printf 'Usage: %s --output-root PATH --seed INTEGER [--gpu-id INTEGER]\n' "$0" >&2
+    printf 'Example: %s --output-root /mnt/drive3/vaibhav_data/ideal_cylinder_seed_7 --seed 7 --gpu-id 0\n' "$0" >&2
 }
 
 output_root=""
 seed=""
-period=""
-tau_r=""
 gpu_id="0"
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -25,16 +23,6 @@ while [[ $# -gt 0 ]]; do
         --seed)
             [[ $# -ge 2 ]] || { usage; exit 2; }
             seed="$2"
-            shift 2
-            ;;
-        --period)
-            [[ $# -ge 2 ]] || { usage; exit 2; }
-            period="$2"
-            shift 2
-            ;;
-        --tau-r)
-            [[ $# -ge 2 ]] || { usage; exit 2; }
-            tau_r="$2"
             shift 2
             ;;
         --gpu-id)
@@ -54,17 +42,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ -z "$output_root" || -z "$seed" || -z "$period" || -z "$tau_r" ]]; then
+if [[ -z "$output_root" || -z "$seed" ]]; then
     usage
-    exit 2
-fi
-if [[ ! "$period" =~ ^[1-9][0-9]*$ ]]; then
-    printf -- '--period must be a positive integer\n' >&2
-    exit 2
-fi
-if [[ ! "$tau_r" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$ ]] ||
-    ! awk -v value="$tau_r" 'BEGIN { exit !(value > 0) }'; then
-    printf -- '--tau-r must be a positive number\n' >&2
     exit 2
 fi
 if [[ ! "$seed" =~ ^[0-9]+$ ]]; then
@@ -80,11 +59,13 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/../.." && pwd)"
 cd "$repo_root"
 
-run_steps="${RUN_STEPS:-100000000}"
+run_steps="300000000"
 write_period="${TRAJECTORY_WRITE_PERIOD:-100000}"
 frames_per_shard="${FRAMES_PER_SHARD:-100}"
 cuda_version="${CONDA_OVERRIDE_CUDA:-12.9}"
-case_id="ideal_3d_bulk"
+case_id="ideal_abp_cylinder"
+period="1"
+tau_r="1"
 
 if [[ "${OVERWRITE:-0}" == 1 && "${RESUME_ANALYSIS:-0}" == 1 ]]; then
     printf 'OVERWRITE and RESUME_ANALYSIS cannot both be 1\n' >&2
@@ -107,7 +88,7 @@ fi
 export CONDA_OVERRIDE_CUDA="$cuda_version"
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
-printf 'Starting non-interacting fully periodic 3D ABP run\n'
+printf 'Starting ideal non-interacting ABP cylinder run\n'
 printf '  case=%s\n  output_root=%s\n  seed=%s\n  period=%s\n  tau_r=%s\n  gpu_id=%s\n' \
     "$case_id" "$output_root" "$seed" "$period" "$tau_r" "$gpu_id"
 printf '  run_steps=%s\n  write_period=%s\n  frames_per_shard=%s\n' \
@@ -121,9 +102,6 @@ CUDA_VISIBLE_DEVICES="$gpu_id" \
     --case "$case_id" \
     --output-root "$output_root" \
     --seed "$seed" \
-    --diffusion-period "$period" \
-    --tau-r "$tau_r" \
-    --run-steps "$run_steps" \
     --trajectory-write-period "$write_period" \
     --device gpu \
     --gpu-id 0 \
@@ -140,5 +118,5 @@ CUDA_VISIBLE_DEVICES="$gpu_id" \
     "${analysis_flags[@]}" \
     2>&1 | tee "$analysis_log"
 
-printf 'Completed ideal 3D simulation and analysis for seed %s (period=%s, tau_r=%s)\n' \
+printf 'Completed ideal cylinder simulation and analysis for seed %s (period=%s, tau_r=%s)\n' \
     "$seed" "$period" "$tau_r"

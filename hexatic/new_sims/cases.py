@@ -11,6 +11,7 @@ from hexatic.constants import cylinder
 DEFAULT_OUTPUT_ROOT = Path(__file__).resolve().parent
 BASE_CASE_ID = "circ_60_5D_lx_1x"
 RUN_STEPS = int(1e8)
+IDEAL_CYLINDER_RUN_STEPS = 3 * RUN_STEPS
 TRAJECTORY_WRITE_PERIOD = int(1e5)
 FRAMES_PER_SHARD = 100
 PASSIVE_KT = 1.0
@@ -320,7 +321,17 @@ class CasePaths:
 
 _BASE = get_big_lx_case(BASE_CASE_ID)
 SWEEP_CASES = tuple(
-    NewSimCase(case_id=kind.value, kind=kind, base=_BASE) for kind in CaseKind
+    NewSimCase(
+        case_id=kind.value,
+        kind=kind,
+        base=_BASE,
+        run_steps=IDEAL_CYLINDER_RUN_STEPS,
+        diffusion_period=1,
+        tau_r=1.0,
+    )
+    if kind == CaseKind.IDEAL_ABP_CYLINDER
+    else NewSimCase(case_id=kind.value, kind=kind, base=_BASE)
+    for kind in CaseKind
 )
 
 
