@@ -232,14 +232,14 @@ def main() -> None:
                 )
         elapsed = _elapsed_time(steps, timestep)
         effective_max_lag = min(args.max_lag, len(steps) - 2)
-        for suffix, title, coords in _msd_variants(
+        for suffix, title, coords, transport_dimensions in _msd_variants(
             com, coordinate_order == CYLINDRICAL_COORDINATE_ORDER
         ):
             seed_msd.setdefault(suffix, []).append(
                 _msd_from_com(coords, effective_max_lag)
             )
             msd_titles[suffix] = title
-            msd_dimensions[suffix] = coords.shape[1]
+            msd_dimensions[suffix] = transport_dimensions
         seed_curves.append(
             _correlation_curves(
                 com,
@@ -343,7 +343,7 @@ def main() -> None:
                 f"[correlation] MSD{suffix} fit over "
                 f"[{fit.tau_min:g}, {fit.tau_max:g}]: "
                 f"alpha={fit.alpha:.4f}, A={fit.amplitude:.4g}, "
-                f"D={fit.diffusion:.4g} (d={fit.dimensions})",
+                f"D={fit.diffusion:.4g} (d_eff={fit.dimensions})",
                 flush=True,
             )
         print(f"[correlation] wrote {msd_path}", flush=True)

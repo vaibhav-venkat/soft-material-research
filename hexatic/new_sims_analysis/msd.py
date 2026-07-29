@@ -37,24 +37,26 @@ def _msd_from_com(
 def _msd_variants(
     com: NDArray[np.float64],
     cylindrical: bool,
-) -> list[tuple[str, str, NDArray[np.float64]]]:
-    """Return the ``(suffix, title, coordinates)`` MSD variants for one seed.
+) -> list[tuple[str, str, NDArray[np.float64], int]]:
+    """Return ``(suffix, title, coordinates, transport_dimensions)`` variants.
 
     Cartesian cases give one variant. Cylindrical cases give two: the COM
     mapped back to Cartesian ``(x, y, z)``, whose transverse part is bounded by
     the cylinder radius, and the unrolled surface coordinates ``(x, r theta)``,
-    which keep the unwrapped azimuthal drift as an arc length.
+    which keep the unwrapped azimuthal drift as an arc length. Consequently,
+    cylindrical Cartesian transport is asymptotically one-dimensional (only
+    ``x`` is unbounded), while unrolled surface transport is two-dimensional.
     """
     if not cylindrical:
-        return [("", "", com)]
+        return [("", "", com, com.shape[1])]
     x, theta, r = com[:, 0], com[:, 1], com[:, 2]
     cartesian = np.stack(
         [x, r * np.cos(theta), r * np.sin(theta)], axis=1
     )
     unrolled = np.stack([x, r * theta], axis=1)
     return [
-        ("_cartesian", r" — Cartesian $(x, y, z)$", cartesian),
-        ("_unrolled", r" — surface $(x, r\theta)$", unrolled),
+        ("_cartesian", r" — Cartesian $(x, y, z)$", cartesian, 1),
+        ("_unrolled", r" — surface $(x, r\theta)$", unrolled, 2),
     ]
 
 
@@ -207,7 +209,8 @@ def _plot_msd(
             lw=1.8,
             label=(
                 rf"$D = {fit.diffusion:.4g}$  "
-                rf"($\mathrm{{MSD}} = 2dD\,\Delta t$, $d = {fit.dimensions}$)"
+                rf"($\mathrm{{MSD}} = 2d_\mathrm{{eff}}D\,\Delta t$, "
+                rf"$d_\mathrm{{eff}} = {fit.dimensions}$)"
             ),
         )
         axis.annotate(
