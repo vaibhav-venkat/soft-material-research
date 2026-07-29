@@ -3,11 +3,14 @@
 
 ## Current Work
 
-**UPDATE**: We are doing analysis on the big_lx cases, contained within `big_lx_analysis` which uses solely safetensors. 
+After doing the analysis for a crystalline active cylinder in the `big_lx`, we are studying the emergence of oscillations within the velocity autocorrelations and the net translation. We have ran new simulations in `new-sims`, which include interacting and non-interacting particles with walls/no-walls. What we found
 
-The active simulation work is `hexatic/unwrapped_analysis`: the sweep now uses an **exact, twisted triangular-lattice supercell**. It is the replacement for the earlier experimentally sheared `simulate_case.py` route. The supercell gives a genuinely twisted cylinder while retaining perfect hexatic order at initialization, so it needs neither an overlap-prone coordinate shear nor a high-drag relaxation ramp.
+- In terms of the COM interacting vs non-interacting carries no weight, since forces cancel out
+- HOOMD's convention for defining the tau rotaitoinal diffusion is not the same as the sphereical diffusion constant, as HOOMD drops the (d-1) factor. THis is fine. 
+- Over lots of seeds the correlation <q_i q_j> where i ne j drops to 0, not perfectly 0 but our hypothesis
+- By plotting the MSD (look at `new-sims-analysis`) we are able to study how a system acts like an ABP, which it doesn't perfectly but we see sections of ballistic, superdiffusive, and diffusive behavior with some subdiffusion. 
+- Right now our focus is on Laplace transforms.
 
-`hexatic/rho_fitting` remains the established analysis workflow for the radius `15D` trajectory. It now fits 3D cylindrical mechanical moment closures, assesses the closure in divergence space, and validates it by rolling out the fitted PDE. Treat the simulation work and the `rho_fitting` analysis inputs as separate unless new supercell trajectories are deliberately promoted into the fitting pipeline.
 
 ## Unwrapped Twisted Supercell
 
