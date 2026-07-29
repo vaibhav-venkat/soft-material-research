@@ -24,6 +24,7 @@ class CaseKind(StrEnum):
     IDEAL_2D_X_WALLS = "ideal_2d_x_walls"
     IDEAL_2D_PERIODIC = "ideal_2d_periodic"
     PERIODIC_3D_BULK = "periodic_3d_bulk"
+    IDEAL_3D_BULK = "ideal_3d_bulk"
     IDEAL_3D_BULK_PERIOD_10 = "ideal_3d_bulk_period_10"
     IDEAL_3D_BULK_PERIOD_1 = "ideal_3d_bulk_period_1"
     SINGLE_ACTIVE_TRACER_CYLINDER = "single_active_tracer_cylinder"
@@ -38,6 +39,8 @@ class NewSimCase:
     run_steps: int = RUN_STEPS
     trajectory_write_period: int = TRAJECTORY_WRITE_PERIOD
     seed: int = cylinder.SEED
+    diffusion_period: int | None = None
+    tau_r: float = cylinder.SIMULATION.tau_r
 
     @property
     def lx(self) -> float:
@@ -112,6 +115,7 @@ class NewSimCase:
             CaseKind.IDEAL_ABP_CYLINDER,
             CaseKind.IDEAL_2D_X_WALLS,
             CaseKind.IDEAL_2D_PERIODIC,
+            CaseKind.IDEAL_3D_BULK,
             CaseKind.IDEAL_3D_BULK_PERIOD_10,
             CaseKind.IDEAL_3D_BULK_PERIOD_1,
         }
@@ -120,12 +124,15 @@ class NewSimCase:
     def is_3d_bulk(self) -> bool:
         return self.kind in {
             CaseKind.PERIODIC_3D_BULK,
+            CaseKind.IDEAL_3D_BULK,
             CaseKind.IDEAL_3D_BULK_PERIOD_10,
             CaseKind.IDEAL_3D_BULK_PERIOD_1,
         }
 
     @property
     def rotational_diffusion_period(self) -> int:
+        if self.diffusion_period is not None:
+            return self.diffusion_period
         if self.kind == CaseKind.IDEAL_3D_BULK_PERIOD_1:
             return 1
         return cylinder.SIMULATION.rotational_diffusion_period
@@ -173,6 +180,7 @@ class NewSimCase:
             ),
             CaseKind.IDEAL_2D_PERIODIC: "non-interacting fully periodic 2D ABPs",
             CaseKind.PERIODIC_3D_BULK: "fully periodic 3D ABPs",
+            CaseKind.IDEAL_3D_BULK: "non-interacting fully periodic 3D ABPs",
             CaseKind.IDEAL_3D_BULK_PERIOD_10: (
                 "non-interacting fully periodic 3D ABPs with diffusion period 10"
             ),
@@ -248,7 +256,8 @@ class NewSimCase:
             "active_force_magnitude": (
                 cylinder.SIMULATION.gamma * cylinder.SIMULATION.u0
             ),
-            "rotational_diffusion": 1.0 / cylinder.SIMULATION.tau_r,
+            "tau_r": self.tau_r,
+            "rotational_diffusion": 1.0 / self.tau_r,
             "rotational_diffusion_period": self.rotational_diffusion_period,
             "timestep": cylinder.SIMULATION.timestep,
         }

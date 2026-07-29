@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import replace
 import json
+import math
 import os
 from pathlib import Path
 
@@ -30,11 +31,23 @@ def _prepare_outputs(paths: CasePaths, overwrite: bool) -> bool:
     if paths.simulation_complete_json.exists() and not overwrite:
         if paths.metadata_json.is_file():
             existing_metadata = json.loads(paths.metadata_json.read_text())
-            existing_seed = existing_metadata.get("seed")
-            if existing_seed != paths.case.seed:
+            requested_parameters = {
+                "seed": paths.case.seed,
+                "rotational_diffusion_period": paths.case.rotational_diffusion_period,
+                "tau_r": paths.case.tau_r,
+            }
+            mismatches = {
+                name: (existing_metadata.get(name), requested)
+                for name, requested in requested_parameters.items()
+                if existing_metadata.get(name) != requested
+            }
+            if mismatches:
+                details = ", ".join(
+                    f"{name}={existing} (requested {requested})"
+                    for name, (existing, requested) in mismatches.items()
+                )
                 raise FileExistsError(
-                    f"case {paths.case.case_id} is already complete with "
-                    f"seed={existing_seed}; requested seed={paths.case.seed}. "
+                    f"case {paths.case.case_id} is already complete with {details}. "
                     "Use a different output root or pass --overwrite."
                 )
         print(f"[new_sims.simulation] skipping complete case={paths.case.case_id}")
@@ -220,7 +233,7 @@ def make_simulation(
     integrator.forces.append(active)
     simulation.operations += active.create_diffusion_updater(
         trigger=hoomd.trigger.Periodic(case.rotational_diffusion_period),
-        rotational_diffusion=1.0 / cylinder.SIMULATION.tau_r,
+        rotational_diffusion=1.0 / case.tau_r,
     )
 
     writer = hoomd.write.GSD(
@@ -324,6 +337,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--run-steps", type=int, default=None)
     parser.add_argument("--trajectory-write-period", type=int, default=None)
     parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--diffusion-period", type=int, default=None)
+    parser.add_argument("--tau-r", type=float, default=None)
     parser.add_argument("--device", choices=("gpu", "cpu"), default="gpu")
     parser.add_argument("--gpu-id", type=int, default=None)
     parser.add_argument("--overwrite", action="store_true")
@@ -335,6 +350,14 @@ def main() -> None:
     case = get_case(args.case)
     if args.seed is not None:
         case = replace(case, seed=args.seed)
+    if args.diffusion_period is not None:
+        if args.diffusion_period <= 0:
+            raise ValueError("diffusion period must be a positive integer")
+        case = replace(case, diffusion_period=args.diffusion_period)
+    if args.tau_r is not None:
+        if not math.isfinite(args.tau_r) or args.tau_r <= 0.0:
+            raise ValueError("tau_r must be finite and positive")
+        case = replace(case, tau_r=args.tau_r)
     run_case(
         case,
         output_root=args.output_root,
