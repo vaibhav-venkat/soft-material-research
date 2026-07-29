@@ -12,8 +12,12 @@ import numpy as np
 from numpy.typing import NDArray
 from safetensors import safe_open
 
-from hexatic.confinement_comparison.cases import GeometryKind
+from hexatic.confinement_comparison.cases import (
+    GeometryKind,
+    get_case as get_confinement_case,
+)
 from hexatic.constants import cylinder
+from hexatic.new_sims.cases import get_case as get_new_sims_case
 
 from .loading import (
     CARTESIAN_COORDINATE_ORDER,
@@ -182,18 +186,29 @@ def _component_periods(
             )
         return [None] * (2 if coordinate_kind == "planar" else 3)
 
-    axes = case.get("logical_to_stored_axes")
-    if tuple(axes) != (0, 1, 2):
+    # Which axes are periodic, and their transverse box widths, are pure
+    # functions of the case definition -- not of the run -- so take them from the
+    # case registry rather than the manifest. Production metadata was written
+    # before `periodic_axes` and `stored_box` were added to `as_metadata()`, so
+    # the already-computed outputs simply do not carry those keys.
+    case_id = case.get("case_id")
+    if not isinstance(case_id, str) or not case_id:
+        raise ValueError("confinement case metadata has no case_id")
+    try:
+        comparison = get_confinement_case(case_id)
+    except KeyError as error:
+        raise ValueError(
+            f"confinement case {case_id!r} is not in the case registry, so its "
+            "periodic axes cannot be determined"
+        ) from error
+    if comparison.logical_to_stored_axes != (0, 1, 2):
         raise ValueError(
             "non-cylinder confinement coordinates require "
-            "logical_to_stored_axes == (0, 1, 2)"
+            f"logical_to_stored_axes == (0, 1, 2), got "
+            f"{comparison.logical_to_stored_axes} for {case_id}"
         )
-    stored_box = case.get("stored_box")
-    if not isinstance(stored_box, (list, tuple)) or len(stored_box) < 3:
-        raise ValueError("confinement case metadata has no valid stored_box")
-    periodic_axes = case.get("periodic_axes")
-    if not isinstance(periodic_axes, (list, tuple)):
-        raise ValueError("confinement case metadata has no periodic_axes")
+    stored_box = comparison.stored_box
+    periodic_axes = comparison.periodic_axes
     axis_names = ("x", "y") if coordinate_kind == "planar" else ("x", "y", "z")
     periods: list[float | None] = []
     for index, name in enumerate(axis_names):
@@ -345,19 +360,42 @@ def case_key(family: str, case_id: str) -> str:
     return f"{family}:{case_id}"
 
 
-def _is_tracer(case: dict[str, Any]) -> bool:
+def _classify(family: str, case_id: str, case: dict[str, Any]) -> tuple[bool, str]:
+    """Return ``(is_tracer, interaction_class)`` for the plot's style channels.
+
+    Prefer the case registries: whether a case has pair interactions or is a
+    tracer setup is part of its definition, and the manifest fields are optional
+    (older production metadata omits ``pair_interaction``, which would silently
+    mis-colour a non-interacting case as interacting rather than failing). Fall
+    back to the metadata heuristic only for a case_id no registry knows.
+    """
+    if family == "new_sims":
+        try:
+            registered = get_new_sims_case(case_id)
+        except KeyError:
+            pass
+        else:
+            if registered.is_tracer:
+                return True, "tracer"
+            return False, (
+                "interacting" if registered.has_pair_interaction else "non-interacting"
+            )
+    elif family in {"big_lx", "confinement"}:
+        # Every big_lx and confinement case is a fully interacting film.
+        return False, "interacting"
+
     active_count = case.get("active_count")
     particle_count = case.get("n_particles")
-    if active_count is None or particle_count is None:
-        return False
-    return int(active_count) < int(particle_count)
-
-
-def _interaction_class(case: dict[str, Any], tracer: bool) -> str:
+    tracer = (
+        active_count is not None
+        and particle_count is not None
+        and int(active_count) < int(particle_count)
+    )
     if tracer:
-        return "tracer"
-    # big_lx and confinement omit pair_interaction; both are interacting.
-    return "interacting" if bool(case.get("pair_interaction", True)) else "non-interacting"
+        return True, "tracer"
+    return False, (
+        "interacting" if bool(case.get("pair_interaction", True)) else "non-interacting"
+    )
 
 
 def load_case_series(directory: Path, frame_limit: int) -> CaseSeries:
@@ -388,7 +426,7 @@ def load_case_series(directory: Path, frame_limit: int) -> CaseSeries:
         coordinate_kind,
         frame_limit,
     )
-    tracer = _is_tracer(case)
+    tracer, interaction_class = _classify(family, case_id, case)
     return CaseSeries(
         family=family,
         case_id=case_id,
@@ -396,7 +434,7 @@ def load_case_series(directory: Path, frame_limit: int) -> CaseSeries:
         lx_multiplier=_lx_multiplier(case),
         coordinate_kind=coordinate_kind,
         is_tracer=tracer,
-        interaction_class=_interaction_class(case, tracer),
+        interaction_class=interaction_class,
         com=com,
         steps=steps,
         timestep=timestep,
