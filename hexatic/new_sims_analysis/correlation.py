@@ -10,6 +10,8 @@ from numpy.typing import NDArray
 from scipy.signal import fftconvolve
 import seaborn as sns
 
+from .plotting import _save_figure
+
 
 def _finite_difference(
     values: NDArray[np.float64],
@@ -328,12 +330,4 @@ def _plot_correlation(
     axis.legend(frameon=False, ncol=2)
     sns.despine(ax=axis)
 
-    output.parent.mkdir(parents=True, exist_ok=True)
-    figure.savefig(
-        output,
-        format="svg",
-        bbox_inches="tight",
-        metadata={"Creator": "hexatic.new_sims_analysis"},
-    )
-    figure.savefig(output.with_suffix(".png"), dpi=300, bbox_inches="tight")
-    plt.close(figure)
+    _save_figure(figure, output)

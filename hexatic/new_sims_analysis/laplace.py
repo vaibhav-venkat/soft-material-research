@@ -9,6 +9,8 @@ import numpy as np
 from numpy.typing import NDArray
 import seaborn as sns
 
+from .plotting import _save_figure
+
 
 def _simpson_weights(sample_count: int, spacing: float) -> NDArray[np.float64]:
     """Match the Laplace-analysis Simpson rule, including an even-size tail."""
@@ -96,12 +98,4 @@ def _plot_laplace(
             axis.set_ylabel(r"angular frequency $\omega$")
         axis.set_title(title)
         sns.despine(ax=axis)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    figure.savefig(
-        output,
-        format="svg",
-        bbox_inches="tight",
-        metadata={"Creator": "hexatic.new_sims_analysis"},
-    )
-    figure.savefig(output.with_suffix(".png"), dpi=300, bbox_inches="tight")
-    plt.close(figure)
+    _save_figure(figure, output)

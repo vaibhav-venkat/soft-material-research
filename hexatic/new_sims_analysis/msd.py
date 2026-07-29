@@ -9,6 +9,8 @@ import numpy as np
 from numpy.typing import NDArray
 import seaborn as sns
 
+from .plotting import _save_figure
+
 
 def _msd_from_com(
     com: NDArray[np.float64],
@@ -133,12 +135,4 @@ def _plot_msd(
     sns.despine(ax=axis, right=False)
     sns.despine(ax=alpha_axis, left=True, right=False)
 
-    output.parent.mkdir(parents=True, exist_ok=True)
-    figure.savefig(
-        output,
-        format="svg",
-        bbox_inches="tight",
-        metadata={"Creator": "hexatic.new_sims_analysis"},
-    )
-    figure.savefig(output.with_suffix(".png"), dpi=300, bbox_inches="tight")
-    plt.close(figure)
+    _save_figure(figure, output)
