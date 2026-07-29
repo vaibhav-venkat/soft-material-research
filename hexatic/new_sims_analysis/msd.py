@@ -1,9 +1,7 @@
-"""Center-of-mass mean squared displacement, its power-law fit, and its plot."""
+"""Center-of-mass mean squared displacement and instantaneous exponent plot."""
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from dataclasses import dataclass
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -37,111 +35,50 @@ def _msd_from_com(
 def _msd_variants(
     com: NDArray[np.float64],
     cylindrical: bool,
-) -> list[tuple[str, str, NDArray[np.float64], int]]:
-    """Return ``(suffix, title, coordinates, transport_dimensions)`` variants.
+) -> list[tuple[str, str, NDArray[np.float64]]]:
+    """Return ``(suffix, title, coordinates)`` MSD variants.
 
     Cartesian cases give one variant. Cylindrical cases give two: the COM
     mapped back to Cartesian ``(x, y, z)``, whose transverse part is bounded by
     the cylinder radius, and the unrolled surface coordinates ``(x, r theta)``,
     which keep the unwrapped azimuthal drift as an arc length. Consequently,
-    cylindrical Cartesian transport is asymptotically one-dimensional (only
-    ``x`` is unbounded), while unrolled surface transport is two-dimensional.
+    cylindrical Cartesian transport has only one asymptotically unbounded
+    direction, while the unrolled surface has two.
     """
     if not cylindrical:
-        return [("", "", com, com.shape[1])]
+        return [("", "", com)]
     x, theta, r = com[:, 0], com[:, 1], com[:, 2]
     cartesian = np.stack(
         [x, r * np.cos(theta), r * np.sin(theta)], axis=1
     )
     unrolled = np.stack([x, r * theta], axis=1)
     return [
-        ("_cartesian", r" — Cartesian $(x, y, z)$", cartesian, 1),
-        ("_unrolled", r" — surface $(x, r\theta)$", unrolled, 2),
+        ("_cartesian", r" — Cartesian $(x, y, z)$", cartesian),
+        ("_unrolled", r" — surface $(x, r\theta)$", unrolled),
     ]
 
 
-@dataclass(frozen=True)
-class MsdFit:
-    """Fits of the MSD over the lag window ``[tau_min, tau_max]``.
-
-    Two fits are carried side by side: the free power law ``A tau^alpha``, and
-    a forced-linear fit that assumes alpha = 1 regardless of what the power law
-    actually found. The linear fit uses the conventional ``MSD = 2 d D tau``,
-    so ``diffusion`` is the raw slope over ``2 d`` and is directly comparable
-    with a literature diffusion constant.
-    """
-
-    tau_min: float
-    tau_max: float
-    alpha: float
-    amplitude: float
-    dimensions: int
-    slope: float
-    diffusion: float
-    tau: NDArray[np.float64]
-    msd: NDArray[np.float64]
-    msd_linear: NDArray[np.float64]
-
-
-def _fit_msd_power_law(
+def _instantaneous_msd_exponent(
     tau: NDArray[np.float64],
     msd: NDArray[np.float64],
-    tau_min: float,
-    tau_max: float,
-    dimensions: int,
-) -> MsdFit:
-    """Fit ``MSD = A tau^alpha`` over the closed lag window ``[tau_min, tau_max]``.
-
-    The window only selects points; the regression runs against the lag time
-    itself. Shifting the origin to ``tau - tau_min`` would bias alpha badly,
-    because ``A tau^alpha`` is scale-free only about tau = 0: a purely diffusive
-    ``MSD = c tau`` re-expressed as ``c (t + tau_min)`` is concave in ``t`` and
-    fits as alpha well below one.
-
-    The fit is a least-squares line through ``log MSD = log A + alpha log tau``,
-    so both ``A`` and ``alpha`` come from every point in the window.
-    """
-    if not np.isfinite(tau_min) or tau_min <= 0.0:
-        raise ValueError(f"tau_min must be finite and positive, got {tau_min}")
-    if tau_max <= tau_min:
-        raise ValueError(
-            f"tau_max ({tau_max}) must exceed tau_min ({tau_min})"
-        )
-    usable = (tau >= tau_min) & (tau <= tau_max) & (tau > 0.0) & (msd > 0.0)
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Return ``(tau, d log(MSD) / d log(tau))`` on positive samples."""
+    usable = np.isfinite(tau) & np.isfinite(msd) & (tau > 0.0) & (msd > 0.0)
     if np.count_nonzero(usable) < 2:
-        raise ValueError(
-            "need at least two positive MSD samples in the lag window "
-            f"[{tau_min}, {tau_max}]; the available lags span "
-            f"[{tau[tau > 0.0].min() if np.any(tau > 0.0) else 0.0}, {tau.max()}]"
-        )
-    if dimensions < 1:
-        raise ValueError(f"dimensions must be at least 1, got {dimensions}")
-    tau_fit = tau[usable]
-    msd_fit = msd[usable]
-    alpha, log_a = np.polyfit(np.log(tau_fit), np.log(msd_fit), 1)
-    amplitude = float(np.exp(log_a))
-
-    # Forced alpha = 1: least squares through the origin, since MSD(0) = 0 is
-    # exact rather than a fitted quantity. Converted with MSD = 2 d D tau.
-    slope = float(np.dot(tau_fit, msd_fit) / np.dot(tau_fit, tau_fit))
-    return MsdFit(
-        tau_min=float(tau_min),
-        tau_max=float(tau_max),
-        alpha=float(alpha),
-        amplitude=amplitude,
-        dimensions=int(dimensions),
-        slope=slope,
-        diffusion=slope / (2.0 * float(dimensions)),
-        tau=tau_fit,
-        msd=amplitude * tau_fit ** float(alpha),
-        msd_linear=slope * tau_fit,
-    )
+        raise ValueError("need at least two positive finite MSD samples")
+    tau_positive = tau[usable]
+    if np.any(np.diff(tau_positive) <= 0.0):
+        raise ValueError("positive lag times must be strictly increasing")
+    log_tau = np.log(tau_positive)
+    log_msd = np.log(msd[usable])
+    edge_order = 2 if len(log_tau) >= 3 else 1
+    alpha = np.gradient(log_msd, log_tau, edge_order=edge_order)
+    return tau_positive, np.asarray(alpha, dtype=np.float64)
 
 
 def _plot_msd(
     tau: NDArray[np.float64],
     msd: NDArray[np.float64],
-    fits: Sequence[MsdFit],
     n_seeds: int,
     n_particles: int,
     label: str,
@@ -166,53 +103,22 @@ def _plot_msd(
             rf"-\mathrm{{COM}}(t_0))^2 \rangle_{{t_0}}$, $N = {n_particles}$"
         ),
     )
-    # On log-log a "slight offset" has to be multiplicative: a constant factor
-    # is a constant vertical shift, so the dashed line stays parallel to the
-    # data instead of being sheared the way an additive offset would.
-    for index, fit in enumerate(fits):
-        color = palette[(index + 3) % len(palette)]
-        offset = 1.18 * 1.12**index
-        # Place the fit annotations near the geometric middle of each line.
-        anchor = int(
-            np.argmin(np.abs(np.log(fit.tau) - np.mean(np.log(fit.tau))))
-        )
 
-        above = fit.msd * offset
-        axis.plot(
-            fit.tau,
-            above,
-            color=color,
-            ls="--",
-            lw=1.8,
-        )
-        axis.annotate(
-            rf"$\alpha = {fit.alpha:.3f}$",
-            xy=(fit.tau[anchor], above[anchor]),
-            xytext=(-8, 10),
-            textcoords="offset points",
-            ha="right",
-            color=color,
-        )
-
-        # The forced-linear fit gets the reciprocal offset, so it sits the same
-        # distance below the data as the power law sits above it.
-        below = fit.msd_linear / offset
-        axis.plot(
-            fit.tau,
-            below,
-            color=color,
-            ls="-.",
-            lw=1.8,
-        )
-        axis.annotate(
-            rf"$D = {fit.diffusion:.4g}$",
-            xy=(fit.tau[anchor], below[anchor]),
-            xytext=(8, -10),
-            textcoords="offset points",
-            ha="left",
-            va="top",
-            color=color,
-        )
+    alpha_tau, alpha = _instantaneous_msd_exponent(tau, msd)
+    alpha_axis = axis.twinx()
+    alpha_axis.plot(
+        alpha_tau,
+        alpha,
+        color=palette[1],
+        lw=1.5,
+        alpha=0.9,
+        label=r"instantaneous $\alpha(\Delta t)$",
+    )
+    alpha_axis.set_ylabel(
+        r"$\alpha(\Delta t)=d\log(\mathrm{MSD})/d\log(\Delta t)$",
+        color=palette[1],
+    )
+    alpha_axis.tick_params(axis="y", colors=palette[1])
 
     axis.set_xscale("log")
     axis.set_yscale("log")
@@ -222,8 +128,10 @@ def _plot_msd(
     axis.set_xlim(float(tau[visible][0]), float(tau[visible][-1]))
     axis.grid(which="major", color="0.85", lw=0.7)
     axis.grid(which="minor", color="0.94", lw=0.5)
-    axis.legend(frameon=False)
-    sns.despine(ax=axis)
+    lines = axis.get_lines() + alpha_axis.get_lines()
+    axis.legend(lines, [str(line.get_label()) for line in lines], frameon=False)
+    sns.despine(ax=axis, right=False)
+    sns.despine(ax=alpha_axis, left=True, right=False)
 
     output.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(

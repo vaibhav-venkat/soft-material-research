@@ -24,7 +24,7 @@ from .loading import (
     _load_frame_series,
     _load_manifest,
 )
-from .msd import _fit_msd_power_law, _msd_from_com, _msd_variants, _plot_msd
+from .msd import _msd_from_com, _msd_variants, _plot_msd
 
 
 def _nonnegative_int(value: str) -> int:
@@ -95,26 +95,6 @@ def _parse_args() -> argparse.Namespace:
         help="Plot unbiased autocorrelations without dividing by lag zero.",
     )
     parser.add_argument(
-        "--tau-min",
-        type=_positive_float,
-        nargs="+",
-        default=[50.0],
-        help=(
-            "Lower lag bound(s) of the MSD fit windows (default: 50). Pair "
-            "elementwise with --tau-max; one fit is plotted per window."
-        ),
-    )
-    parser.add_argument(
-        "--tau-max",
-        type=_positive_float,
-        nargs="+",
-        default=None,
-        help=(
-            "Upper lag bound(s) of the MSD fit windows, one per --tau-min "
-            "(default: the longest available lag for every window)."
-        ),
-    )
-    parser.add_argument(
         "--laplace-r-points",
         type=int,
         default=161,
@@ -135,13 +115,6 @@ def main() -> None:
         raise ValueError("--frames must be at least 3")
     if args.laplace_r_points < 2 or args.laplace_omega_points < 2:
         raise ValueError("Laplace grid dimensions must each be at least 2")
-    # Check the window pairing before loading anything, so a typo fails fast.
-    if args.tau_max is not None and len(args.tau_max) != len(args.tau_min):
-        raise ValueError(
-            f"--tau-min and --tau-max must have the same number of values; "
-            f"got {len(args.tau_min)} and {len(args.tau_max)}"
-        )
-
     seed_curves: list[
         tuple[
             NDArray[np.float64],
@@ -151,7 +124,6 @@ def main() -> None:
     ] = []
     seed_msd: dict[str, list[NDArray[np.float64]]] = {}
     msd_titles: dict[str, str] = {}
-    msd_dimensions: dict[str, int] = {}
     reference_steps: NDArray[np.int64] | None = None
     reference_timestep: float | None = None
     reference_u0: float | None = None
@@ -232,14 +204,13 @@ def main() -> None:
                 )
         elapsed = _elapsed_time(steps, timestep)
         effective_max_lag = min(args.max_lag, len(steps) - 2)
-        for suffix, title, coords, transport_dimensions in _msd_variants(
+        for suffix, title, coords in _msd_variants(
             com, coordinate_order == CYLINDRICAL_COORDINATE_ORDER
         ):
             seed_msd.setdefault(suffix, []).append(
                 _msd_from_com(coords, effective_max_lag)
             )
             msd_titles[suffix] = title
-            msd_dimensions[suffix] = transport_dimensions
         seed_curves.append(
             _correlation_curves(
                 com,
@@ -299,53 +270,23 @@ def main() -> None:
     )
     print(f"[correlation] wrote {output_path}", flush=True)
     print(f"[correlation] wrote {output_path.with_suffix('.png')}", flush=True)
-    # An omitted --tau-max means "run each window out to the longest lag".
-    longest_lag = float(lag_time[-1])
-    tau_max_values = (
-        args.tau_max
-        if args.tau_max is not None
-        else [longest_lag] * len(args.tau_min)
-    )
-    fit_windows = list(zip(args.tau_min, tau_max_values, strict=True))
-    for tau_min, tau_max in fit_windows:
-        if tau_min >= longest_lag:
-            raise ValueError(
-                f"--tau-min {tau_min:g} is at or beyond the longest available "
-                f"lag {longest_lag:g}; raise --frames or --max-lag"
-            )
-
     for suffix, curves in seed_msd.items():
         # The COM averages out N independent trajectories, so its MSD is the
-        # single-particle MSD over N. Scaling back up recovers a per-particle
-        # diffusion constant; exact only because these particles do not interact.
+        # single-particle MSD over N. Scaling back up recovers the equivalent
+        # per-particle MSD; exact only because these particles do not interact.
         msd = (
             np.mean(np.asarray(curves, dtype=np.float64), axis=0)
             * reference_particles
         )
-        fits = [
-            _fit_msd_power_law(
-                lag_time, msd, tau_min, tau_max, msd_dimensions[suffix]
-            )
-            for tau_min, tau_max in fit_windows
-        ]
         msd_path = args.output_dir / f"msd{suffix}_{slug}.svg"
         _plot_msd(
             lag_time,
             msd,
-            fits,
             len(curves),
             reference_particles,
             f"{label}{msd_titles[suffix]}",
             msd_path,
         )
-        for fit in fits:
-            print(
-                f"[correlation] MSD{suffix} fit over "
-                f"[{fit.tau_min:g}, {fit.tau_max:g}]: "
-                f"alpha={fit.alpha:.4f}, A={fit.amplitude:.4g}, "
-                f"D={fit.diffusion:.4g} (d_eff={fit.dimensions})",
-                flush=True,
-            )
         print(f"[correlation] wrote {msd_path}", flush=True)
         print(f"[correlation] wrote {msd_path.with_suffix('.png')}", flush=True)
 
