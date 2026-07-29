@@ -172,11 +172,6 @@ def _plot_msd(
     for index, fit in enumerate(fits):
         color = palette[(index + 3) % len(palette)]
         offset = 1.18 * 1.12**index
-        # Anchor at the geometric middle so the labels sit mid-line.
-        anchor = int(
-            np.argmin(np.abs(np.log(fit.tau) - np.mean(np.log(fit.tau))))
-        )
-
         above = fit.msd * offset
         axis.plot(
             fit.tau,
@@ -184,18 +179,6 @@ def _plot_msd(
             color=color,
             ls="--",
             lw=1.8,
-            label=(
-                rf"$\alpha = {fit.alpha:.3f}$  "
-                rf"($\Delta t \in [{fit.tau_min:g}, {fit.tau_max:g}]$)"
-            ),
-        )
-        axis.annotate(
-            rf"$\alpha = {fit.alpha:.3f}$",
-            xy=(fit.tau[anchor], above[anchor]),
-            xytext=(-8, 10),
-            textcoords="offset points",
-            ha="right",
-            color=color,
         )
 
         # The forced-linear fit gets the reciprocal offset, so it sits the same
@@ -207,22 +190,6 @@ def _plot_msd(
             color=color,
             ls="-.",
             lw=1.8,
-            label=(
-                rf"$D = {fit.diffusion:.4g}$  "
-                rf"($\mathrm{{MSD}} = 2d_\mathrm{{eff}}D\,\Delta t$, "
-                rf"$d_\mathrm{{eff}} = {fit.dimensions}$)"
-            ),
-        )
-        axis.annotate(
-            rf"$D = {fit.diffusion:.4g}$",
-            xy=(fit.tau[anchor], below[anchor]),
-            # The fit line rises to the right, so below-right clears it just as
-            # above-left clears it for the alpha label.
-            xytext=(8, -10),
-            textcoords="offset points",
-            ha="left",
-            va="top",
-            color=color,
         )
 
     axis.set_xscale("log")
