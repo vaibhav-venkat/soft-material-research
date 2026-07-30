@@ -20,18 +20,19 @@ area fraction in each surface bin,
 from __future__ import annotations
 
 import argparse
+from collections.abc import Sequence
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import jenkspy
 import numpy as np
 from numpy.typing import NDArray
 from safetensors import safe_open
-from scipy.ndimage import gaussian_filter1d
-from scipy.signal import find_peaks
 
 from hexatic.constants import cylinder
 
@@ -57,10 +58,8 @@ class FilmDensitySamples:
 
 @dataclass(frozen=True)
 class PhaseClassification:
-    """Density modes and the equal-area-bin phase classification."""
+    """Jenks two-class film-density classification."""
 
-    rho_beta: float
-    rho_alpha: float
     mean_beta: float
     mean_alpha: float
     threshold: float
@@ -195,63 +194,17 @@ def _safe_case_name(case_id: str) -> str:
 
 def _classify_phases(
     values: NDArray[np.float64],
-    density_bins: int,
 ) -> PhaseClassification:
-    """Find the two modes and classify bins at the valley between them."""
-    mode_bins = max(128, 2 * density_bins)
-    density, edges = np.histogram(values, bins=mode_bins, density=True)
-    smoothed = gaussian_filter1d(density, sigma=3.0)
-    minimum_separation = max(1, mode_bins // 4)
-    interior_peaks, _ = find_peaks(
-        smoothed,
-        distance=minimum_separation,
-        prominence=0.02 * float(smoothed.max()),
+    """Use Jenks natural breaks to split dilute beta from dense alpha."""
+    breaks = jenkspy.jenks_breaks(
+        cast(Sequence[float], values),
+        n_classes=2,
     )
-    candidates = [int(index) for index in interior_peaks]
-    if smoothed[0] >= smoothed[1]:
-        candidates.append(0)
-    if smoothed[-1] >= smoothed[-2]:
-        candidates.append(mode_bins - 1)
-
-    pairs = [
-        (left, right)
-        for left in candidates
-        for right in candidates
-        if right - left >= minimum_separation
-    ]
-    if pairs:
-        beta_index, alpha_index = max(
-            pairs,
-            key=lambda pair: (
-                smoothed[pair[0]]
-                * smoothed[pair[1]]
-                * (pair[1] - pair[0])
-            ),
-        )
-    else:
-        # Boundary modes can be monotone after smoothing and therefore fail
-        # the local-maximum test. Pair the global mode with the strongest mode
-        # at least one quarter of the histogram away.
-        primary = int(np.argmax(smoothed))
-        separated = np.flatnonzero(
-            np.abs(np.arange(mode_bins) - primary) >= minimum_separation
-        )
-        if separated.size == 0:
-            raise ValueError("Density range is too narrow to classify two phases")
-        secondary = int(separated[np.argmax(smoothed[separated])])
-        beta_index, alpha_index = sorted((primary, secondary))
-
-    valley_index = int(beta_index) + int(
-        np.argmin(smoothed[int(beta_index) : int(alpha_index) + 1])
-    )
-    centers = 0.5 * (edges[:-1] + edges[1:])
-    threshold = float(centers[valley_index])
+    threshold = float(breaks[1])
     alpha_mask = values > threshold
     if not np.any(alpha_mask) or np.all(alpha_mask):
-        raise ValueError("Phase boundary does not separate alpha and beta bins")
+        raise ValueError("Jenks boundary does not separate alpha and beta bins")
     return PhaseClassification(
-        rho_beta=float(centers[beta_index]),
-        rho_alpha=float(centers[alpha_index]),
         mean_beta=float(values[~alpha_mask].mean()),
         mean_alpha=float(values[alpha_mask].mean()),
         threshold=threshold,
@@ -418,7 +371,7 @@ def main() -> None:
         assert case_lx is not None
         assert case_circumference is not None
         values = np.concatenate(all_values)
-        phases = _classify_phases(values, args.density_bins)
+        phases = _classify_phases(values)
         particle_area = np.pi * (args.particle_diameter / 2.0) ** 2
         rho_2d_alpha = phases.mean_alpha / particle_area
         rho_2d_beta = phases.mean_beta / particle_area
@@ -462,18 +415,18 @@ def main() -> None:
             ax=ax,
         )
         ax.axvline(
-            phases.rho_beta,
+            phases.mean_beta,
             color="tab:blue",
             linestyle="--",
             linewidth=1.2,
-            label=rf"$\phi_\beta={phases.rho_beta:.3g}$ (dilute)",
+            label=rf"$\phi_\beta={phases.mean_beta:.3g}$ (dilute mean)",
         )
         ax.axvline(
-            phases.rho_alpha,
+            phases.mean_alpha,
             color="tab:red",
             linestyle="--",
             linewidth=1.2,
-            label=rf"$\phi_\alpha={phases.rho_alpha:.3g}$ (dense)",
+            label=rf"$\phi_\alpha={phases.mean_alpha:.3g}$ (dense mean)",
         )
         ax.axvline(
             phases.threshold,
@@ -535,10 +488,8 @@ def main() -> None:
         )
         plt.close(fig)
         print(
-            f"{case_id}: phi_alpha={phases.rho_alpha:.6g}, "
-            f"phi_beta={phases.rho_beta:.6g}, "
-            f"mean_phi_alpha={phases.mean_alpha:.6g}, "
-            f"mean_phi_beta={phases.mean_beta:.6g}, "
+            f"{case_id}: phi_alpha={phases.mean_alpha:.6g}, "
+            f"phi_beta={phases.mean_beta:.6g}, "
             f"rho_2d_alpha_D2={rho_2d_alpha * args.particle_diameter**2:.6g}, "
             f"rho_2d_beta_D2={rho_2d_beta * args.particle_diameter**2:.6g}, "
             f"classification_threshold={phases.threshold:.6g}, "

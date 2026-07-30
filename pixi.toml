@@ -102,6 +102,7 @@ ty = ">=0.0.56,<0.0.57"
 rust-src = ">=1.96.0,<2"
 hdf5 = ">=1.14,<2"
 freud = ">=3.5.0,<4"
+jenkspy = ">=0.4.1,<0.5"
 
 [pypi-dependencies]
 pysindy = { version = ">=2.1.0, <3", extras = ["miosr", "sbr", "cvxpy"] }
