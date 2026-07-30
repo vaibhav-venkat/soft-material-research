@@ -243,11 +243,7 @@ def _correlation_curves(
     NDArray[np.float64],
     NDArray[np.float64],
 ]:
-    """Reduce one seed to velocity, orientation, and force correlations.
-
-    The wall-force correlation is divided by ``gamma**2`` so that every
-    unnormalized curve has velocity-squared units.
-    """
+    """Reduce one seed to velocity, orientation, and force correlations."""
     velocity = _finite_difference_vector(com, elapsed)
     if cylindrical:
         velocity_signal = velocity[:, :1]
@@ -286,7 +282,6 @@ def _correlation_curves(
     wall_force_correlation = _normalized_autocorrelation(
         wall_force, max_lag, normalize=False
     )
-    wall_force_correlation /= gamma**2
     return (
         velocity_correlation,
         self_correlation,
@@ -323,9 +318,9 @@ def _plot_correlation(
         else r"$(U_0^2/N^2)\sum_{i\ne j}C_{\mathbf{q}_i\mathbf{q}_j}(\tau)$"
     )
     force_name = (
-        r"$\gamma^{-2}C_{F_{\mathrm{wall},x}}(\tau)$"
+        r"$a_F C_{F_{\mathrm{wall},x}}(\tau)$"
         if cylindrical
-        else r"$\gamma^{-2}C_{\mathbf{F}_{\mathrm{wall}}}(\tau)$"
+        else r"$a_F C_{\mathbf{F}_{\mathrm{wall}}}(\tau)$"
     )
     curves = (
         (velocity_x, palette[0], "-", velocity_name),

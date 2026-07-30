@@ -305,6 +305,22 @@ def main() -> None:
                 raise ValueError(f"cannot normalize {name} with zero lag-0 value")
             correlation /= correlation[0]
 
+    wall_force_mean = float(np.mean(wall_force_correlation))
+    distinct_mean = float(np.mean(distinct_correlation))
+    if wall_force_mean == 0.0:
+        if not np.all(wall_force_correlation == 0.0):
+            raise ValueError(
+                "cannot rescale C_F_wall because its lag mean is zero"
+            )
+    else:
+        force_scale = distinct_mean / wall_force_mean
+        wall_force_correlation *= force_scale
+        print(
+            f"[correlation] scaled C_F_wall by {force_scale:.6g} so its "
+            "lag mean matches C_q_distinct",
+            flush=True,
+        )
+
     lag_time = _lag_times(elapsed, effective_max_lag)
     output_path = args.output_dir / f"velocity_correlation_{slug}.svg"
     _plot_correlation(
