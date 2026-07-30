@@ -512,7 +512,7 @@ def main() -> None:
             rf"$\rho^{{3D}}_{{\gamma,\mathrm{{count}}}}D^3="
             rf"{rho_3d_gamma_measured * diameter_cubed:.3g}$"
             "\n"
-            rf"relative error $={relative_gamma_error:.2%}$",
+            rf"relative error $={100.0 * relative_gamma_error:.2f}\%$",
             transform=ax.transAxes,
             ha="right",
             va="top",
