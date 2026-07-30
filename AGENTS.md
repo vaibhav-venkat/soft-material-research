@@ -3,6 +3,9 @@
 
 ## Current Work
 
+We are tryingn to analyze the distribution of phases on the big-lx cylinder cases
+
+## Previous
 After doing the analysis for a crystalline active cylinder in the `big_lx`, we are studying the emergence of oscillations within the velocity autocorrelations and the net translation. We have ran new simulations in `new-sims`, which include interacting and non-interacting particles with walls/no-walls. What we found
 
 - In terms of the COM interacting vs non-interacting carries no weight, since forces cancel out
