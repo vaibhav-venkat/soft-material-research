@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 from matplotlib.colors import TwoSlopeNorm
+from numba import njit
 import numpy as np
 from numpy.typing import NDArray
+from scipy.signal import fftconvolve
 import seaborn as sns
 
 from .plotting import _save_figure
@@ -104,6 +107,70 @@ def _validate_inputs(
     lag_origin_counts(len(com), max_lag)
 
 
+@njit(cache=True, nogil=True)
+def _isotropic_3d_numba(
+    com: NDArray[np.float64],
+    particles: NDArray[np.float64],
+    k_values: NDArray[np.float64],
+    scale: float,
+    max_lag: int,
+) -> tuple[
+    NDArray[np.float64],
+    NDArray[np.float64],
+    NDArray[np.float64],
+]:
+    """Fused direct isotropic estimator compiled by Numba."""
+    n_frames = com.shape[0]
+    n_sampled = particles.shape[1]
+    n_k = len(k_values)
+    com_isf = np.zeros((max_lag + 1, n_k), dtype=np.float64)
+    single_isf = np.zeros((max_lag + 1, n_k), dtype=np.float64)
+    msd = np.zeros(max_lag + 1, dtype=np.float64)
+    for lag in range(max_lag + 1):
+        origins = n_frames - lag
+        com_msd_sum = 0.0
+        for origin in range(origins):
+            dx = scale * (com[origin + lag, 0] - com[origin, 0])
+            dy = scale * (com[origin + lag, 1] - com[origin, 1])
+            dz = scale * (com[origin + lag, 2] - com[origin, 2])
+            radius_squared = dx * dx + dy * dy + dz * dz
+            radius = math.sqrt(radius_squared)
+            com_msd_sum += radius_squared
+            for k_index in range(n_k):
+                phase = k_values[k_index] * radius
+                if phase == 0.0:
+                    com_isf[lag, k_index] += 1.0
+                else:
+                    com_isf[lag, k_index] += math.sin(phase) / phase
+        particle_samples = origins * n_sampled
+        for origin in range(origins):
+            for particle in range(n_sampled):
+                dx = (
+                    particles[origin + lag, particle, 0]
+                    - particles[origin, particle, 0]
+                )
+                dy = (
+                    particles[origin + lag, particle, 1]
+                    - particles[origin, particle, 1]
+                )
+                dz = (
+                    particles[origin + lag, particle, 2]
+                    - particles[origin, particle, 2]
+                )
+                radius = math.sqrt(dx * dx + dy * dy + dz * dz)
+                for k_index in range(n_k):
+                    phase = k_values[k_index] * radius
+                    if phase == 0.0:
+                        single_isf[lag, k_index] += 1.0
+                    else:
+                        single_isf[lag, k_index] += math.sin(phase) / phase
+        for k_index in range(n_k):
+            com_isf[lag, k_index] /= origins
+            single_isf[lag, k_index] /= particle_samples
+        msd[lag] = com_msd_sum / origins
+    return com_isf, single_isf, msd
+
+
 def isotropic_3d_seed(
     com: NDArray[np.float64],
     particles: NDArray[np.float64],
@@ -116,27 +183,47 @@ def isotropic_3d_seed(
     if com.shape[1] != 3:
         raise ValueError("the isotropic bulk estimator requires three dimensions")
     counts = lag_origin_counts(len(com), max_lag)
-    com_isf = np.empty((max_lag + 1, len(k_values)), dtype=np.complex128)
-    single_isf = np.empty_like(com_isf)
-    msd = np.empty(max_lag + 1, dtype=np.float64)
-    scale = np.sqrt(float(particle_count))
-    for lag in range(max_lag + 1):
-        stop = len(com) - lag
-        com_delta = scale * (com[lag:] - com[:stop])
-        particle_delta = particles[lag:] - particles[:stop]
-        com_radius = np.linalg.norm(com_delta, axis=1)
-        particle_radius = np.linalg.norm(particle_delta, axis=2)
-        com_isf[lag] = np.mean(
-            np.sinc(com_radius[:, None] * k_values[None, :] / np.pi), axis=0
-        )
-        single_isf[lag] = np.mean(
-            np.sinc(
-                particle_radius[:, :, None] * k_values[None, None, :] / np.pi
-            ),
-            axis=(0, 1),
-        )
-        msd[lag] = np.mean(np.sum(com_delta**2, axis=1))
-    return IsfSeedResult(com_isf, single_isf, msd, counts)
+    com_isf, single_isf, msd = _isotropic_3d_numba(
+        np.ascontiguousarray(com),
+        np.ascontiguousarray(particles),
+        np.ascontiguousarray(k_values),
+        math.sqrt(float(particle_count)),
+        max_lag,
+    )
+    return IsfSeedResult(
+        com_isf.astype(np.complex128),
+        single_isf.astype(np.complex128),
+        msd,
+        counts,
+    )
+
+
+def _component_fft_isfs(
+    scaled_com: NDArray[np.float64],
+    particles: NDArray[np.float64],
+    k_values: NDArray[np.float64],
+    max_lag: int,
+) -> tuple[NDArray[np.complex128], NDArray[np.complex128]]:
+    """Exact component ISFs from phase-signal FFT autocorrelations."""
+    coordinates = np.concatenate([scaled_com[:, None], particles], axis=1)
+    phases = np.exp(-1j * coordinates[:, :, None] * k_values[None, None, :])
+    raw = fftconvolve(
+        phases,
+        np.conj(phases[::-1]),
+        mode="full",
+        axes=0,
+    )
+    n_frames = len(coordinates)
+    correlations = raw[n_frames - 1 : n_frames + max_lag]
+    counts = lag_origin_counts(n_frames, max_lag).astype(np.float64)
+    com_isf = correlations[:, 0, :] / counts[:, None]
+    single_isf = np.sum(correlations[:, 1:, :], axis=1) / (
+        counts[:, None] * particles.shape[1]
+    )
+    return (
+        np.asarray(com_isf, dtype=np.complex128),
+        np.asarray(single_isf, dtype=np.complex128),
+    )
 
 
 def component_seed(
@@ -153,27 +240,16 @@ def component_seed(
         particles = particles[:, :, None]
     _validate_inputs(com, particles, k_values, particle_count, max_lag)
     counts = lag_origin_counts(len(com), max_lag)
-    com_isf = np.empty((max_lag + 1, len(k_values)), dtype=np.complex128)
-    single_isf = np.empty_like(com_isf)
-    msd = np.empty(max_lag + 1, dtype=np.float64)
     scale = np.sqrt(float(particle_count))
     com_values = com[:, 0]
     particle_values = particles[:, :, 0]
+    com_isf, single_isf = _component_fft_isfs(
+        scale * com_values, particle_values, k_values, max_lag
+    )
+    msd = np.empty(max_lag + 1, dtype=np.float64)
     for lag in range(max_lag + 1):
         stop = len(com_values) - lag
         com_delta = scale * (com_values[lag:] - com_values[:stop])
-        particle_delta = particle_values[lag:] - particle_values[:stop]
-        com_isf[lag] = np.mean(
-            np.exp(-1j * com_delta[:, None] * k_values[None, :]), axis=0
-        )
-        single_isf[lag] = np.mean(
-            np.exp(
-                -1j
-                * particle_delta[:, :, None]
-                * k_values[None, None, :]
-            ),
-            axis=(0, 1),
-        )
         msd[lag] = np.mean(com_delta**2)
     return IsfSeedResult(com_isf, single_isf, msd, counts)
 

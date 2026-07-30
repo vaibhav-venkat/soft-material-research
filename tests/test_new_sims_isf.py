@@ -78,6 +78,76 @@ class IsfNumericsTest(unittest.TestCase):
         self.assertTrue(np.all(np.diff(first) > 0))
         np.testing.assert_array_equal(lag_origin_counts(5, 3), [5, 4, 3, 2])
 
+    def test_optimized_estimators_match_direct_definitions(self) -> None:
+        generator = np.random.default_rng(72)
+        n_frames = 9
+        n_sampled = 4
+        particle_count = 7
+        max_lag = 6
+        k_values = np.asarray([0.13, 0.8, 2.1])
+        com = np.cumsum(generator.normal(size=(n_frames, 3)), axis=0)
+        particles = np.cumsum(
+            generator.normal(size=(n_frames, n_sampled, 3)), axis=0
+        )
+        scale = np.sqrt(particle_count)
+
+        isotropic = isotropic_3d_seed(
+            com, particles, k_values, particle_count, max_lag
+        )
+        component = component_seed(
+            com[:, 0], particles[:, :, 0], k_values, particle_count, max_lag
+        )
+        expected_isotropic_com = []
+        expected_isotropic_single = []
+        expected_component_com = []
+        expected_component_single = []
+        for lag in range(max_lag + 1):
+            stop = n_frames - lag
+            com_delta = scale * (com[lag:] - com[:stop])
+            particle_delta = particles[lag:] - particles[:stop]
+            expected_isotropic_com.append(
+                np.mean(
+                    np.sinc(
+                        np.linalg.norm(com_delta, axis=1)[:, None]
+                        * k_values[None, :]
+                        / np.pi
+                    ),
+                    axis=0,
+                )
+            )
+            expected_isotropic_single.append(
+                np.mean(
+                    np.sinc(
+                        np.linalg.norm(particle_delta, axis=2)[:, :, None]
+                        * k_values[None, None, :]
+                        / np.pi
+                    ),
+                    axis=(0, 1),
+                )
+            )
+            expected_component_com.append(
+                np.mean(
+                    np.exp(-1j * com_delta[:, 0, None] * k_values[None, :]),
+                    axis=0,
+                )
+            )
+            expected_component_single.append(
+                np.mean(
+                    np.exp(
+                        -1j
+                        * particle_delta[:, :, 0, None]
+                        * k_values[None, None, :]
+                    ),
+                    axis=(0, 1),
+                )
+            )
+        np.testing.assert_allclose(isotropic.com.real, expected_isotropic_com)
+        np.testing.assert_allclose(
+            isotropic.single.real, expected_isotropic_single
+        )
+        np.testing.assert_allclose(component.com, expected_component_com)
+        np.testing.assert_allclose(component.single, expected_component_single)
+
 
 class IsfValidationTest(unittest.TestCase):
     @staticmethod
