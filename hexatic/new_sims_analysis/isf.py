@@ -47,7 +47,7 @@ class IsfDiagnostics:
     """Strict-validation diagnostics reported by the CLI."""
 
     maximum_imaginary_leakage: float
-    maximum_small_k_msd_error: float
+    maximum_small_k_msd_error: float | None
 
 
 def select_particle_ids(
@@ -229,11 +229,17 @@ def validate_results(
     results: list[IsfResult],
     k_values: NDArray[np.float64],
     *,
-    imaginary_tolerance: float = 0.10,
     msd_relative_tolerance: float = 0.10,
     minimum_origins: int = 50,
 ) -> IsfDiagnostics:
-    """Apply zero-lag, boundedness, leakage, and small-k MSD checks."""
+    """Validate ISFs while retaining drift and short-run diagnostics.
+
+    A component ISF can legitimately have a large imaginary part when its
+    displacement distribution has drift or lacks inversion symmetry. Its
+    magnitude is therefore reported but is not a validation failure. Likewise,
+    the small-k approximation is checked only when at least one lag lies in its
+    numerical validation window.
+    """
     if not results:
         raise ValueError("no ISF estimators to validate")
     if k_values.ndim != 1 or len(k_values) < 1:
@@ -243,7 +249,7 @@ def validate_results(
     if minimum_origins < 1:
         raise ValueError("minimum origin count must be positive")
     maximum_imaginary = 0.0
-    maximum_msd_error = 0.0
+    maximum_msd_error: float | None = None
     bound_tolerance = 64.0 * np.finfo(np.float64).eps
     for result in results:
         if result.com.shape != result.single.shape:
@@ -291,22 +297,18 @@ def validate_results(
             if np.any(eligible):
                 leakage = float(np.max(np.abs(values.imag[eligible])))
                 maximum_imaginary = max(maximum_imaginary, leakage)
-                if leakage > imaginary_tolerance:
-                    raise ValueError(
-                        f"{result.key} {name} ISF imaginary leakage {leakage:.4g} "
-                        f"exceeds {imaginary_tolerance:.4g}"
-                    )
         loss = 1.0 - result.com[:, 0].real
         window = (loss >= 1.0e-6) & (loss <= 0.1)
         if not np.any(window):
-            raise ValueError(
-                f"{result.key}: no q=0.1 lag lies in the small-k MSD validation window"
-            )
+            continue
         inferred = 2.0 * result.dimensions * loss[window] / k_values[0] ** 2
         direct = result.com_msd[window]
         error = np.abs(inferred - direct) / np.maximum(direct, np.finfo(float).tiny)
         estimator_error = float(np.max(error))
-        maximum_msd_error = max(maximum_msd_error, estimator_error)
+        if maximum_msd_error is None:
+            maximum_msd_error = estimator_error
+        else:
+            maximum_msd_error = max(maximum_msd_error, estimator_error)
         if estimator_error > msd_relative_tolerance:
             raise ValueError(
                 f"{result.key}: q=0.1 ISF/MSD relative error "

@@ -479,14 +479,19 @@ def main() -> None:
         plot_heatmap(
             scaled_lag, ISF_Q_VALUES, isf_results, label, heatmap_path
         )
+        small_k_error = diagnostics.maximum_small_k_msd_error
+        small_k_summary = (
+            "n/a (no eligible lag)"
+            if small_k_error is None
+            else f"{small_k_error:.3%}"
+        )
         print(
             f"[isf] N={reference_particles}, selected="
             f"{len(sampled_particle_ids)}, U0={reference_u0:g}, "
             f"tau_r={reference_tau_r:g}, l_p={persistence_length:g}, "
             f"k={np.array2string(k_values, precision=6)}, "
             f"max |Im F|={diagnostics.maximum_imaginary_leakage:.4g}, "
-            f"max small-k MSD error="
-            f"{diagnostics.maximum_small_k_msd_error:.3%}",
+            f"max small-k MSD error={small_k_summary}",
             flush=True,
         )
         for path in (summary_path, heatmap_path):

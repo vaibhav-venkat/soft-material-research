@@ -104,15 +104,43 @@ class IsfValidationTest(unittest.TestCase):
     def test_validation_passes(self) -> None:
         result, k = self._valid_result()
         diagnostics = validate_results([result], k)
+        self.assertIsNotNone(diagnostics.maximum_small_k_msd_error)
+        assert diagnostics.maximum_small_k_msd_error is not None
         self.assertLess(diagnostics.maximum_small_k_msd_error, 0.01)
 
-    def test_imaginary_leakage_fails(self) -> None:
-        result, k = self._valid_result()
-        single = result.single.copy()
-        single[1, 0] = 0.8 + 0.2j
-        changed = replace(result, single=single)
-        with self.assertRaisesRegex(ValueError, "imaginary leakage"):
-            validate_results([changed], k)
+    def test_component_drift_is_reported_not_rejected(self) -> None:
+        _, k = self._valid_result()
+        displacement = np.asarray([0.0, 2.0, 4.0, 6.0])
+        values = np.exp(-1j * displacement[:, None] * k[None, :])
+        msd = displacement**2
+        result = IsfResult(
+            key="x",
+            title="x",
+            dimensions=1,
+            com=values,
+            single=values.copy(),
+            gaussian=gaussian_reference(msd, k, 1),
+            com_msd=msd,
+            origin_counts=np.asarray([100, 99, 98, 97]),
+        )
+        diagnostics = validate_results([result], k)
+        self.assertGreater(diagnostics.maximum_imaginary_leakage, 0.9)
+
+    def test_missing_small_k_window_is_skipped(self) -> None:
+        k = np.asarray([0.1, 0.3])
+        ones = np.ones((1, 2), dtype=np.complex128)
+        result = IsfResult(
+            key="x",
+            title="x",
+            dimensions=1,
+            com=ones,
+            single=ones.copy(),
+            gaussian=ones.real.copy(),
+            com_msd=np.zeros(1),
+            origin_counts=np.asarray([100]),
+        )
+        diagnostics = validate_results([result], k)
+        self.assertIsNone(diagnostics.maximum_small_k_msd_error)
 
     def test_small_k_msd_fails(self) -> None:
         result, k = self._valid_result()
