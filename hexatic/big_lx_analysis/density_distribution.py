@@ -78,6 +78,7 @@ def _load_film_density_samples(
     particle_diameter: float,
     requested_dx: float,
     requested_arc_width: float,
+    frame_start: int,
     frame_stride: int,
 ) -> FilmDensitySamples:
     """Compute local surface packing fractions for one replicate."""
@@ -102,10 +103,13 @@ def _load_film_density_samples(
                 raise KeyError(
                     "hexatic_shell_mask not found and static radius is absent; "
                     "cannot exclude interior particles"
-                )
+            )
 
             for local_frame in range(coords.shape[0]):
-                use_frame = global_frame % frame_stride == 0
+                use_frame = (
+                    global_frame >= frame_start
+                    and (global_frame - frame_start) % frame_stride == 0
+                )
                 global_frame += 1
                 if not use_frame:
                     continue
@@ -203,6 +207,12 @@ def main() -> None:
         help="Number of bins in the probability-density histogram",
     )
     parser.add_argument(
+        "--frame-start",
+        type=int,
+        default=700,
+        help="First zero-based frame index to include (default: 700)",
+    )
+    parser.add_argument(
         "--frame-stride",
         type=int,
         default=1,
@@ -216,6 +226,8 @@ def main() -> None:
 
     if args.density_bins < 1:
         raise ValueError("--density-bins must be positive")
+    if args.frame_start < 0:
+        raise ValueError("--frame-start must be non-negative")
     if args.frame_stride < 1:
         raise ValueError("--frame-stride must be positive")
     if args.particle_diameter <= 0.0:
@@ -283,6 +295,7 @@ def main() -> None:
                 particle_diameter=args.particle_diameter,
                 requested_dx=requested_dx,
                 requested_arc_width=requested_arc_width,
+                frame_start=args.frame_start,
                 frame_stride=args.frame_stride,
             )
             if grid is not None and (
