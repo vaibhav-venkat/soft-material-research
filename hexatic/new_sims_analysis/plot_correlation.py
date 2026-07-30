@@ -7,6 +7,8 @@ averaged across seeds, never the raw positions.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
+import os
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +21,7 @@ from .correlation import _correlation_curves, _lag_times, _plot_correlation
 from .isf import (
     ISF_Q_VALUES,
     IsfResult,
+    IsfSeedResult,
     average_seed_results,
     component_seed,
     isotropic_3d_seed,
@@ -96,6 +99,51 @@ def _isf_geometry_route(
     if geometry in _BULK_GEOMETRIES:
         return "bulk"
     return None
+
+
+def _reduce_seed_isf(
+    route: str,
+    com: NDArray[np.float64],
+    sampled_tracks: NDArray[np.float64],
+    k_values: NDArray[np.float64],
+    particle_count: int,
+    max_lag: int,
+    cylinder_radius: float | None,
+) -> dict[str, IsfSeedResult]:
+    """Reduce one seed independently; safe to execute in a worker thread."""
+    if route == "bulk":
+        return {
+            "isotropic": isotropic_3d_seed(
+                com, sampled_tracks, k_values, particle_count, max_lag
+            ),
+            "x": component_seed(
+                com[:, 0],
+                sampled_tracks[:, :, 0],
+                k_values,
+                particle_count,
+                max_lag,
+            ),
+        }
+    if route != "cylinder":
+        raise ValueError(f"unsupported ISF route {route!r}")
+    if cylinder_radius is None:
+        raise ValueError("cylindrical ISF reduction requires a fixed radius")
+    return {
+        "x": component_seed(
+            com[:, 0],
+            sampled_tracks[:, :, 0],
+            k_values,
+            particle_count,
+            max_lag,
+        ),
+        "theta": component_seed(
+            cylinder_radius * com[:, 1],
+            sampled_tracks[:, :, 1],
+            k_values,
+            particle_count,
+            max_lag,
+        ),
+    }
 
 
 def _parse_args() -> argparse.Namespace:
@@ -423,35 +471,29 @@ def main() -> None:
         assert sampled_particle_ids is not None
         persistence_length = reference_u0 * reference_tau_r
         k_values = ISF_Q_VALUES / persistence_length
-        seed_estimators: dict[str, list] = {}
-        for com, sampled_tracks in isf_inputs:
-            if isf_route == "bulk":
-                seed_estimators.setdefault("isotropic", []).append(
-                    isotropic_3d_seed(
-                        com, sampled_tracks, k_values,
-                        reference_particles, effective_max_lag,
-                    )
+        worker_count = min(len(isf_inputs), os.process_cpu_count() or 1)
+        print(
+            f"[isf] reducing {len(isf_inputs)} seed(s) with "
+            f"{worker_count} CPU worker(s)",
+            flush=True,
+        )
+        with ThreadPoolExecutor(
+            max_workers=worker_count, thread_name_prefix="isf-seed"
+        ) as executor:
+            futures = [
+                executor.submit(
+                    _reduce_seed_isf,
+                    isf_route,
+                    com,
+                    sampled_tracks,
+                    k_values,
+                    reference_particles,
+                    effective_max_lag,
+                    reference_radius,
                 )
-                seed_estimators.setdefault("x", []).append(
-                    component_seed(
-                        com[:, 0], sampled_tracks[:, :, 0], k_values,
-                        reference_particles, effective_max_lag,
-                    )
-                )
-            else:
-                assert reference_radius is not None
-                seed_estimators.setdefault("x", []).append(
-                    component_seed(
-                        com[:, 0], sampled_tracks[:, :, 0], k_values,
-                        reference_particles, effective_max_lag,
-                    )
-                )
-                seed_estimators.setdefault("theta", []).append(
-                    component_seed(
-                        reference_radius * com[:, 1], sampled_tracks[:, :, 1],
-                        k_values, reference_particles, effective_max_lag,
-                    )
-                )
+                for com, sampled_tracks in isf_inputs
+            ]
+            reduced_seeds = [future.result() for future in futures]
         if isf_route == "bulk":
             result_specs = (
                 ("isotropic", r"isotropic 3D $F(k,\tau)$", 3),
@@ -464,7 +506,11 @@ def main() -> None:
             )
         isf_results = [
             average_seed_results(
-                key, title, dimensions, seed_estimators[key], k_values
+                key,
+                title,
+                dimensions,
+                [seed[key] for seed in reduced_seeds],
+                k_values,
             )
             for key, title, dimensions in result_specs
         ]
