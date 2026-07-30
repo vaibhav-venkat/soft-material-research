@@ -1,4 +1,4 @@
-"""Plot velocity/orientation correlations, their Laplace transform, and the MSD.
+"""Plot velocity/orientation/wall-force correlations, Laplace transform, and MSD.
 
 Each seed directory is reduced on its own; only the resulting curves are
 averaged across seeds, never the raw positions.
@@ -136,6 +136,7 @@ def main() -> None:
             NDArray[np.float64],
             NDArray[np.float64],
             NDArray[np.float64],
+            NDArray[np.float64],
         ]
     ] = []
     seed_msd: dict[str, list[NDArray[np.float64]]] = {}
@@ -144,6 +145,7 @@ def main() -> None:
     reference_steps: NDArray[np.int64] | None = None
     reference_timestep: float | None = None
     reference_u0: float | None = None
+    reference_gamma: float | None = None
     reference_particles: int | None = None
     reference_coordinate_order: list[str] | None = None
     label: str | None = None
@@ -194,6 +196,15 @@ def main() -> None:
         u0 = float(case_meta.get("u0", cylinder.SIMULATION.u0))
         if not np.isfinite(u0) or u0 <= 0.0:
             raise ValueError(f"invalid U0 in manifest for {input_dir}: {u0!r}")
+        stored_gamma = case_meta.get("gamma")
+        if stored_gamma is not None:
+            gamma = float(stored_gamma)
+        elif case_meta.get("active_force_magnitude") is not None:
+            gamma = float(case_meta["active_force_magnitude"]) / u0
+        else:
+            gamma = float(cylinder.SIMULATION.gamma)
+        if not np.isfinite(gamma) or gamma <= 0.0:
+            raise ValueError(f"invalid gamma in manifest for {input_dir}: {gamma!r}")
 
         com, q, steps = _load_frame_series(input_dir, manifest, args.frames)
         print(
@@ -205,15 +216,20 @@ def main() -> None:
             reference_steps = steps
             reference_timestep = timestep
             reference_u0 = u0
+            reference_gamma = gamma
             reference_particles = q.shape[1]
         else:
             if not np.array_equal(steps, reference_steps):
                 raise ValueError(
                     f"seed frame steps do not match in {input_dir}"
                 )
-            if timestep != reference_timestep or u0 != reference_u0:
+            if (
+                timestep != reference_timestep
+                or u0 != reference_u0
+                or gamma != reference_gamma
+            ):
                 raise ValueError(
-                    f"seed timestep or U0 does not match in {input_dir}"
+                    f"seed timestep, U0, or gamma does not match in {input_dir}"
                 )
             if q.shape[1] != reference_particles:
                 raise ValueError(
@@ -236,14 +252,22 @@ def main() -> None:
                 elapsed,
                 effective_max_lag,
                 u0,
+                gamma,
                 coordinate_order == CYLINDRICAL_COORDINATE_ORDER,
                 coordinate_order == PLANAR_COORDINATE_ORDER,
+                np.asarray(
+                    case_meta.get(
+                        "active_particle_ids", np.arange(q.shape[1])
+                    ),
+                    dtype=np.int64,
+                ),
             )
         )
 
     assert reference_steps is not None
     assert reference_timestep is not None
     assert reference_u0 is not None
+    assert reference_gamma is not None
     assert reference_particles is not None
     assert reference_coordinate_order is not None
     assert label is not None and slug is not None
@@ -259,7 +283,12 @@ def main() -> None:
             flush=True,
         )
 
-    velocity_correlation, self_correlation, distinct_correlation = np.mean(
+    (
+        velocity_correlation,
+        self_correlation,
+        distinct_correlation,
+        wall_force_correlation,
+    ) = np.mean(
         np.asarray(seed_curves, dtype=np.float64), axis=0
     )
     normalize = not args.unnormalize
@@ -268,8 +297,11 @@ def main() -> None:
             ("C_V", velocity_correlation),
             ("C_q_self", self_correlation),
             ("C_q_distinct", distinct_correlation),
+            ("C_F_wall", wall_force_correlation),
         ):
             if correlation[0] == 0.0:
+                if np.all(correlation == 0.0):
+                    continue
                 raise ValueError(f"cannot normalize {name} with zero lag-0 value")
             correlation /= correlation[0]
 
@@ -280,6 +312,7 @@ def main() -> None:
         velocity_correlation,
         self_correlation,
         distinct_correlation,
+        wall_force_correlation,
         normalize,
         cylindrical,
         planar,

@@ -1,4 +1,4 @@
-"""Velocity and orientation correlation curves, and their plot."""
+"""Velocity, orientation, and inferred wall-force correlation curves."""
 
 from __future__ import annotations
 
@@ -233,14 +233,21 @@ def _correlation_curves(
     elapsed: NDArray[np.float64],
     max_lag: int,
     u0: float,
+    gamma: float,
     cylindrical: bool,
     planar: bool,
+    active_particle_ids: NDArray[np.int64] | None = None,
 ) -> tuple[
     NDArray[np.float64],
     NDArray[np.float64],
     NDArray[np.float64],
+    NDArray[np.float64],
 ]:
-    """Reduce one seed to its velocity, self, and distinct correlations."""
+    """Reduce one seed to velocity, orientation, and force correlations.
+
+    The wall-force correlation is divided by ``gamma**2`` so that every
+    unnormalized curve has velocity-squared units.
+    """
     velocity = _finite_difference_vector(com, elapsed)
     if cylindrical:
         velocity_signal = velocity[:, :1]
@@ -251,6 +258,20 @@ def _correlation_curves(
     else:
         velocity_signal = velocity
         orientation_signal = q
+    if active_particle_ids is None:
+        active_particle_ids = np.arange(q.shape[1], dtype=np.int64)
+    if (
+        active_particle_ids.ndim != 1
+        or len(active_particle_ids) == 0
+        or np.any(active_particle_ids < 0)
+        or np.any(active_particle_ids >= q.shape[1])
+        or len(np.unique(active_particle_ids)) != len(active_particle_ids)
+    ):
+        raise ValueError("active particle IDs must be unique and in range")
+    active_polarization = np.sum(
+        orientation_signal[:, active_particle_ids], axis=1, dtype=np.float64
+    ) / q.shape[1]
+    wall_force = gamma * (velocity_signal - u0 * active_polarization)
     velocity_correlation = _normalized_autocorrelation(
         velocity_signal, max_lag, normalize=False
     )
@@ -262,7 +283,16 @@ def _correlation_curves(
         orientation_signal, max_lag, normalize=False
     )
     distinct_correlation *= u0**2
-    return velocity_correlation, self_correlation, distinct_correlation
+    wall_force_correlation = _normalized_autocorrelation(
+        wall_force, max_lag, normalize=False
+    )
+    wall_force_correlation /= gamma**2
+    return (
+        velocity_correlation,
+        self_correlation,
+        distinct_correlation,
+        wall_force_correlation,
+    )
 
 
 def _plot_correlation(
@@ -270,6 +300,7 @@ def _plot_correlation(
     velocity_x: NDArray[np.float64],
     orientation_self_x: NDArray[np.float64],
     orientation_distinct_x: NDArray[np.float64],
+    wall_force_x: NDArray[np.float64],
     normalize: bool,
     cylindrical: bool,
     planar: bool,
@@ -291,6 +322,11 @@ def _plot_correlation(
         if cylindrical
         else r"$(U_0^2/N^2)\sum_{i\ne j}C_{\mathbf{q}_i\mathbf{q}_j}(\tau)$"
     )
+    force_name = (
+        r"$\gamma^{-2}C_{F_{\mathrm{wall},x}}(\tau)$"
+        if cylindrical
+        else r"$\gamma^{-2}C_{\mathbf{F}_{\mathrm{wall}}}(\tau)$"
+    )
     curves = (
         (velocity_x, palette[0], "-", velocity_name),
         (
@@ -304,6 +340,12 @@ def _plot_correlation(
             palette[2],
             ":",
             distinct_name,
+        ),
+        (
+            wall_force_x,
+            palette[3],
+            "-.",
+            force_name,
         ),
     )
     for correlation, color, style, name in curves:
