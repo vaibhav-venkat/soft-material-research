@@ -61,6 +61,8 @@ class PhaseClassification:
 
     rho_beta: float
     rho_alpha: float
+    mean_beta: float
+    mean_alpha: float
     threshold: float
     x_alpha: float
 
@@ -244,11 +246,16 @@ def _classify_phases(
     )
     centers = 0.5 * (edges[:-1] + edges[1:])
     threshold = float(centers[valley_index])
+    alpha_mask = values > threshold
+    if not np.any(alpha_mask) or np.all(alpha_mask):
+        raise ValueError("Phase boundary does not separate alpha and beta bins")
     return PhaseClassification(
         rho_beta=float(centers[beta_index]),
         rho_alpha=float(centers[alpha_index]),
+        mean_beta=float(values[~alpha_mask].mean()),
+        mean_alpha=float(values[alpha_mask].mean()),
         threshold=threshold,
-        x_alpha=float(np.count_nonzero(values > threshold) / values.size),
+        x_alpha=float(np.count_nonzero(alpha_mask) / values.size),
     )
 
 
@@ -413,8 +420,8 @@ def main() -> None:
         values = np.concatenate(all_values)
         phases = _classify_phases(values, args.density_bins)
         particle_area = np.pi * (args.particle_diameter / 2.0) ** 2
-        rho_2d_alpha = phases.rho_alpha / particle_area
-        rho_2d_beta = phases.rho_beta / particle_area
+        rho_2d_alpha = phases.mean_alpha / particle_area
+        rho_2d_beta = phases.mean_beta / particle_area
         surface_area = case_circumference * case_lx
         cylinder_radius = case_circumference / (2.0 * np.pi)
         bulk_radius = cylinder_radius - args.shell_delta
@@ -530,6 +537,8 @@ def main() -> None:
         print(
             f"{case_id}: phi_alpha={phases.rho_alpha:.6g}, "
             f"phi_beta={phases.rho_beta:.6g}, "
+            f"mean_phi_alpha={phases.mean_alpha:.6g}, "
+            f"mean_phi_beta={phases.mean_beta:.6g}, "
             f"rho_2d_alpha_D2={rho_2d_alpha * args.particle_diameter**2:.6g}, "
             f"rho_2d_beta_D2={rho_2d_beta * args.particle_diameter**2:.6g}, "
             f"classification_threshold={phases.threshold:.6g}, "
