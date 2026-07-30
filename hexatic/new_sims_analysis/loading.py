@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, overload
 
 import numpy as np
 from numpy.typing import NDArray
@@ -102,7 +102,9 @@ class _PeriodicComUnwrapper:
         self._unwrapped = np.empty(n_particles, dtype=np.float64)
         self._started = False
 
-    def push(self, values: NDArray[np.float64], frame_index: int) -> float:
+    def push_values(
+        self, values: NDArray[np.float64], frame_index: int
+    ) -> NDArray[np.float64]:
         if len(values) != self._n_particles:
             raise ValueError(f"particle count changes at frame {frame_index}")
         if not np.all(np.isfinite(values)):
@@ -118,7 +120,11 @@ class _PeriodicComUnwrapper:
             )
             self._unwrapped += displacement - self._period * nearest_integer
         self._previous[:] = values
-        return float(np.mean(self._unwrapped, dtype=np.float64))
+        return self._unwrapped.copy()
+
+    def push(self, values: NDArray[np.float64], frame_index: int) -> float:
+        unwrapped = self.push_values(values, frame_index)
+        return float(np.mean(unwrapped, dtype=np.float64))
 
 
 def _cartesian_directions(
@@ -149,20 +155,59 @@ def _cartesian_directions(
     return directions
 
 
+@overload
 def _load_frame_series(
     shard_dir: Path,
     manifest: dict[str, Any],
     frame_limit: int,
+    particle_ids: None = None,
 ) -> tuple[
     NDArray[np.float64],
     NDArray[np.float32],
     NDArray[np.int64],
-]:
+]: ...
+
+
+@overload
+def _load_frame_series(
+    shard_dir: Path,
+    manifest: dict[str, Any],
+    frame_limit: int,
+    particle_ids: NDArray[np.int64],
+) -> tuple[
+    NDArray[np.float64],
+    NDArray[np.float32],
+    NDArray[np.int64],
+    NDArray[np.float64],
+]: ...
+
+
+def _load_frame_series(
+    shard_dir: Path,
+    manifest: dict[str, Any],
+    frame_limit: int,
+    particle_ids: NDArray[np.int64] | None = None,
+) -> (
+    tuple[
+        NDArray[np.float64],
+        NDArray[np.float32],
+        NDArray[np.int64],
+    ]
+    | tuple[
+        NDArray[np.float64],
+        NDArray[np.float32],
+        NDArray[np.int64],
+        NDArray[np.float64],
+    ]
+):
     """Load the per-frame COM coordinates and per-particle orientations.
 
-    Returns ``(com, q, steps)``. Both COM and orientations use Cartesian
-    ``(x, y, z)`` components for bulk inputs. Cylindrical coordinates use
-    ``(x, theta, r)`` and are unwrapped along x and theta before taking COM.
+    Returns ``(com, q, steps)``. If ``particle_ids`` is supplied, the return
+    value also contains sampled tracks as its fourth item. Both COM and
+    orientations use Cartesian ``(x, y, z)`` components for bulk inputs.
+    Cylindrical COM coordinates use ``(x, theta, r)``; sampled cylindrical
+    tracks use surface coordinates ``(x, R theta)``. Periodic components are
+    continuously unwrapped across frames and shards.
 
     Note that ``q`` holds every particle for every frame, so memory scales as
     frames x particles; ``--frames`` is the knob for keeping it bounded.
@@ -173,6 +218,7 @@ def _load_frame_series(
 
     com_frames: list[NDArray[np.float64] | tuple[float, float, float]] = []
     q_arrays: list[NDArray[np.float32]] = []
+    sampled_frames: list[NDArray[np.float64]] = []
     step_frames: list[int] = []
     loaded_frames = 0
     expected_start = 0
@@ -182,6 +228,17 @@ def _load_frame_series(
     lx = _load_lx(shard_dir / "static.safetensors") if cylindrical else None
     axial_unwrapper: _PeriodicComUnwrapper | None = None
     azimuthal_unwrapper: _PeriodicComUnwrapper | None = None
+    sampled_axial_unwrapper: _PeriodicComUnwrapper | None = None
+    sampled_azimuthal_unwrapper: _PeriodicComUnwrapper | None = None
+    expected_particles: int | None = None
+    cylinder_radius: float | None = None
+    if cylindrical:
+        stored_radius = manifest["case"].get("radius")
+        if stored_radius is None:
+            raise ValueError("cylindrical manifest has no fixed radius")
+        cylinder_radius = float(stored_radius)
+        if not np.isfinite(cylinder_radius) or cylinder_radius <= 0.0:
+            raise ValueError(f"invalid cylinder radius {stored_radius!r}")
     for entry in shards:
         if not isinstance(entry, dict):
             raise ValueError("invalid shard entry in manifest")
@@ -219,6 +276,21 @@ def _load_frame_series(
             )
         n_frames_in_shard = coords.shape[0]
         n_particles = coords.shape[1]
+        if expected_particles is None:
+            expected_particles = n_particles
+            if particle_ids is not None:
+                if (
+                    particle_ids.ndim != 1
+                    or len(particle_ids) == 0
+                    or np.any(particle_ids < 0)
+                    or np.any(particle_ids >= n_particles)
+                    or len(np.unique(particle_ids)) != len(particle_ids)
+                ):
+                    raise ValueError(
+                        "sampled particle IDs must be unique and in range"
+                    )
+        elif n_particles != expected_particles:
+            raise ValueError(f"particle count changes in {shard_path}")
         if directions.shape[:2] != coords.shape[:2]:
             raise ValueError(
                 f"orientation frame/particle shape {directions.shape[:2]} "
@@ -239,6 +311,13 @@ def _load_frame_series(
             azimuthal_unwrapper = _PeriodicComUnwrapper(
                 n_particles, 2.0 * np.pi
             )
+            if particle_ids is not None:
+                sampled_axial_unwrapper = _PeriodicComUnwrapper(
+                    len(particle_ids), lx
+                )
+                sampled_azimuthal_unwrapper = _PeriodicComUnwrapper(
+                    len(particle_ids), 2.0 * np.pi
+                )
         take = frame_limit - loaded_frames
         coords = coords[:take]
         steps = steps[:take]
@@ -263,12 +342,29 @@ def _load_frame_series(
                         float(np.mean(coords[local_frame, :, 2])),
                     )
                 )
+                if particle_ids is not None:
+                    assert sampled_axial_unwrapper is not None
+                    assert sampled_azimuthal_unwrapper is not None
+                    assert cylinder_radius is not None
+                    sampled_x = sampled_axial_unwrapper.push_values(
+                        coords[local_frame, particle_ids, 0], frame_index
+                    )
+                    sampled_theta = sampled_azimuthal_unwrapper.push_values(
+                        coords[local_frame, particle_ids, 1], frame_index
+                    )
+                    sampled_frames.append(
+                        np.stack(
+                            [sampled_x, cylinder_radius * sampled_theta], axis=1
+                        )
+                    )
             else:
                 com_frames.append(
                     np.mean(
                         coords[local_frame], axis=0, dtype=np.float64
                     )
                 )
+                if particle_ids is not None:
+                    sampled_frames.append(coords[local_frame, particle_ids].copy())
             step_frames.append(int(steps[local_frame]))
 
         loaded_frames += actual_take
@@ -280,11 +376,14 @@ def _load_frame_series(
         raise ValueError(
             "at least three frames are required for velocity correlation"
         )
-    return (
+    result = (
         np.array(com_frames, dtype=np.float64),
         np.concatenate(q_arrays, axis=0),
         np.array(step_frames, dtype=np.int64),
     )
+    if particle_ids is None:
+        return result
+    return (*result, np.asarray(sampled_frames, dtype=np.float64))
 
 
 def _elapsed_time(

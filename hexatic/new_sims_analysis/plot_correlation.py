@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -15,6 +16,17 @@ from numpy.typing import NDArray
 from hexatic.constants import cylinder
 
 from .correlation import _correlation_curves, _lag_times, _plot_correlation
+from .isf import (
+    ISF_Q_VALUES,
+    IsfResult,
+    average_seed_results,
+    component_seed,
+    isotropic_3d_seed,
+    plot_heatmap,
+    plot_summary,
+    select_particle_ids,
+    validate_results,
+)
 from .laplace import _laplace_transform, _plot_laplace
 from .loading import (
     CYLINDRICAL_COORDINATE_ORDER,
@@ -39,6 +51,51 @@ def _positive_float(value: str) -> float:
     if not np.isfinite(parsed) or parsed <= 0.0:
         raise argparse.ArgumentTypeError("must be finite and positive")
     return parsed
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be positive")
+    return parsed
+
+
+_BULK_GEOMETRIES = {
+    "periodic_3d_bulk",
+    "ideal_3d_bulk",
+    "ideal_3d_bulk_period_10",
+    "ideal_3d_bulk_period_1",
+}
+_TRACER_GEOMETRIES = {
+    "single_active_tracer_cylinder",
+    "inversion_active_pair_cylinder",
+}
+
+
+def _isf_geometry_route(
+    case_meta: dict[str, Any],
+    coordinate_order: list[str],
+    *,
+    disabled: bool,
+) -> str | None:
+    """Return ``bulk``/``cylinder`` or explain why this case is skipped."""
+    if disabled:
+        return None
+    geometry = str(case_meta.get("geometry_kind", ""))
+    n_particles = int(case_meta.get("n_particles", 0))
+    active_count = int(case_meta.get("active_count", n_particles))
+    if geometry in _TRACER_GEOMETRIES or (n_particles > 0 and active_count < n_particles):
+        raise ValueError(
+            "ISF analysis is not defined for tracer cases; pass --no-isf "
+            "to retain correlation/MSD/Laplace analysis"
+        )
+    if coordinate_order == CYLINDRICAL_COORDINATE_ORDER:
+        return "cylinder"
+    if coordinate_order == PLANAR_COORDINATE_ORDER:
+        return None
+    if geometry in _BULK_GEOMETRIES:
+        return "bulk"
+    return None
 
 
 def _parse_args() -> argparse.Namespace:
@@ -120,6 +177,17 @@ def _parse_args() -> argparse.Namespace:
         default=241,
         help="Number of Laplace angular-frequency samples (default: 241).",
     )
+    parser.add_argument(
+        "--no-isf",
+        action="store_true",
+        help="Disable ISF trajectory retention and plots.",
+    )
+    parser.add_argument(
+        "--isf-particles",
+        type=_positive_int,
+        default=256,
+        help="Maximum deterministic particle sample for ISFs (default: 256).",
+    )
     return parser.parse_args()
 
 
@@ -144,8 +212,16 @@ def main() -> None:
     reference_steps: NDArray[np.int64] | None = None
     reference_timestep: float | None = None
     reference_u0: float | None = None
+    reference_tau_r: float | None = None
+    reference_radius: float | None = None
+    reference_geometry: str | None = None
     reference_particles: int | None = None
     reference_coordinate_order: list[str] | None = None
+    isf_route: str | None = None
+    sampled_particle_ids: NDArray[np.int64] | None = None
+    isf_inputs: list[
+        tuple[NDArray[np.float64], NDArray[np.float64]]
+    ] = []
     label: str | None = None
     slug: str | None = None
 
@@ -179,6 +255,20 @@ def main() -> None:
             )
 
         case_meta = manifest.get("case", {})
+        seed_route = _isf_geometry_route(
+            case_meta, coordinate_order, disabled=args.no_isf
+        )
+        if index == 1:
+            isf_route = seed_route
+            if not args.no_isf and seed_route is None:
+                geometry_name = case_meta.get("geometry_kind", "unknown")
+                print(
+                    f"[isf] skipping unsupported 2D/prism geometry "
+                    f"{geometry_name!r}; existing plots remain enabled",
+                    flush=True,
+                )
+        elif seed_route != isf_route:
+            raise ValueError("seed ISF geometry routing does not match")
         stored_timestep = case_meta.get("timestep")
         if args.timestep is not None:
             timestep = args.timestep
@@ -194,8 +284,42 @@ def main() -> None:
         u0 = float(case_meta.get("u0", cylinder.SIMULATION.u0))
         if not np.isfinite(u0) or u0 <= 0.0:
             raise ValueError(f"invalid U0 in manifest for {input_dir}: {u0!r}")
+        tau_r = float(case_meta.get("tau_r", cylinder.SIMULATION.tau_r))
+        if not np.isfinite(tau_r) or tau_r <= 0.0:
+            raise ValueError(
+                f"invalid tau_r in manifest for {input_dir}: {tau_r!r}"
+            )
+        geometry = str(case_meta.get("geometry_kind", ""))
+        radius: float | None = None
+        if coordinate_order == CYLINDRICAL_COORDINATE_ORDER:
+            stored_radius = case_meta.get("radius")
+            if stored_radius is None:
+                raise ValueError(f"missing cylinder radius in {input_dir}")
+            radius = float(stored_radius)
+            if not np.isfinite(radius) or radius <= 0.0:
+                raise ValueError(
+                    f"invalid cylinder radius in {input_dir}: {stored_radius!r}"
+                )
 
-        com, q, steps = _load_frame_series(input_dir, manifest, args.frames)
+        if isf_route is not None and sampled_particle_ids is None:
+            stored_particles = case_meta.get("n_particles")
+            if stored_particles is None:
+                raise ValueError(
+                    f"ISF analysis requires n_particles metadata in {input_dir}"
+                )
+            sampled_particle_ids = select_particle_ids(
+                int(stored_particles), args.isf_particles
+            )
+
+        if sampled_particle_ids is None:
+            com, q, steps = _load_frame_series(
+                input_dir, manifest, args.frames
+            )
+            sampled_tracks = None
+        else:
+            com, q, steps, sampled_tracks = _load_frame_series(
+                input_dir, manifest, args.frames, sampled_particle_ids
+            )
         print(
             f"[correlation] loaded {len(com)} frames, "
             f"{q.shape[1]} particles",
@@ -205,20 +329,36 @@ def main() -> None:
             reference_steps = steps
             reference_timestep = timestep
             reference_u0 = u0
+            reference_tau_r = tau_r
+            reference_radius = radius
+            reference_geometry = geometry
             reference_particles = q.shape[1]
         else:
             if not np.array_equal(steps, reference_steps):
                 raise ValueError(
                     f"seed frame steps do not match in {input_dir}"
                 )
-            if timestep != reference_timestep or u0 != reference_u0:
+            if (
+                timestep != reference_timestep
+                or u0 != reference_u0
+                or tau_r != reference_tau_r
+            ):
                 raise ValueError(
-                    f"seed timestep or U0 does not match in {input_dir}"
+                    f"seed timestep, U0, or tau_r does not match in {input_dir}"
+                )
+            if geometry != reference_geometry or radius != reference_radius:
+                raise ValueError(
+                    f"seed geometry or cylinder radius does not match in {input_dir}"
                 )
             if q.shape[1] != reference_particles:
                 raise ValueError(
                     f"seed particle count does not match in {input_dir}"
                 )
+        stored_particles = case_meta.get("n_particles")
+        if stored_particles is not None and int(stored_particles) != q.shape[1]:
+            raise ValueError(
+                f"manifest particle count does not match tensors in {input_dir}"
+            )
         elapsed = _elapsed_time(steps, timestep)
         effective_max_lag = min(args.max_lag, len(steps) - 2)
         for suffix, title, coords, transport_dimensions in _msd_variants(
@@ -240,10 +380,13 @@ def main() -> None:
                 coordinate_order == PLANAR_COORDINATE_ORDER,
             )
         )
+        if sampled_tracks is not None:
+            isf_inputs.append((com, sampled_tracks))
 
     assert reference_steps is not None
     assert reference_timestep is not None
     assert reference_u0 is not None
+    assert reference_tau_r is not None
     assert reference_particles is not None
     assert reference_coordinate_order is not None
     assert label is not None and slug is not None
@@ -274,6 +417,81 @@ def main() -> None:
             correlation /= correlation[0]
 
     lag_time = _lag_times(elapsed, effective_max_lag)
+
+    isf_results: list[IsfResult] = []
+    if isf_route is not None:
+        assert sampled_particle_ids is not None
+        persistence_length = reference_u0 * reference_tau_r
+        k_values = ISF_Q_VALUES / persistence_length
+        seed_estimators: dict[str, list] = {}
+        for com, sampled_tracks in isf_inputs:
+            if isf_route == "bulk":
+                seed_estimators.setdefault("isotropic", []).append(
+                    isotropic_3d_seed(
+                        com, sampled_tracks, k_values,
+                        reference_particles, effective_max_lag,
+                    )
+                )
+                seed_estimators.setdefault("x", []).append(
+                    component_seed(
+                        com[:, 0], sampled_tracks[:, :, 0], k_values,
+                        reference_particles, effective_max_lag,
+                    )
+                )
+            else:
+                assert reference_radius is not None
+                seed_estimators.setdefault("x", []).append(
+                    component_seed(
+                        com[:, 0], sampled_tracks[:, :, 0], k_values,
+                        reference_particles, effective_max_lag,
+                    )
+                )
+                seed_estimators.setdefault("theta", []).append(
+                    component_seed(
+                        reference_radius * com[:, 1], sampled_tracks[:, :, 1],
+                        k_values, reference_particles, effective_max_lag,
+                    )
+                )
+        if isf_route == "bulk":
+            result_specs = (
+                ("isotropic", r"isotropic 3D $F(k,\tau)$", 3),
+                ("x", r"axial $F_x(k,\tau)$", 1),
+            )
+        else:
+            result_specs = (
+                ("x", r"axial $F_x(k,\tau)$", 1),
+                ("theta", r"azimuthal $F_\theta(k,\tau)$", 1),
+            )
+        isf_results = [
+            average_seed_results(
+                key, title, dimensions, seed_estimators[key], k_values
+            )
+            for key, title, dimensions in result_specs
+        ]
+        diagnostics = validate_results(isf_results, k_values)
+        scaled_lag = lag_time / reference_tau_r
+        summary_path = args.output_dir / f"isf_summary_{slug}.svg"
+        heatmap_path = args.output_dir / f"isf_heatmap_{slug}.svg"
+        plot_summary(
+            scaled_lag, ISF_Q_VALUES, isf_results, label,
+            len(seed_curves), summary_path,
+        )
+        plot_heatmap(
+            scaled_lag, ISF_Q_VALUES, isf_results, label, heatmap_path
+        )
+        print(
+            f"[isf] N={reference_particles}, selected="
+            f"{len(sampled_particle_ids)}, U0={reference_u0:g}, "
+            f"tau_r={reference_tau_r:g}, l_p={persistence_length:g}, "
+            f"k={np.array2string(k_values, precision=6)}, "
+            f"max |Im F|={diagnostics.maximum_imaginary_leakage:.4g}, "
+            f"max small-k MSD error="
+            f"{diagnostics.maximum_small_k_msd_error:.3%}",
+            flush=True,
+        )
+        for path in (summary_path, heatmap_path):
+            print(f"[isf] wrote {path}", flush=True)
+            print(f"[isf] wrote {path.with_suffix('.png')}", flush=True)
     output_path = args.output_dir / f"velocity_correlation_{slug}.svg"
     _plot_correlation(
         lag_time,
@@ -357,6 +575,7 @@ def main() -> None:
     print(
         f"[correlation] done — averaged {len(seed_curves)} seed(s) into one "
         "correlation plot, one MSD plot, and one Laplace heatmap"
+        + (", plus ISF summary and heatmap pairs" if isf_results else "")
     )
 
 
