@@ -1,7 +1,9 @@
-"""Center-of-mass mean squared displacement and instantaneous exponent plot."""
+"""Center-of-mass mean squared displacement, its fits, and its plot."""
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -37,8 +39,8 @@ def _msd_from_com(
 def _msd_variants(
     com: NDArray[np.float64],
     cylindrical: bool,
-) -> list[tuple[str, str, NDArray[np.float64]]]:
-    """Return ``(suffix, title, coordinates)`` MSD variants.
+) -> list[tuple[str, str, NDArray[np.float64], int]]:
+    """Return ``(suffix, title, coordinates, transport_dimensions)`` variants.
 
     Cartesian cases give one variant. Cylindrical cases give two: the COM
     mapped back to Cartesian ``(x, y, z)``, whose transverse part is bounded by
@@ -48,39 +50,79 @@ def _msd_variants(
     direction, while the unrolled surface has two.
     """
     if not cylindrical:
-        return [("", "", com)]
+        return [("", "", com, com.shape[1])]
     x, theta, r = com[:, 0], com[:, 1], com[:, 2]
     cartesian = np.stack(
         [x, r * np.cos(theta), r * np.sin(theta)], axis=1
     )
     unrolled = np.stack([x, r * theta], axis=1)
     return [
-        ("_cartesian", r" — Cartesian $(x, y, z)$", cartesian),
-        ("_unrolled", r" — surface $(x, r\theta)$", unrolled),
+        ("_cartesian", r" — Cartesian $(x, y, z)$", cartesian, 1),
+        ("_unrolled", r" — surface $(x, r\theta)$", unrolled, 2),
     ]
 
 
-def _instantaneous_msd_exponent(
+@dataclass(frozen=True)
+class MsdFit:
+    """Power-law and forced-linear MSD fits over one lag window."""
+
+    tau_min: float
+    tau_max: float
+    alpha: float
+    amplitude: float
+    dimensions: int
+    slope: float
+    diffusion: float
+    tau: NDArray[np.float64]
+    msd: NDArray[np.float64]
+    msd_linear: NDArray[np.float64]
+
+
+def _fit_msd_power_law(
     tau: NDArray[np.float64],
     msd: NDArray[np.float64],
-) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
-    """Return ``(tau, d log(MSD) / d log(tau))`` on positive samples."""
-    usable = np.isfinite(tau) & np.isfinite(msd) & (tau > 0.0) & (msd > 0.0)
+    tau_min: float,
+    tau_max: float,
+    dimensions: int,
+) -> MsdFit:
+    """Fit ``MSD = A tau^alpha`` and ``MSD = 2 d D tau`` in a lag window."""
+    if not np.isfinite(tau_min) or tau_min <= 0.0:
+        raise ValueError(f"tau_min must be finite and positive, got {tau_min}")
+    if tau_max <= tau_min:
+        raise ValueError(
+            f"tau_max ({tau_max}) must exceed tau_min ({tau_min})"
+        )
+    if dimensions < 1:
+        raise ValueError(f"dimensions must be at least 1, got {dimensions}")
+    usable = (tau >= tau_min) & (tau <= tau_max) & (tau > 0.0) & (msd > 0.0)
     if np.count_nonzero(usable) < 2:
-        raise ValueError("need at least two positive finite MSD samples")
-    tau_positive = tau[usable]
-    if np.any(np.diff(tau_positive) <= 0.0):
-        raise ValueError("positive lag times must be strictly increasing")
-    log_tau = np.log(tau_positive)
-    log_msd = np.log(msd[usable])
-    edge_order = 2 if len(log_tau) >= 3 else 1
-    alpha = np.gradient(log_msd, log_tau, edge_order=edge_order)
-    return tau_positive, np.asarray(alpha, dtype=np.float64)
+        raise ValueError(
+            "need at least two positive MSD samples in the lag window "
+            f"[{tau_min}, {tau_max}]"
+        )
+    tau_fit = tau[usable]
+    msd_fit = msd[usable]
+    alpha, log_amplitude = np.polyfit(np.log(tau_fit), np.log(msd_fit), 1)
+    amplitude = float(np.exp(log_amplitude))
+    slope = float(np.dot(tau_fit, msd_fit) / np.dot(tau_fit, tau_fit))
+    return MsdFit(
+        tau_min=float(tau_min),
+        tau_max=float(tau_max),
+        alpha=float(alpha),
+        amplitude=amplitude,
+        dimensions=int(dimensions),
+        slope=slope,
+        diffusion=slope / (2.0 * float(dimensions)),
+        tau=tau_fit,
+        msd=amplitude * tau_fit ** float(alpha),
+        msd_linear=slope * tau_fit,
+    )
 
 
 def _plot_msd(
     tau: NDArray[np.float64],
     msd: NDArray[np.float64],
+    fits: Sequence[MsdFit],
     n_seeds: int,
     n_particles: int,
     label: str,
@@ -106,21 +148,33 @@ def _plot_msd(
         ),
     )
 
-    alpha_tau, alpha = _instantaneous_msd_exponent(tau, msd)
-    alpha_axis = axis.twinx()
-    alpha_axis.plot(
-        alpha_tau,
-        alpha,
-        color=palette[1],
-        lw=1.5,
-        alpha=0.9,
-        label=r"instantaneous $\alpha(\Delta t)$",
-    )
-    alpha_axis.set_ylabel(
-        r"$\alpha(\Delta t)=d\log(\mathrm{MSD})/d\log(\Delta t)$",
-        color=palette[1],
-    )
-    alpha_axis.tick_params(axis="y", colors=palette[1])
+    for index, fit in enumerate(fits):
+        color = palette[(index + 3) % len(palette)]
+        offset = 1.18 * 1.12**index
+        anchor = int(
+            np.argmin(np.abs(np.log(fit.tau) - np.mean(np.log(fit.tau))))
+        )
+        above = fit.msd * offset
+        axis.plot(fit.tau, above, color=color, ls="--", lw=1.8)
+        axis.annotate(
+            rf"$\alpha = {fit.alpha:.3f}$",
+            xy=(fit.tau[anchor], above[anchor]),
+            xytext=(-8, 10),
+            textcoords="offset points",
+            ha="right",
+            color=color,
+        )
+        below = fit.msd_linear / offset
+        axis.plot(fit.tau, below, color=color, ls="-.", lw=1.8)
+        axis.annotate(
+            rf"$D = {fit.diffusion:.4g}$",
+            xy=(fit.tau[anchor], below[anchor]),
+            xytext=(8, -10),
+            textcoords="offset points",
+            ha="left",
+            va="top",
+            color=color,
+        )
 
     axis.set_xscale("log")
     axis.set_yscale("log")
@@ -130,9 +184,7 @@ def _plot_msd(
     axis.set_xlim(float(tau[visible][0]), float(tau[visible][-1]))
     axis.grid(which="major", color="0.85", lw=0.7)
     axis.grid(which="minor", color="0.94", lw=0.5)
-    lines = axis.get_lines() + alpha_axis.get_lines()
-    axis.legend(lines, [str(line.get_label()) for line in lines], frameon=False)
-    sns.despine(ax=axis, right=False)
-    sns.despine(ax=alpha_axis, left=True, right=False)
+    axis.legend(frameon=False)
+    sns.despine(ax=axis)
 
     _save_figure(figure, output)
