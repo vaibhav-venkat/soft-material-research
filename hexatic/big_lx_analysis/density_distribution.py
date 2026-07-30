@@ -185,17 +185,46 @@ def _classify_phases(
     mode_bins = max(128, 2 * density_bins)
     density, edges = np.histogram(values, bins=mode_bins, density=True)
     smoothed = gaussian_filter1d(density, sigma=3.0)
-    peaks, properties = find_peaks(
+    minimum_separation = max(1, mode_bins // 4)
+    interior_peaks, _ = find_peaks(
         smoothed,
-        distance=max(1, mode_bins // 4),
+        distance=minimum_separation,
         prominence=0.02 * float(smoothed.max()),
     )
-    if peaks.size < 2:
-        raise ValueError("Could not identify distinct alpha and beta density peaks")
-    prominences = np.asarray(properties["prominences"])
-    beta_index, alpha_index = np.sort(
-        peaks[np.argsort(prominences)[-2:]]
-    ).astype(np.intp)
+    candidates = [int(index) for index in interior_peaks]
+    if smoothed[0] >= smoothed[1]:
+        candidates.append(0)
+    if smoothed[-1] >= smoothed[-2]:
+        candidates.append(mode_bins - 1)
+
+    pairs = [
+        (left, right)
+        for left in candidates
+        for right in candidates
+        if right - left >= minimum_separation
+    ]
+    if pairs:
+        beta_index, alpha_index = max(
+            pairs,
+            key=lambda pair: (
+                smoothed[pair[0]]
+                * smoothed[pair[1]]
+                * (pair[1] - pair[0])
+            ),
+        )
+    else:
+        # Boundary modes can be monotone after smoothing and therefore fail
+        # the local-maximum test. Pair the global mode with the strongest mode
+        # at least one quarter of the histogram away.
+        primary = int(np.argmax(smoothed))
+        separated = np.flatnonzero(
+            np.abs(np.arange(mode_bins) - primary) >= minimum_separation
+        )
+        if separated.size == 0:
+            raise ValueError("Density range is too narrow to classify two phases")
+        secondary = int(separated[np.argmax(smoothed[separated])])
+        beta_index, alpha_index = sorted((primary, secondary))
+
     valley_index = int(beta_index) + int(
         np.argmin(smoothed[int(beta_index) : int(alpha_index) + 1])
     )
