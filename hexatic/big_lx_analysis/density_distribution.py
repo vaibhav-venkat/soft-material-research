@@ -66,6 +66,9 @@ class PhaseClassification:
     x_alpha: float
 
 
+DEFAULT_JENKS_SAMPLE_SIZE = 4096
+
+
 def _surface_grid(
     lx: float,
     circumference: float,
@@ -194,10 +197,18 @@ def _safe_case_name(case_id: str) -> str:
 
 def _classify_phases(
     values: NDArray[np.float64],
+    sample_size: int,
 ) -> PhaseClassification:
     """Use Jenks natural breaks to split dilute beta from dense alpha."""
+    if values.size > sample_size:
+        rng = np.random.default_rng(0)
+        jenks_values = values[
+            rng.choice(values.size, size=sample_size, replace=False)
+        ]
+    else:
+        jenks_values = values
     breaks = jenkspy.jenks_breaks(
-        cast(Sequence[float], values),
+        cast(Sequence[float], jenks_values),
         n_classes=2,
     )
     threshold = float(breaks[1])
@@ -253,6 +264,15 @@ def main() -> None:
         help="Number of bins in the probability-density histogram",
     )
     parser.add_argument(
+        "--jenks-sample-size",
+        type=int,
+        default=DEFAULT_JENKS_SAMPLE_SIZE,
+        help=(
+            "Maximum pooled bins used to fit the Jenks boundary; all bins are "
+            "still used for phase means and fractions (default: 4096)"
+        ),
+    )
+    parser.add_argument(
         "--frame-start",
         type=int,
         default=700,
@@ -272,6 +292,8 @@ def main() -> None:
 
     if args.density_bins < 1:
         raise ValueError("--density-bins must be positive")
+    if args.jenks_sample_size < 2:
+        raise ValueError("--jenks-sample-size must be at least 2")
     if args.frame_start < 0:
         raise ValueError("--frame-start must be non-negative")
     if args.frame_stride < 1:
@@ -371,7 +393,7 @@ def main() -> None:
         assert case_lx is not None
         assert case_circumference is not None
         values = np.concatenate(all_values)
-        phases = _classify_phases(values)
+        phases = _classify_phases(values, args.jenks_sample_size)
         particle_area = np.pi * (args.particle_diameter / 2.0) ** 2
         rho_2d_alpha = phases.mean_alpha / particle_area
         rho_2d_beta = phases.mean_beta / particle_area
