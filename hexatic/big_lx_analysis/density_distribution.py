@@ -40,6 +40,9 @@ from .surface_area import (
     _recompute_shell_mask_from_coords,
 )
 
+DEFAULT_DILUTE_DENSITY = 0.142
+DEFAULT_DENSE_DENSITY = 0.88295
+
 
 @dataclass(frozen=True)
 class FilmDensitySamples:
@@ -207,6 +210,18 @@ def main() -> None:
         help="Number of bins in the probability-density histogram",
     )
     parser.add_argument(
+        "--dilute-density",
+        type=float,
+        default=DEFAULT_DILUTE_DENSITY,
+        help="Dilute coexistence density for the lever rule (default: 0.142)",
+    )
+    parser.add_argument(
+        "--dense-density",
+        type=float,
+        default=DEFAULT_DENSE_DENSITY,
+        help="Dense coexistence density for the lever rule (default: 0.88295)",
+    )
+    parser.add_argument(
         "--frame-start",
         type=int,
         default=700,
@@ -232,6 +247,14 @@ def main() -> None:
         raise ValueError("--frame-stride must be positive")
     if args.particle_diameter <= 0.0:
         raise ValueError("--particle-diameter must be positive")
+    if (
+        not np.isfinite(args.dilute_density)
+        or not np.isfinite(args.dense_density)
+        or args.dilute_density >= args.dense_density
+    ):
+        raise ValueError(
+            "--dilute-density and --dense-density must be finite and ordered"
+        )
     requested_dx = (
         5.0 * args.particle_diameter if args.dx is None else args.dx
     )
@@ -310,6 +333,12 @@ def main() -> None:
 
         assert grid is not None
         values = np.concatenate(all_values)
+        mean_density = float(values.mean())
+        dense_fraction = (
+            (mean_density - args.dilute_density)
+            / (args.dense_density - args.dilute_density)
+        )
+        dilute_fraction = 1.0 - dense_fraction
         output = args.output_dir / f"{_safe_case_name(case_id)}_density_distribution.svg"
         if output.exists() and not args.overwrite:
             raise FileExistsError(f"{output} exists; pass --overwrite to replace")
@@ -323,6 +352,27 @@ def main() -> None:
             fill=True,
             alpha=0.35,
             ax=ax,
+        )
+        ax.axvline(
+            args.dilute_density,
+            color="tab:blue",
+            linestyle="--",
+            linewidth=1.2,
+            label=rf"$\phi_g={args.dilute_density:.3g}$",
+        )
+        ax.axvline(
+            args.dense_density,
+            color="tab:red",
+            linestyle="--",
+            linewidth=1.2,
+            label=rf"$\phi_l={args.dense_density:.3g}$",
+        )
+        ax.axvline(
+            mean_density,
+            color="black",
+            linestyle=":",
+            linewidth=1.4,
+            label=rf"$\langle\phi\rangle={mean_density:.3g}$",
         )
         replicate_suffix = (
             f", {len(case_replicates)} replicates"
@@ -344,7 +394,18 @@ def main() -> None:
             va="top",
             fontsize="small",
         )
+        ax.text(
+            0.98,
+            0.87,
+            rf"Lever rule: $f_l={dense_fraction:.3f}$, "
+            rf"$f_g={dilute_fraction:.3f}$",
+            transform=ax.transAxes,
+            ha="right",
+            va="top",
+            fontsize="small",
+        )
         ax.grid(axis="y", color="0.9", lw=0.7)
+        ax.legend(frameon=False, loc="upper left")
         fig.savefig(
             output,
             format="svg",
@@ -352,6 +413,17 @@ def main() -> None:
             metadata={"Creator": "hexatic.big_lx_analysis.density_distribution"},
         )
         plt.close(fig)
+        validity = (
+            ""
+            if 0.0 <= dense_fraction <= 1.0
+            else " (mean lies outside the coexistence interval)"
+        )
+        print(
+            f"{case_id}: mean_phi={mean_density:.6g}, "
+            f"lever_dense_fraction={dense_fraction:.6g}, "
+            f"lever_dilute_fraction={dilute_fraction:.6g}{validity}",
+            flush=True,
+        )
         print(f"wrote {output}", flush=True)
 
 
