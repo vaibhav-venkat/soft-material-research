@@ -47,6 +47,8 @@ class FilmDensitySamples:
     """Local film area fractions and the grid used to obtain them."""
 
     values: NDArray[np.float64]
+    bulk_counts: NDArray[np.float64]
+    n_particles: int
     nx: int
     ntheta: int
     dx: float
@@ -99,11 +101,19 @@ def _load_film_density_samples(
     particle_area = np.pi * (particle_diameter / 2.0) ** 2
     bin_area = dx * arc_width
     samples: list[NDArray[np.float64]] = []
+    bulk_counts: list[float] = []
+    n_particles: int | None = None
     global_frame = 0
 
     for path in replicate.shard_files:
         with safe_open(path, framework="np") as tensors:
             coords = tensors.get_tensor("coords")
+            if n_particles is None:
+                n_particles = int(coords.shape[1])
+            elif coords.shape[1] != n_particles:
+                raise ValueError(
+                    f"Particle count changes between shards for {replicate.case_id}"
+                )
             keys = tensors.keys()
             stored_mask = (
                 tensors.get_tensor("hexatic_shell_mask")
@@ -139,6 +149,7 @@ def _load_film_density_samples(
                     & np.isfinite(frame_coords[:, 0])
                     & np.isfinite(frame_coords[:, 1])
                 )
+                bulk_counts.append(float(np.count_nonzero(~mask)))
 
                 # Modulo makes both periodic seams independent of the stored
                 # coordinate convention (centered or [0, period)).
@@ -157,8 +168,11 @@ def _load_film_density_samples(
 
     if not samples:
         raise ValueError(f"No frames selected for {replicate.case_id}")
+    assert n_particles is not None
     return FilmDensitySamples(
         values=np.concatenate(samples),
+        bulk_counts=np.asarray(bulk_counts, dtype=np.float64),
+        n_particles=n_particles,
         nx=nx,
         ntheta=ntheta,
         dx=dx,
@@ -344,7 +358,11 @@ def main() -> None:
     sns = _style()
     for case_id, case_replicates in sorted(grouped.items()):
         all_values: list[NDArray[np.float64]] = []
+        all_bulk_counts: list[NDArray[np.float64]] = []
         grid: FilmDensitySamples | None = None
+        case_n_particles: int | None = None
+        case_lx: float | None = None
+        case_circumference: float | None = None
         for replicate in case_replicates:
             lx = _load_static_lx(replicate.static_file)
             circumference = _load_circumference(replicate.manifest)
@@ -377,12 +395,51 @@ def main() -> None:
                 or not np.isclose(result.arc_width, grid.arc_width)
             ):
                 raise ValueError(f"Replicates for {case_id} have different grids")
+            if case_n_particles is not None and result.n_particles != case_n_particles:
+                raise ValueError(
+                    f"Replicates for {case_id} have different particle counts"
+                )
             grid = result
+            case_n_particles = result.n_particles
+            case_lx = lx
+            case_circumference = circumference
             all_values.append(result.values)
+            all_bulk_counts.append(result.bulk_counts)
 
         assert grid is not None
+        assert case_n_particles is not None
+        assert case_lx is not None
+        assert case_circumference is not None
         values = np.concatenate(all_values)
         phases = _classify_phases(values, args.density_bins)
+        particle_area = np.pi * (args.particle_diameter / 2.0) ** 2
+        rho_2d_alpha = phases.rho_alpha / particle_area
+        rho_2d_beta = phases.rho_beta / particle_area
+        surface_area = case_circumference * case_lx
+        cylinder_radius = case_circumference / (2.0 * np.pi)
+        bulk_radius = cylinder_radius - args.shell_delta
+        if bulk_radius <= 0.0:
+            raise ValueError(
+                f"Shell cutoff leaves no interior volume for {case_id}"
+            )
+        bulk_volume = np.pi * bulk_radius**2 * case_lx
+        inferred_film_count = surface_area * (
+            rho_2d_alpha * phases.x_alpha
+            + rho_2d_beta * (1.0 - phases.x_alpha)
+        )
+        rho_3d_gamma_conservation = (
+            case_n_particles - inferred_film_count
+        ) / bulk_volume
+        rho_3d_gamma_measured = (
+            float(np.concatenate(all_bulk_counts).mean()) / bulk_volume
+        )
+        relative_gamma_error = (
+            (rho_3d_gamma_conservation - rho_3d_gamma_measured)
+            / rho_3d_gamma_measured
+            if rho_3d_gamma_measured != 0.0
+            else np.nan
+        )
+        diameter_cubed = args.particle_diameter**3
         output = args.output_dir / f"{_safe_case_name(case_id)}_density_distribution.svg"
         if output.exists() and not args.overwrite:
             raise FileExistsError(f"{output} exists; pass --overwrite to replace")
@@ -402,14 +459,14 @@ def main() -> None:
             color="tab:blue",
             linestyle="--",
             linewidth=1.2,
-            label=rf"$\rho^{{2D}}_\beta={phases.rho_beta:.3g}$ (dilute)",
+            label=rf"$\phi_\beta={phases.rho_beta:.3g}$ (dilute)",
         )
         ax.axvline(
             phases.rho_alpha,
             color="tab:red",
             linestyle="--",
             linewidth=1.2,
-            label=rf"$\rho^{{2D}}_\alpha={phases.rho_alpha:.3g}$ (dense)",
+            label=rf"$\phi_\alpha={phases.rho_alpha:.3g}$ (dense)",
         )
         ax.axvline(
             phases.threshold,
@@ -447,6 +504,20 @@ def main() -> None:
             va="top",
             fontsize="small",
         )
+        ax.text(
+            0.98,
+            0.79,
+            rf"$\rho^{{3D}}_{{\gamma,\mathrm{{cons}}}}D^3="
+            rf"{rho_3d_gamma_conservation * diameter_cubed:.3g}$, "
+            rf"$\rho^{{3D}}_{{\gamma,\mathrm{{count}}}}D^3="
+            rf"{rho_3d_gamma_measured * diameter_cubed:.3g}$"
+            "\n"
+            rf"relative error $={relative_gamma_error:.2%}$",
+            transform=ax.transAxes,
+            ha="right",
+            va="top",
+            fontsize="small",
+        )
         ax.grid(axis="y", color="0.9", lw=0.7)
         ax.legend(frameon=False, loc="upper left")
         fig.savefig(
@@ -457,10 +528,17 @@ def main() -> None:
         )
         plt.close(fig)
         print(
-            f"{case_id}: rho_2d_alpha={phases.rho_alpha:.6g}, "
-            f"rho_2d_beta={phases.rho_beta:.6g}, "
+            f"{case_id}: phi_alpha={phases.rho_alpha:.6g}, "
+            f"phi_beta={phases.rho_beta:.6g}, "
+            f"rho_2d_alpha_D2={rho_2d_alpha * args.particle_diameter**2:.6g}, "
+            f"rho_2d_beta_D2={rho_2d_beta * args.particle_diameter**2:.6g}, "
             f"classification_threshold={phases.threshold:.6g}, "
-            f"x_alpha={phases.x_alpha:.6g}",
+            f"x_alpha={phases.x_alpha:.6g}, "
+            f"rho_3d_gamma_conservation_D3="
+            f"{rho_3d_gamma_conservation * diameter_cubed:.6g}, "
+            f"rho_3d_gamma_measured_D3="
+            f"{rho_3d_gamma_measured * diameter_cubed:.6g}, "
+            f"rho_3d_gamma_relative_error={relative_gamma_error:.6g}",
             flush=True,
         )
         print(f"wrote {output}", flush=True)
