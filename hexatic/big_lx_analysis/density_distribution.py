@@ -30,6 +30,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 from numpy.typing import NDArray
 from safetensors import safe_open
+from scipy.ndimage import gaussian_filter1d
+from scipy.signal import find_peaks
 
 from hexatic.constants import cylinder
 
@@ -40,10 +42,6 @@ from .surface_area import (
     _recompute_shell_mask_from_coords,
 )
 
-DEFAULT_DILUTE_DENSITY = 0.142
-DEFAULT_DENSE_DENSITY = 0.88295
-
-
 @dataclass(frozen=True)
 class FilmDensitySamples:
     """Local film area fractions and the grid used to obtain them."""
@@ -53,6 +51,16 @@ class FilmDensitySamples:
     ntheta: int
     dx: float
     arc_width: float
+
+
+@dataclass(frozen=True)
+class PhaseClassification:
+    """Density modes and the equal-area-bin phase classification."""
+
+    rho_beta: float
+    rho_alpha: float
+    threshold: float
+    x_alpha: float
 
 
 def _surface_grid(
@@ -169,6 +177,38 @@ def _safe_case_name(case_id: str) -> str:
     return "".join(c if c.isalnum() or c in "-_." else "_" for c in case_id)
 
 
+def _classify_phases(
+    values: NDArray[np.float64],
+    density_bins: int,
+) -> PhaseClassification:
+    """Find the two modes and classify bins at the valley between them."""
+    mode_bins = max(128, 2 * density_bins)
+    density, edges = np.histogram(values, bins=mode_bins, density=True)
+    smoothed = gaussian_filter1d(density, sigma=3.0)
+    peaks, properties = find_peaks(
+        smoothed,
+        distance=max(1, mode_bins // 4),
+        prominence=0.02 * float(smoothed.max()),
+    )
+    if peaks.size < 2:
+        raise ValueError("Could not identify distinct alpha and beta density peaks")
+    prominences = np.asarray(properties["prominences"])
+    beta_index, alpha_index = np.sort(
+        peaks[np.argsort(prominences)[-2:]]
+    ).astype(np.intp)
+    valley_index = int(beta_index) + int(
+        np.argmin(smoothed[int(beta_index) : int(alpha_index) + 1])
+    )
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    threshold = float(centers[valley_index])
+    return PhaseClassification(
+        rho_beta=float(centers[beta_index]),
+        rho_alpha=float(centers[alpha_index]),
+        threshold=threshold,
+        x_alpha=float(np.count_nonzero(values > threshold) / values.size),
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", action="append", type=Path, default=[])
@@ -210,18 +250,6 @@ def main() -> None:
         help="Number of bins in the probability-density histogram",
     )
     parser.add_argument(
-        "--dilute-density",
-        type=float,
-        default=DEFAULT_DILUTE_DENSITY,
-        help="Dilute coexistence density for the lever rule (default: 0.142)",
-    )
-    parser.add_argument(
-        "--dense-density",
-        type=float,
-        default=DEFAULT_DENSE_DENSITY,
-        help="Dense coexistence density for the lever rule (default: 0.88295)",
-    )
-    parser.add_argument(
         "--frame-start",
         type=int,
         default=700,
@@ -247,14 +275,6 @@ def main() -> None:
         raise ValueError("--frame-stride must be positive")
     if args.particle_diameter <= 0.0:
         raise ValueError("--particle-diameter must be positive")
-    if (
-        not np.isfinite(args.dilute_density)
-        or not np.isfinite(args.dense_density)
-        or args.dilute_density >= args.dense_density
-    ):
-        raise ValueError(
-            "--dilute-density and --dense-density must be finite and ordered"
-        )
     requested_dx = (
         5.0 * args.particle_diameter if args.dx is None else args.dx
     )
@@ -333,12 +353,7 @@ def main() -> None:
 
         assert grid is not None
         values = np.concatenate(all_values)
-        mean_density = float(values.mean())
-        dense_fraction = (
-            (mean_density - args.dilute_density)
-            / (args.dense_density - args.dilute_density)
-        )
-        dilute_fraction = 1.0 - dense_fraction
+        phases = _classify_phases(values, args.density_bins)
         output = args.output_dir / f"{_safe_case_name(case_id)}_density_distribution.svg"
         if output.exists() and not args.overwrite:
             raise FileExistsError(f"{output} exists; pass --overwrite to replace")
@@ -354,25 +369,25 @@ def main() -> None:
             ax=ax,
         )
         ax.axvline(
-            args.dilute_density,
+            phases.rho_beta,
             color="tab:blue",
             linestyle="--",
             linewidth=1.2,
-            label=rf"$\phi_g={args.dilute_density:.3g}$",
+            label=rf"$\rho^{{2D}}_\beta={phases.rho_beta:.3g}$ (dilute)",
         )
         ax.axvline(
-            args.dense_density,
+            phases.rho_alpha,
             color="tab:red",
             linestyle="--",
             linewidth=1.2,
-            label=rf"$\phi_l={args.dense_density:.3g}$",
+            label=rf"$\rho^{{2D}}_\alpha={phases.rho_alpha:.3g}$ (dense)",
         )
         ax.axvline(
-            mean_density,
-            color="black",
+            phases.threshold,
+            color="0.25",
             linestyle=":",
-            linewidth=1.4,
-            label=rf"$\langle\phi\rangle={mean_density:.3g}$",
+            linewidth=1.2,
+            label=rf"classification boundary $={phases.threshold:.3g}$",
         )
         replicate_suffix = (
             f", {len(case_replicates)} replicates"
@@ -397,8 +412,7 @@ def main() -> None:
         ax.text(
             0.98,
             0.87,
-            rf"Lever rule: $f_l={dense_fraction:.3f}$, "
-            rf"$f_g={dilute_fraction:.3f}$",
+            rf"$x_\alpha={phases.x_alpha:.3f}$",
             transform=ax.transAxes,
             ha="right",
             va="top",
@@ -413,15 +427,11 @@ def main() -> None:
             metadata={"Creator": "hexatic.big_lx_analysis.density_distribution"},
         )
         plt.close(fig)
-        validity = (
-            ""
-            if 0.0 <= dense_fraction <= 1.0
-            else " (mean lies outside the coexistence interval)"
-        )
         print(
-            f"{case_id}: mean_phi={mean_density:.6g}, "
-            f"lever_dense_fraction={dense_fraction:.6g}, "
-            f"lever_dilute_fraction={dilute_fraction:.6g}{validity}",
+            f"{case_id}: rho_2d_alpha={phases.rho_alpha:.6g}, "
+            f"rho_2d_beta={phases.rho_beta:.6g}, "
+            f"classification_threshold={phases.threshold:.6g}, "
+            f"x_alpha={phases.x_alpha:.6g}",
             flush=True,
         )
         print(f"wrote {output}", flush=True)
