@@ -1,72 +1,54 @@
-"""Plot film-density distributions for each big-Lx cylinder case.
+"""Compute surface-excess density and particle-number closure for big-Lx cases.
 
-Example
--------
-pixi run python -m hexatic.big_lx_analysis.density_distribution \
-    --input-dir /mnt/drive3/vaibhav_data/big_lx_production_run3 \
-    --input-dir /mnt/drive3/vaibhav_data/big_lx_production_run4 \
-    --input-dir /mnt/drive3/vaibhav_data/big_lx_production_run5 \
-    --circ "60.5D" \
-    --overwrite
+This command first calls :mod:`rho_gamma_finding` to ensure that every case
+has a cached ``rho_gamma`` and film cutoff.  It then implements PLAN.md steps
+2 and 3 on equal-area ``(x, theta)`` bins:
 
-The cylindrical film is unwrapped onto ``(x, R theta)``.  Particles in the
-interior are excluded using ``hexatic_shell_mask`` (or the same radial
-fallback as :mod:`surface_area`).  The reported local density is the particle
-area fraction in each surface bin,
+``rho_s,i = (<N_i> - rho_gamma * V_i) / A_i``.
 
-``phi = N_bin * (pi D**2 / 4) / (R dx dtheta)``.
+For each case, the only plot compares the measured particle number with
+``V * rho_gamma + A_s * rho_surface`` and reports the closure error.
 """
 
 from __future__ import annotations
 
 import argparse
-from collections.abc import Sequence
 from collections import defaultdict
 from dataclasses import dataclass
+import json
 from pathlib import Path
-from typing import cast
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import jenkspy
 import numpy as np
 from numpy.typing import NDArray
 from safetensors import safe_open
 
 from hexatic.constants import cylinder
 
-from .run_dynamics import Replicate, _collect_manifests, _load_replicate, _style
-from .surface_area import (
-    _load_circumference,
-    _load_static_lx,
-    _recompute_shell_mask_from_coords,
+from .rho_gamma_finding import (
+    RhoGammaOptions,
+    load_radius,
+    safe_case_name,
+    select_replicates,
+    write_rho_gamma_summaries,
 )
+from .run_dynamics import Replicate, _style
+from .surface_area import _load_circumference, _load_static_lx
+
 
 @dataclass(frozen=True)
-class FilmDensitySamples:
-    """Local film area fractions and the grid used to obtain them."""
-
-    values: NDArray[np.float64]
-    bulk_counts: NDArray[np.float64]
+class SurfaceGrid:
+    counts: NDArray[np.float64]
+    n_frames: int
     n_particles: int
     nx: int
     ntheta: int
     dx: float
-    arc_width: float
-
-
-@dataclass(frozen=True)
-class PhaseClassification:
-    """Jenks two-class film-density classification."""
-
-    mean_beta: float
-    mean_alpha: float
-    threshold: float
-    x_alpha: float
-
-
-DEFAULT_JENKS_SAMPLE_SIZE = 4096
+    dtheta: float
+    lx: float
+    radius: float
 
 
 def _surface_grid(
@@ -75,40 +57,39 @@ def _surface_grid(
     requested_dx: float,
     requested_arc_width: float,
 ) -> tuple[int, int, float, float]:
-    """Return an integer periodic grid with widths close to those requested."""
     if lx <= 0.0 or circumference <= 0.0:
         raise ValueError("Cylinder dimensions must be positive")
     if requested_dx <= 0.0 or requested_arc_width <= 0.0:
         raise ValueError("Surface-bin widths must be positive")
     nx = max(1, int(np.rint(lx / requested_dx)))
     ntheta = max(1, int(np.rint(circumference / requested_arc_width)))
-    return nx, ntheta, lx / nx, circumference / ntheta
+    return nx, ntheta, lx / nx, 2.0 * np.pi / ntheta
 
 
-def _load_film_density_samples(
+def _load_surface_grid(
     replicate: Replicate,
     *,
-    lx: float,
-    circumference: float,
-    cylinder_radius: float | None,
-    shell_delta: float,
-    particle_diameter: float,
+    radial_cutoff: float,
     requested_dx: float,
     requested_arc_width: float,
     frame_start: int,
     frame_stride: int,
-) -> FilmDensitySamples:
-    """Compute local surface packing fractions for one replicate."""
-    nx, ntheta, dx, arc_width = _surface_grid(
+) -> SurfaceGrid:
+    lx = _load_static_lx(replicate.static_file)
+    circumference = _load_circumference(replicate.manifest)
+    radius = load_radius(replicate.static_file, circumference)
+    if not 0.0 < radial_cutoff < radius:
+        raise ValueError(
+            f"rho-gamma cutoff must lie inside the cylinder for "
+            f"{replicate.case_id}: cutoff={radial_cutoff}, R={radius}"
+        )
+    nx, ntheta, dx, dtheta = _surface_grid(
         lx, circumference, requested_dx, requested_arc_width
     )
-    particle_area = np.pi * (particle_diameter / 2.0) ** 2
-    bin_area = dx * arc_width
-    samples: list[NDArray[np.float64]] = []
-    bulk_counts: list[float] = []
+    counts = np.zeros(nx * ntheta, dtype=np.float64)
+    n_frames = 0
     n_particles: int | None = None
     global_frame = 0
-
     for path in replicate.shard_files:
         with safe_open(path, framework="np") as tensors:
             coords = tensors.get_tensor("coords")
@@ -118,120 +99,126 @@ def _load_film_density_samples(
                 raise ValueError(
                     f"Particle count changes between shards for {replicate.case_id}"
                 )
-            keys = tensors.keys()
-            stored_mask = (
-                tensors.get_tensor("hexatic_shell_mask")
-                if "hexatic_shell_mask" in keys
-                else None
-            )
-            if stored_mask is None and cylinder_radius is None:
-                raise KeyError(
-                    "hexatic_shell_mask not found and static radius is absent; "
-                    "cannot exclude interior particles"
-            )
-
             for local_frame in range(coords.shape[0]):
-                use_frame = (
+                selected = (
                     global_frame >= frame_start
                     and (global_frame - frame_start) % frame_stride == 0
                 )
                 global_frame += 1
-                if not use_frame:
+                if not selected:
                     continue
-                frame_coords = coords[local_frame]
-                mask = (
-                    np.asarray(stored_mask[local_frame], dtype=np.bool_)
-                    if stored_mask is not None
-                    else _recompute_shell_mask_from_coords(
-                        frame_coords,
-                        _require_radius(cylinder_radius),
-                        shell_delta,
-                    )
+                frame = coords[local_frame]
+                included = (
+                    np.isfinite(frame[:, 0])
+                    & np.isfinite(frame[:, 1])
+                    & np.isfinite(frame[:, 2])
+                    & (frame[:, 2] >= radial_cutoff)
                 )
-                finite = (
-                    mask
-                    & np.isfinite(frame_coords[:, 0])
-                    & np.isfinite(frame_coords[:, 1])
-                )
-                bulk_counts.append(float(np.count_nonzero(~mask)))
-
-                # Modulo makes both periodic seams independent of the stored
-                # coordinate convention (centered or [0, period)).
-                x = np.mod(frame_coords[finite, 0] + 0.5 * lx, lx)
-                theta = np.mod(frame_coords[finite, 1], 2.0 * np.pi)
+                x = np.mod(frame[included, 0] + 0.5 * lx, lx)
+                theta = np.mod(frame[included, 1], 2.0 * np.pi)
                 x_index = np.minimum((x / dx).astype(np.intp), nx - 1)
                 theta_index = np.minimum(
-                    (theta * ntheta / (2.0 * np.pi)).astype(np.intp),
-                    ntheta - 1,
+                    (theta / dtheta).astype(np.intp), ntheta - 1
                 )
-                counts = np.bincount(
+                counts += np.bincount(
                     x_index * ntheta + theta_index,
                     minlength=nx * ntheta,
                 )
-                samples.append(counts.astype(np.float64) * particle_area / bin_area)
-
-    if not samples:
+                n_frames += 1
+    if n_frames == 0 or n_particles is None:
         raise ValueError(f"No frames selected for {replicate.case_id}")
-    assert n_particles is not None
-    return FilmDensitySamples(
-        values=np.concatenate(samples),
-        bulk_counts=np.asarray(bulk_counts, dtype=np.float64),
-        n_particles=n_particles,
-        nx=nx,
-        ntheta=ntheta,
-        dx=dx,
-        arc_width=arc_width,
+    return SurfaceGrid(
+        counts.reshape(nx, ntheta),
+        n_frames,
+        n_particles,
+        nx,
+        ntheta,
+        dx,
+        dtheta,
+        lx,
+        radius,
     )
 
 
-def _require_radius(radius: float | None) -> float:
-    """Narrow an optional radius after the missing-mask validation."""
-    if radius is None:
-        raise ValueError("Cylinder radius is required to reconstruct the shell mask")
-    return radius
-
-
-def _safe_case_name(case_id: str) -> str:
-    return "".join(c if c.isalnum() or c in "-_." else "_" for c in case_id)
-
-
-def _classify_phases(
-    values: NDArray[np.float64],
-    sample_size: int,
-) -> PhaseClassification:
-    """Use Jenks natural breaks to split dilute beta from dense alpha."""
-    if values.size > sample_size:
-        rng = np.random.default_rng(0)
-        jenks_values = values[
-            rng.choice(values.size, size=sample_size, replace=False)
-        ]
-    else:
-        jenks_values = values
-    breaks = jenkspy.jenks_breaks(
-        cast(Sequence[float], jenks_values),
-        n_classes=2,
-    )
-    threshold = float(breaks[1])
-    alpha_mask = values > threshold
-    if not np.any(alpha_mask) or np.all(alpha_mask):
-        raise ValueError("Jenks boundary does not separate alpha and beta bins")
-    return PhaseClassification(
-        mean_beta=float(values[~alpha_mask].mean()),
-        mean_alpha=float(values[alpha_mask].mean()),
-        threshold=threshold,
-        x_alpha=float(np.count_nonzero(alpha_mask) / values.size),
+def _combine_surface_grids(
+    case_id: str, grids: list[SurfaceGrid]
+) -> SurfaceGrid:
+    reference = grids[0]
+    for grid in grids[1:]:
+        if (
+            grid.nx != reference.nx
+            or grid.ntheta != reference.ntheta
+            or not np.isclose(grid.dx, reference.dx)
+            or not np.isclose(grid.dtheta, reference.dtheta)
+            or not np.isclose(grid.lx, reference.lx)
+            or not np.isclose(grid.radius, reference.radius)
+        ):
+            raise ValueError(f"Replicates for {case_id} have different grids")
+        if grid.n_particles != reference.n_particles:
+            raise ValueError(
+                f"Replicates for {case_id} have different particle counts"
+            )
+    return SurfaceGrid(
+        counts=np.sum([grid.counts for grid in grids], axis=0),
+        n_frames=sum(grid.n_frames for grid in grids),
+        n_particles=reference.n_particles,
+        nx=reference.nx,
+        ntheta=reference.ntheta,
+        dx=reference.dx,
+        dtheta=reference.dtheta,
+        lx=reference.lx,
+        radius=reference.radius,
     )
 
 
-def main() -> None:
+def _plot_number_closure(
+    case_label: str,
+    actual: float,
+    reconstructed: float,
+    relative_error: float,
+    output: Path,
+) -> None:
+    sns = _style()
+    figure, axis = plt.subplots(figsize=(6.4, 4.8), constrained_layout=True)
+    colors = sns.color_palette("colorblind", n_colors=2)
+    bars = axis.bar(
+        ["Measured $N$", r"$V\rho_\gamma+A_s\rho_{\rm surface}$"],
+        [actual, reconstructed],
+        color=colors,
+        width=0.62,
+    )
+    axis.bar_label(bars, fmt="%.6g", padding=4)
+    axis.set(
+        title=case_label,
+        ylabel="Particle number",
+    )
+    axis.text(
+        0.98,
+        0.95,
+        f"signed relative error = {100.0 * relative_error:.4g}%",
+        transform=axis.transAxes,
+        ha="right",
+        va="top",
+        fontsize="small",
+    )
+    axis.grid(axis="y", color="0.9", linewidth=0.7)
+    sns.despine(ax=axis)
+    figure.savefig(
+        output,
+        format="svg",
+        bbox_inches="tight",
+        metadata={"Creator": "hexatic.big_lx_analysis.density_distribution"},
+    )
+    plt.close(figure)
+
+
+def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", action="append", type=Path, default=[])
     parser.add_argument("--input-dir", action="append", type=Path, default=[])
     parser.add_argument("--case", action="append", default=[])
     parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=Path("density_distribution_plots"),
+        "--output-dir", type=Path, default=Path("density_distribution_plots")
     )
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument(
@@ -239,67 +226,28 @@ def main() -> None:
         type=float,
         default=float(cylinder.PARTICLE_DIAMETER),
     )
+    parser.add_argument("--dx", type=float, default=None)
+    parser.add_argument("--arc-bin-width", type=float, default=None)
+    parser.add_argument("--radial-bins", type=int, default=100)
+    parser.add_argument("--frame-start", type=int, default=700)
+    parser.add_argument("--frame-stride", type=int, default=1)
+    parser.add_argument("--rho-gamma-min-r", type=float, default=8.0)
+    parser.add_argument("--rho-gamma-smoothing-window", type=int, default=5)
     parser.add_argument(
-        "--shell-delta",
-        type=float,
-        default=float(cylinder.SHELL_DELTA),
-        help="Fallback shell thickness when a stored shell mask is unavailable",
+        "--rho-gamma-prominence-fraction", type=float, default=0.10
     )
-    parser.add_argument(
-        "--dx",
-        type=float,
-        default=None,
-        help="Requested axial bin width (default: 5 particle diameters)",
-    )
-    parser.add_argument(
-        "--arc-bin-width",
-        type=float,
-        default=None,
-        help="Requested R*dtheta bin width (default: 5 particle diameters)",
-    )
-    parser.add_argument(
-        "--density-bins",
-        type=int,
-        default=80,
-        help="Number of bins in the probability-density histogram",
-    )
-    parser.add_argument(
-        "--jenks-sample-size",
-        type=int,
-        default=DEFAULT_JENKS_SAMPLE_SIZE,
-        help=(
-            "Maximum pooled bins used to fit the Jenks boundary; all bins are "
-            "still used for phase means and fractions (default: 4096)"
-        ),
-    )
-    parser.add_argument(
-        "--frame-start",
-        type=int,
-        default=700,
-        help="First zero-based frame index to include (default: 700)",
-    )
-    parser.add_argument(
-        "--frame-stride",
-        type=int,
-        default=1,
-        help="Use every Nth frame (default: 1)",
-    )
-    parser.add_argument(
-        "--circ",
-        help='Only include cases with a given circumference, e.g. "60.5D"',
-    )
-    args = parser.parse_args()
+    parser.add_argument("--circ")
+    return parser.parse_args()
 
-    if args.density_bins < 1:
-        raise ValueError("--density-bins must be positive")
-    if args.jenks_sample_size < 2:
-        raise ValueError("--jenks-sample-size must be at least 2")
+
+def main() -> None:
+    args = _parse_args()
     if args.frame_start < 0:
         raise ValueError("--frame-start must be non-negative")
     if args.frame_stride < 1:
         raise ValueError("--frame-stride must be positive")
-    if args.particle_diameter <= 0.0:
-        raise ValueError("--particle-diameter must be positive")
+    if not np.isfinite(args.particle_diameter) or args.particle_diameter <= 0:
+        raise ValueError("--particle-diameter must be finite and positive")
     requested_dx = (
         5.0 * args.particle_diameter if args.dx is None else args.dx
     )
@@ -308,222 +256,120 @@ def main() -> None:
         if args.arc_bin_width is None
         else args.arc_bin_width
     )
+    if requested_dx <= 0.0 or requested_arc_width <= 0.0:
+        raise ValueError("Surface-bin widths must be positive")
 
-    manifests = _collect_manifests(args.manifest, args.input_dir)
-    replicates = [_load_replicate(path) for path in manifests]
-    if args.case:
-        selected = set(args.case)
-        replicates = [r for r in replicates if r.case_id in selected]
-        missing = selected - {r.case_id for r in replicates}
-        if missing:
-            raise ValueError(f"Requested cases not found: {sorted(missing)}")
-    if args.circ:
-        token = args.circ.strip().upper()
-        if token.endswith("D"):
-            token = token[:-1]
-        try:
-            circumference_value = float(token)
-        except ValueError as error:
-            raise ValueError('--circ must look like "60.5D"') from error
-        prefix = (
-            f"circ_{format(circumference_value, '.15g').replace('.', '_')}D_"
-        )
-        replicates = [r for r in replicates if r.case_id.startswith(prefix)]
-    if not replicates:
-        raise ValueError("No matching replicates found")
+    replicates = select_replicates(
+        args.manifest, args.input_dir, args.case, args.circ
+    )
+    rho_options = RhoGammaOptions(
+        radial_bins=args.radial_bins,
+        particle_diameter=args.particle_diameter,
+        frame_start=args.frame_start,
+        frame_stride=args.frame_stride,
+        minimum_r=args.rho_gamma_min_r,
+        smoothing_window=args.rho_gamma_smoothing_window,
+        minimum_prominence_fraction=args.rho_gamma_prominence_fraction,
+    )
+    rho_paths = write_rho_gamma_summaries(
+        replicates,
+        args.output_dir,
+        rho_options,
+        overwrite=args.overwrite,
+    )
 
     grouped: dict[str, list[Replicate]] = defaultdict(list)
     for replicate in replicates:
         grouped[replicate.case_id].append(replicate)
-
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    sns = _style()
     for case_id, case_replicates in sorted(grouped.items()):
-        all_values: list[NDArray[np.float64]] = []
-        all_bulk_counts: list[NDArray[np.float64]] = []
-        grid: FilmDensitySamples | None = None
-        case_n_particles: int | None = None
-        case_lx: float | None = None
-        case_circumference: float | None = None
-        for replicate in case_replicates:
-            lx = _load_static_lx(replicate.static_file)
-            circumference = _load_circumference(replicate.manifest)
-            radius: float | None = None
-            with safe_open(replicate.static_file, framework="np") as tensors:
-                if "radius" in tensors.keys():
-                    radius = float(tensors.get_tensor("radius").item())
-            if radius is not None and not np.isclose(
-                circumference, 2.0 * np.pi * radius, rtol=1e-6, atol=1e-8
-            ):
-                raise ValueError(
-                    f"Manifest circumference and static radius disagree for {case_id}"
-                )
-            result = _load_film_density_samples(
+        rho_payload = json.loads(rho_paths[case_id].read_text())
+        rho_gamma = float(rho_payload["rho_gamma"])
+        radial_cutoff = float(rho_payload["rho_gamma_cutoff_r"])
+        grids = [
+            _load_surface_grid(
                 replicate,
-                lx=lx,
-                circumference=circumference,
-                cylinder_radius=radius,
-                shell_delta=args.shell_delta,
-                particle_diameter=args.particle_diameter,
+                radial_cutoff=radial_cutoff,
                 requested_dx=requested_dx,
                 requested_arc_width=requested_arc_width,
                 frame_start=args.frame_start,
                 frame_stride=args.frame_stride,
             )
-            if grid is not None and (
-                result.nx != grid.nx
-                or result.ntheta != grid.ntheta
-                or not np.isclose(result.dx, grid.dx)
-                or not np.isclose(result.arc_width, grid.arc_width)
-            ):
-                raise ValueError(f"Replicates for {case_id} have different grids")
-            if case_n_particles is not None and result.n_particles != case_n_particles:
-                raise ValueError(
-                    f"Replicates for {case_id} have different particle counts"
-                )
-            grid = result
-            case_n_particles = result.n_particles
-            case_lx = lx
-            case_circumference = circumference
-            all_values.append(result.values)
-            all_bulk_counts.append(result.bulk_counts)
+            for replicate in case_replicates
+        ]
+        grid = _combine_surface_grids(case_id, grids)
 
-        assert grid is not None
-        assert case_n_particles is not None
-        assert case_lx is not None
-        assert case_circumference is not None
-        values = np.concatenate(all_values)
-        phases = _classify_phases(values, args.jenks_sample_size)
-        particle_area = np.pi * (args.particle_diameter / 2.0) ** 2
-        rho_2d_alpha = phases.mean_alpha / particle_area
-        rho_2d_beta = phases.mean_beta / particle_area
-        surface_area = case_circumference * case_lx
-        cylinder_radius = case_circumference / (2.0 * np.pi)
-        bulk_radius = cylinder_radius - args.shell_delta
-        if bulk_radius <= 0.0:
-            raise ValueError(
-                f"Shell cutoff leaves no interior volume for {case_id}"
+        mean_counts = grid.counts / grid.n_frames
+        bin_area = grid.radius * grid.dx * grid.dtheta
+        bin_volume = (
+            0.5
+            * grid.dx
+            * grid.dtheta
+            * (grid.radius**2 - radial_cutoff**2)
+        )
+        rho_surface_field = (
+            mean_counts - rho_gamma * bin_volume
+        ) / bin_area
+        rho_surface = float(rho_surface_field.mean())
+
+        surface_area = 2.0 * np.pi * grid.radius * grid.lx
+        total_volume = np.pi * grid.radius**2 * grid.lx
+        actual_n = float(grid.n_particles)
+        reconstructed_n = (
+            total_volume * rho_gamma + surface_area * rho_surface
+        )
+        absolute_error = reconstructed_n - actual_n
+        relative_error = absolute_error / actual_n
+
+        stem = safe_case_name(case_id)
+        plot_output = args.output_dir / f"{stem}_number_closure.svg"
+        data_output = args.output_dir / f"{stem}_surface_excess_summary.json"
+        existing = [
+            path for path in (plot_output, data_output) if path.exists()
+        ]
+        if existing and not args.overwrite:
+            raise FileExistsError(
+                f"{existing[0]} exists; pass --overwrite to replace"
             )
-        bulk_volume = np.pi * bulk_radius**2 * case_lx
-        inferred_film_count = surface_area * (
-            rho_2d_alpha * phases.x_alpha
-            + rho_2d_beta * (1.0 - phases.x_alpha)
+        _plot_number_closure(
+            case_replicates[0].label,
+            actual_n,
+            reconstructed_n,
+            relative_error,
+            plot_output,
         )
-        rho_3d_gamma_conservation = (
-            case_n_particles - inferred_film_count
-        ) / bulk_volume
-        rho_3d_gamma_measured = (
-            float(np.concatenate(all_bulk_counts).mean()) / bulk_volume
-        )
-        relative_gamma_error = (
-            (rho_3d_gamma_conservation - rho_3d_gamma_measured)
-            / rho_3d_gamma_measured
-            if rho_3d_gamma_measured != 0.0
-            else np.nan
-        )
-        diameter_cubed = args.particle_diameter**3
-        output = args.output_dir / f"{_safe_case_name(case_id)}_density_distribution.svg"
-        if output.exists() and not args.overwrite:
-            raise FileExistsError(f"{output} exists; pass --overwrite to replace")
-
-        fig, ax = plt.subplots(figsize=(7.2, 4.8), constrained_layout=True)
-        sns.histplot(
-            values,
-            bins=args.density_bins,
-            stat="density",
-            element="step",
-            fill=True,
-            alpha=0.35,
-            ax=ax,
-        )
-        ax.axvline(
-            phases.mean_beta,
-            color="tab:blue",
-            linestyle="--",
-            linewidth=1.2,
-            label=rf"$\phi_\beta={phases.mean_beta:.3g}$ (dilute mean)",
-        )
-        ax.axvline(
-            phases.mean_alpha,
-            color="tab:red",
-            linestyle="--",
-            linewidth=1.2,
-            label=rf"$\phi_\alpha={phases.mean_alpha:.3g}$ (dense mean)",
-        )
-        ax.axvline(
-            phases.threshold,
-            color="0.25",
-            linestyle=":",
-            linewidth=1.2,
-            label=rf"classification boundary $={phases.threshold:.3g}$",
-        )
-        replicate_suffix = (
-            f", {len(case_replicates)} replicates"
-            if len(case_replicates) > 1
-            else ""
-        )
-        ax.set(
-            title=f"{case_replicates[0].label}{replicate_suffix}",
-            xlabel=r"Local film area fraction $\phi$",
-            ylabel=r"Probability density $p(\phi)$",
-        )
-        ax.text(
-            0.98,
-            0.96,
-            rf"$\Delta x={grid.dx / args.particle_diameter:.3g}D$, "
-            rf"$R\Delta\theta={grid.arc_width / args.particle_diameter:.3g}D$",
-            transform=ax.transAxes,
-            ha="right",
-            va="top",
-            fontsize="small",
-        )
-        ax.text(
-            0.98,
-            0.87,
-            rf"$x_\alpha={phases.x_alpha:.3f}$",
-            transform=ax.transAxes,
-            ha="right",
-            va="top",
-            fontsize="small",
-        )
-        ax.text(
-            0.98,
-            0.79,
-            rf"$\rho^{{3D}}_{{\gamma,\mathrm{{cons}}}}D^3="
-            rf"{rho_3d_gamma_conservation * diameter_cubed:.3g}$, "
-            rf"$\rho^{{3D}}_{{\gamma,\mathrm{{count}}}}D^3="
-            rf"{rho_3d_gamma_measured * diameter_cubed:.3g}$"
-            "\n"
-            rf"relative error $={100.0 * relative_gamma_error:.2f}\%$",
-            transform=ax.transAxes,
-            ha="right",
-            va="top",
-            fontsize="small",
-        )
-        ax.grid(axis="y", color="0.9", lw=0.7)
-        ax.legend(frameon=False, loc="upper left")
-        fig.savefig(
-            output,
-            format="svg",
-            bbox_inches="tight",
-            metadata={"Creator": "hexatic.big_lx_analysis.density_distribution"},
-        )
-        plt.close(fig)
+        payload = {
+            "case_id": case_id,
+            "rho_gamma": rho_gamma,
+            "rho_gamma_units": "N/L^3",
+            "radial_cutoff": radial_cutoff,
+            "rho_surface": rho_surface,
+            "rho_surface_units": "N/L^2",
+            "surface_bin_area": bin_area,
+            "surface_bin_volume": bin_volume,
+            "surface_bin_volume_formula": (
+                "0.5 * dx * dtheta * (R^2 - radial_cutoff^2)"
+            ),
+            "nx": grid.nx,
+            "ntheta": grid.ntheta,
+            "n_selected_frames": grid.n_frames,
+            "n_replicates": len(grids),
+            "total_volume": total_volume,
+            "surface_area": surface_area,
+            "actual_n": actual_n,
+            "reconstructed_n": reconstructed_n,
+            "absolute_error": absolute_error,
+            "relative_error": relative_error,
+        }
+        data_output.write_text(json.dumps(payload, indent=2) + "\n")
         print(
-            f"{case_id}: phi_alpha={phases.mean_alpha:.6g}, "
-            f"phi_beta={phases.mean_beta:.6g}, "
-            f"rho_2d_alpha_D2={rho_2d_alpha * args.particle_diameter**2:.6g}, "
-            f"rho_2d_beta_D2={rho_2d_beta * args.particle_diameter**2:.6g}, "
-            f"classification_threshold={phases.threshold:.6g}, "
-            f"x_alpha={phases.x_alpha:.6g}, "
-            f"rho_3d_gamma_conservation_D3="
-            f"{rho_3d_gamma_conservation * diameter_cubed:.6g}, "
-            f"rho_3d_gamma_measured_D3="
-            f"{rho_3d_gamma_measured * diameter_cubed:.6g}, "
-            f"rho_3d_gamma_relative_error={relative_gamma_error:.6g}",
+            f"{case_id}: N={actual_n:.6g}, "
+            f"V*rho_gamma+As*rho_surface={reconstructed_n:.6g}, "
+            f"absolute_error={absolute_error:.6g}, "
+            f"relative_error={relative_error:.6g}",
             flush=True,
         )
-        print(f"wrote {output}", flush=True)
+        print(f"wrote {plot_output}", flush=True)
+        print(f"wrote {data_output}", flush=True)
 
 
 if __name__ == "__main__":
