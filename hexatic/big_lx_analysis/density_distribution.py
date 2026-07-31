@@ -1,8 +1,8 @@
-"""Plot Gaussian-neighborhood density distributions for big-Lx cylinders.
+"""Plot beta-kernel neighborhood density distributions for big-Lx cylinders.
 
 Particle-center density is evaluated at a Cartesian grid of neighborhood
 centers inside ``r <= R - D/2 - wall_offset``.  Each center uses the same
-fixed-radius spherical Gaussian kernel.  Normalized convolution with the
+fixed-radius compact spherical beta kernel.  Normalized convolution with the
 accessible-domain mask corrects neighborhoods truncated by the cylindrical
 wall; at the outer limit this reduces to the requested hemisphere correction.
 
@@ -29,7 +29,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from numpy.typing import NDArray
 from safetensors import safe_open
-from scipy.ndimage import gaussian_filter1d
+from scipy.ndimage import uniform_filter1d
 from scipy.signal import fftconvolve, find_peaks
 
 from hexatic.constants import cylinder
@@ -63,10 +63,10 @@ class CaseOptions:
     particle_diameter: float
     grid_spacing: float
     neighborhood_radius: float
-    gaussian_bandwidth: float
+    beta_kernel_power: float
     wall_offset: float
     density_bins: int
-    mode_smoothing_sigma: float
+    mode_smoothing_window: int
     mode_prominence_fraction: float
     frame_start: int
     frame_stride: int
@@ -123,12 +123,12 @@ def _select_replicates(
     return replicates
 
 
-def _spherical_gaussian_kernel(
+def _spherical_beta_kernel(
     dx: float,
     dy: float,
     dz: float,
     radius: float,
-    bandwidth: float,
+    power: float,
 ) -> NDArray[np.float64]:
     nx = int(np.ceil(radius / dx))
     ny = int(np.ceil(radius / dy))
@@ -138,8 +138,8 @@ def _spherical_gaussian_kernel(
     z = np.arange(-nz, nz + 1, dtype=np.float64) * dz
     xx, yy, zz = np.meshgrid(x, y, z, indexing="ij")
     distance_sq = xx**2 + yy**2 + zz**2
-    kernel = np.exp(-0.5 * distance_sq / bandwidth**2)
-    kernel[distance_sq > radius**2] = 0.0
+    scaled_distance_sq = distance_sq / radius**2
+    kernel = np.maximum(1.0 - scaled_distance_sq, 0.0) ** power
     total = float(kernel.sum())
     if total <= 0.0:
         raise ValueError("The neighborhood kernel contains no grid points")
@@ -250,12 +250,12 @@ def _load_neighborhood_samples(
     radial_mask = yy**2 + zz**2 <= accessible_radius**2
     mask = np.broadcast_to(radial_mask, (nx, ny, nz))
     raw_density = accumulated_counts / (n_frames * cell_volume)
-    kernel = _spherical_gaussian_kernel(
+    kernel = _spherical_beta_kernel(
         dx,
         dy,
         dz,
         options.neighborhood_radius,
-        options.gaussian_bandwidth,
+        options.beta_kernel_power,
     )
     smoothed_density = _normalized_cylindrical_convolution(
         raw_density, mask, kernel
@@ -301,12 +301,14 @@ def _combine_samples(
 def _empirical_distribution_and_modes(
     values: NDArray[np.float64],
     density_bins: int,
-    smoothing_sigma: float,
+    smoothing_window: int,
     prominence_fraction: float,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64], DensityModes]:
     probability, edges = np.histogram(values, bins=density_bins, density=True)
     centers = 0.5 * (edges[:-1] + edges[1:])
-    smoothed = gaussian_filter1d(probability, smoothing_sigma, mode="nearest")
+    smoothed = uniform_filter1d(
+        probability, size=smoothing_window, mode="nearest"
+    )
     baseline = float(smoothed.min())
     peaks, properties = find_peaks(
         np.concatenate(([baseline], smoothed, [baseline])),
@@ -320,7 +322,7 @@ def _empirical_distribution_and_modes(
     if peaks.size < 2:
         raise ValueError(
             "Fewer than two empirical density modes were found; adjust "
-            "--density-bins, --mode-smoothing-sigma, or "
+            "--density-bins, --mode-smoothing-window, or "
             "--mode-prominence-fraction"
         )
     selected = peaks[np.argsort(prominences)[-2:]]
@@ -360,7 +362,7 @@ def _plot_distribution(
         smoothed_probability,
         color="black",
         linewidth=1.8,
-        label="Smoothed empirical PDF (mode finding)",
+        label="Moving-average empirical PDF (mode finding)",
     )
     colors = sns.color_palette("colorblind", n_colors=2)
     axis.axvline(
@@ -392,7 +394,7 @@ def _plot_distribution(
     )
     axis.set(
         title=case_label,
-        xlabel=r"Gaussian-neighborhood density $\rho$ [$N/L^3$]",
+        xlabel=r"Beta-kernel neighborhood density $\rho$ [$N/L^3$]",
         ylabel=r"Probability density $P(\rho)$ (log scale)",
         xlim=(edges[0], edges[-1]),
     )
@@ -427,7 +429,7 @@ def _analyze_case(task: tuple[str, list[Replicate], CaseOptions]) -> tuple[str, 
     edges, probability, smoothed, modes = _empirical_distribution_and_modes(
         samples.values,
         options.density_bins,
-        options.mode_smoothing_sigma,
+        options.mode_smoothing_window,
         options.mode_prominence_fraction,
     )
     difference = modes.rho_dense - modes.rho_dilute
@@ -477,7 +479,12 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--grid-spacing", type=float, default=None)
     parser.add_argument("--neighborhood-radius", type=float, default=None)
-    parser.add_argument("--gaussian-bandwidth", type=float, default=None)
+    parser.add_argument(
+        "--beta-kernel-power",
+        type=float,
+        default=2.0,
+        help="Exponent p in (1-d^2/a^2)^p (default: 2)",
+    )
     parser.add_argument(
         "--wall-offset",
         type=float,
@@ -485,7 +492,7 @@ def _parse_args() -> argparse.Namespace:
         help="Small inward offset from R-D/2 (default: 1e-3)",
     )
     parser.add_argument("--density-bins", type=int, default=80)
-    parser.add_argument("--mode-smoothing-sigma", type=float, default=1.5)
+    parser.add_argument("--mode-smoothing-window", type=int, default=5)
     parser.add_argument("--mode-prominence-fraction", type=float, default=0.02)
     parser.add_argument("--frame-start", type=int, default=700)
     parser.add_argument("--frame-stride", type=int, default=1)
@@ -502,8 +509,10 @@ def main() -> None:
         raise ValueError("Density bins must be at least 3 and workers non-negative")
     if not 0.0 <= args.mode_prominence_fraction < 1.0:
         raise ValueError("--mode-prominence-fraction must lie in [0, 1)")
-    if args.mode_smoothing_sigma <= 0.0 or args.wall_offset < 0.0:
-        raise ValueError("Smoothing must be positive and wall offset non-negative")
+    if args.mode_smoothing_window < 1 or args.wall_offset < 0.0:
+        raise ValueError("Smoothing window must be positive and offset non-negative")
+    if args.beta_kernel_power <= 0.0:
+        raise ValueError("--beta-kernel-power must be positive")
     diameter = args.particle_diameter
     grid_spacing = diameter if args.grid_spacing is None else args.grid_spacing
     neighborhood_radius = (
@@ -511,12 +520,7 @@ def main() -> None:
         if args.neighborhood_radius is None
         else args.neighborhood_radius
     )
-    gaussian_bandwidth = (
-        0.5 * neighborhood_radius
-        if args.gaussian_bandwidth is None
-        else args.gaussian_bandwidth
-    )
-    if min(diameter, grid_spacing, neighborhood_radius, gaussian_bandwidth) <= 0:
+    if min(diameter, grid_spacing, neighborhood_radius) <= 0:
         raise ValueError("Particle and neighborhood length scales must be positive")
 
     replicates = _select_replicates(
@@ -532,10 +536,10 @@ def main() -> None:
         particle_diameter=diameter,
         grid_spacing=grid_spacing,
         neighborhood_radius=neighborhood_radius,
-        gaussian_bandwidth=gaussian_bandwidth,
+        beta_kernel_power=args.beta_kernel_power,
         wall_offset=args.wall_offset,
         density_bins=args.density_bins,
-        mode_smoothing_sigma=args.mode_smoothing_sigma,
+        mode_smoothing_window=args.mode_smoothing_window,
         mode_prominence_fraction=args.mode_prominence_fraction,
         frame_start=args.frame_start,
         frame_stride=args.frame_stride,
