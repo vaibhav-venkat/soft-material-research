@@ -1,15 +1,17 @@
-"""Plot volumetric-density distributions for big-Lx cylinder cases.
+"""Plot Gaussian-neighborhood density distributions for big-Lx cylinders.
 
-Selected frames are divided into equal-volume ``(x, theta, r)`` voxels.  Each
-voxel's local density is time-averaged before constructing the distribution,
-so transient empty-bin counting noise does not create an artificial delta peak
-at zero.  Dilute and dense densities are the two modes of the empirical
-probability density, with no parametric mixture fit.  Their volume fractions
-are calculated directly from the conservation lever rule
+Particle-center density is evaluated at a Cartesian grid of neighborhood
+centers inside ``r <= R - D/2 - wall_offset``.  Each center uses the same
+fixed-radius spherical Gaussian kernel.  Normalized convolution with the
+accessible-domain mask corrects neighborhoods truncated by the cylindrical
+wall; at the outer limit this reduces to the requested hemisphere correction.
 
-``rho_total = x_dense * rho_dense + (1 - x_dense) * rho_dilute``.
+The two modes of the empirical ``P(rho)`` define ``rho_dilute`` and
+``rho_dense``.  Fractions come only from the conservation lever rule,
 
-The sole generated artifact is one SVG probability-density plot per case.
+``x_dense = (rho_total - rho_dilute) / (rho_dense - rho_dilute)``.
+
+Cases run in parallel CPU processes.  The sole output is one SVG per case.
 """
 
 from __future__ import annotations
@@ -28,7 +30,7 @@ import numpy as np
 from numpy.typing import NDArray
 from safetensors import safe_open
 from scipy.ndimage import gaussian_filter1d
-from scipy.signal import find_peaks
+from scipy.signal import fftconvolve, find_peaks
 
 from hexatic.constants import cylinder
 
@@ -37,19 +39,15 @@ from .surface_area import _load_circumference, _load_static_lx
 
 
 @dataclass(frozen=True)
-class VolumeDensitySamples:
+class NeighborhoodSamples:
     values: NDArray[np.float64]
+    particle_count_sum: float
     n_frames: int
-    n_particles: int
-    nx: int
-    ntheta: int
-    nr: int
-    dx: float
-    dtheta: float
-    radial_edges: NDArray[np.float64]
-    voxel_volume: float
     lx: float
-    radius: float
+    accessible_radius: float
+    dx: float
+    dy: float
+    dz: float
 
 
 @dataclass(frozen=True)
@@ -62,9 +60,11 @@ class DensityModes:
 class CaseOptions:
     output_dir: Path
     overwrite: bool
-    requested_dx: float
-    requested_arc_width: float
-    radial_bins: int
+    particle_diameter: float
+    grid_spacing: float
+    neighborhood_radius: float
+    gaussian_bandwidth: float
+    wall_offset: float
     density_bins: int
     mode_smoothing_sigma: float
     mode_prominence_fraction: float
@@ -123,158 +123,178 @@ def _select_replicates(
     return replicates
 
 
-def _volume_grid(
-    lx: float,
-    circumference: float,
+def _spherical_gaussian_kernel(
+    dx: float,
+    dy: float,
+    dz: float,
     radius: float,
-    requested_dx: float,
-    requested_arc_width: float,
-    radial_bins: int,
-) -> tuple[int, int, float, float, NDArray[np.float64], float]:
-    if requested_dx <= 0.0 or requested_arc_width <= 0.0:
-        raise ValueError("Spatial bin widths must be positive")
-    if radial_bins < 1:
-        raise ValueError("radial_bins must be positive")
-    nx = max(1, int(np.rint(lx / requested_dx)))
-    ntheta = max(1, int(np.rint(circumference / requested_arc_width)))
-    dx = lx / nx
-    dtheta = 2.0 * np.pi / ntheta
+    bandwidth: float,
+) -> NDArray[np.float64]:
+    nx = int(np.ceil(radius / dx))
+    ny = int(np.ceil(radius / dy))
+    nz = int(np.ceil(radius / dz))
+    x = np.arange(-nx, nx + 1, dtype=np.float64) * dx
+    y = np.arange(-ny, ny + 1, dtype=np.float64) * dy
+    z = np.arange(-nz, nz + 1, dtype=np.float64) * dz
+    xx, yy, zz = np.meshgrid(x, y, z, indexing="ij")
+    distance_sq = xx**2 + yy**2 + zz**2
+    kernel = np.exp(-0.5 * distance_sq / bandwidth**2)
+    kernel[distance_sq > radius**2] = 0.0
+    total = float(kernel.sum())
+    if total <= 0.0:
+        raise ValueError("The neighborhood kernel contains no grid points")
+    return kernel / total
 
-    # Uniform spacing in r^2 makes every radial cylindrical sector have the
-    # same volume, despite the factor of r in the cylindrical volume element.
-    radial_edges = radius * np.sqrt(
-        np.linspace(0.0, 1.0, radial_bins + 1, dtype=np.float64)
+
+def _normalized_cylindrical_convolution(
+    density: NDArray[np.float64],
+    mask: NDArray[np.bool_],
+    kernel: NDArray[np.float64],
+) -> NDArray[np.float64]:
+    """Convolve periodically in x and normalize truncated wall kernels."""
+    pad_x = kernel.shape[0] // 2
+    pad_y = kernel.shape[1] // 2
+    pad_z = kernel.shape[2] // 2
+
+    def padded(field: NDArray[np.float64]) -> NDArray[np.float64]:
+        periodic = np.pad(field, ((pad_x, pad_x), (0, 0), (0, 0)), mode="wrap")
+        return np.pad(
+            periodic,
+            ((0, 0), (pad_y, pad_y), (pad_z, pad_z)),
+            mode="constant",
+        )
+
+    numerator = fftconvolve(padded(density), kernel, mode="same")
+    denominator = fftconvolve(
+        padded(mask.astype(np.float64)), kernel, mode="same"
     )
-    radial_sector_volume = 0.5 * dx * dtheta * (
-        radial_edges[1] ** 2 - radial_edges[0] ** 2
+    crop = (
+        slice(pad_x, -pad_x if pad_x else None),
+        slice(pad_y, -pad_y if pad_y else None),
+        slice(pad_z, -pad_z if pad_z else None),
     )
-    return nx, ntheta, dx, dtheta, radial_edges, radial_sector_volume
+    numerator = numerator[crop]
+    denominator = denominator[crop]
+    result = np.full_like(numerator, np.nan)
+    np.divide(numerator, denominator, out=result, where=denominator > 1.0e-12)
+    return result
 
 
-def _load_volume_density_samples(
-    replicate: Replicate,
-    *,
-    requested_dx: float,
-    requested_arc_width: float,
-    radial_bins: int,
-    frame_start: int,
-    frame_stride: int,
-) -> VolumeDensitySamples:
+def _load_neighborhood_samples(
+    replicate: Replicate, options: CaseOptions
+) -> NeighborhoodSamples:
     lx = _load_static_lx(replicate.static_file)
     circumference = _load_circumference(replicate.manifest)
     radius = _load_radius(replicate.static_file, circumference)
-    nx, ntheta, dx, dtheta, radial_edges, voxel_volume = _volume_grid(
-        lx,
-        circumference,
-        radius,
-        requested_dx,
-        requested_arc_width,
-        radial_bins,
+    accessible_radius = (
+        radius - 0.5 * options.particle_diameter - options.wall_offset
     )
-    accumulated_counts = np.zeros(
-        nx * ntheta * radial_bins, dtype=np.float64
-    )
+    if accessible_radius <= 0.0:
+        raise ValueError(f"No accessible particle-center radius for {replicate.case_id}")
+
+    nx = max(1, int(np.rint(lx / options.grid_spacing)))
+    ny = max(3, int(np.ceil(2.0 * accessible_radius / options.grid_spacing)))
+    nz = ny
+    x_edges = np.linspace(-0.5 * lx, 0.5 * lx, nx + 1)
+    y_edges = np.linspace(-accessible_radius, accessible_radius, ny + 1)
+    z_edges = np.linspace(-accessible_radius, accessible_radius, nz + 1)
+    dx = float(x_edges[1] - x_edges[0])
+    dy = float(y_edges[1] - y_edges[0])
+    dz = float(z_edges[1] - z_edges[0])
+    cell_volume = dx * dy * dz
+    accumulated_counts = np.zeros((nx, ny, nz), dtype=np.float64)
+    particle_count_sum = 0.0
     n_frames = 0
-    n_particles: int | None = None
     global_frame = 0
+
     for path in replicate.shard_files:
         with safe_open(path, framework="np") as tensors:
             coords = tensors.get_tensor("coords")
-            if n_particles is None:
-                n_particles = int(coords.shape[1])
-            elif coords.shape[1] != n_particles:
-                raise ValueError(
-                    f"Particle count changes between shards for {replicate.case_id}"
-                )
             for local_frame in range(coords.shape[0]):
                 selected = (
-                    global_frame >= frame_start
-                    and (global_frame - frame_start) % frame_stride == 0
+                    global_frame >= options.frame_start
+                    and (global_frame - options.frame_start)
+                    % options.frame_stride
+                    == 0
                 )
                 global_frame += 1
                 if not selected:
                     continue
                 frame = coords[local_frame]
-                finite = (
+                included = (
                     np.isfinite(frame[:, 0])
                     & np.isfinite(frame[:, 1])
                     & np.isfinite(frame[:, 2])
                     & (frame[:, 2] >= 0.0)
-                    & (frame[:, 2] <= radius)
+                    & (frame[:, 2] <= accessible_radius)
                 )
-                x = np.mod(frame[finite, 0] + 0.5 * lx, lx)
-                theta = np.mod(frame[finite, 1], 2.0 * np.pi)
-                radial = frame[finite, 2]
-                x_index = np.minimum((x / dx).astype(np.intp), nx - 1)
-                theta_index = np.minimum(
-                    (theta / dtheta).astype(np.intp), ntheta - 1
-                )
-                radial_index = np.searchsorted(
-                    radial_edges, radial, side="right"
-                ) - 1
-                radial_index = np.minimum(radial_index, radial_bins - 1)
-                flat_index = (
-                    (x_index * ntheta + theta_index) * radial_bins
-                    + radial_index
-                )
-                counts = np.bincount(
-                    flat_index,
-                    minlength=nx * ntheta * radial_bins,
-                )
-                accumulated_counts += counts
+                x = np.mod(frame[included, 0] + 0.5 * lx, lx) - 0.5 * lx
+                theta = frame[included, 1]
+                radial = frame[included, 2]
+                y = radial * np.cos(theta)
+                z = radial * np.sin(theta)
+                points = np.column_stack((x, y, z))
+                accumulated_counts += np.histogramdd(
+                    points, bins=(x_edges, y_edges, z_edges)
+                )[0]
+                particle_count_sum += float(np.count_nonzero(included))
                 n_frames += 1
-    if n_frames == 0 or n_particles is None:
+    if n_frames == 0:
         raise ValueError(f"No frames selected for {replicate.case_id}")
-    return VolumeDensitySamples(
-        values=accumulated_counts / (n_frames * voxel_volume),
+
+    x_centers = 0.5 * (x_edges[:-1] + x_edges[1:])
+    y_centers = 0.5 * (y_edges[:-1] + y_edges[1:])
+    z_centers = 0.5 * (z_edges[:-1] + z_edges[1:])
+    del x_centers  # x is periodic and every axial center is accessible.
+    yy, zz = np.meshgrid(y_centers, z_centers, indexing="ij")
+    radial_mask = yy**2 + zz**2 <= accessible_radius**2
+    mask = np.broadcast_to(radial_mask, (nx, ny, nz))
+    raw_density = accumulated_counts / (n_frames * cell_volume)
+    kernel = _spherical_gaussian_kernel(
+        dx,
+        dy,
+        dz,
+        options.neighborhood_radius,
+        options.gaussian_bandwidth,
+    )
+    smoothed_density = _normalized_cylindrical_convolution(
+        raw_density, mask, kernel
+    )
+    values = smoothed_density[mask]
+    return NeighborhoodSamples(
+        values=values[np.isfinite(values)],
+        particle_count_sum=particle_count_sum,
         n_frames=n_frames,
-        n_particles=n_particles,
-        nx=nx,
-        ntheta=ntheta,
-        nr=radial_bins,
-        dx=dx,
-        dtheta=dtheta,
-        radial_edges=radial_edges,
-        voxel_volume=voxel_volume,
         lx=lx,
-        radius=radius,
+        accessible_radius=accessible_radius,
+        dx=dx,
+        dy=dy,
+        dz=dz,
     )
 
 
 def _combine_samples(
-    case_id: str, samples: list[VolumeDensitySamples]
-) -> VolumeDensitySamples:
+    case_id: str, samples: list[NeighborhoodSamples]
+) -> NeighborhoodSamples:
     reference = samples[0]
     for sample in samples[1:]:
         if (
-            sample.nx != reference.nx
-            or sample.ntheta != reference.ntheta
-            or sample.nr != reference.nr
+            not np.isclose(sample.lx, reference.lx)
+            or not np.isclose(sample.accessible_radius, reference.accessible_radius)
             or not np.isclose(sample.dx, reference.dx)
-            or not np.isclose(sample.dtheta, reference.dtheta)
-            or not np.allclose(sample.radial_edges, reference.radial_edges)
-            or not np.isclose(sample.voxel_volume, reference.voxel_volume)
-            or not np.isclose(sample.lx, reference.lx)
-            or not np.isclose(sample.radius, reference.radius)
+            or not np.isclose(sample.dy, reference.dy)
+            or not np.isclose(sample.dz, reference.dz)
         ):
             raise ValueError(f"Replicates for {case_id} have different grids")
-        if sample.n_particles != reference.n_particles:
-            raise ValueError(
-                f"Replicates for {case_id} have different particle counts"
-            )
-    return VolumeDensitySamples(
+    return NeighborhoodSamples(
         values=np.concatenate([sample.values for sample in samples]),
+        particle_count_sum=sum(sample.particle_count_sum for sample in samples),
         n_frames=sum(sample.n_frames for sample in samples),
-        n_particles=reference.n_particles,
-        nx=reference.nx,
-        ntheta=reference.ntheta,
-        nr=reference.nr,
-        dx=reference.dx,
-        dtheta=reference.dtheta,
-        radial_edges=reference.radial_edges,
-        voxel_volume=reference.voxel_volume,
         lx=reference.lx,
-        radius=reference.radius,
+        accessible_radius=reference.accessible_radius,
+        dx=reference.dx,
+        dy=reference.dy,
+        dz=reference.dz,
     )
 
 
@@ -283,32 +303,17 @@ def _empirical_distribution_and_modes(
     density_bins: int,
     smoothing_sigma: float,
     prominence_fraction: float,
-) -> tuple[
-    NDArray[np.float64],
-    NDArray[np.float64],
-    NDArray[np.float64],
-    DensityModes,
-]:
-    """Return the empirical PDF, its smoothed copy, and its two modes."""
-    finite = values[np.isfinite(values)]
-    if finite.size < 4:
-        raise ValueError("At least four finite density samples are required")
-    probability, edges = np.histogram(finite, bins=density_bins, density=True)
+) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64], DensityModes]:
+    probability, edges = np.histogram(values, bins=density_bins, density=True)
     centers = 0.5 * (edges[:-1] + edges[1:])
-    smoothed = gaussian_filter1d(
-        probability.astype(np.float64),
-        sigma=smoothing_sigma,
-        mode="nearest",
-    )
-    minimum_prominence = prominence_fraction * float(smoothed.max())
+    smoothed = gaussian_filter1d(probability, smoothing_sigma, mode="nearest")
     baseline = float(smoothed.min())
-    padded = np.concatenate(([baseline], smoothed, [baseline]))
-    padded_peaks, properties = find_peaks(
-        padded,
-        prominence=minimum_prominence,
+    peaks, properties = find_peaks(
+        np.concatenate(([baseline], smoothed, [baseline])),
+        prominence=prominence_fraction * float(smoothed.max()),
         distance=max(2, density_bins // 10),
     )
-    peaks = padded_peaks - 1
+    peaks = peaks - 1
     valid = (peaks >= 0) & (peaks < density_bins)
     peaks = peaks[valid]
     prominences = properties["prominences"][valid]
@@ -320,11 +325,12 @@ def _empirical_distribution_and_modes(
         )
     selected = peaks[np.argsort(prominences)[-2:]]
     selected.sort()
-    modes = DensityModes(
-        rho_dilute=float(centers[selected[0]]),
-        rho_dense=float(centers[selected[1]]),
+    return (
+        edges,
+        probability,
+        smoothed,
+        DensityModes(float(centers[selected[0]]), float(centers[selected[1]])),
     )
-    return edges, probability, smoothed, modes
 
 
 def _plot_distribution(
@@ -363,8 +369,8 @@ def _plot_distribution(
         linestyle="--",
         linewidth=1.3,
         label=(
-            rf"$\rho_{{\rm dilute}}={modes.rho_dilute:.4g}$, "
-            rf"$x_{{\rm dilute}}={x_dilute:.3f}$"
+            rf"$\rho_\beta={modes.rho_dilute:.4g}$, "
+            rf"$x_\beta={x_dilute:.3f}$"
         ),
     )
     axis.axvline(
@@ -373,8 +379,8 @@ def _plot_distribution(
         linestyle="--",
         linewidth=1.3,
         label=(
-            rf"$\rho_{{\rm dense}}={modes.rho_dense:.4g}$, "
-            rf"$x_{{\rm dense}}={x_dense:.3f}$"
+            rf"$\rho_\alpha={modes.rho_dense:.4g}$, "
+            rf"$x_\alpha={x_dense:.3f}$"
         ),
     )
     axis.axvline(
@@ -386,22 +392,18 @@ def _plot_distribution(
     )
     axis.set(
         title=case_label,
-        xlabel=r"Local volume density $\rho$ [$N/L^3$]",
+        xlabel=r"Gaussian-neighborhood density $\rho$ [$N/L^3$]",
         ylabel=r"Probability density $P(\rho)$ (log scale)",
         xlim=(edges[0], edges[-1]),
     )
     positive = np.concatenate(
-        (
-            probability[probability > 0.0],
-            smoothed_probability[smoothed_probability > 0.0],
-        )
+        (probability[probability > 0], smoothed_probability[smoothed_probability > 0])
     )
-    if positive.size:
-        axis.set_yscale("log")
-        axis.set_ylim(
-            max(float(positive.min()) * 0.5, float(positive.max()) * 1.0e-7),
-            float(positive.max()) * 1.5,
-        )
+    axis.set_yscale("log")
+    axis.set_ylim(
+        max(float(positive.min()) * 0.5, float(positive.max()) * 1.0e-7),
+        float(positive.max()) * 1.5,
+    )
     axis.grid(axis="y", which="both", color="0.9", linewidth=0.7)
     axis.legend(frameon=False)
     sns.despine(ax=axis)
@@ -414,57 +416,37 @@ def _plot_distribution(
     plt.close(figure)
 
 
-def _analyze_case(
-    task: tuple[str, list[Replicate], CaseOptions],
-) -> tuple[str, Path]:
-    """Analyze one case in an isolated worker process."""
+def _analyze_case(task: tuple[str, list[Replicate], CaseOptions]) -> tuple[str, Path]:
     case_id, case_replicates, options = task
     samples = _combine_samples(
         case_id,
-        [
-            _load_volume_density_samples(
-                replicate,
-                requested_dx=options.requested_dx,
-                requested_arc_width=options.requested_arc_width,
-                radial_bins=options.radial_bins,
-                frame_start=options.frame_start,
-                frame_stride=options.frame_stride,
-            )
-            for replicate in case_replicates
-        ],
+        [_load_neighborhood_samples(replicate, options) for replicate in case_replicates],
     )
-    rho_total = float(samples.values.mean())
-    edges, probability, smoothed_probability, modes = (
-        _empirical_distribution_and_modes(
-            samples.values,
-            options.density_bins,
-            options.mode_smoothing_sigma,
-            options.mode_prominence_fraction,
-        )
+    cylinder_volume = np.pi * samples.accessible_radius**2 * samples.lx
+    rho_total = samples.particle_count_sum / (samples.n_frames * cylinder_volume)
+    edges, probability, smoothed, modes = _empirical_distribution_and_modes(
+        samples.values,
+        options.density_bins,
+        options.mode_smoothing_sigma,
+        options.mode_prominence_fraction,
     )
-    density_difference = modes.rho_dense - modes.rho_dilute
-    if density_difference <= 0.0:
-        raise ValueError(f"Dense and dilute modes coincide for {case_id}")
-    x_dense = (rho_total - modes.rho_dilute) / density_difference
+    difference = modes.rho_dense - modes.rho_dilute
+    x_dense = (rho_total - modes.rho_dilute) / difference
     x_dilute = 1.0 - x_dense
     if not 0.0 <= x_dense <= 1.0:
         raise ValueError(
-            f"Fitted modes do not bracket rho_total for {case_id}: "
+            f"Detected modes do not bracket rho_total for {case_id}: "
             f"rho_dilute={modes.rho_dilute}, rho_total={rho_total}, "
             f"rho_dense={modes.rho_dense}"
         )
-
-    output = (
-        options.output_dir
-        / f"{_safe_case_name(case_id)}_density_distribution.svg"
-    )
+    output = options.output_dir / f"{_safe_case_name(case_id)}_density_distribution.svg"
     if output.exists() and not options.overwrite:
         raise FileExistsError(f"{output} exists; pass --overwrite to replace")
     _plot_distribution(
         case_replicates[0].label,
         edges,
         probability,
-        smoothed_probability,
+        smoothed,
         rho_total,
         modes,
         x_dense,
@@ -473,9 +455,8 @@ def _analyze_case(
     )
     report = (
         f"{case_id}: rho_total={rho_total:.6g}, "
-        f"rho_dilute={modes.rho_dilute:.6g}, "
-        f"rho_dense={modes.rho_dense:.6g}, "
-        f"x_dilute={x_dilute:.6g}, x_dense={x_dense:.6g}"
+        f"rho_beta={modes.rho_dilute:.6g}, rho_alpha={modes.rho_dense:.6g}, "
+        f"x_beta={x_dilute:.6g}, x_alpha={x_dense:.6g}"
     )
     return report, output
 
@@ -494,72 +475,65 @@ def _parse_args() -> argparse.Namespace:
         type=float,
         default=float(cylinder.PARTICLE_DIAMETER),
     )
-    parser.add_argument("--dx", type=float, default=None)
-    parser.add_argument("--arc-bin-width", type=float, default=None)
-    parser.add_argument("--radial-bins", type=int, default=20)
+    parser.add_argument("--grid-spacing", type=float, default=None)
+    parser.add_argument("--neighborhood-radius", type=float, default=None)
+    parser.add_argument("--gaussian-bandwidth", type=float, default=None)
+    parser.add_argument(
+        "--wall-offset",
+        type=float,
+        default=1.0e-3,
+        help="Small inward offset from R-D/2 (default: 1e-3)",
+    )
     parser.add_argument("--density-bins", type=int, default=80)
-    parser.add_argument(
-        "--mode-smoothing-sigma",
-        type=float,
-        default=1.5,
-        help="Gaussian smoothing in histogram-bin units used only to find modes",
-    )
-    parser.add_argument(
-        "--mode-prominence-fraction",
-        type=float,
-        default=0.02,
-        help="Minimum mode prominence as a fraction of the PDF maximum",
-    )
+    parser.add_argument("--mode-smoothing-sigma", type=float, default=1.5)
+    parser.add_argument("--mode-prominence-fraction", type=float, default=0.02)
     parser.add_argument("--frame-start", type=int, default=700)
     parser.add_argument("--frame-stride", type=int, default=1)
-    parser.add_argument(
-        "--workers",
-        type=int,
-        default=0,
-        help="Case worker processes; 0 uses the available CPUs (default: 0)",
-    )
+    parser.add_argument("--workers", type=int, default=0)
     parser.add_argument("--circ")
     return parser.parse_args()
 
 
 def main() -> None:
     args = _parse_args()
-    if args.frame_start < 0:
-        raise ValueError("--frame-start must be non-negative")
-    if args.frame_stride < 1:
-        raise ValueError("--frame-stride must be positive")
-    if args.radial_bins < 1 or args.density_bins < 1:
-        raise ValueError("--radial-bins and --density-bins must be positive")
-    if not np.isfinite(args.mode_smoothing_sigma) or args.mode_smoothing_sigma <= 0:
-        raise ValueError("--mode-smoothing-sigma must be finite and positive")
+    if args.frame_start < 0 or args.frame_stride < 1:
+        raise ValueError("Frame start must be non-negative and stride positive")
+    if args.density_bins < 3 or args.workers < 0:
+        raise ValueError("Density bins must be at least 3 and workers non-negative")
     if not 0.0 <= args.mode_prominence_fraction < 1.0:
         raise ValueError("--mode-prominence-fraction must lie in [0, 1)")
-    if args.workers < 0:
-        raise ValueError("--workers must be non-negative")
-    if not np.isfinite(args.particle_diameter) or args.particle_diameter <= 0:
-        raise ValueError("--particle-diameter must be finite and positive")
-    requested_dx = (
-        5.0 * args.particle_diameter if args.dx is None else args.dx
+    if args.mode_smoothing_sigma <= 0.0 or args.wall_offset < 0.0:
+        raise ValueError("Smoothing must be positive and wall offset non-negative")
+    diameter = args.particle_diameter
+    grid_spacing = diameter if args.grid_spacing is None else args.grid_spacing
+    neighborhood_radius = (
+        2.5 * diameter
+        if args.neighborhood_radius is None
+        else args.neighborhood_radius
     )
-    requested_arc_width = (
-        5.0 * args.particle_diameter
-        if args.arc_bin_width is None
-        else args.arc_bin_width
+    gaussian_bandwidth = (
+        0.5 * neighborhood_radius
+        if args.gaussian_bandwidth is None
+        else args.gaussian_bandwidth
     )
+    if min(diameter, grid_spacing, neighborhood_radius, gaussian_bandwidth) <= 0:
+        raise ValueError("Particle and neighborhood length scales must be positive")
+
     replicates = _select_replicates(
         args.manifest, args.input_dir, args.case, args.circ
     )
     grouped: dict[str, list[Replicate]] = defaultdict(list)
     for replicate in replicates:
         grouped[replicate.case_id].append(replicate)
-
     args.output_dir.mkdir(parents=True, exist_ok=True)
     options = CaseOptions(
         output_dir=args.output_dir,
         overwrite=args.overwrite,
-        requested_dx=requested_dx,
-        requested_arc_width=requested_arc_width,
-        radial_bins=args.radial_bins,
+        particle_diameter=diameter,
+        grid_spacing=grid_spacing,
+        neighborhood_radius=neighborhood_radius,
+        gaussian_bandwidth=gaussian_bandwidth,
+        wall_offset=args.wall_offset,
         density_bins=args.density_bins,
         mode_smoothing_sigma=args.mode_smoothing_sigma,
         mode_prominence_fraction=args.mode_prominence_fraction,
@@ -570,16 +544,12 @@ def main() -> None:
         (case_id, case_replicates, options)
         for case_id, case_replicates in sorted(grouped.items())
     ]
-    available_cpus = os.cpu_count() or 1
     worker_count = (
-        min(len(tasks), available_cpus)
+        min(len(tasks), os.cpu_count() or 1)
         if args.workers == 0
         else min(len(tasks), args.workers)
     )
-    print(
-        f"analyzing {len(tasks)} cases with {worker_count} worker processes",
-        flush=True,
-    )
+    print(f"analyzing {len(tasks)} cases with {worker_count} workers", flush=True)
     if worker_count == 1:
         results = map(_analyze_case, tasks)
         for report, output in results:
