@@ -1,4 +1,4 @@
-"""Explore the time-averaged radial number-density profile of big-Lx cases.
+"""Explore the net radial number-density profile of big-Lx cases.
 
 Example
 -------
@@ -9,11 +9,12 @@ pixi run python -m hexatic.big_lx_analysis.explore \
     --circ "60.5D" \
     --overwrite
 
-All particles, including particles in the wall-associated shell, contribute to
-``rho(r)``.  Counts are divided by the exact cylindrical-annulus volume and
-then averaged over the selected frames and replicates.  The radial derivative
-uses three-point finite differences: centered differences in the interior and
-second-order one-sided differences at the two endpoints.
+Particles are accumulated over all selected frames and replicates before the
+counts are divided by the exact cylindrical-annulus volume.  The histogram has
+a hard upper cutoff at ``R - D``; particles beyond that radius do not
+contribute.  The radial derivative uses three-point finite differences:
+centered differences in the interior and second-order one-sided differences at
+the two endpoints.
 """
 
 from __future__ import annotations
@@ -67,6 +68,7 @@ def _load_radial_profile(
     replicate: Replicate,
     *,
     radial_bins: int,
+    particle_diameter: float,
     frame_start: int,
     frame_stride: int,
 ) -> RadialProfile:
@@ -74,7 +76,13 @@ def _load_radial_profile(
     lx = _load_static_lx(replicate.static_file)
     circumference = _load_circumference(replicate.manifest)
     radius = _load_radius(replicate.static_file, circumference)
-    edges = np.linspace(0.0, radius, radial_bins + 1, dtype=np.float64)
+    radial_cutoff = radius - particle_diameter
+    if radial_cutoff <= 0.0:
+        raise ValueError(
+            f"R - D must be positive for {replicate.case_id}: "
+            f"R={radius}, D={particle_diameter}"
+        )
+    edges = np.linspace(0.0, radial_cutoff, radial_bins + 1, dtype=np.float64)
     counts = np.zeros(radial_bins, dtype=np.float64)
     n_frames = 0
     global_frame = 0
@@ -91,8 +99,12 @@ def _load_radial_profile(
                 if not selected:
                     continue
                 radial_positions = np.asarray(coords[local_frame, :, 2])
-                finite = radial_positions[np.isfinite(radial_positions)]
-                counts += np.histogram(finite, bins=edges)[0]
+                included = radial_positions[
+                    np.isfinite(radial_positions)
+                    & (radial_positions >= 0.0)
+                    & (radial_positions <= radial_cutoff)
+                ]
+                counts += np.histogram(included, bins=edges)[0]
                 n_frames += 1
 
     if n_frames == 0:
@@ -192,6 +204,7 @@ def main() -> None:
             _load_radial_profile(
                 replicate,
                 radial_bins=args.radial_bins,
+                particle_diameter=args.particle_diameter,
                 frame_start=args.frame_start,
                 frame_stride=args.frame_stride,
             )
@@ -207,11 +220,10 @@ def main() -> None:
                 raise ValueError(f"Replicates for {case_id} have different geometry")
 
         counts = np.sum([profile.counts for profile in profiles], axis=0)
-        total_frames = sum(profile.n_frames for profile in profiles)
         edges = reference.bin_edges
         radial_centers = 0.5 * (edges[:-1] + edges[1:])
         annulus_volumes = np.pi * reference.lx * (edges[1:] ** 2 - edges[:-1] ** 2)
-        density = counts / (total_frames * annulus_volumes)
+        density = counts / annulus_volumes
         derivative = _three_point_derivative(density, float(edges[1] - edges[0]))
 
         output = args.output_dir / f"{_safe_case_name(case_id)}_radial_density.svg"
@@ -227,14 +239,14 @@ def main() -> None:
             density,
             color="tab:blue",
             linewidth=1.8,
-            label=r"$\langle\rho(r)\rangle_t$",
+            label=r"$\rho_{\mathrm{net}}(r)$ (all selected frames)",
         )[0]
         derivative_line = derivative_axis.plot(
             radial_centers,
             derivative,
             color="tab:orange",
             linewidth=1.3,
-            label=r"$\rho'(r)$ (three-point finite difference)",
+            label=r"$\rho'_{\mathrm{net}}(r)$ (three-point finite difference)",
         )[0]
         wall_line = density_axis.axvline(
             reference.radius - args.particle_diameter,
@@ -246,10 +258,10 @@ def main() -> None:
         density_axis.set(
             title=case_replicates[0].label,
             xlabel=r"Radial distance $r$",
-            ylabel=r"Number density $\rho(r)$",
+            ylabel=r"Net number density $\rho_{\mathrm{net}}(r)$",
             xlim=(0.0, reference.radius),
         )
-        derivative_axis.set_ylabel(r"Radial derivative $\rho'(r)$")
+        derivative_axis.set_ylabel(r"Radial derivative $\rho'_{\mathrm{net}}(r)$")
         density_axis.grid(color="0.9", linewidth=0.7)
         density_axis.legend(
             handles=[density_line, derivative_line, wall_line],
