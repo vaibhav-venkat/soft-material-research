@@ -8,8 +8,8 @@ from .cases import BigLxCase
 
 
 def generate_unwrapped_lattice(case: BigLxCase) -> tuple[np.ndarray, np.ndarray]:
-    positions = np.empty((case.n_particles, 3), dtype=np.float64)
-    theta = np.empty(case.n_particles, dtype=np.float64)
+    positions = np.empty((case.lattice_site_count, 3), dtype=np.float64)
+    theta = np.empty(case.lattice_site_count, dtype=np.float64)
 
     circumference_vector = np.asarray(case.circumference_lattice_vector, dtype=int)
     axial_vector = np.asarray(case.axial_lattice_vector, dtype=int)
@@ -41,10 +41,22 @@ def generate_unwrapped_lattice(case: BigLxCase) -> tuple[np.ndarray, np.ndarray]
             theta[particle_idx] = angle
             particle_idx += 1
 
-    if particle_idx != case.n_particles:
+    if particle_idx != case.lattice_site_count:
         raise AssertionError(
-            f"enumerated {particle_idx} particles, expected {case.n_particles}"
+            f"enumerated {particle_idx} lattice sites, "
+            f"expected {case.lattice_site_count}"
         )
+    if case.n_particles < case.lattice_site_count:
+        rng = np.random.default_rng(case.seed)
+        selected = np.sort(
+            rng.choice(
+                case.lattice_site_count,
+                size=case.n_particles,
+                replace=False,
+            )
+        )
+        positions = positions[selected]
+        theta = theta[selected]
     return positions, theta
 
 

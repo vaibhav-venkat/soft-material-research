@@ -23,8 +23,8 @@ def validate_case(case: BigLxCase) -> dict[str, object]:
         raise AssertionError("axial lattice vector did not scale exactly")
     if not np.isclose(case.lx, case.lx_multiplier * case.base_lx):
         raise AssertionError("Lx did not scale exactly")
-    if case.n_particles != case.lx_multiplier * case.base_n_particles:
-        raise AssertionError("particle count did not scale exactly")
+    if case.lattice_site_count != case.lx_multiplier * case.base_n_particles:
+        raise AssertionError("lattice-site count did not scale exactly")
 
     positions, theta = generate_unwrapped_lattice(case)
     if positions.shape != (case.n_particles, 3):
@@ -49,12 +49,14 @@ def validate_case(case: BigLxCase) -> dict[str, object]:
     )
     alignment = np.einsum("ij,ij->i", directions, normals)
 
-    if not np.all(counts == cylinder.ANALYSIS.neighbors):
+    if case.occupancy_fraction == 1.0 and not np.all(
+        counts == cylinder.ANALYSIS.neighbors
+    ):
         unique, totals = np.unique(counts, return_counts=True)
         raise AssertionError(
             f"initial neighbor counts are not all six: {dict(zip(unique.tolist(), totals.tolist()))}"
         )
-    if float(psi_abs.min()) < 0.99:
+    if case.occupancy_fraction == 1.0 and float(psi_abs.min()) < 0.99:
         raise AssertionError(f"initial |psi6| is too small: {psi_abs.min()}")
     if float(alignment.min()) < 0.99999:
         raise AssertionError(f"orientation is not outward-normal: {alignment.min()}")
@@ -64,6 +66,8 @@ def validate_case(case: BigLxCase) -> dict[str, object]:
         "lx_multiplier": case.lx_multiplier,
         "lx": case.lx,
         "n_particles": case.n_particles,
+        "lattice_site_count": case.lattice_site_count,
+        "occupancy_fraction": case.occupancy_fraction,
         "volume_density": case.volume_density,
         "surface_density": case.surface_density,
         "neighbor_count_min": int(counts.min()),

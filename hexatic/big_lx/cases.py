@@ -22,6 +22,7 @@ class BigLxCase:
     case_id: str
     circumference_diameters: float
     lx_multiplier: int
+    occupancy_fraction: float = 1.0
     run_steps: int = RUN_STEPS
     trajectory_write_period: int = TRAJECTORY_WRITE_PERIOD
     seed: int = cylinder.SEED
@@ -29,6 +30,8 @@ class BigLxCase:
     def __post_init__(self) -> None:
         if self.lx_multiplier not in LX_MULTIPLIERS:
             raise ValueError(f"lx_multiplier must be one of {LX_MULTIPLIERS}")
+        if not 0.0 < self.occupancy_fraction <= 1.0:
+            raise ValueError("occupancy_fraction must be in (0, 1]")
 
     @property
     def circumference(self) -> float:
@@ -78,8 +81,12 @@ class BigLxCase:
         return abs(m * q - n * p)
 
     @property
-    def n_particles(self) -> int:
+    def lattice_site_count(self) -> int:
         return self.lx_multiplier * self.base_n_particles
+
+    @property
+    def n_particles(self) -> int:
+        return int(round(self.occupancy_fraction * self.lattice_site_count))
 
     @property
     def volume(self) -> float:
@@ -103,7 +110,13 @@ class BigLxCase:
 
     @property
     def label(self) -> str:
-        return f"C = {self.circumference_diameters:g}D, Lx = {self.lx_multiplier}x"
+        label = (
+            f"C = {self.circumference_diameters:g}D, "
+            f"Lx = {self.lx_multiplier}x"
+        )
+        if self.occupancy_fraction < 1.0:
+            label += f", occupancy = {self.occupancy_fraction:g}"
+        return label
 
     def as_metadata(self) -> dict[str, object]:
         return {
@@ -117,6 +130,8 @@ class BigLxCase:
             "base_lx": self.base_lx,
             "lx": self.lx,
             "base_n_particles": self.base_n_particles,
+            "lattice_site_count": self.lattice_site_count,
+            "occupancy_fraction": self.occupancy_fraction,
             "n_particles": self.n_particles,
             "volume": self.volume,
             "volume_density": self.volume_density,
@@ -192,6 +207,14 @@ SWEEP_CASES = tuple(
     for multiplier in LX_MULTIPLIERS
 )
 
+HALF_N_8X_CASE = BigLxCase(
+    case_id="circ_60_5D_lx_8x_half_n",
+    circumference_diameters=60.5,
+    lx_multiplier=8,
+    occupancy_fraction=0.5,
+)
+EXPERIMENTAL_CASES = (HALF_N_8X_CASE,)
+
 
 def all_cases() -> tuple[BigLxCase, ...]:
     return SWEEP_CASES
@@ -208,10 +231,11 @@ def ordered_cases(cases: tuple[BigLxCase, ...]) -> tuple[BigLxCase, ...]:
 
 
 def get_case(case_id: str) -> BigLxCase:
-    for case in SWEEP_CASES:
+    known_cases = SWEEP_CASES + EXPERIMENTAL_CASES
+    for case in known_cases:
         if case.case_id == case_id:
             return case
-    known = ", ".join(case.case_id for case in SWEEP_CASES)
+    known = ", ".join(case.case_id for case in known_cases)
     raise KeyError(f"Unknown big-Lx case {case_id!r}. Known cases: {known}")
 
 
