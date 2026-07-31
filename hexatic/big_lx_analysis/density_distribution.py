@@ -2,9 +2,16 @@
 
 ``freud.density.LocalDensity`` is evaluated at every particle center in every
 selected frame.  Query points are therefore never empty grid locations.
-Particles marked by the stored ``hexatic_shell_mask`` receive a factor of two
-to correct the missing outer hemisphere.  A radial shell-mask fallback uses
-the repository shell cutoff if the stored mask is absent.
+Particles close enough to the cylindrical wall are reflected radially across
+the accessible particle-center radius.  These ghosts are neighbor sources but
+never query points or histogram samples, providing a distance-dependent wall
+correction without a hard factor of two.
+
+For particles in ``hexatic_shell_mask``, the 3D estimate is replaced by a
+surface density on the unwrapped periodic cylinder ``(x, R theta)``.  Taking
+the shell thickness to be one particle diameter converts this to the effective
+volumetric density ``rho_shell = sigma_shell / D``.  This gives the shell a
+defined physical volume instead of dividing a monolayer count by a 3D sphere.
 
 Because query points are sampled at particles, the empirical histogram uses
 inverse-density weights ``w_i = 1 / rho_i`` as an approximate conversion from
@@ -69,6 +76,7 @@ class CaseOptions:
     neighborhood_radius: float
     wall_offset: float
     shell_delta: float
+    shell_thickness: float
     density_bins: int
     mode_smoothing_window: int
     mode_prominence_fraction: float
@@ -127,6 +135,27 @@ def _select_replicates(
     return replicates
 
 
+def _radial_ghost_points(
+    points: NDArray[np.float32],
+    radial: NDArray[np.float32],
+    theta: NDArray[np.float32],
+    *,
+    center_radius: float,
+    influence_radius: float,
+) -> NDArray[np.float32]:
+    """Reflect near-wall particles across the particle-center boundary."""
+    depth = center_radius - radial
+    ghost_mask = (depth >= 0.0) & (depth < influence_radius)
+    ghost_radius = 2.0 * center_radius - radial[ghost_mask]
+    return np.column_stack(
+        (
+            points[ghost_mask, 0],
+            ghost_radius * np.cos(theta[ghost_mask]),
+            ghost_radius * np.sin(theta[ghost_mask]),
+        )
+    ).astype(np.float32)
+
+
 def _frame_shell_mask(
     tensors: object,
     local_frame: int,
@@ -161,6 +190,10 @@ def _load_particle_density_samples(
         r_max=options.neighborhood_radius,
         diameter=options.particle_diameter,
     )
+    surface_density = freud.density.LocalDensity(
+        r_max=options.neighborhood_radius,
+        diameter=options.particle_diameter,
+    )
     self_density = 1.0 / (
         (4.0 / 3.0) * np.pi * options.neighborhood_radius**3
     )
@@ -171,6 +204,15 @@ def _load_particle_density_samples(
         Lx=lx,
         Ly=transverse_box_length,
         Lz=transverse_box_length,
+    )
+    surface_circumference = 2.0 * np.pi * center_radius
+    surface_box = freud.box.Box(
+        Lx=lx,
+        Ly=surface_circumference,
+        is2D=True,
+    )
+    self_surface_density = 1.0 / (
+        np.pi * options.neighborhood_radius**2
     )
 
     for path in replicate.shard_files:
@@ -200,11 +242,29 @@ def _load_particle_density_samples(
                 points = np.column_stack(
                     (x, radial * np.cos(theta), radial * np.sin(theta))
                 ).astype(np.float32)
-                result = local_density.compute(system=(box, points))
+                influence_radius = (
+                    options.neighborhood_radius
+                    + 0.5 * options.particle_diameter
+                )
+                ghosts = _radial_ghost_points(
+                    points,
+                    radial,
+                    np.asarray(theta, dtype=np.float32),
+                    center_radius=center_radius,
+                    influence_radius=influence_radius,
+                )
+                sources = np.concatenate((points, ghosts), axis=0)
+                result = local_density.compute(
+                    system=(box, sources),
+                    query_points=points,
+                    neighbors={
+                        "r_max": influence_radius,
+                        "exclude_ii": True,
+                    },
+                )
                 frame_density = np.asarray(result.density, dtype=np.float64).copy()
-                # freud excludes a query point from its own neighbor list.
-                # Add that particle explicitly so particle-centered queries
-                # cannot produce the empty-neighborhood rho=0 artifact.
+                # Real sources precede ghosts, so exclude_ii removes exactly
+                # the real particle at each matching query index. Add it once.
                 frame_density += self_density
                 full_shell_mask = _frame_shell_mask(
                     tensors,
@@ -214,7 +274,29 @@ def _load_particle_density_samples(
                     options.shell_delta,
                 )
                 shell_mask = full_shell_mask[finite]
-                frame_density[shell_mask] *= 2.0
+                if np.any(shell_mask):
+                    surface_arclength = np.mod(
+                        center_radius * theta[shell_mask]
+                        + 0.5 * surface_circumference,
+                        surface_circumference,
+                    ) - 0.5 * surface_circumference
+                    surface_points = np.column_stack(
+                        (
+                            x[shell_mask],
+                            surface_arclength,
+                            np.zeros(np.count_nonzero(shell_mask)),
+                        )
+                    ).astype(np.float32)
+                    shell_result = surface_density.compute(
+                        system=(surface_box, surface_points)
+                    )
+                    shell_sigma = (
+                        np.asarray(shell_result.density, dtype=np.float64)
+                        + self_surface_density
+                    )
+                    frame_density[shell_mask] = (
+                        shell_sigma / options.shell_thickness
+                    )
                 densities.append(frame_density)
                 particle_count_sum += float(points.shape[0])
                 n_frames += 1
@@ -465,6 +547,12 @@ def _parse_args() -> argparse.Namespace:
         default=float(cylinder.SHELL_DELTA),
         help="Radial shell fallback when hexatic_shell_mask is absent",
     )
+    parser.add_argument(
+        "--shell-thickness",
+        type=float,
+        default=None,
+        help="Effective shell thickness used for sigma_shell/t (default: D)",
+    )
     parser.add_argument("--density-bins", type=int, default=80)
     parser.add_argument("--mode-smoothing-window", type=int, default=5)
     parser.add_argument("--mode-prominence-fraction", type=float, default=0.02)
@@ -489,7 +577,14 @@ def main() -> None:
         if args.neighborhood_radius is None
         else args.neighborhood_radius
     )
-    if min(diameter, neighborhood_radius, args.shell_delta) <= 0 or args.wall_offset < 0:
+    shell_thickness = (
+        diameter if args.shell_thickness is None else args.shell_thickness
+    )
+    if (
+        min(diameter, neighborhood_radius, args.shell_delta, shell_thickness)
+        <= 0
+        or args.wall_offset < 0
+    ):
         raise ValueError("Particle, neighborhood, and shell lengths must be valid")
 
     replicates = _select_replicates(
@@ -506,6 +601,7 @@ def main() -> None:
         neighborhood_radius=neighborhood_radius,
         wall_offset=args.wall_offset,
         shell_delta=args.shell_delta,
+        shell_thickness=shell_thickness,
         density_bins=args.density_bins,
         mode_smoothing_window=args.mode_smoothing_window,
         mode_prominence_fraction=args.mode_prominence_fraction,
