@@ -387,10 +387,22 @@ def _plot_distribution(
     axis.set(
         title=case_label,
         xlabel=r"Local volume density $\rho$ [$N/L^3$]",
-        ylabel=r"Probability density $P(\rho)$",
+        ylabel=r"Probability density $P(\rho)$ (log scale)",
         xlim=(edges[0], edges[-1]),
     )
-    axis.grid(axis="y", color="0.9", linewidth=0.7)
+    positive = np.concatenate(
+        (
+            probability[probability > 0.0],
+            smoothed_probability[smoothed_probability > 0.0],
+        )
+    )
+    if positive.size:
+        axis.set_yscale("log")
+        axis.set_ylim(
+            max(float(positive.min()) * 0.5, float(positive.max()) * 1.0e-7),
+            float(positive.max()) * 1.5,
+        )
+    axis.grid(axis="y", which="both", color="0.9", linewidth=0.7)
     axis.legend(frameon=False)
     sns.despine(ax=axis)
     figure.savefig(
