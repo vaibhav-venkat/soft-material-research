@@ -1,13 +1,14 @@
-"""Compute and fit surface-excess density distributions for big-Lx cases.
+"""Plot volumetric-density distributions for big-Lx cylinder cases.
 
-This command first calls :mod:`rho_gamma_finding` to ensure that every case
-has a cached ``rho_gamma`` and film cutoff.  It then implements PLAN.md steps
-2 and 3 on equal-area ``(x, theta)`` bins:
+Selected frames are divided into equal-volume ``(x, theta, r)`` voxels.  The
+local volume density is the particle count divided by the exact cylindrical
+sector volume.  A two-component Gaussian mixture supplies dilute and dense
+density modes.  Their volume fractions are not taken from the mixture weights;
+they are calculated from the conservation lever rule
 
-``rho_s,i = (<N_i> - rho_gamma * V_i) / A_i``.
+``rho_total = x_dense * rho_dense + (1 - x_dense) * rho_dilute``.
 
-For each case, the plot shows the area-weighted probability distribution
-``P(rho_s)`` and a probabilistic two- or three-component Gaussian mixture.
+The sole generated artifact is one SVG probability-density plot per case.
 """
 
 from __future__ import annotations
@@ -15,7 +16,6 @@ from __future__ import annotations
 import argparse
 from collections import defaultdict
 from dataclasses import dataclass
-import json
 from pathlib import Path
 
 import matplotlib
@@ -28,82 +28,134 @@ from sklearn.mixture import GaussianMixture
 
 from hexatic.constants import cylinder
 
-from .rho_gamma_finding import (
-    RhoGammaOptions,
-    load_radius,
-    safe_case_name,
-    select_replicates,
-    write_rho_gamma_summaries,
-)
-from .run_dynamics import Replicate, _style
+from .run_dynamics import Replicate, _collect_manifests, _load_replicate, _style
 from .surface_area import _load_circumference, _load_static_lx
 
 
 @dataclass(frozen=True)
-class SurfaceGrid:
-    counts: NDArray[np.float64]
+class VolumeDensitySamples:
+    values: NDArray[np.float64]
     n_frames: int
     n_particles: int
     nx: int
     ntheta: int
+    nr: int
     dx: float
     dtheta: float
+    radial_edges: NDArray[np.float64]
+    voxel_volume: float
     lx: float
     radius: float
 
 
 @dataclass(frozen=True)
-class MixtureComponent:
-    name: str
-    mean: float
-    standard_deviation: float
-    weight: float
+class DensityModes:
+    rho_dilute: float
+    sigma_dilute: float
+    rho_dense: float
+    sigma_dense: float
 
 
-@dataclass(frozen=True)
-class MixtureFit:
-    n_components: int
-    bic: float
-    components: tuple[MixtureComponent, ...]
+def _safe_case_name(case_id: str) -> str:
+    return "".join(c if c.isalnum() or c in "-_." else "_" for c in case_id)
 
 
-def _surface_grid(
+def _circumference_prefix(value: str) -> str:
+    token = value.strip().upper()
+    if token.endswith("D"):
+        token = token[:-1]
+    try:
+        circumference = float(token)
+    except ValueError as error:
+        raise ValueError('--circ must look like "60.5D"') from error
+    return f"circ_{format(circumference, '.15g').replace('.', '_')}D_"
+
+
+def _load_radius(static_file: Path, circumference: float) -> float:
+    with safe_open(static_file, framework="np") as tensors:
+        radius = (
+            float(tensors.get_tensor("radius").item())
+            if "radius" in tensors.keys()
+            else circumference / (2.0 * np.pi)
+        )
+    if not np.isclose(circumference, 2.0 * np.pi * radius, rtol=1e-6, atol=1e-8):
+        raise ValueError(
+            f"Manifest circumference and static radius disagree for {static_file}"
+        )
+    return radius
+
+
+def _select_replicates(
+    manifests: list[Path],
+    input_dirs: list[Path],
+    cases: list[str],
+    circumference: str | None,
+) -> list[Replicate]:
+    paths = _collect_manifests(manifests, input_dirs)
+    replicates = [_load_replicate(path) for path in paths]
+    if cases:
+        selected = set(cases)
+        replicates = [r for r in replicates if r.case_id in selected]
+        missing = selected - {r.case_id for r in replicates}
+        if missing:
+            raise ValueError(f"Requested cases not found: {sorted(missing)}")
+    if circumference:
+        prefix = _circumference_prefix(circumference)
+        replicates = [r for r in replicates if r.case_id.startswith(prefix)]
+    if not replicates:
+        raise ValueError("No matching replicates found")
+    return replicates
+
+
+def _volume_grid(
     lx: float,
     circumference: float,
+    radius: float,
     requested_dx: float,
     requested_arc_width: float,
-) -> tuple[int, int, float, float]:
-    if lx <= 0.0 or circumference <= 0.0:
-        raise ValueError("Cylinder dimensions must be positive")
+    radial_bins: int,
+) -> tuple[int, int, float, float, NDArray[np.float64], float]:
     if requested_dx <= 0.0 or requested_arc_width <= 0.0:
-        raise ValueError("Surface-bin widths must be positive")
+        raise ValueError("Spatial bin widths must be positive")
+    if radial_bins < 1:
+        raise ValueError("radial_bins must be positive")
     nx = max(1, int(np.rint(lx / requested_dx)))
     ntheta = max(1, int(np.rint(circumference / requested_arc_width)))
-    return nx, ntheta, lx / nx, 2.0 * np.pi / ntheta
+    dx = lx / nx
+    dtheta = 2.0 * np.pi / ntheta
+
+    # Uniform spacing in r^2 makes every radial cylindrical sector have the
+    # same volume, despite the factor of r in the cylindrical volume element.
+    radial_edges = radius * np.sqrt(
+        np.linspace(0.0, 1.0, radial_bins + 1, dtype=np.float64)
+    )
+    radial_sector_volume = 0.5 * dx * dtheta * (
+        radial_edges[1] ** 2 - radial_edges[0] ** 2
+    )
+    return nx, ntheta, dx, dtheta, radial_edges, radial_sector_volume
 
 
-def _load_surface_grid(
+def _load_volume_density_samples(
     replicate: Replicate,
     *,
-    radial_cutoff: float,
     requested_dx: float,
     requested_arc_width: float,
+    radial_bins: int,
     frame_start: int,
     frame_stride: int,
-) -> SurfaceGrid:
+) -> VolumeDensitySamples:
     lx = _load_static_lx(replicate.static_file)
     circumference = _load_circumference(replicate.manifest)
-    radius = load_radius(replicate.static_file, circumference)
-    if not 0.0 < radial_cutoff < radius:
-        raise ValueError(
-            f"rho-gamma cutoff must lie inside the cylinder for "
-            f"{replicate.case_id}: cutoff={radial_cutoff}, R={radius}"
-        )
-    nx, ntheta, dx, dtheta = _surface_grid(
-        lx, circumference, requested_dx, requested_arc_width
+    radius = _load_radius(replicate.static_file, circumference)
+    nx, ntheta, dx, dtheta, radial_edges, voxel_volume = _volume_grid(
+        lx,
+        circumference,
+        radius,
+        requested_dx,
+        requested_arc_width,
+        radial_bins,
     )
-    frame_counts: list[NDArray[np.float64]] = []
-    n_frames = 0
+    frame_densities: list[NDArray[np.float64]] = []
     n_particles: int | None = None
     global_frame = 0
     for path in replicate.shard_files:
@@ -124,120 +176,118 @@ def _load_surface_grid(
                 if not selected:
                     continue
                 frame = coords[local_frame]
-                included = (
+                finite = (
                     np.isfinite(frame[:, 0])
                     & np.isfinite(frame[:, 1])
                     & np.isfinite(frame[:, 2])
-                    & (frame[:, 2] >= radial_cutoff)
+                    & (frame[:, 2] >= 0.0)
+                    & (frame[:, 2] <= radius)
                 )
-                x = np.mod(frame[included, 0] + 0.5 * lx, lx)
-                theta = np.mod(frame[included, 1], 2.0 * np.pi)
+                x = np.mod(frame[finite, 0] + 0.5 * lx, lx)
+                theta = np.mod(frame[finite, 1], 2.0 * np.pi)
+                radial = frame[finite, 2]
                 x_index = np.minimum((x / dx).astype(np.intp), nx - 1)
                 theta_index = np.minimum(
                     (theta / dtheta).astype(np.intp), ntheta - 1
                 )
-                frame_counts.append(
-                    np.bincount(
-                        x_index * ntheta + theta_index,
-                        minlength=nx * ntheta,
-                    ).reshape(nx, ntheta)
+                radial_index = np.searchsorted(
+                    radial_edges, radial, side="right"
+                ) - 1
+                radial_index = np.minimum(radial_index, radial_bins - 1)
+                flat_index = (
+                    (x_index * ntheta + theta_index) * radial_bins
+                    + radial_index
                 )
-                n_frames += 1
-    if n_frames == 0 or n_particles is None:
+                counts = np.bincount(
+                    flat_index,
+                    minlength=nx * ntheta * radial_bins,
+                )
+                frame_densities.append(
+                    counts.astype(np.float64) / voxel_volume
+                )
+    if not frame_densities or n_particles is None:
         raise ValueError(f"No frames selected for {replicate.case_id}")
-    return SurfaceGrid(
-        np.stack(frame_counts).astype(np.float64),
-        n_frames,
-        n_particles,
-        nx,
-        ntheta,
-        dx,
-        dtheta,
-        lx,
-        radius,
+    return VolumeDensitySamples(
+        values=np.concatenate(frame_densities),
+        n_frames=len(frame_densities),
+        n_particles=n_particles,
+        nx=nx,
+        ntheta=ntheta,
+        nr=radial_bins,
+        dx=dx,
+        dtheta=dtheta,
+        radial_edges=radial_edges,
+        voxel_volume=voxel_volume,
+        lx=lx,
+        radius=radius,
     )
 
 
-def _combine_surface_grids(
-    case_id: str, grids: list[SurfaceGrid]
-) -> SurfaceGrid:
-    reference = grids[0]
-    for grid in grids[1:]:
+def _combine_samples(
+    case_id: str, samples: list[VolumeDensitySamples]
+) -> VolumeDensitySamples:
+    reference = samples[0]
+    for sample in samples[1:]:
         if (
-            grid.nx != reference.nx
-            or grid.ntheta != reference.ntheta
-            or not np.isclose(grid.dx, reference.dx)
-            or not np.isclose(grid.dtheta, reference.dtheta)
-            or not np.isclose(grid.lx, reference.lx)
-            or not np.isclose(grid.radius, reference.radius)
+            sample.nx != reference.nx
+            or sample.ntheta != reference.ntheta
+            or sample.nr != reference.nr
+            or not np.isclose(sample.dx, reference.dx)
+            or not np.isclose(sample.dtheta, reference.dtheta)
+            or not np.allclose(sample.radial_edges, reference.radial_edges)
+            or not np.isclose(sample.voxel_volume, reference.voxel_volume)
+            or not np.isclose(sample.lx, reference.lx)
+            or not np.isclose(sample.radius, reference.radius)
         ):
             raise ValueError(f"Replicates for {case_id} have different grids")
-        if grid.n_particles != reference.n_particles:
+        if sample.n_particles != reference.n_particles:
             raise ValueError(
                 f"Replicates for {case_id} have different particle counts"
             )
-    return SurfaceGrid(
-        counts=np.concatenate([grid.counts for grid in grids], axis=0),
-        n_frames=sum(grid.n_frames for grid in grids),
+    return VolumeDensitySamples(
+        values=np.concatenate([sample.values for sample in samples]),
+        n_frames=sum(sample.n_frames for sample in samples),
         n_particles=reference.n_particles,
         nx=reference.nx,
         ntheta=reference.ntheta,
+        nr=reference.nr,
         dx=reference.dx,
         dtheta=reference.dtheta,
+        radial_edges=reference.radial_edges,
+        voxel_volume=reference.voxel_volume,
         lx=reference.lx,
         radius=reference.radius,
     )
 
 
-def _fit_phase_mixture(
-    values: NDArray[np.float64],
-    *,
-    requested_components: str,
-    max_fit_samples: int,
-) -> MixtureFit:
-    """Fit a two- or three-component Gaussian mixture to equal-area samples."""
+def _fit_density_modes(
+    values: NDArray[np.float64], max_fit_samples: int
+) -> DensityModes:
     finite = values[np.isfinite(values)]
     if finite.size < 4:
-        raise ValueError("At least four finite surface-density samples are required")
+        raise ValueError("At least four finite density samples are required")
     rng = np.random.default_rng(0)
     fit_values = (
         rng.choice(finite, size=max_fit_samples, replace=False)
         if finite.size > max_fit_samples
         else finite
     )
-    fit_column = fit_values.reshape(-1, 1)
-    candidates = (
-        [2, 3] if requested_components == "auto" else [int(requested_components)]
+    model = GaussianMixture(
+        n_components=2,
+        covariance_type="full",
+        n_init=10,
+        random_state=0,
+        reg_covar=1.0e-8,
     )
-    fitted: list[tuple[float, GaussianMixture]] = []
-    for n_components in candidates:
-        model = GaussianMixture(
-            n_components=n_components,
-            covariance_type="full",
-            n_init=10,
-            random_state=0,
-            reg_covar=1.0e-8,
-        )
-        model.fit(fit_column)
-        fitted.append((float(model.bic(fit_column)), model))
-    bic, model = min(fitted, key=lambda item: item[0])
-    means = model.means_[:, 0]
-    order = np.argsort(means)
-    names = (
-        ("beta", "alpha")
-        if model.n_components == 2
-        else ("beta", "interface", "alpha")
+    model.fit(fit_values.reshape(-1, 1))
+    order = np.argsort(model.means_[:, 0])
+    dilute, dense = int(order[0]), int(order[1])
+    return DensityModes(
+        rho_dilute=float(model.means_[dilute, 0]),
+        sigma_dilute=float(np.sqrt(model.covariances_[dilute, 0, 0])),
+        rho_dense=float(model.means_[dense, 0]),
+        sigma_dense=float(np.sqrt(model.covariances_[dense, 0, 0])),
     )
-    components = tuple(
-        MixtureComponent(
-            name=name,
-            mean=float(means[index]),
-            standard_deviation=float(np.sqrt(model.covariances_[index, 0, 0])),
-            weight=float(model.weights_[index]),
-        )
-        for name, index in zip(names, order, strict=True)
-    )
-    return MixtureFit(model.n_components, bic, components)
 
 
 def _normal_pdf(
@@ -247,12 +297,13 @@ def _normal_pdf(
     return np.exp(-0.5 * z**2) / (np.sqrt(2.0 * np.pi) * standard_deviation)
 
 
-def _plot_density_distribution(
+def _plot_distribution(
     case_label: str,
     values: NDArray[np.float64],
-    mixture: MixtureFit,
-    number_residual: float,
-    full_number_residual: float,
+    rho_total: float,
+    modes: DensityModes,
+    x_dense: float,
+    x_dilute: float,
     density_bins: int,
     output: Path,
 ) -> None:
@@ -271,43 +322,54 @@ def _plot_density_distribution(
     lower, upper = np.quantile(values, [0.001, 0.999])
     padding = 0.08 * max(upper - lower, np.finfo(np.float64).eps)
     x = np.linspace(lower - padding, upper + padding, 600)
-    colors = sns.color_palette("colorblind", n_colors=mixture.n_components)
-    total = np.zeros_like(x)
-    for color, component in zip(colors, mixture.components, strict=True):
-        component_pdf = component.weight * _normal_pdf(
-            x, component.mean, component.standard_deviation
-        )
-        total += component_pdf
-        symbol = "I" if component.name == "interface" else component.name
-        axis.plot(
-            x,
-            component_pdf,
-            color=color,
-            linestyle="--",
-            linewidth=1.4,
-            label=(
-                rf"$\rho_{{{symbol}}}={component.mean:.4g}$, "
-                rf"$x_{{{symbol}}}={component.weight:.3f}$"
-            ),
-        )
-        axis.axvline(component.mean, color=color, linestyle=":", linewidth=0.9)
-    axis.plot(x, total, color="black", linewidth=1.8, label="mixture total")
+    dilute_pdf = x_dilute * _normal_pdf(
+        x, modes.rho_dilute, modes.sigma_dilute
+    )
+    dense_pdf = x_dense * _normal_pdf(
+        x, modes.rho_dense, modes.sigma_dense
+    )
+    colors = sns.color_palette("colorblind", n_colors=2)
+    axis.plot(
+        x,
+        dilute_pdf,
+        color=colors[0],
+        linestyle="--",
+        linewidth=1.4,
+        label=(
+            rf"$\rho_{{\rm dilute}}={modes.rho_dilute:.4g}$, "
+            rf"$x_{{\rm dilute}}={x_dilute:.3f}$"
+        ),
+    )
+    axis.plot(
+        x,
+        dense_pdf,
+        color=colors[1],
+        linestyle="--",
+        linewidth=1.4,
+        label=(
+            rf"$\rho_{{\rm dense}}={modes.rho_dense:.4g}$, "
+            rf"$x_{{\rm dense}}={x_dense:.3f}$"
+        ),
+    )
+    axis.plot(
+        x,
+        dilute_pdf + dense_pdf,
+        color="black",
+        linewidth=1.8,
+        label="two-population reconstruction",
+    )
+    axis.axvline(
+        rho_total,
+        color="0.25",
+        linestyle=":",
+        linewidth=1.1,
+        label=rf"$\rho_{{\rm total}}={rho_total:.4g}$",
+    )
     axis.set(
         title=case_label,
-        xlabel=r"Local surface-excess density $\rho_s$ [$N/L^2$]",
-        ylabel=r"Probability density $P(\rho_s)$",
+        xlabel=r"Local volume density $\rho$ [$N/L^3$]",
+        ylabel=r"Probability density $P(\rho)$",
         xlim=(x[0], x[-1]),
-    )
-    axis.text(
-        0.98,
-        0.96,
-        rf"$\epsilon_N={number_residual:.6g}$"
-        "\n"
-        rf"$\epsilon_{{\mathrm{{full}}}}={full_number_residual:.6g}$",
-        transform=axis.transAxes,
-        ha="right",
-        va="top",
-        fontsize="small",
     )
     axis.grid(axis="y", color="0.9", linewidth=0.7)
     axis.legend(frameon=False)
@@ -337,27 +399,11 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--dx", type=float, default=None)
     parser.add_argument("--arc-bin-width", type=float, default=None)
+    parser.add_argument("--radial-bins", type=int, default=20)
     parser.add_argument("--density-bins", type=int, default=80)
-    parser.add_argument(
-        "--mixture-components",
-        choices=("auto", "2", "3"),
-        default="auto",
-        help="Fit two, three, or the BIC-selected number of components",
-    )
-    parser.add_argument(
-        "--mixture-max-fit-samples",
-        type=int,
-        default=100_000,
-        help="Maximum deterministic subsample used to fit the mixture",
-    )
-    parser.add_argument("--radial-bins", type=int, default=100)
+    parser.add_argument("--mixture-max-fit-samples", type=int, default=100_000)
     parser.add_argument("--frame-start", type=int, default=700)
     parser.add_argument("--frame-stride", type=int, default=1)
-    parser.add_argument("--rho-gamma-min-r", type=float, default=8.0)
-    parser.add_argument("--rho-gamma-smoothing-window", type=int, default=5)
-    parser.add_argument(
-        "--rho-gamma-prominence-fraction", type=float, default=0.10
-    )
     parser.add_argument("--circ")
     return parser.parse_args()
 
@@ -368,8 +414,8 @@ def main() -> None:
         raise ValueError("--frame-start must be non-negative")
     if args.frame_stride < 1:
         raise ValueError("--frame-stride must be positive")
-    if args.density_bins < 1:
-        raise ValueError("--density-bins must be positive")
+    if args.radial_bins < 1 or args.density_bins < 1:
+        raise ValueError("--radial-bins and --density-bins must be positive")
     if args.mixture_max_fit_samples < 4:
         raise ValueError("--mixture-max-fit-samples must be at least 4")
     if not np.isfinite(args.particle_diameter) or args.particle_diameter <= 0:
@@ -382,187 +428,69 @@ def main() -> None:
         if args.arc_bin_width is None
         else args.arc_bin_width
     )
-    if requested_dx <= 0.0 or requested_arc_width <= 0.0:
-        raise ValueError("Surface-bin widths must be positive")
-
-    replicates = select_replicates(
+    replicates = _select_replicates(
         args.manifest, args.input_dir, args.case, args.circ
     )
-    rho_options = RhoGammaOptions(
-        radial_bins=args.radial_bins,
-        particle_diameter=args.particle_diameter,
-        frame_start=args.frame_start,
-        frame_stride=args.frame_stride,
-        minimum_r=args.rho_gamma_min_r,
-        smoothing_window=args.rho_gamma_smoothing_window,
-        minimum_prominence_fraction=args.rho_gamma_prominence_fraction,
-    )
-    rho_paths = write_rho_gamma_summaries(
-        replicates,
-        args.output_dir,
-        rho_options,
-        overwrite=args.overwrite,
-    )
-
     grouped: dict[str, list[Replicate]] = defaultdict(list)
     for replicate in replicates:
         grouped[replicate.case_id].append(replicate)
+
+    args.output_dir.mkdir(parents=True, exist_ok=True)
     for case_id, case_replicates in sorted(grouped.items()):
-        rho_payload = json.loads(rho_paths[case_id].read_text())
-        rho_gamma = float(rho_payload["rho_gamma"])
-        radial_cutoff = float(rho_payload["rho_gamma_cutoff_r"])
-        grids = [
-            _load_surface_grid(
-                replicate,
-                radial_cutoff=radial_cutoff,
-                requested_dx=requested_dx,
-                requested_arc_width=requested_arc_width,
-                frame_start=args.frame_start,
-                frame_stride=args.frame_stride,
-            )
-            for replicate in case_replicates
-        ]
-        grid = _combine_surface_grids(case_id, grids)
-
-        bin_area = grid.radius * grid.dx * grid.dtheta
-        bin_volume = (
-            0.5
-            * grid.dx
-            * grid.dtheta
-            * (grid.radius**2 - radial_cutoff**2)
-        )
-        rho_surface_field = (
-            grid.counts - rho_gamma * bin_volume
-        ) / bin_area
-        values = rho_surface_field.reshape(-1)
-        # Every (x, theta) bin has area A_i = R dx dtheta.  Repeating those
-        # equal weights for every selected frame implements
-        # rho_surface = sum_i A_i rho_s,i / sum_i A_i explicitly.
-        area_weights = np.full(values.shape, bin_area, dtype=np.float64)
-        rho_surface = float(
-            np.average(values, weights=area_weights)
-        )
-        mixture = _fit_phase_mixture(
-            values,
-            requested_components=args.mixture_components,
-            max_fit_samples=args.mixture_max_fit_samples,
-        )
-
-        stem = safe_case_name(case_id)
-        plot_output = args.output_dir / f"{stem}_density_distribution.svg"
-        data_output = args.output_dir / f"{stem}_surface_excess_summary.json"
-        existing = [
-            path for path in (plot_output, data_output) if path.exists()
-        ]
-        if existing and not args.overwrite:
-            raise FileExistsError(
-                f"{existing[0]} exists; pass --overwrite to replace"
-        )
-        beta = mixture.components[0]
-        alpha = mixture.components[-1]
-        interface = (
-            mixture.components[1] if mixture.n_components == 3 else None
-        )
-        total_volume = np.pi * grid.radius**2 * grid.lx
-        surface_area = 2.0 * np.pi * grid.radius * grid.lx
-        phase_surface_density = (
-            alpha.weight * alpha.mean + beta.weight * beta.mean
-        )
-        reconstructed_n = (
-            total_volume * rho_gamma
-            + surface_area * phase_surface_density
-        )
-        actual_n = float(grid.n_particles)
-        number_residual = (actual_n - reconstructed_n) / actual_n
-        full_surface_density = sum(
-            component.weight * component.mean
-            for component in mixture.components
-        )
-        full_reconstructed_n = (
-            total_volume * rho_gamma
-            + surface_area * full_surface_density
-        )
-        full_number_residual = (
-            actual_n - full_reconstructed_n
-        ) / actual_n
-
-        _plot_density_distribution(
-            case_replicates[0].label,
-            values,
-            mixture,
-            number_residual,
-            full_number_residual,
-            args.density_bins,
-            plot_output,
-        )
-        payload = {
-            "case_id": case_id,
-            "rho_gamma": rho_gamma,
-            "rho_gamma_units": "N/L^3",
-            "radial_cutoff": radial_cutoff,
-            "rho_surface": rho_surface,
-            "rho_surface_units": "N/L^2",
-            "surface_bin_area": bin_area,
-            "surface_bin_volume": bin_volume,
-            "surface_bin_volume_formula": (
-                "0.5 * dx * dtheta * (R^2 - radial_cutoff^2)"
-            ),
-            "rho_surface_averaging": (
-                "area-weighted mean of per-frame equal-area local bins"
-            ),
-            "nx": grid.nx,
-            "ntheta": grid.ntheta,
-            "n_selected_frames": grid.n_frames,
-            "n_replicates": len(grids),
-            "n_distribution_samples": int(values.size),
-            "mixture_components": mixture.n_components,
-            "mixture_bic": mixture.bic,
-            "rho_beta": beta.mean,
-            "rho_alpha": alpha.mean,
-            "rho_phase_units": "N/L^2",
-            "x_beta": beta.weight,
-            "x_alpha": alpha.weight,
-            "rho_interface": interface.mean if interface is not None else None,
-            "x_interface": interface.weight if interface is not None else 0.0,
-            "total_volume": total_volume,
-            "surface_area": surface_area,
-            "actual_n": actual_n,
-            "alpha_beta_surface_density": phase_surface_density,
-            "alpha_beta_reconstructed_n": reconstructed_n,
-            "epsilon_n": number_residual,
-            "epsilon_n_formula": (
-                "(N - (V*rho_gamma + A_s*(x_alpha*rho_alpha + "
-                "x_beta*rho_beta))) / N"
-            ),
-            "full_surface_density": full_surface_density,
-            "full_reconstructed_n": full_reconstructed_n,
-            "epsilon_full": full_number_residual,
-            "epsilon_full_formula": (
-                "(N - (V*rho_gamma + A_s*sum_k(x_k*rho_k))) / N; "
-                "k includes beta, alpha, and interface when present"
-            ),
-            "components": [
-                {
-                    "name": component.name,
-                    "mean": component.mean,
-                    "standard_deviation": component.standard_deviation,
-                    "weight": component.weight,
-                }
-                for component in mixture.components
+        samples = _combine_samples(
+            case_id,
+            [
+                _load_volume_density_samples(
+                    replicate,
+                    requested_dx=requested_dx,
+                    requested_arc_width=requested_arc_width,
+                    radial_bins=args.radial_bins,
+                    frame_start=args.frame_start,
+                    frame_stride=args.frame_stride,
+                )
+                for replicate in case_replicates
             ],
-        }
-        data_output.write_text(json.dumps(payload, indent=2) + "\n")
+        )
+        rho_total = float(samples.values.mean())
+        modes = _fit_density_modes(
+            samples.values, args.mixture_max_fit_samples
+        )
+        density_difference = modes.rho_dense - modes.rho_dilute
+        if density_difference <= 0.0:
+            raise ValueError(f"Dense and dilute modes coincide for {case_id}")
+        x_dense = (rho_total - modes.rho_dilute) / density_difference
+        x_dilute = 1.0 - x_dense
+        if not 0.0 <= x_dense <= 1.0:
+            raise ValueError(
+                f"Fitted modes do not bracket rho_total for {case_id}: "
+                f"rho_dilute={modes.rho_dilute}, rho_total={rho_total}, "
+                f"rho_dense={modes.rho_dense}"
+            )
+
+        output = (
+            args.output_dir
+            / f"{_safe_case_name(case_id)}_density_distribution.svg"
+        )
+        if output.exists() and not args.overwrite:
+            raise FileExistsError(f"{output} exists; pass --overwrite to replace")
+        _plot_distribution(
+            case_replicates[0].label,
+            samples.values,
+            rho_total,
+            modes,
+            x_dense,
+            x_dilute,
+            args.density_bins,
+            output,
+        )
         print(
-            f"{case_id}: rho_surface={rho_surface:.6g}, "
-            f"rho_beta={beta.mean:.6g}, rho_alpha={alpha.mean:.6g}, "
-            f"x_beta={beta.weight:.6g}, x_alpha={alpha.weight:.6g}, "
-            f"epsilon_N={number_residual:.6g}, "
-            f"epsilon_full={full_number_residual:.6g}, "
-            f"components={mixture.n_components}, BIC={mixture.bic:.6g}",
+            f"{case_id}: rho_total={rho_total:.6g}, "
+            f"rho_dilute={modes.rho_dilute:.6g}, "
+            f"rho_dense={modes.rho_dense:.6g}, "
+            f"x_dilute={x_dilute:.6g}, x_dense={x_dense:.6g}",
             flush=True,
         )
-        print(f"wrote {plot_output}", flush=True)
-        print(f"wrote {data_output}", flush=True)
+        print(f"wrote {output}", flush=True)
 
 
 if __name__ == "__main__":
