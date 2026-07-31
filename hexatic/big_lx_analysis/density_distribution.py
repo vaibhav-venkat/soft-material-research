@@ -252,6 +252,7 @@ def _plot_density_distribution(
     values: NDArray[np.float64],
     mixture: MixtureFit,
     number_residual: float,
+    full_number_residual: float,
     density_bins: int,
     output: Path,
 ) -> None:
@@ -300,7 +301,9 @@ def _plot_density_distribution(
     axis.text(
         0.98,
         0.96,
-        rf"$\epsilon_N={number_residual:.6g}$",
+        rf"$\epsilon_N={number_residual:.6g}$"
+        "\n"
+        rf"$\epsilon_{{\mathrm{{full}}}}={full_number_residual:.6g}$",
         transform=axis.transAxes,
         ha="right",
         va="top",
@@ -454,9 +457,12 @@ def main() -> None:
         if existing and not args.overwrite:
             raise FileExistsError(
                 f"{existing[0]} exists; pass --overwrite to replace"
-            )
+        )
         beta = mixture.components[0]
         alpha = mixture.components[-1]
+        interface = (
+            mixture.components[1] if mixture.n_components == 3 else None
+        )
         total_volume = np.pi * grid.radius**2 * grid.lx
         surface_area = 2.0 * np.pi * grid.radius * grid.lx
         phase_surface_density = (
@@ -468,12 +474,24 @@ def main() -> None:
         )
         actual_n = float(grid.n_particles)
         number_residual = (actual_n - reconstructed_n) / actual_n
+        full_surface_density = sum(
+            component.weight * component.mean
+            for component in mixture.components
+        )
+        full_reconstructed_n = (
+            total_volume * rho_gamma
+            + surface_area * full_surface_density
+        )
+        full_number_residual = (
+            actual_n - full_reconstructed_n
+        ) / actual_n
 
         _plot_density_distribution(
             case_replicates[0].label,
             values,
             mixture,
             number_residual,
+            full_number_residual,
             args.density_bins,
             plot_output,
         )
@@ -504,6 +522,8 @@ def main() -> None:
             "rho_phase_units": "N/L^2",
             "x_beta": beta.weight,
             "x_alpha": alpha.weight,
+            "rho_interface": interface.mean if interface is not None else None,
+            "x_interface": interface.weight if interface is not None else 0.0,
             "total_volume": total_volume,
             "surface_area": surface_area,
             "actual_n": actual_n,
@@ -513,6 +533,13 @@ def main() -> None:
             "epsilon_n_formula": (
                 "(N - (V*rho_gamma + A_s*(x_alpha*rho_alpha + "
                 "x_beta*rho_beta))) / N"
+            ),
+            "full_surface_density": full_surface_density,
+            "full_reconstructed_n": full_reconstructed_n,
+            "epsilon_full": full_number_residual,
+            "epsilon_full_formula": (
+                "(N - (V*rho_gamma + A_s*sum_k(x_k*rho_k))) / N; "
+                "k includes beta, alpha, and interface when present"
             ),
             "components": [
                 {
@@ -530,6 +557,7 @@ def main() -> None:
             f"rho_beta={beta.mean:.6g}, rho_alpha={alpha.mean:.6g}, "
             f"x_beta={beta.weight:.6g}, x_alpha={alpha.weight:.6g}, "
             f"epsilon_N={number_residual:.6g}, "
+            f"epsilon_full={full_number_residual:.6g}, "
             f"components={mixture.n_components}, BIC={mixture.bic:.6g}",
             flush=True,
         )
