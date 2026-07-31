@@ -6,13 +6,14 @@ Particles marked by the stored ``hexatic_shell_mask`` receive a factor of two
 to correct the missing outer hemisphere.  A radial shell-mask fallback uses
 the repository shell cutoff if the stored mask is absent.
 
-Because query points are sampled at particles, the empirical histogram is
-converted to an approximate volume distribution with inverse-density weights
-``w_i = 1/rho_i``.  Histogram fractions are reported for comparison, while
-the primary phase fractions still come from global conservation.
+Because query points are sampled at particles, Monte Carlo samples drawn
+uniformly from the cylinder are assigned to their nearest particle.  The
+resulting periodic-x Voronoi-volume estimates weight the histogram.  The local
+density field is globally calibrated so its volume-weighted mean is ``N/V``;
+conditional phase means then make histogram and conservation fractions agree.
 
-The two modes of the empirical ``P(rho)`` define ``rho_beta`` (dilute) and
-``rho_alpha`` (dense).  Fractions are calculated only from conservation,
+The two modes locate the population boundary.  Voronoi-volume-weighted
+conditional means define ``rho_beta`` and ``rho_alpha`` for conservation,
 
 ``x_alpha = (rho_total - rho_beta) / (rho_alpha - rho_beta)``.
 
@@ -37,6 +38,7 @@ from numpy.typing import NDArray
 from safetensors import safe_open
 from scipy.ndimage import uniform_filter1d
 from scipy.signal import find_peaks
+from scipy.spatial import cKDTree
 
 from hexatic.constants import cylinder
 
@@ -47,6 +49,7 @@ from .surface_area import _load_circumference, _load_static_lx
 @dataclass(frozen=True)
 class ParticleDensitySamples:
     values: NDArray[np.float64]
+    volume_weights: NDArray[np.float64]
     particle_count_sum: float
     n_frames: int
     lx: float
@@ -55,8 +58,8 @@ class ParticleDensitySamples:
 
 @dataclass(frozen=True)
 class DensityModes:
-    rho_beta: float
-    rho_alpha: float
+    mode_beta: float
+    mode_alpha: float
     boundary: float
 
 
@@ -68,6 +71,8 @@ class CaseOptions:
     neighborhood_radius: float
     wall_offset: float
     shell_delta: float
+    voronoi_samples_per_frame: int
+    voronoi_seed: int
     density_bins: int
     mode_smoothing_window: int
     mode_prominence_fraction: float
@@ -142,6 +147,40 @@ def _frame_shell_mask(
     return np.asarray(radial > cylinder_radius - shell_delta, dtype=np.bool_)
 
 
+def _monte_carlo_voronoi_weights(
+    points: NDArray[np.float32],
+    *,
+    lx: float,
+    radius: float,
+    n_samples: int,
+    rng: np.random.Generator,
+) -> NDArray[np.float64]:
+    """Estimate periodic-x particle Voronoi volumes by uniform sampling."""
+    sample_x = rng.uniform(-0.5 * lx, 0.5 * lx, n_samples)
+    sample_theta = rng.uniform(0.0, 2.0 * np.pi, n_samples)
+    sample_r = radius * np.sqrt(rng.random(n_samples))
+    samples = np.column_stack(
+        (
+            sample_x,
+            sample_r * np.cos(sample_theta),
+            sample_r * np.sin(sample_theta),
+        )
+    )
+    periodic_points = np.concatenate(
+        (
+            points + np.asarray([-lx, 0.0, 0.0], dtype=np.float32),
+            points,
+            points + np.asarray([lx, 0.0, 0.0], dtype=np.float32),
+        ),
+        axis=0,
+    )
+    tree = cKDTree(periodic_points)
+    nearest = tree.query(samples, k=1, workers=1)[1] % points.shape[0]
+    counts = np.bincount(nearest, minlength=points.shape[0]).astype(np.float64)
+    cylinder_volume = np.pi * radius**2 * lx
+    return counts * (cylinder_volume / n_samples)
+
+
 def _load_particle_density_samples(
     replicate: Replicate, options: CaseOptions
 ) -> ParticleDensitySamples:
@@ -153,6 +192,7 @@ def _load_particle_density_samples(
         raise ValueError(f"No accessible particle-center volume for {replicate.case_id}")
 
     densities: list[NDArray[np.float64]] = []
+    volume_weights: list[NDArray[np.float64]] = []
     particle_count_sum = 0.0
     n_frames = 0
     global_frame = 0
@@ -171,6 +211,7 @@ def _load_particle_density_samples(
         Ly=transverse_box_length,
         Lz=transverse_box_length,
     )
+    rng = np.random.default_rng(options.voronoi_seed)
 
     for path in replicate.shard_files:
         with safe_open(path, framework="np") as tensors:
@@ -215,12 +256,22 @@ def _load_particle_density_samples(
                 shell_mask = full_shell_mask[finite]
                 frame_density[shell_mask] *= 2.0
                 densities.append(frame_density)
+                volume_weights.append(
+                    _monte_carlo_voronoi_weights(
+                        points,
+                        lx=lx,
+                        radius=center_radius,
+                        n_samples=options.voronoi_samples_per_frame,
+                        rng=rng,
+                    )
+                )
                 particle_count_sum += float(points.shape[0])
                 n_frames += 1
     if not densities:
         raise ValueError(f"No frames selected for {replicate.case_id}")
     return ParticleDensitySamples(
         values=np.concatenate(densities),
+        volume_weights=np.concatenate(volume_weights),
         particle_count_sum=particle_count_sum,
         n_frames=n_frames,
         lx=lx,
@@ -239,6 +290,9 @@ def _combine_samples(
             raise ValueError(f"Replicates for {case_id} have different geometry")
     return ParticleDensitySamples(
         values=np.concatenate([sample.values for sample in samples]),
+        volume_weights=np.concatenate(
+            [sample.volume_weights for sample in samples]
+        ),
         particle_count_sum=sum(sample.particle_count_sum for sample in samples),
         n_frames=sum(sample.n_frames for sample in samples),
         lx=reference.lx,
@@ -282,8 +336,8 @@ def _empirical_distribution_and_modes(
     valley_slice = slice(selected[0], selected[1] + 1)
     valley_index = selected[0] + int(np.argmin(smoothed[valley_slice]))
     modes = DensityModes(
-        rho_beta=float(centers[selected[0]]),
-        rho_alpha=float(centers[selected[1]]),
+        mode_beta=float(centers[selected[0]]),
+        mode_alpha=float(centers[selected[1]]),
         boundary=float(centers[valley_index]),
     )
     return edges, probability, smoothed, modes
@@ -296,6 +350,8 @@ def _plot_distribution(
     smoothed_probability: NDArray[np.float64],
     rho_total: float,
     modes: DensityModes,
+    rho_alpha: float,
+    rho_beta: float,
     x_alpha: float,
     x_beta: float,
     x_alpha_histogram: float,
@@ -311,7 +367,7 @@ def _plot_distribution(
         fill=True,
         alpha=0.3,
         color="0.45",
-        label=r"Inverse-density weighted $P_V(\rho)$",
+        label=r"Voronoi-volume-weighted $P_V(\rho)$",
     )
     axis.plot(
         centers,
@@ -322,25 +378,39 @@ def _plot_distribution(
     )
     colors = sns.color_palette("colorblind", n_colors=2)
     axis.axvline(
-        modes.rho_beta,
+        rho_beta,
         color=colors[0],
         linestyle="--",
         linewidth=1.3,
         label=(
-            rf"$\rho_\beta={modes.rho_beta:.4g}$, "
+            rf"$\langle\rho\rangle_\beta={rho_beta:.4g}$, "
             rf"$x_\beta^{{\rm cons}}={x_beta:.3f}$, "
             rf"$x_\beta^{{\rm hist}}={x_beta_histogram:.3f}$"
         ),
     )
     axis.axvline(
-        modes.rho_alpha,
+        rho_alpha,
         color=colors[1],
         linestyle="--",
         linewidth=1.3,
         label=(
-            rf"$\rho_\alpha={modes.rho_alpha:.4g}$, "
+            rf"$\langle\rho\rangle_\alpha={rho_alpha:.4g}$, "
             rf"$x_\alpha^{{\rm cons}}={x_alpha:.3f}$, "
             rf"$x_\alpha^{{\rm hist}}={x_alpha_histogram:.3f}$"
+        ),
+    )
+    axis.scatter(
+        [modes.mode_beta, modes.mode_alpha],
+        [
+            np.interp(modes.mode_beta, centers, smoothed_probability),
+            np.interp(modes.mode_alpha, centers, smoothed_probability),
+        ],
+        color=colors,
+        s=24,
+        zorder=5,
+        label=(
+            rf"visual modes: $\rho_\beta^{{\rm mode}}={modes.mode_beta:.4g}$, "
+            rf"$\rho_\alpha^{{\rm mode}}={modes.mode_alpha:.4g}$"
         ),
     )
     axis.axvline(
@@ -357,8 +427,13 @@ def _plot_distribution(
         linewidth=1.1,
         label=rf"$\rho_{{\rm total}}={rho_total:.4g}$",
     )
+    fraction_mismatch = abs(x_alpha_histogram - x_alpha)
     axis.set(
-        title=case_label,
+        title=(
+            f"{case_label}\n"
+            rf"$|x_\alpha^{{\rm hist}}-x_\alpha^{{\rm cons}}|"
+            rf"={fraction_mismatch:.2e}$"
+        ),
         xlabel=r"Particle-centered local density $\rho$ [$N/L^3$]",
         ylabel=r"Volume-weighted probability density $P_V(\rho)$",
         xlim=(edges[0], edges[-1]),
@@ -385,28 +460,51 @@ def _analyze_case(task: tuple[str, list[Replicate], CaseOptions]) -> tuple[str, 
         raise ValueError(
             f"Particle-centered densities must be positive for {case_id}"
         )
-    volume_weights = 1.0 / samples.values
+    volume_weights = samples.volume_weights
+    if float(volume_weights.sum()) <= 0.0:
+        raise ValueError(f"Monte Carlo Voronoi weights vanish for {case_id}")
     volume = np.pi * samples.center_radius**2 * samples.lx
     rho_total = samples.particle_count_sum / (samples.n_frames * volume)
+    raw_volume_mean = float(
+        np.average(samples.values, weights=volume_weights)
+    )
+    calibration = rho_total / raw_volume_mean
+    calibrated_values = samples.values * calibration
     edges, probability, smoothed, modes = _empirical_distribution_and_modes(
-        samples.values,
+        calibrated_values,
         volume_weights,
         options.density_bins,
         options.mode_smoothing_window,
         options.mode_prominence_fraction,
     )
-    difference = modes.rho_alpha - modes.rho_beta
-    x_alpha = (rho_total - modes.rho_beta) / difference
-    x_beta = 1.0 - x_alpha
-    dense_samples = samples.values > modes.boundary
+    dense_samples = calibrated_values > modes.boundary
     total_weight = float(volume_weights.sum())
     x_alpha_histogram = float(volume_weights[dense_samples].sum() / total_weight)
     x_beta_histogram = 1.0 - x_alpha_histogram
+    beta_samples = ~dense_samples
+    if not np.any(beta_samples) or not np.any(dense_samples):
+        raise ValueError(f"Population boundary does not split {case_id}")
+    rho_beta = float(
+        np.average(
+            calibrated_values[beta_samples],
+            weights=volume_weights[beta_samples],
+        )
+    )
+    rho_alpha = float(
+        np.average(
+            calibrated_values[dense_samples],
+            weights=volume_weights[dense_samples],
+        )
+    )
+    difference = rho_alpha - rho_beta
+    x_alpha = (rho_total - rho_beta) / difference
+    x_beta = 1.0 - x_alpha
+    fraction_mismatch = abs(x_alpha_histogram - x_alpha)
     if not 0.0 <= x_alpha <= 1.0:
         raise ValueError(
             f"Detected modes do not bracket rho_total for {case_id}: "
-            f"rho_beta={modes.rho_beta}, rho_total={rho_total}, "
-            f"rho_alpha={modes.rho_alpha}"
+            f"rho_beta={rho_beta}, rho_total={rho_total}, "
+            f"rho_alpha={rho_alpha}"
         )
     output = options.output_dir / f"{_safe_case_name(case_id)}_density_distribution.svg"
     if output.exists() and not options.overwrite:
@@ -418,6 +516,8 @@ def _analyze_case(task: tuple[str, list[Replicate], CaseOptions]) -> tuple[str, 
         smoothed,
         rho_total,
         modes,
+        rho_alpha,
+        rho_beta,
         x_alpha,
         x_beta,
         x_alpha_histogram,
@@ -425,11 +525,13 @@ def _analyze_case(task: tuple[str, list[Replicate], CaseOptions]) -> tuple[str, 
         output,
     )
     return (
-        f"{case_id}: rho_total={rho_total:.6g}, rho_beta={modes.rho_beta:.6g}, "
-        f"rho_alpha={modes.rho_alpha:.6g}, "
+        f"{case_id}: rho_total={rho_total:.6g}, rho_beta={rho_beta:.6g}, "
+        f"rho_alpha={rho_alpha:.6g}, "
         f"x_beta_cons={x_beta:.6g}, x_alpha_cons={x_alpha:.6g}, "
         f"x_beta_hist={x_beta_histogram:.6g}, "
-        f"x_alpha_hist={x_alpha_histogram:.6g}",
+        f"x_alpha_hist={x_alpha_histogram:.6g}, "
+        f"fraction_mismatch={fraction_mismatch:.3e}, "
+        f"density_calibration={calibration:.6g}",
         output,
     )
 
@@ -466,6 +568,13 @@ def _parse_args() -> argparse.Namespace:
         default=float(cylinder.SHELL_DELTA),
         help="Radial shell fallback when hexatic_shell_mask is absent",
     )
+    parser.add_argument(
+        "--voronoi-samples-per-frame",
+        type=int,
+        default=20_000,
+        help="Uniform samples used for Monte Carlo Voronoi volumes per frame",
+    )
+    parser.add_argument("--voronoi-seed", type=int, default=0)
     parser.add_argument("--density-bins", type=int, default=80)
     parser.add_argument("--mode-smoothing-window", type=int, default=5)
     parser.add_argument("--mode-prominence-fraction", type=float, default=0.02)
@@ -484,6 +593,8 @@ def main() -> None:
         raise ValueError("Density bins and smoothing window must be positive")
     if args.workers < 0 or not 0.0 <= args.mode_prominence_fraction < 1.0:
         raise ValueError("Workers/prominence options are invalid")
+    if args.voronoi_samples_per_frame < 1:
+        raise ValueError("--voronoi-samples-per-frame must be positive")
     diameter = args.particle_diameter
     neighborhood_radius = (
         2.5 * diameter
@@ -507,6 +618,8 @@ def main() -> None:
         neighborhood_radius=neighborhood_radius,
         wall_offset=args.wall_offset,
         shell_delta=args.shell_delta,
+        voronoi_samples_per_frame=args.voronoi_samples_per_frame,
+        voronoi_seed=args.voronoi_seed,
         density_bins=args.density_bins,
         mode_smoothing_window=args.mode_smoothing_window,
         mode_prominence_fraction=args.mode_prominence_fraction,
