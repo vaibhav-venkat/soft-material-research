@@ -295,6 +295,7 @@ def _plot_distribution(
     edges: NDArray[np.float64],
     probability: NDArray[np.float64],
     smoothed_probability: NDArray[np.float64],
+    particle_diameter: float,
     rho_total: float,
     modes: DensityModes,
     x_dense: float,
@@ -303,62 +304,69 @@ def _plot_distribution(
 ) -> None:
     sns = _style()
     figure, axis = plt.subplots(figsize=(7.2, 4.8), constrained_layout=True)
-    centers = 0.5 * (edges[:-1] + edges[1:])
+    particle_volume = np.pi * particle_diameter**3 / 6.0
+    fraction_edges = particle_volume * edges
+    fraction_centers = 0.5 * (fraction_edges[:-1] + fraction_edges[1:])
+    fraction_probability = probability / particle_volume
+    fraction_smoothed = smoothed_probability / particle_volume
     axis.stairs(
-        probability,
-        edges,
+        fraction_probability,
+        fraction_edges,
         fill=True,
         alpha=0.3,
         color="0.45",
-        label=r"Inverse-density-weighted $P_V(\rho)$",
+        label=r"Inverse-density-weighted $P_V(\phi)$",
     )
     axis.plot(
-        centers,
-        smoothed_probability,
+        fraction_centers,
+        fraction_smoothed,
         color="black",
         linewidth=1.8,
         label="Moving-average empirical PDF (mode finding)",
     )
     colors = sns.color_palette("colorblind", n_colors=2)
     axis.axvline(
-        modes.rho_dilute,
+        particle_volume * modes.rho_dilute,
         color=colors[0],
         linestyle="--",
         linewidth=1.3,
         label=(
-            rf"$\rho_{{\rm dilute}}={modes.rho_dilute:.4g}$, "
+            rf"$\phi_{{\rm dilute}}={particle_volume * modes.rho_dilute:.4g}$, "
             rf"$x_{{\rm dilute}}={x_dilute:.3f}$"
         ),
     )
     axis.axvline(
-        modes.rho_dense,
+        particle_volume * modes.rho_dense,
         color=colors[1],
         linestyle="--",
         linewidth=1.3,
         label=(
-            rf"$\rho_{{\rm dense}}={modes.rho_dense:.4g}$, "
+            rf"$\phi_{{\rm dense}}={particle_volume * modes.rho_dense:.4g}$, "
             rf"$x_{{\rm dense}}={x_dense:.3f}$"
         ),
     )
     axis.axvline(
-        modes.boundary,
+        particle_volume * modes.boundary,
         color="0.5",
         linestyle="-.",
         linewidth=1.0,
-        label=rf"population boundary $={modes.boundary:.4g}$",
+        label=(
+            "population boundary "
+            rf"$={particle_volume * modes.boundary:.4g}$"
+        ),
     )
     axis.axvline(
-        rho_total,
+        particle_volume * rho_total,
         color="0.25",
         linestyle=":",
         linewidth=1.1,
-        label=rf"$\rho_{{\rm total}}={rho_total:.4g}$",
+        label=rf"$\phi_{{\rm total}}={particle_volume * rho_total:.4g}$",
     )
     axis.set(
         title=case_label,
-        xlabel=r"Particle-centered local density $\rho$ [$N/L^3$]",
-        ylabel=r"Volume-weighted probability density $P_V(\rho)$",
-        xlim=(edges[0], edges[-1]),
+        xlabel=r"Particle-centered local volume fraction $\phi=\rho\pi D^3/6$",
+        ylabel=r"Volume-weighted probability density $P_V(\phi)$",
+        xlim=(fraction_edges[0], fraction_edges[-1]),
     )
     axis.grid(axis="y", color="0.9", linewidth=0.7)
     axis.legend(frameon=False)
@@ -409,6 +417,7 @@ def _analyze_case(task: tuple[str, list[Replicate], CaseOptions]) -> tuple[str, 
         edges,
         probability,
         smoothed,
+        options.particle_diameter,
         rho_total,
         modes,
         x_dense,
