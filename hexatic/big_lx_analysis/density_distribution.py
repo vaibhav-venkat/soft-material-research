@@ -1,15 +1,15 @@
-"""Plot beta-kernel neighborhood density distributions for big-Lx cylinders.
+"""Plot particle-centered freud local-density distributions for big-Lx cases.
 
-Particle-center density is evaluated at a Cartesian grid of neighborhood
-centers inside ``r <= R - D/2 - wall_offset``.  Each center uses the same
-fixed-radius compact spherical beta kernel.  Normalized convolution with the
-accessible-domain mask corrects neighborhoods truncated by the cylindrical
-wall; at the outer limit this reduces to the requested hemisphere correction.
+``freud.density.LocalDensity`` is evaluated at every particle center in every
+selected frame.  Query points are therefore never empty grid locations.
+Particles marked by the stored ``hexatic_shell_mask`` receive a factor of two
+to correct the missing outer hemisphere.  A radial shell-mask fallback uses
+the repository shell cutoff if the stored mask is absent.
 
-The two modes of the empirical ``P(rho)`` define ``rho_dilute`` and
-``rho_dense``.  Fractions come only from the conservation lever rule,
+The two modes of the empirical ``P(rho)`` define ``rho_beta`` (dilute) and
+``rho_alpha`` (dense).  Fractions are calculated only from conservation,
 
-``x_dense = (rho_total - rho_dilute) / (rho_dense - rho_dilute)``.
+``x_alpha = (rho_total - rho_beta) / (rho_alpha - rho_beta)``.
 
 Cases run in parallel CPU processes.  The sole output is one SVG per case.
 """
@@ -23,6 +23,7 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 
+import freud
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -30,7 +31,7 @@ import numpy as np
 from numpy.typing import NDArray
 from safetensors import safe_open
 from scipy.ndimage import uniform_filter1d
-from scipy.signal import fftconvolve, find_peaks
+from scipy.signal import find_peaks
 
 from hexatic.constants import cylinder
 
@@ -39,21 +40,18 @@ from .surface_area import _load_circumference, _load_static_lx
 
 
 @dataclass(frozen=True)
-class NeighborhoodSamples:
+class ParticleDensitySamples:
     values: NDArray[np.float64]
     particle_count_sum: float
     n_frames: int
     lx: float
-    accessible_radius: float
-    dx: float
-    dy: float
-    dz: float
+    center_radius: float
 
 
 @dataclass(frozen=True)
 class DensityModes:
-    rho_dilute: float
-    rho_dense: float
+    rho_beta: float
+    rho_alpha: float
 
 
 @dataclass(frozen=True)
@@ -61,10 +59,9 @@ class CaseOptions:
     output_dir: Path
     overwrite: bool
     particle_diameter: float
-    grid_spacing: float
     neighborhood_radius: float
-    beta_kernel_power: float
     wall_offset: float
+    shell_delta: float
     density_bins: int
     mode_smoothing_window: int
     mode_prominence_fraction: float
@@ -123,89 +120,51 @@ def _select_replicates(
     return replicates
 
 
-def _spherical_beta_kernel(
-    dx: float,
-    dy: float,
-    dz: float,
-    radius: float,
-    power: float,
-) -> NDArray[np.float64]:
-    nx = int(np.ceil(radius / dx))
-    ny = int(np.ceil(radius / dy))
-    nz = int(np.ceil(radius / dz))
-    x = np.arange(-nx, nx + 1, dtype=np.float64) * dx
-    y = np.arange(-ny, ny + 1, dtype=np.float64) * dy
-    z = np.arange(-nz, nz + 1, dtype=np.float64) * dz
-    xx, yy, zz = np.meshgrid(x, y, z, indexing="ij")
-    distance_sq = xx**2 + yy**2 + zz**2
-    scaled_distance_sq = distance_sq / radius**2
-    kernel = np.maximum(1.0 - scaled_distance_sq, 0.0) ** power
-    total = float(kernel.sum())
-    if total <= 0.0:
-        raise ValueError("The neighborhood kernel contains no grid points")
-    return kernel / total
-
-
-def _normalized_cylindrical_convolution(
-    density: NDArray[np.float64],
-    mask: NDArray[np.bool_],
-    kernel: NDArray[np.float64],
-) -> NDArray[np.float64]:
-    """Convolve periodically in x and normalize truncated wall kernels."""
-    pad_x = kernel.shape[0] // 2
-    pad_y = kernel.shape[1] // 2
-    pad_z = kernel.shape[2] // 2
-
-    def padded(field: NDArray[np.float64]) -> NDArray[np.float64]:
-        periodic = np.pad(field, ((pad_x, pad_x), (0, 0), (0, 0)), mode="wrap")
-        return np.pad(
-            periodic,
-            ((0, 0), (pad_y, pad_y), (pad_z, pad_z)),
-            mode="constant",
+def _frame_shell_mask(
+    tensors: object,
+    local_frame: int,
+    radial: NDArray[np.float32],
+    cylinder_radius: float,
+    shell_delta: float,
+) -> NDArray[np.bool_]:
+    keys = tensors.keys()  # type: ignore[attr-defined]
+    if "hexatic_shell_mask" in keys:
+        return np.asarray(
+            tensors.get_tensor("hexatic_shell_mask")[local_frame],  # type: ignore[attr-defined]
+            dtype=np.bool_,
         )
-
-    numerator = fftconvolve(padded(density), kernel, mode="same")
-    denominator = fftconvolve(
-        padded(mask.astype(np.float64)), kernel, mode="same"
-    )
-    crop = (
-        slice(pad_x, -pad_x if pad_x else None),
-        slice(pad_y, -pad_y if pad_y else None),
-        slice(pad_z, -pad_z if pad_z else None),
-    )
-    numerator = numerator[crop]
-    denominator = denominator[crop]
-    result = np.full_like(numerator, np.nan)
-    np.divide(numerator, denominator, out=result, where=denominator > 1.0e-12)
-    return result
+    return np.asarray(radial > cylinder_radius - shell_delta, dtype=np.bool_)
 
 
-def _load_neighborhood_samples(
+def _load_particle_density_samples(
     replicate: Replicate, options: CaseOptions
-) -> NeighborhoodSamples:
+) -> ParticleDensitySamples:
     lx = _load_static_lx(replicate.static_file)
     circumference = _load_circumference(replicate.manifest)
     radius = _load_radius(replicate.static_file, circumference)
-    accessible_radius = (
-        radius - 0.5 * options.particle_diameter - options.wall_offset
-    )
-    if accessible_radius <= 0.0:
-        raise ValueError(f"No accessible particle-center radius for {replicate.case_id}")
+    center_radius = radius - 0.5 * options.particle_diameter - options.wall_offset
+    if center_radius <= 0.0:
+        raise ValueError(f"No accessible particle-center volume for {replicate.case_id}")
 
-    nx = max(1, int(np.rint(lx / options.grid_spacing)))
-    ny = max(3, int(np.ceil(2.0 * accessible_radius / options.grid_spacing)))
-    nz = ny
-    x_edges = np.linspace(-0.5 * lx, 0.5 * lx, nx + 1)
-    y_edges = np.linspace(-accessible_radius, accessible_radius, ny + 1)
-    z_edges = np.linspace(-accessible_radius, accessible_radius, nz + 1)
-    dx = float(x_edges[1] - x_edges[0])
-    dy = float(y_edges[1] - y_edges[0])
-    dz = float(z_edges[1] - z_edges[0])
-    cell_volume = dx * dy * dz
-    accumulated_counts = np.zeros((nx, ny, nz), dtype=np.float64)
+    densities: list[NDArray[np.float64]] = []
     particle_count_sum = 0.0
     n_frames = 0
     global_frame = 0
+    local_density = freud.density.LocalDensity(
+        r_max=options.neighborhood_radius,
+        diameter=options.particle_diameter,
+    )
+    self_density = 1.0 / (
+        (4.0 / 3.0) * np.pi * options.neighborhood_radius**3
+    )
+    transverse_box_length = 2.0 * (
+        radius + options.neighborhood_radius + options.particle_diameter
+    )
+    box = freud.box.Box(
+        Lx=lx,
+        Ly=transverse_box_length,
+        Lz=transverse_box_length,
+    )
 
     for path in replicate.shard_files:
         with safe_open(path, framework="np") as tensors:
@@ -221,80 +180,63 @@ def _load_neighborhood_samples(
                 if not selected:
                     continue
                 frame = coords[local_frame]
-                included = (
+                finite = (
                     np.isfinite(frame[:, 0])
                     & np.isfinite(frame[:, 1])
                     & np.isfinite(frame[:, 2])
                     & (frame[:, 2] >= 0.0)
-                    & (frame[:, 2] <= accessible_radius)
                 )
-                x = np.mod(frame[included, 0] + 0.5 * lx, lx) - 0.5 * lx
-                theta = frame[included, 1]
-                radial = frame[included, 2]
-                y = radial * np.cos(theta)
-                z = radial * np.sin(theta)
-                points = np.column_stack((x, y, z))
-                accumulated_counts += np.histogramdd(
-                    points, bins=(x_edges, y_edges, z_edges)
-                )[0]
-                particle_count_sum += float(np.count_nonzero(included))
+                frame = frame[finite]
+                radial = np.asarray(frame[:, 2], dtype=np.float32)
+                x = np.mod(frame[:, 0] + 0.5 * lx, lx) - 0.5 * lx
+                theta = frame[:, 1]
+                points = np.column_stack(
+                    (x, radial * np.cos(theta), radial * np.sin(theta))
+                ).astype(np.float32)
+                result = local_density.compute(system=(box, points))
+                frame_density = np.asarray(result.density, dtype=np.float64).copy()
+                # freud excludes a query point from its own neighbor list.
+                # Add that particle explicitly so particle-centered queries
+                # cannot produce the empty-neighborhood rho=0 artifact.
+                frame_density += self_density
+                full_shell_mask = _frame_shell_mask(
+                    tensors,
+                    local_frame,
+                    np.asarray(coords[local_frame, :, 2]),
+                    radius,
+                    options.shell_delta,
+                )
+                shell_mask = full_shell_mask[finite]
+                frame_density[shell_mask] *= 2.0
+                densities.append(frame_density)
+                particle_count_sum += float(points.shape[0])
                 n_frames += 1
-    if n_frames == 0:
+    if not densities:
         raise ValueError(f"No frames selected for {replicate.case_id}")
-
-    x_centers = 0.5 * (x_edges[:-1] + x_edges[1:])
-    y_centers = 0.5 * (y_edges[:-1] + y_edges[1:])
-    z_centers = 0.5 * (z_edges[:-1] + z_edges[1:])
-    del x_centers  # x is periodic and every axial center is accessible.
-    yy, zz = np.meshgrid(y_centers, z_centers, indexing="ij")
-    radial_mask = yy**2 + zz**2 <= accessible_radius**2
-    mask = np.broadcast_to(radial_mask, (nx, ny, nz))
-    raw_density = accumulated_counts / (n_frames * cell_volume)
-    kernel = _spherical_beta_kernel(
-        dx,
-        dy,
-        dz,
-        options.neighborhood_radius,
-        options.beta_kernel_power,
-    )
-    smoothed_density = _normalized_cylindrical_convolution(
-        raw_density, mask, kernel
-    )
-    values = smoothed_density[mask]
-    return NeighborhoodSamples(
-        values=values[np.isfinite(values)],
+    return ParticleDensitySamples(
+        values=np.concatenate(densities),
         particle_count_sum=particle_count_sum,
         n_frames=n_frames,
         lx=lx,
-        accessible_radius=accessible_radius,
-        dx=dx,
-        dy=dy,
-        dz=dz,
+        center_radius=center_radius,
     )
 
 
 def _combine_samples(
-    case_id: str, samples: list[NeighborhoodSamples]
-) -> NeighborhoodSamples:
+    case_id: str, samples: list[ParticleDensitySamples]
+) -> ParticleDensitySamples:
     reference = samples[0]
     for sample in samples[1:]:
-        if (
-            not np.isclose(sample.lx, reference.lx)
-            or not np.isclose(sample.accessible_radius, reference.accessible_radius)
-            or not np.isclose(sample.dx, reference.dx)
-            or not np.isclose(sample.dy, reference.dy)
-            or not np.isclose(sample.dz, reference.dz)
+        if not np.isclose(sample.lx, reference.lx) or not np.isclose(
+            sample.center_radius, reference.center_radius
         ):
-            raise ValueError(f"Replicates for {case_id} have different grids")
-    return NeighborhoodSamples(
+            raise ValueError(f"Replicates for {case_id} have different geometry")
+    return ParticleDensitySamples(
         values=np.concatenate([sample.values for sample in samples]),
         particle_count_sum=sum(sample.particle_count_sum for sample in samples),
         n_frames=sum(sample.n_frames for sample in samples),
         lx=reference.lx,
-        accessible_radius=reference.accessible_radius,
-        dx=reference.dx,
-        dy=reference.dy,
-        dz=reference.dz,
+        center_radius=reference.center_radius,
     )
 
 
@@ -306,9 +248,7 @@ def _empirical_distribution_and_modes(
 ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64], DensityModes]:
     probability, edges = np.histogram(values, bins=density_bins, density=True)
     centers = 0.5 * (edges[:-1] + edges[1:])
-    smoothed = uniform_filter1d(
-        probability, size=smoothing_window, mode="nearest"
-    )
+    smoothed = uniform_filter1d(probability, smoothing_window, mode="nearest")
     baseline = float(smoothed.min())
     peaks, properties = find_peaks(
         np.concatenate(([baseline], smoothed, [baseline])),
@@ -327,12 +267,11 @@ def _empirical_distribution_and_modes(
         )
     selected = peaks[np.argsort(prominences)[-2:]]
     selected.sort()
-    return (
-        edges,
-        probability,
-        smoothed,
-        DensityModes(float(centers[selected[0]]), float(centers[selected[1]])),
+    modes = DensityModes(
+        rho_beta=float(centers[selected[0]]),
+        rho_alpha=float(centers[selected[1]]),
     )
+    return edges, probability, smoothed, modes
 
 
 def _plot_distribution(
@@ -342,8 +281,8 @@ def _plot_distribution(
     smoothed_probability: NDArray[np.float64],
     rho_total: float,
     modes: DensityModes,
-    x_dense: float,
-    x_dilute: float,
+    x_alpha: float,
+    x_beta: float,
     output: Path,
 ) -> None:
     sns = _style()
@@ -355,7 +294,7 @@ def _plot_distribution(
         fill=True,
         alpha=0.3,
         color="0.45",
-        label=r"Empirical $P(\rho)$",
+        label=r"Particle-centered empirical $P(\rho)$",
     )
     axis.plot(
         centers,
@@ -366,24 +305,18 @@ def _plot_distribution(
     )
     colors = sns.color_palette("colorblind", n_colors=2)
     axis.axvline(
-        modes.rho_dilute,
+        modes.rho_beta,
         color=colors[0],
         linestyle="--",
         linewidth=1.3,
-        label=(
-            rf"$\rho_\beta={modes.rho_dilute:.4g}$, "
-            rf"$x_\beta={x_dilute:.3f}$"
-        ),
+        label=rf"$\rho_\beta={modes.rho_beta:.4g}$, $x_\beta={x_beta:.3f}$",
     )
     axis.axvline(
-        modes.rho_dense,
+        modes.rho_alpha,
         color=colors[1],
         linestyle="--",
         linewidth=1.3,
-        label=(
-            rf"$\rho_\alpha={modes.rho_dense:.4g}$, "
-            rf"$x_\alpha={x_dense:.3f}$"
-        ),
+        label=rf"$\rho_\alpha={modes.rho_alpha:.4g}$, $x_\alpha={x_alpha:.3f}$",
     )
     axis.axvline(
         rho_total,
@@ -394,19 +327,11 @@ def _plot_distribution(
     )
     axis.set(
         title=case_label,
-        xlabel=r"Beta-kernel neighborhood density $\rho$ [$N/L^3$]",
-        ylabel=r"Probability density $P(\rho)$ (log scale)",
+        xlabel=r"Particle-centered local density $\rho$ [$N/L^3$]",
+        ylabel=r"Probability density $P(\rho)$",
         xlim=(edges[0], edges[-1]),
     )
-    positive = np.concatenate(
-        (probability[probability > 0], smoothed_probability[smoothed_probability > 0])
-    )
-    axis.set_yscale("log")
-    axis.set_ylim(
-        max(float(positive.min()) * 0.5, float(positive.max()) * 1.0e-7),
-        float(positive.max()) * 1.5,
-    )
-    axis.grid(axis="y", which="both", color="0.9", linewidth=0.7)
+    axis.grid(axis="y", color="0.9", linewidth=0.7)
     axis.legend(frameon=False)
     sns.despine(ax=axis)
     figure.savefig(
@@ -422,24 +347,24 @@ def _analyze_case(task: tuple[str, list[Replicate], CaseOptions]) -> tuple[str, 
     case_id, case_replicates, options = task
     samples = _combine_samples(
         case_id,
-        [_load_neighborhood_samples(replicate, options) for replicate in case_replicates],
+        [_load_particle_density_samples(r, options) for r in case_replicates],
     )
-    cylinder_volume = np.pi * samples.accessible_radius**2 * samples.lx
-    rho_total = samples.particle_count_sum / (samples.n_frames * cylinder_volume)
+    volume = np.pi * samples.center_radius**2 * samples.lx
+    rho_total = samples.particle_count_sum / (samples.n_frames * volume)
     edges, probability, smoothed, modes = _empirical_distribution_and_modes(
         samples.values,
         options.density_bins,
         options.mode_smoothing_window,
         options.mode_prominence_fraction,
     )
-    difference = modes.rho_dense - modes.rho_dilute
-    x_dense = (rho_total - modes.rho_dilute) / difference
-    x_dilute = 1.0 - x_dense
-    if not 0.0 <= x_dense <= 1.0:
+    difference = modes.rho_alpha - modes.rho_beta
+    x_alpha = (rho_total - modes.rho_beta) / difference
+    x_beta = 1.0 - x_alpha
+    if not 0.0 <= x_alpha <= 1.0:
         raise ValueError(
             f"Detected modes do not bracket rho_total for {case_id}: "
-            f"rho_dilute={modes.rho_dilute}, rho_total={rho_total}, "
-            f"rho_dense={modes.rho_dense}"
+            f"rho_beta={modes.rho_beta}, rho_total={rho_total}, "
+            f"rho_alpha={modes.rho_alpha}"
         )
     output = options.output_dir / f"{_safe_case_name(case_id)}_density_distribution.svg"
     if output.exists() and not options.overwrite:
@@ -451,16 +376,16 @@ def _analyze_case(task: tuple[str, list[Replicate], CaseOptions]) -> tuple[str, 
         smoothed,
         rho_total,
         modes,
-        x_dense,
-        x_dilute,
+        x_alpha,
+        x_beta,
         output,
     )
-    report = (
-        f"{case_id}: rho_total={rho_total:.6g}, "
-        f"rho_beta={modes.rho_dilute:.6g}, rho_alpha={modes.rho_dense:.6g}, "
-        f"x_beta={x_dilute:.6g}, x_alpha={x_dense:.6g}"
+    return (
+        f"{case_id}: rho_total={rho_total:.6g}, rho_beta={modes.rho_beta:.6g}, "
+        f"rho_alpha={modes.rho_alpha:.6g}, x_beta={x_beta:.6g}, "
+        f"x_alpha={x_alpha:.6g}",
+        output,
     )
-    return report, output
 
 
 def _parse_args() -> argparse.Namespace:
@@ -477,19 +402,23 @@ def _parse_args() -> argparse.Namespace:
         type=float,
         default=float(cylinder.PARTICLE_DIAMETER),
     )
-    parser.add_argument("--grid-spacing", type=float, default=None)
-    parser.add_argument("--neighborhood-radius", type=float, default=None)
     parser.add_argument(
-        "--beta-kernel-power",
+        "--neighborhood-radius",
         type=float,
-        default=2.0,
-        help="Exponent p in (1-d^2/a^2)^p (default: 2)",
+        default=None,
+        help="freud LocalDensity r_max (default: 2.5D)",
     )
     parser.add_argument(
         "--wall-offset",
         type=float,
         default=1.0e-3,
-        help="Small inward offset from R-D/2 (default: 1e-3)",
+        help="Small inward offset in the particle-center volume (default: 1e-3)",
+    )
+    parser.add_argument(
+        "--shell-delta",
+        type=float,
+        default=float(cylinder.SHELL_DELTA),
+        help="Radial shell fallback when hexatic_shell_mask is absent",
     )
     parser.add_argument("--density-bins", type=int, default=80)
     parser.add_argument("--mode-smoothing-window", type=int, default=5)
@@ -505,23 +434,18 @@ def main() -> None:
     args = _parse_args()
     if args.frame_start < 0 or args.frame_stride < 1:
         raise ValueError("Frame start must be non-negative and stride positive")
-    if args.density_bins < 3 or args.workers < 0:
-        raise ValueError("Density bins must be at least 3 and workers non-negative")
-    if not 0.0 <= args.mode_prominence_fraction < 1.0:
-        raise ValueError("--mode-prominence-fraction must lie in [0, 1)")
-    if args.mode_smoothing_window < 1 or args.wall_offset < 0.0:
-        raise ValueError("Smoothing window must be positive and offset non-negative")
-    if args.beta_kernel_power <= 0.0:
-        raise ValueError("--beta-kernel-power must be positive")
+    if args.density_bins < 3 or args.mode_smoothing_window < 1:
+        raise ValueError("Density bins and smoothing window must be positive")
+    if args.workers < 0 or not 0.0 <= args.mode_prominence_fraction < 1.0:
+        raise ValueError("Workers/prominence options are invalid")
     diameter = args.particle_diameter
-    grid_spacing = diameter if args.grid_spacing is None else args.grid_spacing
     neighborhood_radius = (
         2.5 * diameter
         if args.neighborhood_radius is None
         else args.neighborhood_radius
     )
-    if min(diameter, grid_spacing, neighborhood_radius) <= 0:
-        raise ValueError("Particle and neighborhood length scales must be positive")
+    if min(diameter, neighborhood_radius, args.shell_delta) <= 0 or args.wall_offset < 0:
+        raise ValueError("Particle, neighborhood, and shell lengths must be valid")
 
     replicates = _select_replicates(
         args.manifest, args.input_dir, args.case, args.circ
@@ -534,10 +458,9 @@ def main() -> None:
         output_dir=args.output_dir,
         overwrite=args.overwrite,
         particle_diameter=diameter,
-        grid_spacing=grid_spacing,
         neighborhood_radius=neighborhood_radius,
-        beta_kernel_power=args.beta_kernel_power,
         wall_offset=args.wall_offset,
+        shell_delta=args.shell_delta,
         density_bins=args.density_bins,
         mode_smoothing_window=args.mode_smoothing_window,
         mode_prominence_fraction=args.mode_prominence_fraction,
