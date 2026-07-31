@@ -51,11 +51,13 @@ class RadialProfile:
 
 
 @dataclass(frozen=True)
-class Plateau:
-    """Detected low-slope radial interval."""
+class PersistentMinimum:
+    """A robust local radial-density minimum after a local maximum."""
 
-    start: float
-    end: float
+    index: int
+    radius: float
+    density: float
+    prominence: float
 
 
 def _load_radius(static_file: Path, circumference: float) -> float:
@@ -147,41 +149,53 @@ def _smooth(values: NDArray[np.float64], window: int) -> NDArray[np.float64]:
     return np.convolve(padded, np.ones(window) / window, mode="valid")
 
 
-def _find_plateaus(
+def _find_persistent_minimum(
     density: NDArray[np.float64],
     edges: NDArray[np.float64],
     *,
     minimum_r: float,
-    slope_quantile: float,
-    minimum_bins: int,
     smoothing_window: int,
-) -> tuple[list[Plateau], float]:
-    """Find contiguous low-slope regions beyond a requested radius.
-
-    The slope cutoff is the requested quantile of ``abs(d rho / dr)`` among
-    bins whose centers lie beyond ``minimum_r``.  This is an exploratory,
-    data-relative plateau criterion rather than a fitted phase boundary.
-    """
+    minimum_prominence_fraction: float,
+) -> PersistentMinimum:
+    """Find the most prominent two-sided density minimum beyond a radius."""
     centers = 0.5 * (edges[:-1] + edges[1:])
     smoothed = _smooth(density, smoothing_window)
-    slope = np.abs(_three_point_derivative(smoothed, float(edges[1] - edges[0])))
-    eligible = centers > minimum_r
-    if np.count_nonzero(eligible) < minimum_bins:
-        return [], np.nan
-    cutoff = float(np.quantile(slope[eligible], slope_quantile))
-    low_slope = eligible & (slope <= cutoff)
+    eligible_indices = np.flatnonzero(centers > minimum_r)
+    if eligible_indices.size < 3:
+        raise ValueError(f"Fewer than three radial bins lie beyond r={minimum_r:g}")
 
-    plateaus: list[Plateau] = []
-    start: int | None = None
-    for index, selected in enumerate(low_slope):
-        if selected and start is None:
-            start = index
-        if start is not None and (not selected or index == low_slope.size - 1):
-            stop = index + 1 if selected else index
-            if stop - start >= minimum_bins:
-                plateaus.append(Plateau(float(edges[start]), float(edges[stop])))
-            start = None
-    return plateaus, cutoff
+    first = int(eligible_indices[0])
+    last = int(eligible_indices[-1])
+    density_range = float(np.ptp(smoothed[eligible_indices]))
+    required_prominence = minimum_prominence_fraction * density_range
+    candidates: list[PersistentMinimum] = []
+    for index in range(first + 1, last):
+        if not (
+            smoothed[index] <= smoothed[index - 1]
+            and smoothed[index] < smoothed[index + 1]
+        ):
+            continue
+        left_peak = float(np.max(smoothed[first:index]))
+        right_peak = float(np.max(smoothed[index + 1 : last + 1]))
+        prominence = min(
+            left_peak - float(smoothed[index]),
+            right_peak - float(smoothed[index]),
+        )
+        if prominence >= required_prominence:
+            candidates.append(
+                PersistentMinimum(
+                    index=index,
+                    radius=float(centers[index]),
+                    density=float(smoothed[index]),
+                    prominence=prominence,
+                )
+            )
+    if not candidates:
+        raise ValueError(
+            f"No persistent density minimum found beyond r={minimum_r:g}; "
+            "adjust the smoothing window or prominence fraction"
+        )
+    return max(candidates, key=lambda candidate: candidate.prominence)
 
 
 def _circumference_prefix(value: str) -> str:
@@ -218,31 +232,25 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--frame-start", type=int, default=700)
     parser.add_argument("--frame-stride", type=int, default=1)
     parser.add_argument(
-        "--plateau-min-r",
+        "--rho-gamma-min-r",
         type=float,
         default=8.0,
-        help="Only detect plateaus beyond this radius (default: 8)",
+        help="Only detect the bulk-density minimum beyond this radius (default: 8)",
     )
     parser.add_argument(
-        "--plateau-slope-quantile",
+        "--rho-gamma-prominence-fraction",
         type=float,
-        default=0.35,
+        default=0.10,
         help=(
-            "Low-slope cutoff quantile beyond --plateau-min-r "
-            "(default: 0.35)"
+            "Required two-sided minimum prominence as a fraction of the "
+            "density range beyond --rho-gamma-min-r (default: 0.10)"
         ),
     )
     parser.add_argument(
-        "--plateau-min-bins",
-        type=int,
-        default=3,
-        help="Minimum contiguous bins in a reported plateau (default: 3)",
-    )
-    parser.add_argument(
-        "--plateau-smoothing-window",
+        "--rho-gamma-smoothing-window",
         type=int,
         default=5,
-        help="Odd moving-average window used only for detection (default: 5)",
+        help="Odd moving-average window used to find rho_gamma (default: 5)",
     )
     parser.add_argument(
         "--circ", help='Only include cases with a circumference such as "60.5D"'
@@ -260,18 +268,18 @@ def main() -> None:
         raise ValueError("--frame-stride must be positive")
     if not np.isfinite(args.particle_diameter) or args.particle_diameter <= 0.0:
         raise ValueError("--particle-diameter must be finite and positive")
-    if not np.isfinite(args.plateau_min_r) or args.plateau_min_r < 0.0:
-        raise ValueError("--plateau-min-r must be finite and non-negative")
-    if not 0.0 < args.plateau_slope_quantile < 1.0:
-        raise ValueError("--plateau-slope-quantile must lie between 0 and 1")
-    if args.plateau_min_bins < 1:
-        raise ValueError("--plateau-min-bins must be positive")
+    if not np.isfinite(args.rho_gamma_min_r) or args.rho_gamma_min_r < 0.0:
+        raise ValueError("--rho-gamma-min-r must be finite and non-negative")
+    if not 0.0 <= args.rho_gamma_prominence_fraction < 1.0:
+        raise ValueError(
+            "--rho-gamma-prominence-fraction must lie in [0, 1)"
+        )
     if (
-        args.plateau_smoothing_window < 1
-        or args.plateau_smoothing_window % 2 == 0
+        args.rho_gamma_smoothing_window < 1
+        or args.rho_gamma_smoothing_window % 2 == 0
     ):
         raise ValueError(
-            "--plateau-smoothing-window must be a positive odd integer"
+            "--rho-gamma-smoothing-window must be a positive odd integer"
         )
 
     manifests = _collect_manifests(args.manifest, args.input_dir)
@@ -318,29 +326,23 @@ def main() -> None:
         total_frames = sum(profile.n_frames for profile in profiles)
         edges = reference.bin_edges
         radial_centers = 0.5 * (edges[:-1] + edges[1:])
-        annulus_volumes = np.pi * reference.lx * (edges[1:] ** 2 - edges[:-1] ** 2)
+        # Exact volume of each cylindrical radial shell [r_i, r_{i+1}]:
+        # V_i = pi * L_x * (r_{i+1}^2 - r_i^2).  Dividing the mean particle
+        # count by V_i makes rho(r), and therefore rho_gamma, an N / L^3
+        # number density.
+        annulus_volumes = np.pi * reference.lx * (
+            edges[1:] ** 2 - edges[:-1] ** 2
+        )
         density = counts / (total_frames * annulus_volumes)
         derivative = _three_point_derivative(density, float(edges[1] - edges[0]))
-        plateaus, plateau_slope_cutoff = _find_plateaus(
+        bulk_minimum = _find_persistent_minimum(
             density,
             edges,
-            minimum_r=args.plateau_min_r,
-            slope_quantile=args.plateau_slope_quantile,
-            minimum_bins=args.plateau_min_bins,
-            smoothing_window=args.plateau_smoothing_window,
+            minimum_r=args.rho_gamma_min_r,
+            smoothing_window=args.rho_gamma_smoothing_window,
+            minimum_prominence_fraction=args.rho_gamma_prominence_fraction,
         )
-        if len(plateaus) != 1:
-            raise ValueError(
-                f"Expected exactly one plateau beyond r={args.plateau_min_r:g} "
-                f"for {case_id}, detected {len(plateaus)}; adjust the plateau "
-                "detection options"
-            )
-        plateau = plateaus[0]
-        plateau_mask = (
-            (radial_centers >= plateau.start)
-            & (radial_centers <= plateau.end)
-        )
-        rho_gamma = float(density[plateau_mask].mean())
+        rho_gamma = bulk_minimum.density
 
         output = args.output_dir / f"{_safe_case_name(case_id)}_radial_density.svg"
         data_output = (
@@ -378,35 +380,34 @@ def main() -> None:
             linewidth=1.1,
             label=r"$R-D$",
         )
-        for index, plateau in enumerate(plateaus, start=1):
-            density_axis.axvspan(
-                plateau.start,
-                plateau.end,
-                color="tab:green",
-                alpha=0.12,
-                linewidth=0.0,
-            )
-            density_axis.axvline(
-                plateau.start, color="tab:green", linestyle=":", linewidth=0.9
-            )
-            density_axis.axvline(
-                plateau.end, color="tab:green", linestyle=":", linewidth=0.9
-            )
-            density_axis.text(
-                0.5 * (plateau.start + plateau.end),
-                0.97,
-                f"plateau {index}: {plateau.start:.3f}–{plateau.end:.3f}"
-                f"\n$\\rho_\\gamma={rho_gamma:.6g}$",
-                transform=density_axis.get_xaxis_transform(),
-                ha="center",
-                va="top",
-                color="tab:green",
-                fontsize="small",
-            )
+        density_axis.axvline(
+            bulk_minimum.radius,
+            color="tab:green",
+            linestyle=":",
+            linewidth=1.2,
+        )
+        density_axis.scatter(
+            [bulk_minimum.radius],
+            [rho_gamma],
+            color="tab:green",
+            s=30,
+            zorder=5,
+        )
+        density_axis.text(
+            bulk_minimum.radius,
+            0.97,
+            f"bulk cutoff $r={bulk_minimum.radius:.3f}$"
+            f"\n$\\rho_\\gamma={rho_gamma:.6g}$",
+            transform=density_axis.get_xaxis_transform(),
+            ha="right",
+            va="top",
+            color="tab:green",
+            fontsize="small",
+        )
         density_axis.set(
             title=case_replicates[0].label,
             xlabel=r"Radial distance $r$",
-            ylabel=r"Mean number density $\langle\rho(r)\rangle_t$",
+            ylabel=r"Mean number density $\langle\rho(r)\rangle_t$ [$N/L^3$]",
             xlim=(0.0, reference.radius),
         )
         derivative_axis.set_ylabel(
@@ -429,14 +430,22 @@ def main() -> None:
         summary = {
             "case_id": case_id,
             "rho_gamma": rho_gamma,
-            "rho_definition": "time-averaged radial number density",
-            "plateau_start": plateau.start,
-            "plateau_end": plateau.end,
-            "plateau_min_r": float(args.plateau_min_r),
-            "absolute_slope_cutoff": plateau_slope_cutoff,
-            "plateau_slope_quantile": float(args.plateau_slope_quantile),
-            "plateau_min_bins": int(args.plateau_min_bins),
-            "plateau_smoothing_window": int(args.plateau_smoothing_window),
+            "rho_units": "N/L^3",
+            "radial_bin_volume_formula": "pi * Lx * (r_outer^2 - r_inner^2)",
+            "rho_definition": (
+                "smoothed time-averaged radial number density at the most "
+                "prominent persistent local minimum"
+            ),
+            "rho_gamma_raw_bin_value": float(density[bulk_minimum.index]),
+            "rho_gamma_cutoff_r": bulk_minimum.radius,
+            "rho_gamma_minimum_prominence": bulk_minimum.prominence,
+            "rho_gamma_min_r": float(args.rho_gamma_min_r),
+            "rho_gamma_prominence_fraction": float(
+                args.rho_gamma_prominence_fraction
+            ),
+            "rho_gamma_smoothing_window": int(
+                args.rho_gamma_smoothing_window
+            ),
             "radial_bins": int(args.radial_bins),
             "frame_start": int(args.frame_start),
             "frame_stride": int(args.frame_stride),
@@ -445,9 +454,9 @@ def main() -> None:
         }
         data_output.write_text(json.dumps(summary, indent=2) + "\n")
         print(
-            f"{case_id}: plateau=[{plateau.start:.6g}, "
-            f"{plateau.end:.6g}], rho_gamma={rho_gamma:.6g}, "
-            f"absolute_slope_cutoff={plateau_slope_cutoff:.6g}",
+            f"{case_id}: rho_gamma_cutoff_r={bulk_minimum.radius:.6g}, "
+            f"rho_gamma={rho_gamma:.6g}, "
+            f"minimum_prominence={bulk_minimum.prominence:.6g}",
             flush=True,
         )
         print(f"wrote {output}", flush=True)
