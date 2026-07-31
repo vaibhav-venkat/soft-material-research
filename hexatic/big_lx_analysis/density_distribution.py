@@ -6,6 +6,11 @@ Particles marked by the stored ``hexatic_shell_mask`` receive a factor of two
 to correct the missing outer hemisphere.  A radial shell-mask fallback uses
 the repository shell cutoff if the stored mask is absent.
 
+Because query points are sampled at particles, the empirical histogram is
+converted to an approximate volume distribution with inverse-density weights
+``w_i = 1/rho_i``.  Histogram fractions are reported for comparison, while
+the primary phase fractions still come from global conservation.
+
 The two modes of the empirical ``P(rho)`` define ``rho_beta`` (dilute) and
 ``rho_alpha`` (dense).  Fractions are calculated only from conservation,
 
@@ -52,6 +57,7 @@ class ParticleDensitySamples:
 class DensityModes:
     rho_beta: float
     rho_alpha: float
+    boundary: float
 
 
 @dataclass(frozen=True)
@@ -242,11 +248,17 @@ def _combine_samples(
 
 def _empirical_distribution_and_modes(
     values: NDArray[np.float64],
+    volume_weights: NDArray[np.float64],
     density_bins: int,
     smoothing_window: int,
     prominence_fraction: float,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64], DensityModes]:
-    probability, edges = np.histogram(values, bins=density_bins, density=True)
+    probability, edges = np.histogram(
+        values,
+        bins=density_bins,
+        weights=volume_weights,
+        density=True,
+    )
     centers = 0.5 * (edges[:-1] + edges[1:])
     smoothed = uniform_filter1d(probability, smoothing_window, mode="nearest")
     baseline = float(smoothed.min())
@@ -267,9 +279,12 @@ def _empirical_distribution_and_modes(
         )
     selected = peaks[np.argsort(prominences)[-2:]]
     selected.sort()
+    valley_slice = slice(selected[0], selected[1] + 1)
+    valley_index = selected[0] + int(np.argmin(smoothed[valley_slice]))
     modes = DensityModes(
         rho_beta=float(centers[selected[0]]),
         rho_alpha=float(centers[selected[1]]),
+        boundary=float(centers[valley_index]),
     )
     return edges, probability, smoothed, modes
 
@@ -283,6 +298,8 @@ def _plot_distribution(
     modes: DensityModes,
     x_alpha: float,
     x_beta: float,
+    x_alpha_histogram: float,
+    x_beta_histogram: float,
     output: Path,
 ) -> None:
     sns = _style()
@@ -294,7 +311,7 @@ def _plot_distribution(
         fill=True,
         alpha=0.3,
         color="0.45",
-        label=r"Particle-centered empirical $P(\rho)$",
+        label=r"Inverse-density weighted $P_V(\rho)$",
     )
     axis.plot(
         centers,
@@ -309,14 +326,29 @@ def _plot_distribution(
         color=colors[0],
         linestyle="--",
         linewidth=1.3,
-        label=rf"$\rho_\beta={modes.rho_beta:.4g}$, $x_\beta={x_beta:.3f}$",
+        label=(
+            rf"$\rho_\beta={modes.rho_beta:.4g}$, "
+            rf"$x_\beta^{{\rm cons}}={x_beta:.3f}$, "
+            rf"$x_\beta^{{\rm hist}}={x_beta_histogram:.3f}$"
+        ),
     )
     axis.axvline(
         modes.rho_alpha,
         color=colors[1],
         linestyle="--",
         linewidth=1.3,
-        label=rf"$\rho_\alpha={modes.rho_alpha:.4g}$, $x_\alpha={x_alpha:.3f}$",
+        label=(
+            rf"$\rho_\alpha={modes.rho_alpha:.4g}$, "
+            rf"$x_\alpha^{{\rm cons}}={x_alpha:.3f}$, "
+            rf"$x_\alpha^{{\rm hist}}={x_alpha_histogram:.3f}$"
+        ),
+    )
+    axis.axvline(
+        modes.boundary,
+        color="0.5",
+        linestyle="-.",
+        linewidth=1.0,
+        label=rf"population boundary $={modes.boundary:.4g}$",
     )
     axis.axvline(
         rho_total,
@@ -328,7 +360,7 @@ def _plot_distribution(
     axis.set(
         title=case_label,
         xlabel=r"Particle-centered local density $\rho$ [$N/L^3$]",
-        ylabel=r"Probability density $P(\rho)$",
+        ylabel=r"Volume-weighted probability density $P_V(\rho)$",
         xlim=(edges[0], edges[-1]),
     )
     axis.grid(axis="y", color="0.9", linewidth=0.7)
@@ -349,10 +381,16 @@ def _analyze_case(task: tuple[str, list[Replicate], CaseOptions]) -> tuple[str, 
         case_id,
         [_load_particle_density_samples(r, options) for r in case_replicates],
     )
+    if np.any(samples.values <= 0.0):
+        raise ValueError(
+            f"Particle-centered densities must be positive for {case_id}"
+        )
+    volume_weights = 1.0 / samples.values
     volume = np.pi * samples.center_radius**2 * samples.lx
     rho_total = samples.particle_count_sum / (samples.n_frames * volume)
     edges, probability, smoothed, modes = _empirical_distribution_and_modes(
         samples.values,
+        volume_weights,
         options.density_bins,
         options.mode_smoothing_window,
         options.mode_prominence_fraction,
@@ -360,6 +398,10 @@ def _analyze_case(task: tuple[str, list[Replicate], CaseOptions]) -> tuple[str, 
     difference = modes.rho_alpha - modes.rho_beta
     x_alpha = (rho_total - modes.rho_beta) / difference
     x_beta = 1.0 - x_alpha
+    dense_samples = samples.values > modes.boundary
+    total_weight = float(volume_weights.sum())
+    x_alpha_histogram = float(volume_weights[dense_samples].sum() / total_weight)
+    x_beta_histogram = 1.0 - x_alpha_histogram
     if not 0.0 <= x_alpha <= 1.0:
         raise ValueError(
             f"Detected modes do not bracket rho_total for {case_id}: "
@@ -378,12 +420,16 @@ def _analyze_case(task: tuple[str, list[Replicate], CaseOptions]) -> tuple[str, 
         modes,
         x_alpha,
         x_beta,
+        x_alpha_histogram,
+        x_beta_histogram,
         output,
     )
     return (
         f"{case_id}: rho_total={rho_total:.6g}, rho_beta={modes.rho_beta:.6g}, "
-        f"rho_alpha={modes.rho_alpha:.6g}, x_beta={x_beta:.6g}, "
-        f"x_alpha={x_alpha:.6g}",
+        f"rho_alpha={modes.rho_alpha:.6g}, "
+        f"x_beta_cons={x_beta:.6g}, x_alpha_cons={x_alpha:.6g}, "
+        f"x_beta_hist={x_beta_histogram:.6g}, "
+        f"x_alpha_hist={x_alpha_histogram:.6g}",
         output,
     )
 
