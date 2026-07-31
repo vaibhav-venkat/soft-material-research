@@ -1,10 +1,11 @@
 """Plot volumetric-density distributions for big-Lx cylinder cases.
 
-Selected frames are divided into equal-volume ``(x, theta, r)`` voxels.  The
-local volume density is the particle count divided by the exact cylindrical
-sector volume.  A two-component Gaussian mixture supplies dilute and dense
-density modes.  Their volume fractions are not taken from the mixture weights;
-they are calculated from the conservation lever rule
+Selected frames are divided into equal-volume ``(x, theta, r)`` voxels.  Each
+voxel's local density is time-averaged before constructing the distribution,
+so transient empty-bin counting noise does not create an artificial delta peak
+at zero.  Dilute and dense densities are the two modes of the empirical
+probability density, with no parametric mixture fit.  Their volume fractions
+are calculated directly from the conservation lever rule
 
 ``rho_total = x_dense * rho_dense + (1 - x_dense) * rho_dilute``.
 
@@ -15,7 +16,9 @@ from __future__ import annotations
 
 import argparse
 from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
+import os
 from pathlib import Path
 
 import matplotlib
@@ -24,7 +27,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 from numpy.typing import NDArray
 from safetensors import safe_open
-from sklearn.mixture import GaussianMixture
+from scipy.ndimage import gaussian_filter1d
+from scipy.signal import find_peaks
 
 from hexatic.constants import cylinder
 
@@ -51,9 +55,21 @@ class VolumeDensitySamples:
 @dataclass(frozen=True)
 class DensityModes:
     rho_dilute: float
-    sigma_dilute: float
     rho_dense: float
-    sigma_dense: float
+
+
+@dataclass(frozen=True)
+class CaseOptions:
+    output_dir: Path
+    overwrite: bool
+    requested_dx: float
+    requested_arc_width: float
+    radial_bins: int
+    density_bins: int
+    mode_smoothing_sigma: float
+    mode_prominence_fraction: float
+    frame_start: int
+    frame_stride: int
 
 
 def _safe_case_name(case_id: str) -> str:
@@ -155,7 +171,10 @@ def _load_volume_density_samples(
         requested_arc_width,
         radial_bins,
     )
-    frame_densities: list[NDArray[np.float64]] = []
+    accumulated_counts = np.zeros(
+        nx * ntheta * radial_bins, dtype=np.float64
+    )
+    n_frames = 0
     n_particles: int | None = None
     global_frame = 0
     for path in replicate.shard_files:
@@ -202,14 +221,13 @@ def _load_volume_density_samples(
                     flat_index,
                     minlength=nx * ntheta * radial_bins,
                 )
-                frame_densities.append(
-                    counts.astype(np.float64) / voxel_volume
-                )
-    if not frame_densities or n_particles is None:
+                accumulated_counts += counts
+                n_frames += 1
+    if n_frames == 0 or n_particles is None:
         raise ValueError(f"No frames selected for {replicate.case_id}")
     return VolumeDensitySamples(
-        values=np.concatenate(frame_densities),
-        n_frames=len(frame_densities),
+        values=accumulated_counts / (n_frames * voxel_volume),
+        n_frames=n_frames,
         n_particles=n_particles,
         nx=nx,
         ntheta=ntheta,
@@ -260,103 +278,104 @@ def _combine_samples(
     )
 
 
-def _fit_density_modes(
-    values: NDArray[np.float64], max_fit_samples: int
-) -> DensityModes:
+def _empirical_distribution_and_modes(
+    values: NDArray[np.float64],
+    density_bins: int,
+    smoothing_sigma: float,
+    prominence_fraction: float,
+) -> tuple[
+    NDArray[np.float64],
+    NDArray[np.float64],
+    NDArray[np.float64],
+    DensityModes,
+]:
+    """Return the empirical PDF, its smoothed copy, and its two modes."""
     finite = values[np.isfinite(values)]
     if finite.size < 4:
         raise ValueError("At least four finite density samples are required")
-    rng = np.random.default_rng(0)
-    fit_values = (
-        rng.choice(finite, size=max_fit_samples, replace=False)
-        if finite.size > max_fit_samples
-        else finite
+    probability, edges = np.histogram(finite, bins=density_bins, density=True)
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    smoothed = gaussian_filter1d(
+        probability.astype(np.float64),
+        sigma=smoothing_sigma,
+        mode="nearest",
     )
-    model = GaussianMixture(
-        n_components=2,
-        covariance_type="full",
-        n_init=10,
-        random_state=0,
-        reg_covar=1.0e-8,
+    minimum_prominence = prominence_fraction * float(smoothed.max())
+    baseline = float(smoothed.min())
+    padded = np.concatenate(([baseline], smoothed, [baseline]))
+    padded_peaks, properties = find_peaks(
+        padded,
+        prominence=minimum_prominence,
+        distance=max(2, density_bins // 10),
     )
-    model.fit(fit_values.reshape(-1, 1))
-    order = np.argsort(model.means_[:, 0])
-    dilute, dense = int(order[0]), int(order[1])
-    return DensityModes(
-        rho_dilute=float(model.means_[dilute, 0]),
-        sigma_dilute=float(np.sqrt(model.covariances_[dilute, 0, 0])),
-        rho_dense=float(model.means_[dense, 0]),
-        sigma_dense=float(np.sqrt(model.covariances_[dense, 0, 0])),
+    peaks = padded_peaks - 1
+    valid = (peaks >= 0) & (peaks < density_bins)
+    peaks = peaks[valid]
+    prominences = properties["prominences"][valid]
+    if peaks.size < 2:
+        raise ValueError(
+            "Fewer than two empirical density modes were found; adjust "
+            "--density-bins, --mode-smoothing-sigma, or "
+            "--mode-prominence-fraction"
+        )
+    selected = peaks[np.argsort(prominences)[-2:]]
+    selected.sort()
+    modes = DensityModes(
+        rho_dilute=float(centers[selected[0]]),
+        rho_dense=float(centers[selected[1]]),
     )
-
-
-def _normal_pdf(
-    x: NDArray[np.float64], mean: float, standard_deviation: float
-) -> NDArray[np.float64]:
-    z = (x - mean) / standard_deviation
-    return np.exp(-0.5 * z**2) / (np.sqrt(2.0 * np.pi) * standard_deviation)
+    return edges, probability, smoothed, modes
 
 
 def _plot_distribution(
     case_label: str,
-    values: NDArray[np.float64],
+    edges: NDArray[np.float64],
+    probability: NDArray[np.float64],
+    smoothed_probability: NDArray[np.float64],
     rho_total: float,
     modes: DensityModes,
     x_dense: float,
     x_dilute: float,
-    density_bins: int,
     output: Path,
 ) -> None:
     sns = _style()
     figure, axis = plt.subplots(figsize=(7.2, 4.8), constrained_layout=True)
-    sns.histplot(
-        values,
-        bins=density_bins,
-        stat="density",
-        element="step",
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    axis.stairs(
+        probability,
+        edges,
         fill=True,
         alpha=0.3,
         color="0.45",
-        ax=axis,
+        label=r"Empirical $P(\rho)$",
     )
-    lower, upper = np.quantile(values, [0.001, 0.999])
-    padding = 0.08 * max(upper - lower, np.finfo(np.float64).eps)
-    x = np.linspace(lower - padding, upper + padding, 600)
-    dilute_pdf = x_dilute * _normal_pdf(
-        x, modes.rho_dilute, modes.sigma_dilute
-    )
-    dense_pdf = x_dense * _normal_pdf(
-        x, modes.rho_dense, modes.sigma_dense
+    axis.plot(
+        centers,
+        smoothed_probability,
+        color="black",
+        linewidth=1.8,
+        label="Smoothed empirical PDF (mode finding)",
     )
     colors = sns.color_palette("colorblind", n_colors=2)
-    axis.plot(
-        x,
-        dilute_pdf,
+    axis.axvline(
+        modes.rho_dilute,
         color=colors[0],
         linestyle="--",
-        linewidth=1.4,
+        linewidth=1.3,
         label=(
             rf"$\rho_{{\rm dilute}}={modes.rho_dilute:.4g}$, "
             rf"$x_{{\rm dilute}}={x_dilute:.3f}$"
         ),
     )
-    axis.plot(
-        x,
-        dense_pdf,
+    axis.axvline(
+        modes.rho_dense,
         color=colors[1],
         linestyle="--",
-        linewidth=1.4,
+        linewidth=1.3,
         label=(
             rf"$\rho_{{\rm dense}}={modes.rho_dense:.4g}$, "
             rf"$x_{{\rm dense}}={x_dense:.3f}$"
         ),
-    )
-    axis.plot(
-        x,
-        dilute_pdf + dense_pdf,
-        color="black",
-        linewidth=1.8,
-        label="two-population reconstruction",
     )
     axis.axvline(
         rho_total,
@@ -369,7 +388,7 @@ def _plot_distribution(
         title=case_label,
         xlabel=r"Local volume density $\rho$ [$N/L^3$]",
         ylabel=r"Probability density $P(\rho)$",
-        xlim=(x[0], x[-1]),
+        xlim=(edges[0], edges[-1]),
     )
     axis.grid(axis="y", color="0.9", linewidth=0.7)
     axis.legend(frameon=False)
@@ -381,6 +400,72 @@ def _plot_distribution(
         metadata={"Creator": "hexatic.big_lx_analysis.density_distribution"},
     )
     plt.close(figure)
+
+
+def _analyze_case(
+    task: tuple[str, list[Replicate], CaseOptions],
+) -> tuple[str, Path]:
+    """Analyze one case in an isolated worker process."""
+    case_id, case_replicates, options = task
+    samples = _combine_samples(
+        case_id,
+        [
+            _load_volume_density_samples(
+                replicate,
+                requested_dx=options.requested_dx,
+                requested_arc_width=options.requested_arc_width,
+                radial_bins=options.radial_bins,
+                frame_start=options.frame_start,
+                frame_stride=options.frame_stride,
+            )
+            for replicate in case_replicates
+        ],
+    )
+    rho_total = float(samples.values.mean())
+    edges, probability, smoothed_probability, modes = (
+        _empirical_distribution_and_modes(
+            samples.values,
+            options.density_bins,
+            options.mode_smoothing_sigma,
+            options.mode_prominence_fraction,
+        )
+    )
+    density_difference = modes.rho_dense - modes.rho_dilute
+    if density_difference <= 0.0:
+        raise ValueError(f"Dense and dilute modes coincide for {case_id}")
+    x_dense = (rho_total - modes.rho_dilute) / density_difference
+    x_dilute = 1.0 - x_dense
+    if not 0.0 <= x_dense <= 1.0:
+        raise ValueError(
+            f"Fitted modes do not bracket rho_total for {case_id}: "
+            f"rho_dilute={modes.rho_dilute}, rho_total={rho_total}, "
+            f"rho_dense={modes.rho_dense}"
+        )
+
+    output = (
+        options.output_dir
+        / f"{_safe_case_name(case_id)}_density_distribution.svg"
+    )
+    if output.exists() and not options.overwrite:
+        raise FileExistsError(f"{output} exists; pass --overwrite to replace")
+    _plot_distribution(
+        case_replicates[0].label,
+        edges,
+        probability,
+        smoothed_probability,
+        rho_total,
+        modes,
+        x_dense,
+        x_dilute,
+        output,
+    )
+    report = (
+        f"{case_id}: rho_total={rho_total:.6g}, "
+        f"rho_dilute={modes.rho_dilute:.6g}, "
+        f"rho_dense={modes.rho_dense:.6g}, "
+        f"x_dilute={x_dilute:.6g}, x_dense={x_dense:.6g}"
+    )
+    return report, output
 
 
 def _parse_args() -> argparse.Namespace:
@@ -401,9 +486,26 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--arc-bin-width", type=float, default=None)
     parser.add_argument("--radial-bins", type=int, default=20)
     parser.add_argument("--density-bins", type=int, default=80)
-    parser.add_argument("--mixture-max-fit-samples", type=int, default=100_000)
+    parser.add_argument(
+        "--mode-smoothing-sigma",
+        type=float,
+        default=1.5,
+        help="Gaussian smoothing in histogram-bin units used only to find modes",
+    )
+    parser.add_argument(
+        "--mode-prominence-fraction",
+        type=float,
+        default=0.02,
+        help="Minimum mode prominence as a fraction of the PDF maximum",
+    )
     parser.add_argument("--frame-start", type=int, default=700)
     parser.add_argument("--frame-stride", type=int, default=1)
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=0,
+        help="Case worker processes; 0 uses the available CPUs (default: 0)",
+    )
     parser.add_argument("--circ")
     return parser.parse_args()
 
@@ -416,8 +518,12 @@ def main() -> None:
         raise ValueError("--frame-stride must be positive")
     if args.radial_bins < 1 or args.density_bins < 1:
         raise ValueError("--radial-bins and --density-bins must be positive")
-    if args.mixture_max_fit_samples < 4:
-        raise ValueError("--mixture-max-fit-samples must be at least 4")
+    if not np.isfinite(args.mode_smoothing_sigma) or args.mode_smoothing_sigma <= 0:
+        raise ValueError("--mode-smoothing-sigma must be finite and positive")
+    if not 0.0 <= args.mode_prominence_fraction < 1.0:
+        raise ValueError("--mode-prominence-fraction must lie in [0, 1)")
+    if args.workers < 0:
+        raise ValueError("--workers must be non-negative")
     if not np.isfinite(args.particle_diameter) or args.particle_diameter <= 0:
         raise ValueError("--particle-diameter must be finite and positive")
     requested_dx = (
@@ -436,61 +542,42 @@ def main() -> None:
         grouped[replicate.case_id].append(replicate)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    for case_id, case_replicates in sorted(grouped.items()):
-        samples = _combine_samples(
-            case_id,
-            [
-                _load_volume_density_samples(
-                    replicate,
-                    requested_dx=requested_dx,
-                    requested_arc_width=requested_arc_width,
-                    radial_bins=args.radial_bins,
-                    frame_start=args.frame_start,
-                    frame_stride=args.frame_stride,
-                )
-                for replicate in case_replicates
-            ],
-        )
-        rho_total = float(samples.values.mean())
-        modes = _fit_density_modes(
-            samples.values, args.mixture_max_fit_samples
-        )
-        density_difference = modes.rho_dense - modes.rho_dilute
-        if density_difference <= 0.0:
-            raise ValueError(f"Dense and dilute modes coincide for {case_id}")
-        x_dense = (rho_total - modes.rho_dilute) / density_difference
-        x_dilute = 1.0 - x_dense
-        if not 0.0 <= x_dense <= 1.0:
-            raise ValueError(
-                f"Fitted modes do not bracket rho_total for {case_id}: "
-                f"rho_dilute={modes.rho_dilute}, rho_total={rho_total}, "
-                f"rho_dense={modes.rho_dense}"
-            )
-
-        output = (
-            args.output_dir
-            / f"{_safe_case_name(case_id)}_density_distribution.svg"
-        )
-        if output.exists() and not args.overwrite:
-            raise FileExistsError(f"{output} exists; pass --overwrite to replace")
-        _plot_distribution(
-            case_replicates[0].label,
-            samples.values,
-            rho_total,
-            modes,
-            x_dense,
-            x_dilute,
-            args.density_bins,
-            output,
-        )
-        print(
-            f"{case_id}: rho_total={rho_total:.6g}, "
-            f"rho_dilute={modes.rho_dilute:.6g}, "
-            f"rho_dense={modes.rho_dense:.6g}, "
-            f"x_dilute={x_dilute:.6g}, x_dense={x_dense:.6g}",
-            flush=True,
-        )
-        print(f"wrote {output}", flush=True)
+    options = CaseOptions(
+        output_dir=args.output_dir,
+        overwrite=args.overwrite,
+        requested_dx=requested_dx,
+        requested_arc_width=requested_arc_width,
+        radial_bins=args.radial_bins,
+        density_bins=args.density_bins,
+        mode_smoothing_sigma=args.mode_smoothing_sigma,
+        mode_prominence_fraction=args.mode_prominence_fraction,
+        frame_start=args.frame_start,
+        frame_stride=args.frame_stride,
+    )
+    tasks = [
+        (case_id, case_replicates, options)
+        for case_id, case_replicates in sorted(grouped.items())
+    ]
+    available_cpus = os.cpu_count() or 1
+    worker_count = (
+        min(len(tasks), available_cpus)
+        if args.workers == 0
+        else min(len(tasks), args.workers)
+    )
+    print(
+        f"analyzing {len(tasks)} cases with {worker_count} worker processes",
+        flush=True,
+    )
+    if worker_count == 1:
+        results = map(_analyze_case, tasks)
+        for report, output in results:
+            print(report, flush=True)
+            print(f"wrote {output}", flush=True)
+    else:
+        with ProcessPoolExecutor(max_workers=worker_count) as executor:
+            for report, output in executor.map(_analyze_case, tasks):
+                print(report, flush=True)
+                print(f"wrote {output}", flush=True)
 
 
 if __name__ == "__main__":
