@@ -3,13 +3,14 @@
 ``freud.density.LocalDensity`` is evaluated at every particle center in every
 selected frame.  Query points are therefore never empty grid locations.
 Particles close enough to the cylindrical wall are reflected radially across
-the accessible particle-center radius.  These ghosts are neighbor sources but
-never query points or histogram samples, providing a distance-dependent wall
-correction without a hard factor of two.
+the measured maximum particle radius in each frame.  These ghosts are neighbor
+sources but never query points or histogram samples, providing a
+distance-dependent wall correction without a hard factor of two.
 
 For particles in ``hexatic_shell_mask``, the 3D estimate is replaced by a
-surface density on the unwrapped periodic cylinder ``(x, R theta)``.  Taking
-the shell thickness to be one particle diameter converts this to the effective
+surface density on the unwrapped periodic cylinder ``(x, R_shell theta)``,
+where ``R_shell`` is the measured mean shell radius in that frame.  Taking the
+shell thickness to be one particle diameter converts this to the effective
 volumetric density ``rho_shell = sigma_shell / D``.  This gives the shell a
 defined physical volume instead of dividing a monolayer count by a 3D sphere.
 
@@ -25,7 +26,7 @@ fractions are calculated only from global conservation,
 ``x_dense = (rho_total - rho_dilute) / (rho_dense - rho_dilute)``.
 
 Cases run in parallel CPU processes.  Each case produces the original density
-distribution SVG and a separate shell/non-shell population diagnostic.
+distribution SVG and a separate two-panel shell/non-shell PNG diagnostic.
 """
 
 from __future__ import annotations
@@ -36,6 +37,7 @@ from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 import os
 from pathlib import Path
+from typing import Any
 
 import freud
 import matplotlib
@@ -51,6 +53,9 @@ from hexatic.constants import cylinder
 
 from .run_dynamics import Replicate, _collect_manifests, _load_replicate, _style
 from .surface_area import _load_circumference, _load_static_lx
+
+
+SURFACE_CLOSE_PACKED_VOLUME_FRACTION = np.pi / (3.0 * np.sqrt(3.0))
 
 
 @dataclass(frozen=True)
@@ -142,13 +147,13 @@ def _radial_ghost_points(
     radial: NDArray[np.float32],
     theta: NDArray[np.float32],
     *,
-    center_radius: float,
+    reflection_radius: float,
     influence_radius: float,
 ) -> NDArray[np.float32]:
     """Reflect near-wall particles across the particle-center boundary."""
-    depth = center_radius - radial
+    depth = reflection_radius - radial
     ghost_mask = (depth >= 0.0) & (depth < influence_radius)
-    ghost_radius = 2.0 * center_radius - radial[ghost_mask]
+    ghost_radius = 2.0 * reflection_radius - radial[ghost_mask]
     return np.column_stack(
         (
             points[ghost_mask, 0],
@@ -159,16 +164,16 @@ def _radial_ghost_points(
 
 
 def _frame_shell_mask(
-    tensors: object,
+    tensors: Any,
     local_frame: int,
     radial: NDArray[np.float32],
     cylinder_radius: float,
     shell_delta: float,
 ) -> NDArray[np.bool_]:
-    keys = tensors.keys()  # type: ignore[attr-defined]
+    keys = tensors.keys()
     if "hexatic_shell_mask" in keys:
         return np.asarray(
-            tensors.get_tensor("hexatic_shell_mask")[local_frame],  # type: ignore[attr-defined]
+            tensors.get_tensor("hexatic_shell_mask")[local_frame],
             dtype=np.bool_,
         )
     return np.asarray(radial > cylinder_radius - shell_delta, dtype=np.bool_)
@@ -208,12 +213,6 @@ def _load_particle_density_samples(
         Ly=transverse_box_length,
         Lz=transverse_box_length,
     )
-    surface_circumference = 2.0 * np.pi * center_radius
-    surface_box = freud.box.Box(
-        Lx=lx,
-        Ly=surface_circumference,
-        is2D=True,
-    )
     self_surface_density = 1.0 / (
         np.pi * options.neighborhood_radius**2
     )
@@ -240,6 +239,37 @@ def _load_particle_density_samples(
                 )
                 frame = frame[finite]
                 radial = np.asarray(frame[:, 2], dtype=np.float32)
+                full_shell_mask = _frame_shell_mask(
+                    tensors,
+                    local_frame,
+                    np.asarray(coords[local_frame, :, 2]),
+                    radius,
+                    options.shell_delta,
+                )
+                shell_mask = full_shell_mask[finite]
+                if not np.any(shell_mask):
+                    raise AssertionError(
+                        f"No shell particles in selected frame for {replicate.case_id}"
+                    )
+                maximum_radius = float(radial.max())
+                maximum_shell_radius = float(radial[shell_mask].max())
+                radial_tolerance = (
+                    cylinder.SIMULATION.wall_clearance_epsilon
+                    * options.particle_diameter
+                    + 1.0e-5 * max(1.0, radius)
+                )
+                if maximum_radius > maximum_shell_radius + radial_tolerance:
+                    raise AssertionError(
+                        "Outermost particle is not in hexatic_shell_mask for "
+                        f"{replicate.case_id}: max r={maximum_radius:.8g}, "
+                        f"max shell r={maximum_shell_radius:.8g}"
+                    )
+                if maximum_radius > radius + radial_tolerance:
+                    raise AssertionError(
+                        f"Particle radius exceeds nominal cylinder radius for "
+                        f"{replicate.case_id}: max r={maximum_radius:.8g}, "
+                        f"R={radius:.8g}"
+                    )
                 x = np.mod(frame[:, 0] + 0.5 * lx, lx) - 0.5 * lx
                 theta = frame[:, 1]
                 points = np.column_stack(
@@ -253,7 +283,7 @@ def _load_particle_density_samples(
                     points,
                     radial,
                     np.asarray(theta, dtype=np.float32),
-                    center_radius=center_radius,
+                    reflection_radius=maximum_radius,
                     influence_radius=influence_radius,
                 )
                 sources = np.concatenate((points, ghosts), axis=0)
@@ -269,37 +299,35 @@ def _load_particle_density_samples(
                 # Real sources precede ghosts, so exclude_ii removes exactly
                 # the real particle at each matching query index. Add it once.
                 frame_density += self_density
-                full_shell_mask = _frame_shell_mask(
-                    tensors,
-                    local_frame,
-                    np.asarray(coords[local_frame, :, 2]),
-                    radius,
-                    options.shell_delta,
+                shell_radius = float(radial[shell_mask].mean(dtype=np.float64))
+                surface_circumference = 2.0 * np.pi * shell_radius
+                surface_box = freud.box.Box(
+                    Lx=lx,
+                    Ly=surface_circumference,
+                    is2D=True,
                 )
-                shell_mask = full_shell_mask[finite]
-                if np.any(shell_mask):
-                    surface_arclength = np.mod(
-                        center_radius * theta[shell_mask]
-                        + 0.5 * surface_circumference,
-                        surface_circumference,
-                    ) - 0.5 * surface_circumference
-                    surface_points = np.column_stack(
-                        (
-                            x[shell_mask],
-                            surface_arclength,
-                            np.zeros(np.count_nonzero(shell_mask)),
-                        )
-                    ).astype(np.float32)
-                    shell_result = surface_density.compute(
-                        system=(surface_box, surface_points)
+                surface_arclength = np.mod(
+                    shell_radius * theta[shell_mask]
+                    + 0.5 * surface_circumference,
+                    surface_circumference,
+                ) - 0.5 * surface_circumference
+                surface_points = np.column_stack(
+                    (
+                        x[shell_mask],
+                        surface_arclength,
+                        np.zeros(np.count_nonzero(shell_mask)),
                     )
-                    shell_sigma = (
-                        np.asarray(shell_result.density, dtype=np.float64)
-                        + self_surface_density
-                    )
-                    frame_density[shell_mask] = (
-                        shell_sigma / options.shell_thickness
-                    )
+                ).astype(np.float32)
+                shell_result = surface_density.compute(
+                    system=(surface_box, surface_points)
+                )
+                shell_sigma = (
+                    np.asarray(shell_result.density, dtype=np.float64)
+                    + self_surface_density
+                )
+                frame_density[shell_mask] = (
+                    shell_sigma / options.shell_thickness
+                )
                 densities.append(frame_density)
                 shell_masks.append(shell_mask)
                 particle_count_sum += float(points.shape[0])
@@ -475,15 +503,26 @@ def _plot_population_distribution(
     volume_weights: NDArray[np.float64],
     edges: NDArray[np.float64],
     particle_diameter: float,
+    smoothing_window: int,
+    modes: DensityModes,
     output: Path,
 ) -> None:
-    """Overlay shell and non-shell contributions to the shared density PDF."""
+    """Compare the combined PDF with shell/non-shell population curves."""
     sns = _style()
-    figure, axis = plt.subplots(figsize=(7.2, 4.8), constrained_layout=True)
+    figure, axes = plt.subplots(
+        1,
+        2,
+        figsize=(12.4, 4.8),
+        sharex=True,
+        sharey=True,
+        constrained_layout=True,
+    )
     particle_volume = np.pi * particle_diameter**3 / 6.0
     fraction_edges = particle_volume * edges
+    fraction_centers = 0.5 * (fraction_edges[:-1] + fraction_edges[1:])
     normalization = volume_weights.sum() * np.diff(fraction_edges)
     colors = sns.color_palette("colorblind", n_colors=2)
+    population_curves: list[NDArray[np.float64]] = []
     for mask, label, color in (
         (shell_mask, "Shell particles", colors[0]),
         (~shell_mask, "Non-shell particles", colors[1]),
@@ -491,25 +530,72 @@ def _plot_population_distribution(
         weighted_counts, _ = np.histogram(
             values[mask], bins=edges, weights=volume_weights[mask]
         )
-        axis.stairs(
-            weighted_counts / normalization,
-            fraction_edges,
+        contribution = weighted_counts / normalization
+        population_curves.append(contribution)
+        volume_fraction = float(
+            volume_weights[mask].sum() / volume_weights.sum()
+        )
+        axes[1].plot(
+            fraction_centers,
+            uniform_filter1d(contribution, smoothing_window, mode="nearest"),
             linewidth=1.8,
-            label=label,
+            label=f"{label} ({volume_fraction:.1%} of volume weight)",
             color=color,
         )
-    axis.set(
-        title=f"{case_label}: shell vs non-shell populations",
-        xlabel=r"Particle-centered local volume fraction $\phi=\rho\pi D^3/6$",
-        ylabel=r"Contribution to volume-weighted $P_V(\phi)$",
-        xlim=(fraction_edges[0], fraction_edges[-1]),
+    combined = population_curves[0] + population_curves[1]
+    axes[0].stairs(
+        combined,
+        fraction_edges,
+        fill=True,
+        alpha=0.3,
+        color="0.45",
+        label="Combined shell + non-shell PDF",
     )
-    axis.grid(axis="y", color="0.9", linewidth=0.7)
-    axis.legend(frameon=False)
-    sns.despine(ax=axis)
+    axes[0].plot(
+        fraction_centers,
+        uniform_filter1d(combined, smoothing_window, mode="nearest"),
+        color="black",
+        linewidth=1.8,
+        label="Smoothed combined PDF",
+    )
+    axes[0].set_title("Combined distribution")
+    axes[1].set_title("Shell/non-shell contributions")
+    for axis in axes:
+        axis.axvline(
+            SURFACE_CLOSE_PACKED_VOLUME_FRACTION,
+            color="0.35",
+            linestyle=":",
+            linewidth=1.1,
+            label=r"2D close-packed ceiling $\phi=0.6046$",
+        )
+        axis.axvline(
+            particle_volume * modes.rho_dilute,
+            color="0.65",
+            linestyle="--",
+            linewidth=0.9,
+        )
+        axis.axvline(
+            particle_volume * modes.rho_dense,
+            color="0.65",
+            linestyle="--",
+            linewidth=0.9,
+        )
+        axis.set(
+            xlabel=(
+                r"Particle-centered local volume fraction "
+                r"$\phi=\rho\pi D^3/6$"
+            ),
+            xlim=(fraction_edges[0], fraction_edges[-1]),
+        )
+        axis.grid(axis="y", color="0.9", linewidth=0.7)
+        axis.legend(frameon=False)
+        sns.despine(ax=axis)
+    axes[0].set_ylabel(r"Volume-weighted probability density $P_V(\phi)$")
+    figure.suptitle(f"{case_label}: density populations")
     figure.savefig(
         output,
-        format="svg",
+        format="png",
+        dpi=300,
         bbox_inches="tight",
         metadata={"Creator": "hexatic.big_lx_analysis.density_distribution"},
     )
@@ -550,7 +636,7 @@ def _analyze_case(
     output = options.output_dir / f"{_safe_case_name(case_id)}_density_distribution.svg"
     population_output = (
         options.output_dir
-        / f"{_safe_case_name(case_id)}_density_distribution_by_population.svg"
+        / f"{_safe_case_name(case_id)}_density_distribution_by_population.png"
     )
     existing = [path for path in (output, population_output) if path.exists()]
     if existing and not options.overwrite:
@@ -576,12 +662,20 @@ def _analyze_case(
         volume_weights,
         edges,
         options.particle_diameter,
+        options.mode_smoothing_window,
+        modes,
         population_output,
+    )
+    dense_volume_fraction = (
+        options.particle_diameter**3 * np.pi / 6.0 * modes.rho_dense
     )
     return (
         f"{case_id}: rho_total={rho_total:.6g}, "
         f"rho_dilute={modes.rho_dilute:.6g}, "
         f"rho_dense={modes.rho_dense:.6g}, "
+        f"phi_dense={dense_volume_fraction:.6g}, "
+        "below_close_packed_ceiling="
+        f"{dense_volume_fraction < SURFACE_CLOSE_PACKED_VOLUME_FRACTION}, "
         f"x_dilute={x_dilute:.6g}, x_dense={x_dense:.6g}",
         output,
         population_output,

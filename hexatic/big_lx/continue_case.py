@@ -47,8 +47,15 @@ def _prepare_outputs(paths: CasePaths) -> None:
         )
 
 
-def continue_case(output_dir: Path, input_gsd: Path) -> None:
+def continue_case(
+    output_dir: Path,
+    input_gsd: Path,
+    *,
+    gpu_id: int | None = None,
+) -> None:
     """Continue the fixed big-Lx case and analyze the resulting trajectory."""
+    if gpu_id is not None and gpu_id < 0:
+        raise ValueError("gpu_id must be non-negative")
     output_dir = output_dir.resolve()
     input_gsd = input_gsd.resolve()
     if not input_gsd.is_file():
@@ -104,10 +111,11 @@ def continue_case(output_dir: Path, input_gsd: Path) -> None:
         tau_r=TAU_R,
         trajectory_gsd=str(paths.trajectory_gsd),
         device="gpu",
+        gpu_id=gpu_id,
     )
     _write_json_atomic(paths.metadata_json, metadata)
 
-    device = hoomd.device.GPU()
+    device = hoomd.device.GPU(gpu_id=gpu_id)
     sim = hoomd.Simulation(device=device, seed=case.seed)
     sim.create_state_from_gsd(filename=str(input_gsd), frame=-1)
 
@@ -172,7 +180,8 @@ def continue_case(output_dir: Path, input_gsd: Path) -> None:
     print(
         f"[big_lx.continue] case={case.case_id} input_step={input_last_step} "
         f"extra_steps={EXTRA_STEPS} write_period={TRAJECTORY_WRITE_PERIOD} "
-        f"tau_r={TAU_R} diffusion_period={ROTATIONAL_DIFFUSION_PERIOD}",
+        f"tau_r={TAU_R} diffusion_period={ROTATIONAL_DIFFUSION_PERIOD} "
+        f"gpu={gpu_id}",
         flush=True,
     )
     sim.run(EXTRA_STEPS)
@@ -205,6 +214,7 @@ def continue_case(output_dir: Path, input_gsd: Path) -> None:
             "frame_count": frame_count,
             "final_step": final_step,
             "seed": case.seed,
+            "gpu_id": gpu_id,
             "trajectory_gsd": str(paths.trajectory_gsd),
         },
     )
@@ -225,12 +235,13 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("output_dir", type=Path)
     parser.add_argument("input_gsd", type=Path)
+    parser.add_argument("--gpu-id", type=int, default=None)
     return parser.parse_args()
 
 
 def main() -> None:
     args = _parse_args()
-    continue_case(args.output_dir, args.input_gsd)
+    continue_case(args.output_dir, args.input_gsd, gpu_id=args.gpu_id)
 
 
 if __name__ == "__main__":
