@@ -24,7 +24,8 @@ fractions are calculated only from global conservation,
 
 ``x_dense = (rho_total - rho_dilute) / (rho_dense - rho_dilute)``.
 
-Cases run in parallel CPU processes.  The sole output is one SVG per case.
+Cases run in parallel CPU processes.  Each case produces the original density
+distribution SVG and a separate shell/non-shell population diagnostic.
 """
 
 from __future__ import annotations
@@ -55,6 +56,7 @@ from .surface_area import _load_circumference, _load_static_lx
 @dataclass(frozen=True)
 class ParticleDensitySamples:
     values: NDArray[np.float64]
+    shell_mask: NDArray[np.bool_]
     particle_count_sum: float
     n_frames: int
     lx: float
@@ -183,6 +185,7 @@ def _load_particle_density_samples(
         raise ValueError(f"No accessible particle-center volume for {replicate.case_id}")
 
     densities: list[NDArray[np.float64]] = []
+    shell_masks: list[NDArray[np.bool_]] = []
     particle_count_sum = 0.0
     n_frames = 0
     global_frame = 0
@@ -298,12 +301,14 @@ def _load_particle_density_samples(
                         shell_sigma / options.shell_thickness
                     )
                 densities.append(frame_density)
+                shell_masks.append(shell_mask)
                 particle_count_sum += float(points.shape[0])
                 n_frames += 1
     if not densities:
         raise ValueError(f"No frames selected for {replicate.case_id}")
     return ParticleDensitySamples(
         values=np.concatenate(densities),
+        shell_mask=np.concatenate(shell_masks),
         particle_count_sum=particle_count_sum,
         n_frames=n_frames,
         lx=lx,
@@ -322,6 +327,7 @@ def _combine_samples(
             raise ValueError(f"Replicates for {case_id} have different geometry")
     return ParticleDensitySamples(
         values=np.concatenate([sample.values for sample in samples]),
+        shell_mask=np.concatenate([sample.shell_mask for sample in samples]),
         particle_count_sum=sum(sample.particle_count_sum for sample in samples),
         n_frames=sum(sample.n_frames for sample in samples),
         lx=reference.lx,
@@ -462,7 +468,57 @@ def _plot_distribution(
     plt.close(figure)
 
 
-def _analyze_case(task: tuple[str, list[Replicate], CaseOptions]) -> tuple[str, Path]:
+def _plot_population_distribution(
+    case_label: str,
+    values: NDArray[np.float64],
+    shell_mask: NDArray[np.bool_],
+    volume_weights: NDArray[np.float64],
+    edges: NDArray[np.float64],
+    particle_diameter: float,
+    output: Path,
+) -> None:
+    """Overlay shell and non-shell contributions to the shared density PDF."""
+    sns = _style()
+    figure, axis = plt.subplots(figsize=(7.2, 4.8), constrained_layout=True)
+    particle_volume = np.pi * particle_diameter**3 / 6.0
+    fraction_edges = particle_volume * edges
+    normalization = volume_weights.sum() * np.diff(fraction_edges)
+    colors = sns.color_palette("colorblind", n_colors=2)
+    for mask, label, color in (
+        (shell_mask, "Shell particles", colors[0]),
+        (~shell_mask, "Non-shell particles", colors[1]),
+    ):
+        weighted_counts, _ = np.histogram(
+            values[mask], bins=edges, weights=volume_weights[mask]
+        )
+        axis.stairs(
+            weighted_counts / normalization,
+            fraction_edges,
+            linewidth=1.8,
+            label=label,
+            color=color,
+        )
+    axis.set(
+        title=f"{case_label}: shell vs non-shell populations",
+        xlabel=r"Particle-centered local volume fraction $\phi=\rho\pi D^3/6$",
+        ylabel=r"Contribution to volume-weighted $P_V(\phi)$",
+        xlim=(fraction_edges[0], fraction_edges[-1]),
+    )
+    axis.grid(axis="y", color="0.9", linewidth=0.7)
+    axis.legend(frameon=False)
+    sns.despine(ax=axis)
+    figure.savefig(
+        output,
+        format="svg",
+        bbox_inches="tight",
+        metadata={"Creator": "hexatic.big_lx_analysis.density_distribution"},
+    )
+    plt.close(figure)
+
+
+def _analyze_case(
+    task: tuple[str, list[Replicate], CaseOptions]
+) -> tuple[str, Path, Path]:
     case_id, case_replicates, options = task
     samples = _combine_samples(
         case_id,
@@ -492,8 +548,15 @@ def _analyze_case(task: tuple[str, list[Replicate], CaseOptions]) -> tuple[str, 
             f"rho_dense={modes.rho_dense}"
         )
     output = options.output_dir / f"{_safe_case_name(case_id)}_density_distribution.svg"
-    if output.exists() and not options.overwrite:
-        raise FileExistsError(f"{output} exists; pass --overwrite to replace")
+    population_output = (
+        options.output_dir
+        / f"{_safe_case_name(case_id)}_density_distribution_by_population.svg"
+    )
+    existing = [path for path in (output, population_output) if path.exists()]
+    if existing and not options.overwrite:
+        raise FileExistsError(
+            f"{existing[0]} exists; pass --overwrite to replace"
+        )
     _plot_distribution(
         case_replicates[0].label,
         edges,
@@ -506,12 +569,22 @@ def _analyze_case(task: tuple[str, list[Replicate], CaseOptions]) -> tuple[str, 
         x_dilute,
         output,
     )
+    _plot_population_distribution(
+        case_replicates[0].label,
+        samples.values,
+        samples.shell_mask,
+        volume_weights,
+        edges,
+        options.particle_diameter,
+        population_output,
+    )
     return (
         f"{case_id}: rho_total={rho_total:.6g}, "
         f"rho_dilute={modes.rho_dilute:.6g}, "
         f"rho_dense={modes.rho_dense:.6g}, "
         f"x_dilute={x_dilute:.6g}, x_dense={x_dense:.6g}",
         output,
+        population_output,
     )
 
 
@@ -620,14 +693,18 @@ def main() -> None:
     print(f"analyzing {len(tasks)} cases with {worker_count} workers", flush=True)
     if worker_count == 1:
         results = map(_analyze_case, tasks)
-        for report, output in results:
+        for report, output, population_output in results:
             print(report, flush=True)
             print(f"wrote {output}", flush=True)
+            print(f"wrote {population_output}", flush=True)
     else:
         with ProcessPoolExecutor(max_workers=worker_count) as executor:
-            for report, output in executor.map(_analyze_case, tasks):
+            for report, output, population_output in executor.map(
+                _analyze_case, tasks
+            ):
                 print(report, flush=True)
                 print(f"wrote {output}", flush=True)
+                print(f"wrote {population_output}", flush=True)
 
 
 if __name__ == "__main__":
