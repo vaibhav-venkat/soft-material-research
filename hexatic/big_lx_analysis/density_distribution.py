@@ -253,22 +253,24 @@ def _load_particle_density_samples(
                     )
                 maximum_radius = float(radial.max())
                 maximum_shell_radius = float(radial[shell_mask].max())
-                radial_tolerance = (
-                    cylinder.SIMULATION.wall_clearance_epsilon
+                numerical_tolerance = 1.0e-5 * max(1.0, radius)
+                wall_radius = (
+                    radius
+                    + cylinder.ANALYSIS.wall_cutoff
+                    + cylinder.SIMULATION.wall_clearance_epsilon
                     * options.particle_diameter
-                    + 1.0e-5 * max(1.0, radius)
                 )
-                if maximum_radius > maximum_shell_radius + radial_tolerance:
+                if maximum_radius > maximum_shell_radius + numerical_tolerance:
                     raise AssertionError(
                         "Outermost particle is not in hexatic_shell_mask for "
                         f"{replicate.case_id}: max r={maximum_radius:.8g}, "
                         f"max shell r={maximum_shell_radius:.8g}"
                     )
-                if maximum_radius > radius + radial_tolerance:
+                if maximum_radius > wall_radius + numerical_tolerance:
                     raise AssertionError(
-                        f"Particle radius exceeds nominal cylinder radius for "
+                        f"Particle radius exceeds HOOMD wall radius for "
                         f"{replicate.case_id}: max r={maximum_radius:.8g}, "
-                        f"R={radius:.8g}"
+                        f"wall R={wall_radius:.8g}"
                     )
                 x = np.mod(frame[:, 0] + 0.5 * lx, lx) - 0.5 * lx
                 theta = frame[:, 1]
