@@ -1,4 +1,4 @@
-"""Continue the C=60.5D, Lx=8x case from the last frame of a GSD."""
+"""Continue the half-N C=60.5D, Lx=8x case from the last frame of a GSD."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from hexatic.constants import cylinder
 from .analyze_case import analyze_case
 from .cases import CasePaths, get_case
 
-CASE_ID = "circ_60_5D_lx_8x"
+CASE_ID = "circ_60_5D_lx_8x_half_n"
 EXTRA_STEPS = 1_000_000_000
 TRAJECTORY_WRITE_PERIOD = 1_000_000
 EXPECTED_FRAME_COUNT = EXTRA_STEPS // TRAJECTORY_WRITE_PERIOD
@@ -229,8 +229,9 @@ def continue_case(
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Continue the C=60.5D, Lx=8x case for 10^9 steps from the last "
-            "frame of an input GSD, then run the standard big-Lx analysis."
+            "Continue the half-N C=60.5D, Lx=8x case for 10^9 steps from "
+            "the last frame of an input GSD, then run the standard big-Lx "
+            "analysis."
         )
     )
     parser.add_argument("output_dir", type=Path)
