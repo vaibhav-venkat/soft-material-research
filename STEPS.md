@@ -1,298 +1,423 @@
-1. Structural grains and boundaries
-For each frame, build a geometry-aware neighbor graph and calculate
+
+
+---
+
+# A. Discrete characterization of one band
+
+## Band area
+
 \[
-\psi_{6,i}=\frac{1}{N_i}\sum_j e^{6i\theta_{ij}}, \qquad
-\alpha_i=\frac{\arg\psi_{6,i}}{6}.
-\]|ψ₆| measures local hexagonal order, while α is the local crystal orientation. This is the standard diagnostic for 2D crystalline/hexatic order. Example definition and application.
-Classify a neighbor connection as belonging to the same grain when:
-Both particles are sufficiently ordered, initially |ψ₆| > 0.7.
-Their lattice misorientation is small, initially below approximately 5°.
-They are actual Delaunay or first-shell neighbors.
-Connected components of those compatible bonds are the grains.
-Mark grain-boundary particles when they have one or more of:
-Coordination other than six
-A nonzero disclination charge
-A nearby 5–7 dislocation pair
-Low |ψ₆|
-Strong orientation disagreement with neighbors
-Using orientation-compatible edges is important: proximity alone can accidentally merge adjacent but differently oriented grains. This distinction is also emphasized in modern crystalline-cluster construction work. Journal of Chemical Physics discussion.
-2. Coherently moving clusters
-Choose a physical lag Δt and compute each particle’s minimum-image displacement:
-\[
-\mathbf u_i(t,\Delta t)
+A_k(t)
 =
-\mathbf r_i(t+\Delta t)-\mathbf r_i(t).
-\]Then subtract global drift:
+\Delta x\,\Delta s
+\sum_{i,j}B^{(k)}_{ij}(t).
+\]
+
+## Mean width
+
+For a completely wrapped band,
+
 \[
-\mathbf u_i'=\mathbf u_i-\langle\mathbf u\rangle.
-\]Connect neighboring particles when their residual displacements are aligned, for example:
+\bar w_k(t)
+=
+\frac{A_k(t)}{L_s}
+=
+\frac{1}{N_s}\sum_jw_{kj}(t).
+\]
+
+The area-based expression is generally more robust to individual noisy columns.
+
+## Mean axial position
+
+Use the average centerline:
+
 \[
-\frac{\mathbf u_i'\cdot\mathbf u_j'}
-{|\mathbf u_i'||\mathbf u_j'|}>0.8.
-\]Optionally require similar displacement magnitudes so a nearly stationary particle is not joined to a fast-moving domain. Connected components of this graph are the moving clusters.
-Do not use DBSCAN on positions alone: because these systems are dense, almost the entire crystal would become one spatial cluster.
-Choose Δt by scanning several lags and looking for the peak in dynamic heterogeneity—using the non-Gaussian parameter, overlap susceptibility χ₄, or mean coherent-cluster size. Four-point correlations and χ₄ are established ways to quantify the spatial extent of slow or mobile domains. Physical Review E discussion.
+X_k(t)
+=
+\frac{1}{N_s}
+\sum_{j=0}^{N_s-1}h_{kj}(t).
+\]
 
-# Package Recommendations
+This weights every circumferential position equally. The ordinary area centroid,
 
-These recommendations come from a scan of all tracked Python, Zig, and Rust
-source outside `hoomd-blue`. They prioritize logic that is valuable to this
-project, has a credible reusable API, and is not already covered by a widely
-used package in the same form. Names below are working names only.
+\[
+X_k^{\rm area}
+=
+\frac{\sum_{ij}x_i B^{(k)}_{ij}}
+{\sum_{ij}B^{(k)}_{ij}},
+\]
 
-## 1. `curvdeposit`: conservative curvilinear particle-to-grid deposition
+may also be recorded, but it is biased toward locally wider portions of the band.
 
-This is the strongest package opportunity. The repository already contains a
-GPU implementation that deposits 53 packed scalar, vector, tensor, and current
-features in `crates/rho_fitting_gpu/src/coarse_grain_burn/`, NumPy Gaussian
-deposition in `hexatic/active_matter_cylinder/math_utils.py`, and another
-cell-list-backed implementation in
-`packages/simulation_analysis/src/properties/polar.zig`.
+If \(x\) is periodic, unwrap \(X_k(t)\) in time before calculating displacements.
 
-The package should provide:
+## Width nonuniformity
 
-- Particle-to-grid deposition on Cartesian, cylindrical, and other orthogonal
-  curvilinear grids.
-- User-defined particle features rather than hardcoded `rho`, `P`, `Q`, and
-  current tensors.
-- Scalar, vector, symmetric-tensor, and rank-three moment deposition.
-- Periodic axes, clipped axes, metric factors, and grid-cell volume forms.
-- Discrete boundary renormalization so deposited mass and moments are
-  conserved near finite radial boundaries.
-- CPU, CUDA, and Metal backends with consistent results.
-- Chunked execution, conservation diagnostics, masks, and nonfinite handling.
-- A Rust core with NumPy-facing Python bindings.
+\[
+\sigma_{w,k}^2(t)
+=
+\frac{1}{N_s}
+\sum_j
+\left[w_{kj}(t)-\bar w_k(t)\right]^2.
+\]
 
-A possible public API is:
+This distinguishes a nearly uniform band from one that opens and closes locally.
 
-```python
-domain = CylindricalGrid(x=x, theta=theta, r=r, periods={"x": lx, "theta": 2 * pi})
-plan = DepositPlan(
-    kernel=Gaussian(sigma),
-    moments={
-        "rho": "1",
-        "P": "direction",
-        "Q": "symmetric_traceless(direction * direction)",
-        "J": "velocity",
-    },
-)
-fields = plan.deposit(positions, particle_data, domain)
-```
+## Centerline roughness
 
-Existing particle-mesh packages primarily target Cartesian cosmology,
-electrostatics, or generic scatter operations. The differentiator here is the
-combination of curvilinear volume elements, physical component frames,
-boundary renormalization, arbitrary mechanical moments, and multiple GPU
-backends. Potential users include active-matter, SPH, plasma, colloid,
-granular, microscopy, and molecular-simulation researchers.
+\[
+\sigma_{h,k}^2(t)
+=
+\frac{1}{N_s}
+\sum_j
+\left[h_{kj}(t)-X_k(t)\right]^2.
+\]
 
-## 2. `conserveid`: conservation-form sparse system identification
+## Discrete interface length
 
-This package would extract the divergence-primary fitting architecture from
-`hexatic/rho_fitting/fit.py`, the regression-row assembly from
-`crates/rho_fitting_numerics/src/fitting/`, the constrained solver from
-`crates/rho_fitting_numerics/src/regression/`, and the rollout machinery from
-`crates/rho_fitting_numerics/src/pde/`.
+Use periodic indexing \(j+1\equiv0\) at \(j=N_s-1\):
 
-Its central workflow should be:
+\[
+P_k=
+\sum_j
+\sqrt{
+\Delta s^2+
+\left(x^-_{k,j+1}-x^-_{kj}\right)^2
+}
++
+\sum_j
+\sqrt{
+\Delta s^2+
+\left(x^+_{k,j+1}-x^+_{kj}\right)^2
+}.
+\]
 
-```text
-measured flux + candidate fluxes
-              -> differential operator
-measured divergence + candidate divergences
-              -> joint constrained sparse fit
-              -> holdout and forward-rollout validation
-```
+For a straight uniform band,
 
-The package should support:
+\[
+P_k\approx2L_s.
+\]
 
-- Joint fitting of flux values and their PDE-relevant divergences.
-- Divergence-primary evaluation rather than treating a high flux R² as
-  sufficient evidence for a usable closure.
-- Scalar, vector, and tensor conservation laws.
-- Sign, equality, symmetry, and shared-coefficient constraints.
-- Independent finite filtering and weighting of field and divergence rows.
-- Candidate normalization, regularization paths, coefficient importance, and
-  feature-correlation diagnostics.
-- Pluggable geometry and differential operators.
-- Mandatory forward-rollout validation of learned closures.
+Obliqueness, bending, and roughness increase \(P_k\).
 
-PySINDy and PDE-discovery projects are established adjacent tools, but they do
-not provide this complete combination of flux-level interpretability,
-divergence-primary scoring, physical tensor closures, constrained regression,
-and rollout validation. Active-matter-specific candidate names should remain
-outside the reusable numerical core.
+---
 
-## 3. `tensortrail`: transactional safetensors time-series datasets
+## Circumferential shape modes
 
-The immediate motivation is the nearly duplicated atomic safetensors writers,
-frame-shard writers, manifests, overwrite/resume handling, and completion
-markers in `hexatic/big_lx/storage.py` and
-`hexatic/confinement_comparison/storage.py`. The Zig analyses also implement
-their own mapped shard collections and cross-shard schema validation.
+Apply a discrete Fourier transform to the centerline:
 
-The package should provide:
+\[
+\widetilde h_{k,n}
+=
+\frac{1}{N_s}
+\sum_{j=0}^{N_s-1}
+\left[h_{kj}-X_k\right]
+e^{-2\pi i n j/N_s}.
+\]
 
-- Immutable safetensors shards organized along a declared frame or record
-  axis.
-- Atomic shard and manifest publication.
-- Crash recovery, resume support, and explicit dataset completion.
-- Frame-range iteration and tensor projection without loading unrelated data.
-- Cross-shard dtype, shape, axis, and metadata validation.
-- Monotonic step/index validation and gap or overlap detection.
-- Dataset fingerprints and versioned schema identifiers.
-- Memory-mapped Rust and Zig readers plus a NumPy-facing Python API.
-- Ragged tensors represented by values and offsets.
+Define the mode amplitude
 
-This should not become another safetensors parser. The official safetensors
-implementations already fill that role. It should be the immutable,
-transactional dataset layer above individual safetensors files. It is also not
-intended to replace Zarr: the niche is independently transportable, safely
-published shards with straightforward zero-copy readers. This is particularly
-useful for HPC outputs, simulation trajectories, scientific acquisition, and
-large ML activation datasets.
+\[
+H_{k,n}=2\left|\widetilde h_{k,n}\right|.
+\]
 
-## 4. `quotientcell`: exact commensurate Bravais supercells
+Similarly, width modes are
 
-This package would generalize the exact twisted triangular-lattice construction
-in `hexatic/unwrapped_analysis/cases.py` and
-`simulate_case_perfect_hexatic.py`. The reusable mathematical object is a
-finite quotient of a Bravais lattice under integer periodic identifications,
-not a HOOMD-specific cylinder initializer.
+\[
+\widetilde w_{k,n}
+=
+\frac{1}{N_s}
+\sum_j
+\left[w_{kj}-\bar w_k\right]
+e^{-2\pi i n j/N_s}.
+\]
 
-The package should provide:
+Interpretation:
 
-- Integer orthogonal complements under an arbitrary two-dimensional Gram
-  metric.
-- Primitive and multiplied axial or transverse supercell vectors.
-- Exact enumeration of one fundamental parallelogram.
-- Quotient, screw, and twisted periodic identifications.
-- Verification that requested nearest-neighbor bonds survive every periodic
-  identification.
-- Embeddings onto planes, cylinders, tori, and helices.
-- Export to NumPy, ASE, GSD, or plain coordinate and connectivity arrays.
+- \(H_{k,1}\): largest-scale displacement or oblique/trapezoidal shape;
+- \(H_{k,2}\): two-lobed deformation;
+- higher \(n\): smaller-scale interface roughness;
+- \(|\widetilde w_{k,n}|\): local opening and closing around the circumference.
 
-A possible API is:
+The allowed circumferential wave numbers are
 
-```python
-cell = QuotientCell(
-    gram=[[1.0, 0.5], [0.5, 1.0]],
-    identification=(m, n),
-    orthogonality="metric",
-)
-points, fractions = cell.enumerate()
-cell.verify_neighbors(neighbor_vectors)
-```
+\[
+q_n=\frac{2\pi n}{L_s}=\frac{n}{R_s}.
+\]
 
-Crystallographic and nanotube packages cover many specific constructions, but
-a small general package for metric-aware integer quotient cells and
-graph-preserving periodic embeddings does not appear to be widespread.
-Potential applications include nanotubes, wrapped crystals, moiré
-approximants, screw-periodic simulations, topological lattice models, and mesh
-generation.
+This gives a direct connection between the observed band modes and cylinder radius.
 
-## 5. `periodic-lift`: topology-aware components in periodic domains
+---
 
-The foundation already exists in `packages/cluster_analysis/src/clusters.zig`:
-a reusable cell list, union-find components, adjacency construction, and
-periodic component unwrapping. A public package should focus on the topology of
-periodic components rather than provide only cluster labels.
+# B. Tracking bands through time
 
-The package should provide:
+Let frames occur at
 
-- Connected components built from periodic minimum-image edges.
-- Consistent lifted or unwrapped coordinates for each component.
-- Winding vectors and detection of components that cross or wrap the domain.
-- Percolation classification.
-- Periodic centers, covariance, gyration, and bounding geometry.
-- Rectangular boxes and general lattice-period matrices.
-- Optional node and edge compatibility predicates, including lattice
-  misorientation or orientational order.
-- Compact ragged outputs using values and offsets.
+\[
+t_m=m\Delta t.
+\]
 
-Freud already provides strong periodic clustering, so plain clustering would
-not be a sufficiently differentiated package. The distinguishing features
-should be lifted coordinates, winding topology, percolation, and custom edge
-compatibility. The package could serve percolation studies, porous media,
-polymer networks, crystalline domains, and periodic image segmentation.
+For band \(k\) at frame \(m\) and band \(\ell\) at frame \(m+1\), calculate their Jaccard overlap:
 
-## 6. `curvispec`: array-first cylindrical spectral calculus
+\[
+O_{k\ell}
+=
+\frac{
+\sum_{ij}
+B^{(k)}_{ij}(t_m)
+B^{(\ell)}_{ij}(t_{m+1})
+}{
+\sum_{ij}
+\max\left[
+B^{(k)}_{ij}(t_m),
+B^{(\ell)}_{ij}(t_{m+1})
+\right]
+}.
+\]
 
-This package would extract `CylindricalSpectralOperators` and radial transfer
-logic from `crates/rho_fitting_numerics/src/spectral/` and
-`hexatic/rho_fitting/spectral.py`.
+A possible matching cost is
 
-The package should provide:
+\[
+C_{k\ell}
+=
+1-O_{k\ell}
++
+\alpha
+\frac{|X_k-X_\ell|}{L_x}
++
+\beta
+\frac{|A_k-A_\ell|}{A_k+A_\ell}.
+\]
 
-- Fourier-by-Chebyshev grids for periodic axial/angular directions and a
-  bounded radial direction.
-- Derivative, gradient, divergence, curl, and Laplacian operators.
-- Correct metric and connection terms for physical-frame vectors and tensors.
-- Arbitrary leading batch dimensions and trailing component dimensions.
-- Stable barycentric transfers between uniform and spectral radial grids.
-- Two-thirds and configurable spectral filtering.
-- NumPy and Rust APIs with explicit axis and component conventions.
+Minimize the total cost using one-to-one assignment.
 
-Dedalus and Shenfun are established spectral PDE frameworks, so this should
-not attempt to become another complete solver. Its niche should be a
-lightweight operator library for users who already have arrays and need
-correct cylindrical vector and tensor calculus. Spherical and other orthogonal
-coordinate charts could be added later.
+Classify exceptions separately:
 
-## 7. `polemap`: damped-mode discovery from correlations
+- one old band overlaps two new bands: splitting;
+- two old bands overlap one new band: merging;
+- unmatched new band: birth;
+- unmatched old band: disappearance.
 
-This lower-priority package would extract the complex Laplace analysis,
-preferred-coordinate searches, and robust damped-cosine fitting from
-`packages/laplacian_analysis/`.
+For stable bands, require persistence for at least several frames before including them in the stochastic analysis.
 
-It should provide:
+---
 
-- Fast complex Laplace evaluation over decay-rate and frequency grids.
-- Uniform and irregular-time numerical integration.
-- Stable recurrence-based grid evaluation.
-- Preferred pole, peak, or ridge detection.
-- Bootstrap uncertainty across trajectories or experimental replicates.
-- Boundary-hit and identifiability diagnostics.
-- Robust bounded multistart fitting of damped modes.
+# C. Discrete dynamics
 
-The useful product framing is decaying-mode discovery rather than another
-generic Laplace-transform implementation. Applications include spectroscopy,
-relaxation processes, autocorrelation analysis, active matter, and dynamical
-systems.
+For any measured band quantity
 
-## Packages not worth creating
+\[
+z_k\in
+\left\{
+X_k,A_k,\bar w_k,P_k,H_{k,1},H_{k,2},\ldots
+\right\},
+\]
 
-Do not create the following as new general public packages:
+define the increment
 
-- A generic molecular-dynamics trajectory analyzer; MDAnalysis and freud
-  already occupy this space.
-- A generic parameter-sweep or GPU subprocess scheduler; consolidate the
-  duplicated repository code internally or use signac-flow and established
-  workflow systems.
-- Another safetensors parser; build `tensortrail` as a dataset layer instead.
-- Another generic GSD or HDF5 wrapper; the local Zig wrappers are useful
-  infrastructure but have a weak standalone differentiator.
-- Another general dense-linear-algebra library.
-- Another complete spectral PDE framework; keep `curvispec` focused on
-  array-oriented physical-frame operators.
-- A plotting or report-helper package; the repetition is real but does not
-  define a compelling public product.
+\[
+\Delta z_k(t_m)
+=
+z_k(t_{m+1})-z_k(t_m).
+\]
 
-## Recommended implementation order
+Group observations into bins according to the current value \(z_k(t_m)\). The discrete conditional drift is
 
-1. Extract `curvdeposit`; it has the highest project impact and the broadest
-   external audience.
-2. Build `tensortrail`; it directly removes repeated logic and supports the
-   active safetensors-only `big_lx_analysis` workflow.
-3. Extract `conserveid` after defining clean geometry, candidate-library, and
-   differential-operator interfaces.
-4. Publish `quotientcell` as the smaller and mathematically distinctive
-   package.
-5. Develop `periodic-lift` and `curvispec` after separating their public APIs
-   from repository-specific schemas.
-6. Consider `polemap` once replicate uncertainty and a clear standalone
-   scientific workflow are included.
+\[
+F_z(z_b)
+=
+\frac{1}{\Delta t}
+\left\langle
+\Delta z_k
+\mid z_k(t_m)\in z_b
+\right\rangle.
+\]
 
-The best single public package is `curvdeposit`. The fastest useful extraction
-is `tensortrail`. The most scientifically distinctive package is
-`conserveid`, with `quotientcell` close behind.
+The conditional diffusion is
+
+\[
+D_z(z_b)
+=
+\frac{1}{2\Delta t}
+\left\langle
+\left[
+\Delta z_k-F_z(z_b)\Delta t
+\right]^2
+\mid z_k(t_m)\in z_b
+\right\rangle.
+\]
+
+Repeat this using several sampling intervals \(\Delta t\). The inferred drift and diffusion should remain reasonably stable over a range of \(\Delta t\).
+
+The bubble study similarly obtained reduced stochastic dynamics by measuring conditional first and second moments of area changes. It found perimeter-dependent area fluctuations for compact bubbles; for your wrapped bands, that dependence should be tested rather than assumed. 
+
+---
+
+## Position dynamics
+
+Test whether
+
+\[
+F_X(X)\approx v
+\]
+
+for systematic translation,
+
+\[
+F_X(X)\approx0
+\]
+
+for free diffusion, or
+
+\[
+F_X(X)\approx-\kappa_X(X-X_0)
+\]
+
+for fluctuations around a preferred position.
+
+Also calculate
+
+\[
+\operatorname{MSD}_X(\tau)
+=
+\left\langle
+[X_k(t+\tau)-X_k(t)]^2
+\right\rangle.
+\]
+
+---
+
+## Width or area dynamics
+
+For a stable band, test
+
+\[
+F_A(A)\approx-\kappa_A(A-A_0)
+\]
+
+or
+
+\[
+F_{\bar w}(\bar w)
+\approx
+-\kappa_w(\bar w-w_0).
+\]
+
+Then examine whether the area diffusion is:
+
+\[
+D_A\approx\text{constant},
+\]
+
+or instead
+
+\[
+D_A(P)\propto P.
+\]
+
+Because a wrapped band has approximately two interfaces of length \(L_s\),
+
+\[
+P\approx2L_s
+\]
+
+over much of its evolution. Therefore, perimeter-dependent fluctuations may appear approximately as constant additive area noise.
+
+The noise here is an **effective stochastic description** of unresolved active-particle dynamics, not thermal noise.
+
+---
+
+## Shape-mode dynamics
+
+For each complex centerline mode, estimate
+
+\[
+\frac{
+\widetilde h_{k,n}(t_{m+1})
+-
+\widetilde h_{k,n}(t_m)
+}{\Delta t}.
+\]
+
+Test the linear relaxation model
+
+\[
+\frac{\Delta\widetilde h_{k,n}}{\Delta t}
+=
+-\lambda_n\widetilde h_{k,n}
++\eta_{k,n}.
+\]
+
+Then fit the relaxation rates against
+
+\[
+\lambda_n
+=
+\nu_hq_n^2+K_hq_n^4,
+\qquad
+q_n=\frac{n}{R_s}.
+\]
+
+This is the most direct test of how the cylindrical geometry controls band deformation and relaxation.
+
+---
+
+## Coupling between multiple bands
+
+Sort bands by their axial positions and define their separations:
+
+\[
+\ell_k(t)=X_{k+1}(t)-X_k(t).
+\]
+
+To examine one band closing while another opens, calculate
+
+\[
+C_{k\ell}^{A}(\tau)
+=
+\left\langle
+\delta A_k(t)
+\delta A_\ell(t+\tau)
+\right\rangle,
+\]
+
+where
+
+\[
+\delta A_k=A_k-\langle A_k\rangle.
+\]
+
+A negative correlation indicates that one band tends to gain dilute area while another loses it. Also track
+
+\[
+A_{\rm total}(t)=\sum_kA_k(t).
+\]
+
+Nearly constant \(A_{\rm total}\) together with anticorrelated \(A_k\) would support redistribution of dilute material between bands rather than independent creation and destruction.
+
+---
+
+## Minimum output table
+
+For every detected band and every frame, store
+
+\[
+\boxed{
+\{
+t,\,
+\text{band ID},\,
+X,\,
+A,\,
+\bar w,\,
+\sigma_w,\,
+\sigma_h,\,
+P,\,
+H_1,\,
+H_2,\ldots
+\}
+}
+\]
+
+plus event labels for birth, disappearance, merging, and splitting.
+
+That table is sufficient for the initial geometric, positional, and stochastic characterization without modeling individual particles inside the bands.
