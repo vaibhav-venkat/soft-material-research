@@ -115,7 +115,7 @@ def analyze(
     write_band_movie(
         movie_frames,
         grid=grid,
-        output=output_dir / "dilute_bands.gif",
+        output=output_dir / "dilute_bands.mp4",
         fps=fps,
         dpi=dpi,
     )
@@ -134,7 +134,7 @@ def analyze(
         "frames": frame_records,
         "outputs": {
             "density_distribution": "density_distribution.png",
-            "band_movie": "dilute_bands.gif",
+            "band_movie": "dilute_bands.mp4",
         },
     }
     result_path = output_dir / "analysis.json"

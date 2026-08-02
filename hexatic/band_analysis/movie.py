@@ -7,7 +7,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.animation import PillowWriter
+from matplotlib.animation import FFMpegWriter
 from matplotlib.colors import BoundaryNorm, ListedColormap
 import numpy as np
 
@@ -33,7 +33,11 @@ def write_band_movie(
     norm = BoundaryNorm(np.arange(-0.5, len(colors) + 0.5), cmap.N)
     figure, axis = plt.subplots(figsize=(10.0, 5.0))
     output.parent.mkdir(parents=True, exist_ok=True)
-    writer = PillowWriter(fps=fps)
+    writer = FFMpegWriter(
+        fps=fps,
+        codec="libx264",
+        extra_args=["-pix_fmt", "yuv420p"],
+    )
     try:
         with writer.saving(figure, str(output), dpi=dpi):
             for frame_index, step, labels in frames:
