@@ -31,6 +31,7 @@ def analyze(
     start: int = 0,
     stop: int | None = None,
     stride: int = 1,
+    frame_delta: int = 10,
     fps: int = 12,
     dpi: int = 120,
 ) -> Path:
@@ -46,6 +47,9 @@ def analyze(
     selected_frames = frame_numbers(metadata, start, stop, stride)
     if not selected_frames:
         raise ValueError("the selected frame range is empty")
+    if frame_delta < 1:
+        raise ValueError("frame_delta must be positive")
+    movie_frame_numbers = set(selected_frames[::frame_delta])
 
     density_for = make_density_kernel(
         grid,
@@ -94,7 +98,8 @@ def analyze(
                 "bands": interface_records,
             }
         )
-        movie_frames.append((frame_index, step, labels))
+        if frame_index in movie_frame_numbers:
+            movie_frames.append((frame_index, step, labels))
         print(
             f"[band_analysis] frame={frame_index} shell={shell_count} bands={len(components)}",
             flush=True,
@@ -123,6 +128,7 @@ def analyze(
         "shell_epsilon_d": shell_epsilon_d,
         "smoothing_sigma_bins": smoothing_sigma,
         "minimum_area_cells": minimum_area,
+        "movie_frame_delta": frame_delta,
         "distribution_peaks_phi": features.peaks.tolist(),
         "distribution_valleys_phi": features.valleys.tolist(),
         "frames": frame_records,
@@ -151,6 +157,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--start", type=int, default=0)
     parser.add_argument("--stop", type=int)
     parser.add_argument("--stride", type=int, default=1)
+    parser.add_argument(
+        "--frame-delta",
+        type=int,
+        default=10,
+        help="Render every Nth analyzed frame; analysis still uses all selected frames.",
+    )
     parser.add_argument("--fps", type=int, default=12)
     parser.add_argument("--dpi", type=int, default=120)
     return parser.parse_args()
