@@ -41,6 +41,8 @@ class TrainingTransitions:
     scaling: Scaling
     blocks: tuple[TransitionBlock, ...]
     rate_blocks: tuple[PersistentRateBlock, ...]
+    conservative_slopes: tuple[jax.Array, ...] = ()
+    sigma_b_squared: jax.Array | float = 0.0
 
 
 class StateSpaceSequence(NamedTuple):
@@ -103,11 +105,16 @@ def prepare_training_transitions(
     """Freeze training scaling before constructing normalized transitions."""
     scaling = Scaling.from_training(segments)
     normalized = [scaling.normalize_segment(segment) for segment in segments]
+    slopes = conservative_segment_slopes(normalized)
     sequences = build_state_space_sequences(normalized, lag)
     return TrainingTransitions(
         scaling=scaling,
         blocks=build_transition_blocks(normalized, lag),
         rate_blocks=build_persistent_rate_blocks(sequences),
+        conservative_slopes=tuple(jnp.asarray(slope) for slope in slopes),
+        sigma_b_squared=jnp.asarray(
+            estimate_slope_variance(slopes), dtype=jnp.float64
+        ),
     )
 
 
@@ -120,6 +127,31 @@ def _helmert_basis(n_bands: int) -> np.ndarray:
     return basis
 
 
+def conservative_segment_slope(segment: StableSegment) -> np.ndarray:
+    """Estimate the constant, zero-sum conservative slope of one segment."""
+    duration = float(segment.tau[-1] - segment.tau[0])
+    if duration <= 0.0:
+        raise ValueError("segment duration must be positive")
+    delta = np.asarray(segment.areas[-1] - segment.areas[0], dtype=np.float64)
+    return (delta - delta.mean()) / duration
+
+
+def conservative_segment_slopes(
+    segments: list[StableSegment],
+) -> tuple[np.ndarray, ...]:
+    """Return endpoint slopes projected by P_n for every segment."""
+    return tuple(conservative_segment_slope(segment) for segment in segments)
+
+
+def estimate_slope_variance(slopes: tuple[np.ndarray, ...]) -> float:
+    """Estimate sigma_b^2 under b_s ~ N(0, sigma_b^2 P_n)."""
+    degrees_of_freedom = sum(slope.size - 1 for slope in slopes)
+    if degrees_of_freedom == 0:
+        return 0.0
+    sum_squares = sum(float(np.dot(slope, slope)) for slope in slopes)
+    return sum_squares / degrees_of_freedom
+
+
 def build_state_space_sequences(
     segments: list[StableSegment], lag: int
 ) -> tuple[StateSpaceSequence, ...]:
@@ -128,6 +160,8 @@ def build_state_space_sequences(
         if segment.n_bands == 1:
             continue
         basis = _helmert_basis(segment.n_bands)
+        slope = conservative_segment_slope(segment)
+        slope_coordinates = slope @ basis
         for phase in range(lag):
             areas = segment.areas[phase::lag]
             tau = segment.tau[phase::lag]
@@ -135,7 +169,11 @@ def build_state_space_sequences(
                 continue
             sequences.append(
                 StateSpaceSequence(
-                    conservative=jnp.asarray(areas @ basis, dtype=jnp.float64),
+                    conservative=jnp.asarray(
+                        areas @ basis
+                        - (tau - segment.tau[0])[:, None] * slope_coordinates,
+                        dtype=jnp.float64,
+                    ),
                     tau=jnp.asarray(tau, dtype=jnp.float64),
                     weight=jnp.asarray(1.0 / lag, dtype=jnp.float64),
                 )
@@ -249,7 +287,10 @@ def raw_parameters(parameters: np.ndarray) -> np.ndarray:
 
 
 def transition(
-    area: jax.Array, dt: jax.Array, parameters: jax.Array
+    area: jax.Array,
+    dt: jax.Array,
+    parameters: jax.Array,
+    sigma_b_squared: jax.Array | float = 0.0,
 ) -> tuple[jax.Array, jax.Array]:
     """Unconditional one-step moments used by posterior predictive checks."""
     tau_p, kappa_total, diffusion_u, diffusion_total, area_star = parameters
@@ -261,8 +302,8 @@ def transition(
     allocation = jnp.ones(n_bands, dtype=jnp.float64) / n_bands
     drift = -kappa_total * (total - area_star) * allocation
     mean = area + drift * dt
-    persistent_variance = diffusion_u * dt**2 / tau_p
-    covariance = persistent_variance * projection + 2.0 * dt * (
+    conservative_variance = (sigma_b_squared + diffusion_u / tau_p) * dt**2
+    covariance = conservative_variance * projection + 2.0 * dt * (
         diffusion_total * jnp.outer(allocation, allocation)
     )
     return mean, covariance + JITTER * jnp.eye(n_bands, dtype=jnp.float64)
@@ -273,8 +314,9 @@ def transition_log_density(
     area: jax.Array,
     dt: jax.Array,
     parameters: jax.Array,
+    sigma_b_squared: jax.Array | float = 0.0,
 ) -> jax.Array:
-    mean, covariance = transition(area, dt, parameters)
+    mean, covariance = transition(area, dt, parameters, sigma_b_squared)
     cholesky = jnp.linalg.cholesky(covariance)
     whitened = jax.scipy.linalg.solve_triangular(
         cholesky, following - mean, lower=True

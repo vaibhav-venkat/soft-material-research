@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 import hashlib
 import json
@@ -26,7 +25,7 @@ from .storage import fingerprint
 from .validation import ValidationResult, validate_posterior
 
 
-LAG_CACHE_SCHEMA = "hexatic.band_lag.v7"
+LAG_CACHE_SCHEMA = "hexatic.band_lag.v8"
 logger = logging.getLogger(__name__)
 
 
@@ -39,7 +38,6 @@ class AnalysisConfig:
     mcmc: MCMCConfig = MCMCConfig()
     predictive_draws: int = 200
     paths_per_segment: int = 200
-    parallel: int = 1
 
     def __post_init__(self) -> None:
         if any(lag < 1 for lag in self.lags):
@@ -50,8 +48,6 @@ class AnalysisConfig:
             raise ValueError("configured lags must be unique")
         if self.optimizer_starts < 2:
             raise ValueError("optimizer starts must be at least two")
-        if self.parallel < 1:
-            raise ValueError("parallel lag workers must be at least one")
 
 
 @dataclass(frozen=True)
@@ -170,6 +166,19 @@ def _compute_lag(
     )
     arrays = _optimization_arrays(optimization)
     arrays["normalized_posterior"] = bayesian.normalized_samples
+    slope_offsets = np.cumsum(
+        [0, *(len(slope) for slope in prepared.conservative_slopes)],
+        dtype=np.int64,
+    )
+    arrays["conservative_segment_slope"] = (
+        np.concatenate([np.asarray(slope) for slope in prepared.conservative_slopes])
+        * prepared.scaling.area
+        / prepared.scaling.time
+        if prepared.conservative_slopes
+        else np.empty(0)
+    )
+    arrays["conservative_segment_slope_offset"] = slope_offsets
+    sigma_b_squared = float(np.asarray(prepared.sigma_b_squared))
     validation_metrics: dict[str, Any] = {}
     if bayesian.diagnostics.accepted:
         logger.info("lag %d: validating training posterior", lag)
@@ -178,6 +187,7 @@ def _compute_lag(
             lag,
             prepared.scaling,
             bayesian.normalized_samples,
+            sigma_b_squared=sigma_b_squared,
             predictive_draws=config.predictive_draws,
             paths_per_segment=config.paths_per_segment,
             seed=config.optimizer_seed + lag,
@@ -198,6 +208,7 @@ def _compute_lag(
                 lag,
                 prepared.scaling,
                 bayesian.normalized_samples,
+                sigma_b_squared=sigma_b_squared,
                 predictive_draws=config.predictive_draws,
                 paths_per_segment=config.paths_per_segment,
                 seed=config.optimizer_seed + lag + index + 1,
@@ -211,6 +222,7 @@ def _compute_lag(
                 lag,
                 prepared.scaling,
                 bayesian.normalized_samples,
+                sigma_b_squared=sigma_b_squared,
                 predictive_draws=config.predictive_draws,
                 paths_per_segment=config.paths_per_segment,
                 seed=config.optimizer_seed + lag + len(holdouts) + 1,
@@ -235,6 +247,17 @@ def _compute_lag(
         "diagnostics": bayesian.diagnostics.to_dict(),
         "posterior": _posterior_intervals(bayesian.idata),
         "scaling": asdict(prepared.scaling),
+        "conservative_slope": {
+            "sigma_b_squared": sigma_b_squared
+            * (prepared.scaling.area / prepared.scaling.time) ** 2,
+            "normalized_sigma_b_squared": sigma_b_squared,
+            "informative_segments": sum(
+                len(slope) > 1 for slope in prepared.conservative_slopes
+            ),
+            "degrees_of_freedom": int(
+                sum(len(slope) - 1 for slope in prepared.conservative_slopes)
+            ),
+        },
         "optimization": {
             "best_objective": optimization.best.objective,
             "best_gradient_norm": optimization.best.gradient_norm,
@@ -275,6 +298,7 @@ def _load_cache(
             "hexatic.band_lag.v4",
             "hexatic.band_lag.v5",
             "hexatic.band_lag.v6",
+            "hexatic.band_lag.v7",
         }:
             logger.info("lag %d: rebuilding stale inference cache", lag)
             return None
@@ -322,11 +346,10 @@ def run_analysis(
         tuple[dict[str, Any], dict[str, np.ndarray], az.InferenceData],
     ] = _compute_lag,
 ) -> list[LagOutcome]:
-    """Process and atomically cache independent lags with bounded concurrency."""
+    """Process and atomically cache lags sequentially in configured order."""
     if not training:
         raise ValueError("at least one training segment is required")
     settings = asdict(config)
-    settings.pop("parallel")
     data_fingerprint = fingerprint(
         {
             "training": segments_fingerprint(training),
@@ -337,8 +360,7 @@ def run_analysis(
             "settings": settings,
         }
     )
-    outcomes_by_lag: dict[int, LagOutcome] = {}
-    pending: list[tuple[int, str]] = []
+    outcomes: list[LagOutcome] = []
     for lag in config.lags:
         logger.info("lag %d: checking cache", lag)
         lag_fingerprint = fingerprint({"analysis": data_fingerprint, "lag": lag})
@@ -346,11 +368,8 @@ def run_analysis(
             cached = _load_cache(output_dir, lag, lag_fingerprint)
             if cached is not None:
                 logger.info("lag %d: reusing completed cache", lag)
-                outcomes_by_lag[lag] = cached
+                outcomes.append(cached)
                 continue
-        pending.append((lag, lag_fingerprint))
-
-    def compute_and_save(lag: int, lag_fingerprint: str) -> LagOutcome:
         logger.info("lag %d: starting inference", lag)
         metadata, arrays, idata = compute_lag(lag, training, holdouts, config)
         arrays_path, posterior_path, metrics_path = _paths(output_dir, lag)
@@ -378,35 +397,20 @@ def run_analysis(
             "fingerprint": lag_fingerprint,
         }
         _save_json(metrics_path, completed)
-        outcome = LagOutcome(
-            lag, bool(metadata["accepted"]), False, completed, arrays, idata
+        outcomes.append(
+            LagOutcome(
+                lag,
+                bool(metadata["accepted"]),
+                False,
+                completed,
+                arrays,
+                idata,
+            )
         )
         logger.info(
             "lag %d: complete (accepted=%s)", lag, bool(metadata["accepted"])
         )
-        return outcome
-
-    worker_count = min(config.parallel, len(pending))
-    if worker_count > 1:
-        logger.info(
-            "running %d uncached lags with %d parallel GPU workers",
-            len(pending),
-            worker_count,
-        )
-        with ThreadPoolExecutor(
-            max_workers=worker_count, thread_name_prefix="band-lag"
-        ) as executor:
-            futures = {
-                executor.submit(compute_and_save, lag, lag_fingerprint): lag
-                for lag, lag_fingerprint in pending
-            }
-            for future in as_completed(futures):
-                lag = futures[future]
-                outcomes_by_lag[lag] = future.result()
-    else:
-        for lag, lag_fingerprint in pending:
-            outcomes_by_lag[lag] = compute_and_save(lag, lag_fingerprint)
-    return [outcomes_by_lag[lag] for lag in config.lags]
+    return outcomes
 
 
 def stable_lags(outcomes: list[LagOutcome], base_lag: int = 2) -> tuple[int, ...]:

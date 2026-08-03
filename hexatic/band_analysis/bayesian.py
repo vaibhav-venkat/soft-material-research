@@ -66,7 +66,7 @@ class BayesianResult:
 def coupled_area_model(
     data: TrainingTransitions, empirical: np.ndarray
 ) -> None:
-    """Empirical-centered priors and the observed-rate AR(1) likelihood."""
+    """Empirical-centered priors and the slope-detrended AR(1) likelihood."""
     parameters = jnp.stack(
         [
             numpyro.sample(

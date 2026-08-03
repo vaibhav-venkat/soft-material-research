@@ -63,18 +63,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--retry-target-accept", type=float, default=0.95)
     parser.add_argument("--predictive-draws", type=int, default=200)
     parser.add_argument("--paths-per-segment", type=int, default=200)
-    parser.add_argument(
-        "--parallel",
-        type=int,
-        nargs="?",
-        const=5,
-        default=1,
-        metavar="N",
-        help=(
-            "run fitting lags concurrently on the current GPU; optionally limit "
-            "concurrency to N (default with no N: all five lags)"
-        ),
-    )
     parser.add_argument("--seed", type=int, default=0)
 
     extraction = parser.add_argument_group("stable-band extraction")
@@ -175,7 +163,6 @@ def _configs(args: argparse.Namespace) -> tuple[ExtractionConfig, AnalysisConfig
         mcmc=mcmc,
         predictive_draws=args.predictive_draws,
         paths_per_segment=args.paths_per_segment,
-        parallel=args.parallel,
     )
     return extraction, analysis
 

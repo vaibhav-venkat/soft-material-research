@@ -52,6 +52,7 @@ def _one_step(
     lag: int,
     scaling: Scaling,
     posterior: np.ndarray,
+    sigma_b_squared: float,
     draws: int,
     seed: int,
 ) -> tuple[dict[str, np.ndarray], dict[str, float]]:
@@ -86,7 +87,12 @@ def _one_step(
     for block in blocks:
         current = np.asarray(block.current)
         following = np.asarray(block.following)
-        transition_rows = jax.vmap(transition, in_axes=(0, 0, None))
+        transition_rows = jax.vmap(
+            lambda area, dt, parameters: transition(
+                area, dt, parameters, sigma_b_squared
+            ),
+            in_axes=(0, 0, None),
+        )
         means, covariances = jax.vmap(
             lambda parameters: transition_rows(block.current, block.dt, parameters)
         )(jnp.asarray(selected))
@@ -95,7 +101,10 @@ def _one_step(
         noise = generator.standard_normal(means_np.shape)
         predictions = means_np + np.einsum("...ij,...j->...i", cholesky, noise)
         density_rows = jax.vmap(
-            transition_log_density, in_axes=(0, 0, 0, None)
+            lambda following, area, dt, parameters: transition_log_density(
+                following, area, dt, parameters, sigma_b_squared
+            ),
+            in_axes=(0, 0, 0, None),
         )
         draw_logp = np.asarray(
             jax.vmap(
@@ -349,6 +358,7 @@ def _paths(
     lag: int,
     scaling: Scaling,
     posterior: np.ndarray,
+    sigma_b_squared: float,
     paths_per_segment: int,
     seed: int,
 ) -> tuple[dict[str, np.ndarray], dict[str, float | int]]:
@@ -466,6 +476,10 @@ def _paths(
         rates *= np.sqrt(
             segment_parameters[:, 2] / segment_parameters[:, 0]
         )[:, None]
+        slopes = generator.standard_normal(
+            (paths_per_segment, segment.n_bands)
+        ) @ projection
+        slopes *= np.sqrt(sigma_b_squared)
         stops = np.full(paths_per_segment, len(sampled_areas), dtype=np.int64)
         active = np.ones(paths_per_segment, dtype=bool)
         for frame in range(len(sampled_areas) - 1):
@@ -494,6 +508,7 @@ def _paths(
             )
             following = (
                 conservative
+                + slopes[indices] * step
                 + rates[indices] * step
                 + following_totals[:, None] / segment.n_bands
             )
@@ -728,17 +743,32 @@ def validate_posterior(
     scaling: Scaling,
     normalized_samples: np.ndarray,
     *,
+    sigma_b_squared: float = 0.0,
     predictive_draws: int = 200,
     paths_per_segment: int = 200,
     seed: int = 0,
 ) -> ValidationResult:
     """Validate with frozen scaling and posterior; this function never refits."""
+    if sigma_b_squared < 0.0 or not np.isfinite(sigma_b_squared):
+        raise ValueError("sigma_b_squared must be finite and nonnegative")
     posterior = _posterior_matrix(normalized_samples)
     one_step_arrays, one_step_metrics = _one_step(
-        segments, lag, scaling, posterior, predictive_draws, seed
+        segments,
+        lag,
+        scaling,
+        posterior,
+        sigma_b_squared,
+        predictive_draws,
+        seed,
     )
     path_arrays, path_metrics = _paths(
-        segments, lag, scaling, posterior, paths_per_segment, seed + 2
+        segments,
+        lag,
+        scaling,
+        posterior,
+        sigma_b_squared,
+        paths_per_segment,
+        seed + 2,
     )
     return ValidationResult(
         arrays={**one_step_arrays, **path_arrays},

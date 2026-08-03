@@ -68,6 +68,9 @@ def consolidated_metrics(
                 "diagnostics": outcome.metadata["diagnostics"],
                 "optimization": outcome.metadata["optimization"],
                 "scaling": outcome.metadata["scaling"],
+                "conservative_slope": outcome.metadata.get(
+                    "conservative_slope", {}
+                ),
                 "data": outcome.metadata.get("data", {}),
                 "validation": outcome.metadata.get("validation", {}),
             }
@@ -185,8 +188,10 @@ def write_report(
         "",
         stability,
         "",
-        "Conservative transfer is modeled as an observed-rate AR(1) process. "
-        "NUTS samples only the five global parameters.",
+        "Conservative transfer is decomposed into one constant, zero-sum "
+        "Gaussian slope per stable segment plus the existing AR(1) rate process. "
+        "Segment slopes and their variance are estimated directly from endpoints; "
+        "NUTS samples only the five global AR(1)/total-mode parameters.",
         "",
         "Rejected lags retain posterior and sampler diagnostics, but are excluded "
         "from predictive, holdout, and lag-stability conclusions.",
@@ -223,6 +228,10 @@ def write_report(
                 f"{'accepted' if outcome.accepted else 'rejected'}",
                 "",
                 *(_parameter_table(outcome)),
+                "",
+                "Direct conservative-slope estimate: "
+                f"sigma_b^2 = {_number(outcome.metadata.get('conservative_slope', {}).get('sigma_b_squared'))} "
+                "(area^2/time^2).",
                 "",
                 f"BFGS objective: {_number(optimization['best_objective'])}; "
                 f"gradient norm: {_number(optimization['best_gradient_norm'])}; "
