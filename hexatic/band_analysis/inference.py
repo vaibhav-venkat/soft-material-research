@@ -83,14 +83,20 @@ def empirical_parameters(data: TrainingTransitions) -> np.ndarray:
     rates: list[np.ndarray] = []
     rate_pairs: list[tuple[np.ndarray, np.ndarray]] = []
     rate_intervals: list[np.ndarray] = []
-    for sequence in data.sequences:
-        conservative = np.asarray(sequence.conservative)
-        intervals = np.diff(np.asarray(sequence.tau))
-        sequence_rates = np.diff(conservative, axis=0) / intervals[:, None]
-        rates.append(sequence_rates.reshape(-1))
-        if len(sequence_rates) > 1:
-            rate_pairs.append((sequence_rates[:-1].reshape(-1), sequence_rates[1:].reshape(-1)))
-            rate_intervals.append(intervals[1:].repeat(sequence_rates.shape[1]))
+    for block in data.rate_blocks:
+        rates.extend(
+            (np.asarray(block.initial).reshape(-1), np.asarray(block.following).reshape(-1))
+        )
+        if len(block.current):
+            rate_pairs.append(
+                (
+                    np.asarray(block.current).reshape(-1),
+                    np.asarray(block.following).reshape(-1),
+                )
+            )
+            rate_intervals.append(
+                np.repeat(np.asarray(block.dt), block.current.shape[1])
+            )
 
     if rates:
         all_rates = np.concatenate(rates)
@@ -189,7 +195,7 @@ def optimize_parameters(
     data: TrainingTransitions, *, seed: int = 0, starts: int = 8
 ) -> OptimizationResult:
     """Run reproducible empirical, perturbed, and generic BFGS fits."""
-    if not data.blocks or not data.sequences:
+    if not data.blocks or not data.rate_blocks:
         raise ValueError("at least one training transition is required")
     empirical = empirical_parameters(data)
     logger.info(

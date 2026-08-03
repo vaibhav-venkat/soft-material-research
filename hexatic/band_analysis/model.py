@@ -8,13 +8,6 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 import numpy as np
-from dynamax.linear_gaussian_ssm import (
-    ParamsLGSSM,
-    ParamsLGSSMDynamics,
-    ParamsLGSSMEmissions,
-    ParamsLGSSMInitial,
-    lgssm_filter,
-)
 
 from .segments import StableSegment
 
@@ -33,12 +26,21 @@ class TransitionBlock(NamedTuple):
     weight: jax.Array
 
 
+class PersistentRateBlock(NamedTuple):
+    initial: jax.Array
+    initial_weight: jax.Array
+    current: jax.Array
+    following: jax.Array
+    dt: jax.Array
+    weight: jax.Array
+
+
 @jax.tree_util.register_dataclass
 @dataclass(frozen=True)
 class TrainingTransitions:
     scaling: Scaling
     blocks: tuple[TransitionBlock, ...]
-    sequences: tuple[StateSpaceSequence, ...]
+    rate_blocks: tuple[PersistentRateBlock, ...]
 
 
 class StateSpaceSequence(NamedTuple):
@@ -101,10 +103,11 @@ def prepare_training_transitions(
     """Freeze training scaling before constructing normalized transitions."""
     scaling = Scaling.from_training(segments)
     normalized = [scaling.normalize_segment(segment) for segment in segments]
+    sequences = build_state_space_sequences(normalized, lag)
     return TrainingTransitions(
         scaling=scaling,
         blocks=build_transition_blocks(normalized, lag),
-        sequences=build_state_space_sequences(normalized, lag),
+        rate_blocks=build_persistent_rate_blocks(sequences),
     )
 
 
@@ -138,6 +141,75 @@ def build_state_space_sequences(
                 )
             )
     return tuple(sequences)
+
+
+def build_persistent_rate_blocks(
+    sequences: tuple[StateSpaceSequence, ...],
+) -> tuple[PersistentRateBlock, ...]:
+    """Batch observed conservative rates by dimension for a compact JAX graph."""
+    grouped: dict[int, dict[str, list[np.ndarray | float]]] = {}
+    for sequence in sequences:
+        conservative = np.asarray(sequence.conservative)
+        dt = np.diff(np.asarray(sequence.tau))
+        rates = np.diff(conservative, axis=0) / dt[:, None]
+        dimension = rates.shape[1]
+        values = grouped.setdefault(
+            dimension,
+            {
+                "initial": [],
+                "initial_weight": [],
+                "current": [],
+                "following": [],
+                "dt": [],
+                "weight": [],
+            },
+        )
+        sequence_weight = float(sequence.weight)
+        values["initial"].append(rates[0])
+        values["initial_weight"].append(sequence_weight)
+        if len(rates) > 1:
+            values["current"].append(rates[:-1])
+            values["following"].append(rates[1:])
+            values["dt"].append(dt[:-1])
+            values["weight"].append(
+                np.full(len(rates) - 1, sequence_weight, dtype=np.float64)
+            )
+
+    blocks = []
+    for dimension, values in sorted(grouped.items()):
+        current_parts = values["current"]
+        following_parts = values["following"]
+        dt_parts = values["dt"]
+        weight_parts = values["weight"]
+        blocks.append(
+            PersistentRateBlock(
+                initial=jnp.asarray(values["initial"], dtype=jnp.float64),
+                initial_weight=jnp.asarray(
+                    values["initial_weight"], dtype=jnp.float64
+                ),
+                current=jnp.asarray(
+                    np.concatenate(current_parts)
+                    if current_parts
+                    else np.empty((0, dimension)),
+                    dtype=jnp.float64,
+                ),
+                following=jnp.asarray(
+                    np.concatenate(following_parts)
+                    if following_parts
+                    else np.empty((0, dimension)),
+                    dtype=jnp.float64,
+                ),
+                dt=jnp.asarray(
+                    np.concatenate(dt_parts) if dt_parts else np.empty(0),
+                    dtype=jnp.float64,
+                ),
+                weight=jnp.asarray(
+                    np.concatenate(weight_parts) if weight_parts else np.empty(0),
+                    dtype=jnp.float64,
+                ),
+            )
+        )
+    return tuple(blocks)
 
 
 def build_transition_blocks(
@@ -229,93 +301,39 @@ def parameter_negative_log_likelihood(
             jnp.log(2.0 * jnp.pi * variance) + (following - mean) ** 2 / variance
         )
         objective -= jnp.sum(block.weight * log_density)
-    for sequence in data.sequences:
-        objective -= sequence.weight * _persistent_log_likelihood(
-            sequence, tau_p, diffusion_u
+    stationary_variance = diffusion_u / tau_p + JITTER
+    for block in data.rate_blocks:
+        dimension = block.initial.shape[1]
+        initial_log_density = -0.5 * (
+            dimension * jnp.log(2.0 * jnp.pi * stationary_variance)
+            + jnp.sum(block.initial**2, axis=1) / stationary_variance
         )
+        objective -= jnp.sum(block.initial_weight * initial_log_density)
+        decay = jnp.exp(-block.dt / tau_p)
+        variance = diffusion_u / tau_p * (1.0 - decay**2) + JITTER
+        residual = block.following - decay[:, None] * block.current
+        log_density = -0.5 * (
+            dimension * jnp.log(2.0 * jnp.pi * variance)
+            + jnp.sum(residual**2, axis=1) / variance
+        )
+        objective -= jnp.sum(block.weight * log_density)
     return objective
-
-
-def _persistent_log_likelihood(
-    sequence: StateSpaceSequence, tau_p: jax.Array, diffusion_u: jax.Array
-) -> jax.Array:
-    params = _persistent_lgssm(sequence, tau_p, diffusion_u)
-    return lgssm_filter(params, sequence.conservative).marginal_loglik
-
-
-def _persistent_lgssm(
-    sequence: StateSpaceSequence, tau_p: jax.Array, diffusion_u: jax.Array
-) -> ParamsLGSSM:
-    observations = sequence.conservative
-    dimension = observations.shape[1]
-    identity = jnp.eye(dimension, dtype=jnp.float64)
-    zeros = jnp.zeros_like(identity)
-    dt = jnp.diff(sequence.tau)
-    dt_full = jnp.concatenate((dt, dt[-1:]))
-    decay = jnp.exp(-dt_full / tau_p)
-    weights = jax.vmap(
-        lambda step, persistence: jnp.block(
-            [[identity, step * identity], [zeros, persistence * identity]]
-        )
-    )(dt_full, decay)
-    variance_u = diffusion_u / tau_p
-    noise_u = variance_u * (1.0 - decay**2)
-    covariances = jax.vmap(
-        lambda variance: jnp.block(
-            [[JITTER * identity, zeros], [zeros, variance * identity]]
-        )
-    )(noise_u)
-    emission = jnp.concatenate((identity, zeros), axis=1)
-    return ParamsLGSSM(
-        initial=ParamsLGSSMInitial(
-            mean=jnp.concatenate((observations[0], jnp.zeros(dimension))),
-            cov=jnp.block(
-                [[JITTER * identity, zeros], [zeros, variance_u * identity]]
-            ),
-        ),
-        dynamics=ParamsLGSSMDynamics(
-            weights=weights,
-            bias=jnp.zeros(2 * dimension),
-            input_weights=jnp.zeros((2 * dimension, 0)),
-            cov=covariances,
-        ),
-        emissions=ParamsLGSSMEmissions(
-            weights=emission,
-            bias=jnp.zeros(dimension),
-            input_weights=jnp.zeros((dimension, 0)),
-            cov=JITTER * identity,
-        ),
-    )
 
 
 def persistent_innovations(
     sequence: StateSpaceSequence, tau_p: jax.Array, diffusion_u: jax.Array
 ) -> jax.Array:
-    """Return standardized conservative Kalman innovations after the first frame."""
-    params = _persistent_lgssm(sequence, tau_p, diffusion_u)
-    posterior = lgssm_filter(params, sequence.conservative)
-    filtered_means = posterior.filtered_means[:-1]
-    filtered_covariances = posterior.filtered_covariances[:-1]
-    weights = params.dynamics.weights[:-1]
-    process_covariances = params.dynamics.cov[:-1]
-    emission = params.emissions.weights
-    predicted_means = jax.vmap(jnp.matmul)(weights, filtered_means)
-    predicted_covariances = jax.vmap(
-        lambda weight, covariance, process: weight @ covariance @ weight.T + process
-    )(weights, filtered_covariances, process_covariances)
-    observation_means = jax.vmap(jnp.matmul)(
-        jnp.broadcast_to(emission, (len(predicted_means), *emission.shape)),
-        predicted_means,
+    """Return standardized innovations of the observed conservative rates."""
+    dt = jnp.diff(sequence.tau)
+    rates = jnp.diff(sequence.conservative, axis=0) / dt[:, None]
+    stationary_scale = jnp.sqrt(diffusion_u / tau_p + JITTER)
+    initial = rates[:1] / stationary_scale
+    decay = jnp.exp(-dt[:-1] / tau_p)
+    variance = diffusion_u / tau_p * (1.0 - decay**2) + JITTER
+    following = (rates[1:] - decay[:, None] * rates[:-1]) / jnp.sqrt(
+        variance[:, None]
     )
-    observation_covariances = jax.vmap(
-        lambda covariance: emission @ covariance @ emission.T + params.emissions.cov
-    )(predicted_covariances)
-    differences = sequence.conservative[1:] - observation_means
-    return jax.vmap(
-        lambda covariance, difference: jax.scipy.linalg.solve_triangular(
-            jnp.linalg.cholesky(covariance), difference, lower=True
-        )
-    )(observation_covariances, differences)
+    return jnp.concatenate((initial, following), axis=0)
 
 
 def negative_log_likelihood(raw: jax.Array, data: TrainingTransitions) -> jax.Array:

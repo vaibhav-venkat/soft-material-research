@@ -185,8 +185,8 @@ def write_report(
         "",
         stability,
         "",
-        "Conservative transfer is modeled by a latent persistent rate integrated "
-        "out with a Kalman filter; NUTS samples only the five global parameters.",
+        "Conservative transfer is modeled as an observed-rate AR(1) process. "
+        "NUTS samples only the five global parameters.",
         "",
         "Rejected lags retain posterior and sampler diagnostics, but are excluded "
         "from predictive, holdout, and lag-stability conclusions.",

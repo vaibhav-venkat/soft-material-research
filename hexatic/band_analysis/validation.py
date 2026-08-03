@@ -276,7 +276,7 @@ def _pooled_autocorrelation(series: list[np.ndarray]) -> np.ndarray:
 def _temporal_residual_acf(
     segments: list[StableSegment], lag: int, parameters: np.ndarray
 ) -> np.ndarray:
-    """Pool total-mode and conservative Kalman innovations without overlap."""
+    """Pool total-mode and conservative observed-rate innovations without overlap."""
     series: list[np.ndarray] = []
     tau_p, kappa_total, diffusion_u, diffusion_total, area_star = parameters
     for segment in segments:

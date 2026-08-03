@@ -123,7 +123,6 @@ jaxlib = { version = "*", build = "*cuda*" }
 jax = { version = "*", extras = ["cuda12"] }
 optimistix = ">=0.1.0,<0.2"
 numpyro = ">=0.21.0,<0.22"
-dynamax = ">=1.0.2,<2"
 
 [environments.big-lx-cuda12]
 features = ["big-lx-cuda12"]

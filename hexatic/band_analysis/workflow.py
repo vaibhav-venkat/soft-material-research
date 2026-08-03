@@ -26,7 +26,7 @@ from .storage import fingerprint
 from .validation import ValidationResult, validate_posterior
 
 
-LAG_CACHE_SCHEMA = "hexatic.band_lag.v6"
+LAG_CACHE_SCHEMA = "hexatic.band_lag.v7"
 logger = logging.getLogger(__name__)
 
 
@@ -274,6 +274,7 @@ def _load_cache(
             "hexatic.band_lag.v3",
             "hexatic.band_lag.v4",
             "hexatic.band_lag.v5",
+            "hexatic.band_lag.v6",
         }:
             logger.info("lag %d: rebuilding stale inference cache", lag)
             return None

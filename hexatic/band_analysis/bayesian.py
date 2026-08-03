@@ -66,7 +66,7 @@ class BayesianResult:
 def coupled_area_model(
     data: TrainingTransitions, empirical: np.ndarray
 ) -> None:
-    """Empirical-centered priors and the Kalman marginal likelihood."""
+    """Empirical-centered priors and the observed-rate AR(1) likelihood."""
     parameters = jnp.stack(
         [
             numpyro.sample(
@@ -189,7 +189,8 @@ def run_bayesian_inference(
 ) -> BayesianResult:
     """Run NUTS and perform exactly one prescribed retry after diagnostic failure."""
     logger.info(
-        "NUTS sampling global state-space parameters: %d chains, %d warmup, %d draws, "
+        "NUTS sampling global persistent-rate parameters: %d chains, %d warmup, "
+        "%d draws, "
         "target acceptance %.2f",
         config.chains,
         config.warmup,
