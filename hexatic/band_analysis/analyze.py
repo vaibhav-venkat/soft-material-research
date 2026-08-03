@@ -124,7 +124,7 @@ def analyze(
             existing = json.loads(result_path.read_text())
         existing.update(
             {
-                "schema": "hexatic.band_analysis.v12",
+                "schema": "hexatic.band_analysis.v13",
                 "input_dir": str(input_dir),
                 "configuration": configuration,
                 "outputs": {
@@ -243,6 +243,7 @@ def analyze(
             "batched density deposition; "
             "distribution histogram; net and area-heterogeneity reductions; "
             "conditional moments; "
+            "fixed-count event-free area-CV drift; "
             "raw and normalized neighbor-relative area drift; "
             "neighbor-relative area-increment drift; "
             "area transition matrices and Chapman-Kolmogorov discrepancy; "
@@ -267,7 +268,7 @@ def analyze(
         characterization_tensors, output_dir, progress=progress
     )
     result = {
-        "schema": "hexatic.band_analysis.v12",
+        "schema": "hexatic.band_analysis.v13",
         "input_dir": str(input_dir),
         "configuration": configuration,
         "compute_provenance": compute_provenance,
