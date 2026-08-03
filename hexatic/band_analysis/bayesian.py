@@ -102,7 +102,7 @@ def _run_once(
         num_samples=config.draws,
         num_chains=config.chains,
         chain_method="vectorized",
-        progress_bar=False,
+        progress_bar=True,
     )
     generator = np.random.default_rng(seed)
     offsets = generator.normal(
