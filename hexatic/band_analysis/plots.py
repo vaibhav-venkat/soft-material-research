@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Callable
 
 import matplotlib
 
@@ -134,14 +135,17 @@ def _plot_area_coupling(tensors: dict[str, np.ndarray], output_dir: Path) -> dic
 
 
 def plot_characterization(
-    tensors: dict[str, np.ndarray], output_dir: Path
+    tensors: dict[str, np.ndarray],
+    output_dir: Path,
+    *,
+    progress: Callable[[str], None] | None = None,
 ) -> dict[str, str]:
     output_dir.mkdir(parents=True, exist_ok=True)
     for filename in _LEGACY_NET_PLOTS:
         (output_dir / filename).unlink(missing_ok=True)
 
     outputs: dict[str, str] = {}
-    for prop in DYNAMIC_PROPERTIES:
+    for plot_index, prop in enumerate(DYNAMIC_PROPERTIES, start=1):
         filename = f"stochastic_{prop.slug}.png"
         _plot_conditional_property(
             tensors,
@@ -151,5 +155,12 @@ def plot_characterization(
             include_msd=prop.slug == "axial_position",
         )
         outputs[prop.slug] = filename
+        if progress is not None:
+            progress(
+                f"stage=plots stochastic={plot_index}/{len(DYNAMIC_PROPERTIES)} "
+                f"property={prop.slug}"
+            )
     outputs.update(_plot_area_coupling(tensors, output_dir))
+    if progress is not None:
+        progress("stage=plots coupling=2/2 complete")
     return outputs

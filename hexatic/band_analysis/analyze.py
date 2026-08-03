@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import time
 
 import jax
 import jax.numpy as jnp
@@ -45,6 +46,12 @@ def analyze(
     timestep: float = float(cylinder.SIMULATION.timestep),
     overwrite: bool = False,
 ) -> Path:
+    analysis_started = time.perf_counter()
+
+    def progress(message: str) -> None:
+        elapsed = time.perf_counter() - analysis_started
+        print(f"[band_analysis] {message} elapsed={elapsed:.1f}s", flush=True)
+
     metadata = load_metadata(input_dir)
     output_dir = output_dir or input_dir / "band_analysis_output"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -90,13 +97,17 @@ def analyze(
     characterization_path = output_dir / "band_characterization.safetensors"
     result_path = output_dir / "analysis.json"
     if characterization_path.exists() and not overwrite:
+        progress(f"stage=cache load path={characterization_path}")
         tensors, cached_configuration = load_characterization(characterization_path)
         if cached_configuration != configuration:
             raise ValueError(
                 "characterization cache parameters or input manifest changed; "
                 "rerun with --overwrite"
             )
-        characterization_plots = plot_characterization(tensors, output_dir)
+        progress("stage=plots start source=cache")
+        characterization_plots = plot_characterization(
+            tensors, output_dir, progress=progress
+        )
         existing: dict[str, object] = {}
         if result_path.exists():
             existing = json.loads(result_path.read_text())
@@ -113,8 +124,13 @@ def analyze(
             }
         )
         result_path.write_text(json.dumps(existing, indent=2) + "\n")
+        progress(f"stage=complete wrote={result_path}")
         return result_path
 
+    progress(
+        f"stage=frames start selected={len(selected_frames)} "
+        f"grid={grid.nx}x{grid.ns}"
+    )
     validate_gpu()
     density_for = make_density_kernel(
         grid,
@@ -173,13 +189,18 @@ def analyze(
             flush=True,
         )
 
+    progress(f"stage=frames complete count={len(tracked_frames)}")
+    progress("stage=distribution concatenate")
     area_fractions = np.concatenate(area_fraction_samples)
     phi_c = rho_c * particle_area
+    progress("stage=distribution plot_start")
     features = plot_distribution(
         area_fractions,
         threshold=phi_c,
         output=output_dir / "density_distribution.png",
     )
+    progress("stage=distribution complete")
+    progress("stage=storage build_padded_tensors_start")
     characterization_tensors = build_characterization_tensors(
         tracked_frames,
         ns=grid.ns,
@@ -188,7 +209,8 @@ def analyze(
         run_steps=metadata.run_steps,
         trajectory_write_period=metadata.trajectory_write_period,
     )
-    add_stochastic_statistics(characterization_tensors)
+    progress("stage=storage build_padded_tensors_complete")
+    add_stochastic_statistics(characterization_tensors, progress=progress)
     compute_provenance = {
         "jax_backend": jax.default_backend(),
         "jax_device": str(jax.devices()[0]),
@@ -202,14 +224,17 @@ def analyze(
             "neighbor topology; distribution peak detection; plotting"
         ),
     }
+    progress(f"stage=storage save_start path={characterization_path}")
     save_characterization(
         characterization_path,
         characterization_tensors,
         configuration=configuration,
         compute_provenance=compute_provenance,
     )
+    progress("stage=storage save_complete")
+    progress("stage=plots start source=fresh_analysis")
     characterization_plots = plot_characterization(
-        characterization_tensors, output_dir
+        characterization_tensors, output_dir, progress=progress
     )
     result = {
         "schema": "hexatic.band_analysis.v3",
@@ -232,7 +257,9 @@ def analyze(
             "stochastic_plots": characterization_plots,
         },
     }
+    progress(f"stage=json write_start path={result_path}")
     result_path.write_text(json.dumps(result, indent=2) + "\n")
+    progress(f"stage=complete wrote={result_path}")
     return result_path
 
 

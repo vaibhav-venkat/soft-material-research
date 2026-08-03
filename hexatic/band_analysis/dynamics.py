@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
 import jax
 import jax.numpy as jnp
@@ -13,6 +14,7 @@ MAX_FRAME_LAG = 10
 TARGET_BINS = 20
 MIN_BIN_SAMPLES = 50
 PREFERRED_BIN_SAMPLES = 100
+ProgressCallback = Callable[[str], None]
 
 
 @dataclass(frozen=True)
@@ -106,6 +108,7 @@ def add_conditional_dynamics(
     target_bins: int = TARGET_BINS,
     minimum_samples: int = MIN_BIN_SAMPLES,
     preferred_bin_samples: int = PREFERRED_BIN_SAMPLES,
+    progress: ProgressCallback | None = None,
 ) -> None:
     if (
         max_frame_lag < 1
@@ -121,7 +124,7 @@ def add_conditional_dynamics(
     lag_count = min(max_frame_lag, max(0, n_time - 1))
     tensors["dynamics_frame_lag"] = np.arange(1, lag_count + 1, dtype=np.int64)
 
-    for prop in DYNAMIC_PROPERTIES:
+    for property_index, prop in enumerate(DYNAMIC_PROPERTIES, start=1):
         values = _property_values(tensors, prop)
         conditioning = _conditioning_values(tensors, prop)
         edges = _quantile_edges(
@@ -198,9 +201,18 @@ def add_conditional_dynamics(
         tensors[f"{prefix}_diffusion"] = diffusion
         tensors[f"{prefix}_count"] = counts
         tensors[f"{prefix}_mean_physical_lag"] = mean_lag
+        if progress is not None:
+            progress(
+                "stage=stochastic conditional="
+                f"{property_index}/{len(DYNAMIC_PROPERTIES)} property={prop.slug}"
+            )
 
 
-def add_position_msd(tensors: dict[str, np.ndarray]) -> None:
+def add_position_msd(
+    tensors: dict[str, np.ndarray],
+    *,
+    progress: ProgressCallback | None = None,
+) -> None:
     values = jnp.asarray(tensors["unwrapped_axial_position"])
     stable = jnp.asarray(tensors["stable"])
     segments = jnp.asarray(tensors["segment_id"])
@@ -210,6 +222,7 @@ def add_position_msd(tensors: dict[str, np.ndarray]) -> None:
     physical_lags = np.full(lag_count, np.nan)
     msd = np.full(lag_count, np.nan)
     counts = np.zeros(lag_count, dtype=np.int64)
+    report_interval = max(1, lag_count // 10)
     for lag_index, lag in enumerate(frame_lags):
         delta_tau = times[lag:] - times[:-lag]
         valid = (
@@ -220,16 +233,24 @@ def add_position_msd(tensors: dict[str, np.ndarray]) -> None:
         valid &= delta_tau[:, np.newaxis] > 0.0
         count = int(jax.device_get(jnp.sum(valid)))
         counts[lag_index] = count
-        if not count:
-            continue
-        displacement = values[lag:] - values[:-lag]
-        pair_lags = jnp.broadcast_to(delta_tau[:, np.newaxis], valid.shape)
-        msd[lag_index] = float(
-            jax.device_get(jnp.sum(jnp.where(valid, displacement**2, 0.0)) / count)
-        )
-        physical_lags[lag_index] = float(
-            jax.device_get(jnp.sum(jnp.where(valid, pair_lags, 0.0)) / count)
-        )
+        if count:
+            displacement = values[lag:] - values[:-lag]
+            pair_lags = jnp.broadcast_to(delta_tau[:, np.newaxis], valid.shape)
+            msd[lag_index] = float(
+                jax.device_get(
+                    jnp.sum(jnp.where(valid, displacement**2, 0.0)) / count
+                )
+            )
+            physical_lags[lag_index] = float(
+                jax.device_get(
+                    jnp.sum(jnp.where(valid, pair_lags, 0.0)) / count
+                )
+            )
+        completed = lag_index + 1
+        if progress is not None and (
+            completed % report_interval == 0 or completed == lag_count
+        ):
+            progress(f"stage=stochastic msd_lags={completed}/{lag_count}")
     tensors["position_msd_frame_lag"] = frame_lags
     tensors["position_msd_physical_lag"] = physical_lags
     tensors["position_msd"] = msd
@@ -252,7 +273,11 @@ def _neighbor_pairs(positions: np.ndarray, selected: np.ndarray) -> set[tuple[in
     return pairs
 
 
-def add_area_coupling(tensors: dict[str, np.ndarray]) -> None:
+def add_area_coupling(
+    tensors: dict[str, np.ndarray],
+    *,
+    progress: ProgressCallback | None = None,
+) -> None:
     area = tensors["area"]
     area_device = jnp.asarray(area)
     positions = tensors["wrapped_axial_position"]
@@ -280,6 +305,7 @@ def add_area_coupling(tensors: dict[str, np.ndarray]) -> None:
     covariance = np.full(lag_count, np.nan)
     physical_lag = np.full(lag_count, np.nan)
     counts = np.zeros(lag_count, dtype=np.int64)
+    report_interval = max(1, lag_count // 10)
     for lag_index, lag in enumerate(range(1, lag_count + 1)):
         first_times: list[int] = []
         second_times: list[int] = []
@@ -315,6 +341,13 @@ def add_area_coupling(tensors: dict[str, np.ndarray]) -> None:
             )
             physical_lag[lag_index] = float(
                 jax.device_get(jnp.mean(jnp.asarray(pair_lags)))
+            )
+        completed = lag_index + 1
+        if progress is not None and (
+            completed % report_interval == 0 or completed == lag_count
+        ):
+            progress(
+                f"stage=stochastic area_coupling_lags={completed}/{lag_count}"
             )
 
     stable_device = jnp.asarray(stable)
@@ -365,7 +398,19 @@ def add_area_coupling(tensors: dict[str, np.ndarray]) -> None:
     tensors["stable_mean_absolute_area_rate"] = mean_absolute_rate
 
 
-def add_stochastic_statistics(tensors: dict[str, np.ndarray]) -> None:
-    add_conditional_dynamics(tensors)
-    add_position_msd(tensors)
-    add_area_coupling(tensors)
+def add_stochastic_statistics(
+    tensors: dict[str, np.ndarray],
+    *,
+    progress: ProgressCallback | None = None,
+) -> None:
+    if progress is not None:
+        progress("stage=stochastic conditional_start")
+    add_conditional_dynamics(tensors, progress=progress)
+    if progress is not None:
+        progress("stage=stochastic msd_start")
+    add_position_msd(tensors, progress=progress)
+    if progress is not None:
+        progress("stage=stochastic area_coupling_start")
+    add_area_coupling(tensors, progress=progress)
+    if progress is not None:
+        progress("stage=stochastic complete")
