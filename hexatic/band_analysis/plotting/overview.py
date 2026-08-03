@@ -218,7 +218,7 @@ def _plot_total_area_drift(
     axis.set(
         xlabel=r"$A_T=\sum_i A_i$",
         ylabel=r"$F_T(A_T)=\langle\Delta A_T\mid A_T\rangle/\Delta\tau$",
-        title="Fixed band count; event-free intervals only",
+        title="Stable bands only; fixed stable-band count; event-free intervals",
     )
     axis.grid(alpha=0.25)
     handles, _ = axis.get_legend_handles_labels()
@@ -228,5 +228,4 @@ def _plot_total_area_drift(
     figure.savefig(output_dir / filename, dpi=180)
     plt.close(figure)
     return {"total_area_drift_fixed_n": filename}
-
 

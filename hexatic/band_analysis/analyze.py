@@ -129,7 +129,7 @@ def analyze(
             existing = json.loads(result_path.read_text())
         existing.update(
             {
-                "schema": "hexatic.band_analysis.v16",
+                "schema": "hexatic.band_analysis.v17",
                 "input_dir": str(input_dir),
                 "configuration": configuration,
                 "stochastic_summary": {
@@ -263,7 +263,7 @@ def analyze(
             "distribution histogram; net and area-heterogeneity reductions; "
             "conditional moments; "
             "fixed-count event-free area-CV drift; "
-            "fixed-count event-free total-area drift; "
+            "fixed-stable-count event-free stable-total-area drift; "
             "area-diffusion perimeter binning; increment covariances; "
             "raw and normalized neighbor-relative area drift; "
             "neighbor-relative area-increment drift; "
@@ -290,7 +290,7 @@ def analyze(
         characterization_tensors, output_dir, progress=progress
     )
     result = {
-        "schema": "hexatic.band_analysis.v16",
+        "schema": "hexatic.band_analysis.v17",
         "input_dir": str(input_dir),
         "configuration": configuration,
         "compute_provenance": compute_provenance,

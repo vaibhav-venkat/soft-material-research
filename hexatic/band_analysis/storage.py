@@ -14,7 +14,7 @@ from .characterization import N_MODES, mode_wave_numbers
 from .tracking import TrackedFrame
 
 
-SCHEMA = "hexatic.band_characterization.v16"
+SCHEMA = "hexatic.band_characterization.v17"
 
 SCALAR_FIELDS = (
     "area",
@@ -42,12 +42,17 @@ def add_instantaneous_area_statistics(
 ) -> None:
     """Add per-frame area variance, squared CV, and largest-area fraction."""
     valid_device = jnp.asarray(tensors["valid"])
+    stable_device = jnp.asarray(tensors["stable"])
     area_device = jnp.asarray(tensors["area"])
     n_time, n_tracks = area_device.shape
     band_count_device = jnp.sum(valid_device, axis=1)
     safe_band_count = jnp.maximum(band_count_device, 1)
     total_area_device = jnp.sum(
         jnp.where(valid_device, area_device, 0.0), axis=1
+    )
+    stable_band_count_device = jnp.sum(stable_device, axis=1)
+    stable_total_area_device = jnp.sum(
+        jnp.where(stable_device, area_device, 0.0), axis=1
     )
     mean_area_device = total_area_device / safe_band_count
     area_variance_device = jnp.sum(
@@ -91,8 +96,11 @@ def add_instantaneous_area_statistics(
         )
     )
     tensors["instantaneous_band_count"] = np.asarray(band_count, dtype=np.int64)
+    tensors["instantaneous_stable_band_count"] = np.asarray(
+        jax.device_get(stable_band_count_device), dtype=np.int64
+    )
     tensors["instantaneous_total_area"] = np.asarray(
-        jax.device_get(total_area_device)
+        jax.device_get(stable_total_area_device)
     )
     tensors["instantaneous_mean_area"] = np.asarray(mean_area)
     tensors["instantaneous_area_variance"] = np.asarray(area_variance)
@@ -309,6 +317,7 @@ def load_characterization(
         "instantaneous_area_cv_squared",
         "instantaneous_maximum_area_fraction",
         "instantaneous_total_area",
+        "instantaneous_stable_band_count",
         "dynamics_area_cv_squared_fixed_n_drift",
         "dynamics_area_cv_squared_fixed_n_count",
         "dynamics_total_area_fixed_n_drift",

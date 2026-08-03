@@ -172,6 +172,7 @@ def _fixed_n_event_free_scalar_reductions(
 def _add_fixed_n_event_free_drift(
     tensors: dict[str, np.ndarray],
     values_key: str,
+    band_count_key: str,
     prefix: str,
     *,
     max_frame_lag: int = MAX_FRAME_LAG,
@@ -203,7 +204,7 @@ def _add_fixed_n_event_free_drift(
             reduced = jax.device_get(
                 _fixed_n_event_free_scalar_reductions(
                     jnp.asarray(values),
-                    jnp.asarray(tensors["instantaneous_band_count"]),
+                    jnp.asarray(tensors[band_count_key]),
                     jnp.asarray(tensors["frame_event_count"]),
                     jnp.asarray(tensors["physical_time"]),
                     jnp.asarray(edges),
@@ -246,6 +247,7 @@ def add_area_cv_squared_drift(
     _add_fixed_n_event_free_drift(
         tensors,
         "instantaneous_area_cv_squared",
+        "instantaneous_band_count",
         "dynamics_area_cv_squared_fixed_n",
         max_frame_lag=max_frame_lag,
         target_bins=target_bins,
@@ -266,10 +268,10 @@ def add_total_area_drift(
     _add_fixed_n_event_free_drift(
         tensors,
         "instantaneous_total_area",
+        "instantaneous_stable_band_count",
         "dynamics_total_area_fixed_n",
         max_frame_lag=max_frame_lag,
         target_bins=target_bins,
         minimum_samples=minimum_samples,
         preferred_bin_samples=preferred_bin_samples,
     )
-
