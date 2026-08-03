@@ -3,10 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import partial
 from typing import Callable
+import warnings
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+from scipy.optimize import OptimizeWarning, curve_fit
 
 from .characterization import N_MODES
 
@@ -16,6 +18,15 @@ TARGET_BINS = 20
 MIN_BIN_SAMPLES = 50
 PREFERRED_BIN_SAMPLES = 100
 ProgressCallback = Callable[[str], None]
+
+
+def area_diffusion_model(
+    area: np.ndarray | float,
+    d0: float,
+    gamma: float,
+    alpha: float,
+) -> np.ndarray:
+    return np.asarray(d0 + gamma * np.asarray(area) ** alpha)
 
 
 @dataclass(frozen=True)
@@ -256,6 +267,86 @@ def add_conditional_dynamics(
                 "stage=stochastic conditional="
                 f"{property_index}/{len(DYNAMIC_PROPERTIES)} property={prop.slug}"
             )
+
+
+def add_area_diffusion_fit(tensors: dict[str, np.ndarray]) -> None:
+    """Fit ``D_A(A) = D0 + Gamma A**alpha`` independently for each lag."""
+    centers = tensors["dynamics_area_bin_center"]
+    diffusion = tensors["dynamics_area_diffusion"]
+    counts = tensors["dynamics_area_count"]
+    mean_lags = tensors["dynamics_area_mean_physical_lag"]
+    lag_count = diffusion.shape[0]
+    d0_values = np.full(lag_count, np.nan)
+    gamma_values = np.full(lag_count, np.nan)
+    alpha_values = np.full(lag_count, np.nan)
+    r_squared = np.full(lag_count, np.nan)
+    physical_lags = np.full(lag_count, np.nan)
+    fit_valid = np.zeros(lag_count, dtype=bool)
+
+    for lag_index in range(lag_count):
+        usable = (
+            np.isfinite(centers)
+            & np.isfinite(diffusion[lag_index])
+            & np.isfinite(mean_lags[lag_index])
+            & (centers > 0.0)
+            & (counts[lag_index] > 0)
+        )
+        if np.count_nonzero(usable) < 4:
+            continue
+        area = centers[usable]
+        observed = diffusion[lag_index, usable]
+        weights = counts[lag_index, usable].astype(float)
+        area_scale = float(np.median(area))
+
+        def scaled_model(
+            values: np.ndarray,
+            d0: float,
+            scaled_gamma: float,
+            alpha: float,
+        ) -> np.ndarray:
+            return d0 + scaled_gamma * (values / area_scale) ** alpha
+
+        d0_guess = max(0.0, 0.5 * float(np.min(observed)))
+        gamma_guess = max(
+            np.finfo(float).eps, float(np.max(observed) - d0_guess)
+        )
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", OptimizeWarning)
+                parameters, _ = curve_fit(
+                    scaled_model,
+                    area,
+                    observed,
+                    p0=(d0_guess, gamma_guess, 1.0),
+                    sigma=1.0 / np.sqrt(weights),
+                    absolute_sigma=False,
+                    bounds=((0.0, 0.0, -5.0), (np.inf, np.inf, 5.0)),
+                    maxfev=50_000,
+                )
+        except (RuntimeError, ValueError, FloatingPointError):
+            continue
+        d0, scaled_gamma, alpha = (float(value) for value in parameters)
+        gamma = scaled_gamma / area_scale**alpha
+        predicted = area_diffusion_model(area, d0, gamma, alpha)
+        residual_sum = float(np.sum((observed - predicted) ** 2))
+        total_sum = float(np.sum((observed - np.mean(observed)) ** 2))
+        d0_values[lag_index] = d0
+        gamma_values[lag_index] = gamma
+        alpha_values[lag_index] = alpha
+        r_squared[lag_index] = (
+            1.0 - residual_sum / total_sum if total_sum > 0.0 else np.nan
+        )
+        physical_lags[lag_index] = float(
+            np.average(mean_lags[lag_index, usable], weights=weights)
+        )
+        fit_valid[lag_index] = True
+
+    tensors["area_diffusion_fit_valid"] = fit_valid
+    tensors["area_diffusion_fit_d0"] = d0_values
+    tensors["area_diffusion_fit_gamma"] = gamma_values
+    tensors["area_diffusion_fit_alpha"] = alpha_values
+    tensors["area_diffusion_fit_r_squared"] = r_squared
+    tensors["area_diffusion_fit_physical_lag"] = physical_lags
 
 
 @jax.jit
@@ -566,6 +657,10 @@ def add_stochastic_statistics(
         progress("stage=stochastic conditional_start")
     add_conditional_dynamics(tensors, progress=progress)
     if progress is not None:
+        progress("stage=stochastic area_diffusion_fit start")
+    add_area_diffusion_fit(tensors)
+    if progress is not None:
+        progress("stage=stochastic area_diffusion_fit complete")
         progress("stage=stochastic msd_start")
     add_position_msd(tensors, progress=progress)
     if progress is not None:

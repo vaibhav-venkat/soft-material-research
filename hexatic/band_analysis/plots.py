@@ -9,7 +9,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from .dynamics import DYNAMIC_PROPERTIES
+from .dynamics import DYNAMIC_PROPERTIES, area_diffusion_model
 
 
 _LEGACY_NET_PLOTS = (
@@ -61,6 +61,28 @@ def _plot_conditional_property(
             color=color,
             label=legend,
         )
+        if (
+            slug == "area"
+            and tensors["area_diffusion_fit_valid"][lag_index]
+            and np.any(usable_diffusion)
+        ):
+            fit_area = np.linspace(
+                float(np.min(centers[usable_diffusion])),
+                float(np.max(centers[usable_diffusion])),
+                200,
+            )
+            axes[1].plot(
+                fit_area,
+                area_diffusion_model(
+                    fit_area,
+                    float(tensors["area_diffusion_fit_d0"][lag_index]),
+                    float(tensors["area_diffusion_fit_gamma"][lag_index]),
+                    float(tensors["area_diffusion_fit_alpha"][lag_index]),
+                ),
+                "--",
+                color=color,
+                linewidth=1.2,
+            )
     axes[0].axhline(0.0, color="0.65", linewidth=0.8)
     axes[0].set(xlabel=label, ylabel=rf"$F_{{{label.strip('$')}}}$")
     axes[1].set(xlabel=label, ylabel=rf"$D_{{{label.strip('$')}}}$")
@@ -134,6 +156,69 @@ def _plot_area_coupling(tensors: dict[str, np.ndarray], output_dir: Path) -> dic
     return outputs
 
 
+def _plot_area_diagnostics(
+    tensors: dict[str, np.ndarray], output_dir: Path
+) -> dict[str, str]:
+    outputs: dict[str, str] = {}
+
+    perimeter_file = "stable_interface_length_vs_area.png"
+    figure, axis = plt.subplots(figsize=(7.0, 5.0))
+    stable = tensors["stable"]
+    area = tensors["area"]
+    perimeter = tensors["interface_length"]
+    track_ids = tensors["track_id"]
+    for track_column, track_id in enumerate(track_ids):
+        usable = (
+            stable[:, track_column]
+            & np.isfinite(area[:, track_column])
+            & np.isfinite(perimeter[:, track_column])
+        )
+        if np.any(usable):
+            axis.scatter(
+                area[usable, track_column],
+                perimeter[usable, track_column],
+                s=16,
+                alpha=0.65,
+                label=f"track {int(track_id)}",
+            )
+    axis.set(xlabel=r"band area $A$", ylabel=r"total boundary length $P$")
+    axis.grid(alpha=0.25)
+    if axis.collections:
+        axis.legend(fontsize=8)
+    figure.tight_layout()
+    figure.savefig(output_dir / perimeter_file, dpi=180)
+    plt.close(figure)
+    outputs["stable_interface_length_vs_area"] = perimeter_file
+
+    alpha_file = "area_diffusion_alpha.png"
+    valid = tensors["area_diffusion_fit_valid"]
+    physical_lag = tensors["area_diffusion_fit_physical_lag"]
+    alpha = tensors["area_diffusion_fit_alpha"]
+    usable = valid & np.isfinite(physical_lag) & np.isfinite(alpha)
+    figure, axis = plt.subplots(figsize=(7.5, 4.8))
+    axis.plot(physical_lag[usable], alpha[usable], "o-", color="black")
+    for point_index, (lag, exponent) in enumerate(
+        zip(physical_lag[usable], alpha[usable], strict=True)
+    ):
+        axis.annotate(
+            rf"$\alpha={float(exponent):.3g}$",
+            (float(lag), float(exponent)),
+            xytext=(5, 8 if point_index % 2 == 0 else -14),
+            textcoords="offset points",
+            fontsize=8,
+        )
+    axis.set(
+        xlabel=r"physical lag $\Delta\tau$",
+        ylabel=r"fitted exponent $\alpha$",
+    )
+    axis.grid(alpha=0.25)
+    figure.tight_layout()
+    figure.savefig(output_dir / alpha_file, dpi=180)
+    plt.close(figure)
+    outputs["area_diffusion_alpha"] = alpha_file
+    return outputs
+
+
 def plot_characterization(
     tensors: dict[str, np.ndarray],
     output_dir: Path,
@@ -161,6 +246,8 @@ def plot_characterization(
                 f"property={prop.slug}"
             )
     outputs.update(_plot_area_coupling(tensors, output_dir))
+    outputs.update(_plot_area_diagnostics(tensors, output_dir))
     if progress is not None:
         progress("stage=plots coupling=2/2 complete")
+        progress("stage=plots area_diagnostics=2/2 complete")
     return outputs

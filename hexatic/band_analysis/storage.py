@@ -14,7 +14,7 @@ from .characterization import N_MODES, mode_wave_numbers
 from .tracking import TrackedFrame
 
 
-SCHEMA = "hexatic.band_characterization.v2"
+SCHEMA = "hexatic.band_characterization.v3"
 
 SCALAR_FIELDS = (
     "area",
@@ -242,6 +242,8 @@ def load_characterization(
         "dynamics_axial_position_drift",
         "position_msd",
         "neighbor_area_covariance",
+        "area_diffusion_fit_alpha",
+        "area_diffusion_fit_valid",
     }
     missing = sorted(required - tensors.keys())
     if missing:
