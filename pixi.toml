@@ -111,6 +111,7 @@ optimistix = "*"
 numpyro = "*"
 arviz = "*"
 h5netcdf = "*"
+h5py = "*"
 
 [feature.big-lx-cuda12]
 platforms = ["linux-64"]
