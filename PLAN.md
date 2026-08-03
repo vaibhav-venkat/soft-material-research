@@ -1,174 +1,153 @@
-You will implement everything in the hexatic/band_analysis folder, using the safetensor as an input. 
-I.e i do an `--input-dir case1/safetensor_output/case1` which has a manifest output and everythgin, and is a `big-lx` case so read that folder.
+Once again, account for x being periodic so you will to unwrap it when storing axial componets or anything that depends on x, which is a lot. This isn't covered below. If it turns out a to be aproplem to distinguish whether one end is the max or min based on the periodic image, then handle it in the earlier analysis stage to identify the bands themselves. You can assume a band doesn't travel more than one box length in one frame.
 
-# Discrete identification and analysis of dilute bands
+The previous analysis delt with the x- and x+ storage, so you will need to make sure those are unwrapped. Either way a lot of the things we will be doing is based on relative motion of these bands later on, so it doesn't depend on the exact position of the each band.
 
-First, Work only with particles in the cylindrical shell, i.e `R - D - eps < R < R + eps` or something which allows a buffer (i.e eps doesnt need to be like the acutal np.finfo(dtype).eps because that may be way to small). 
-Before continuing assert in the code that there is no particle with R greater than the R + eps.
 
-Then, use the unwrapped coordinates:
+# Discrete characterization of one band
 
-\[
-x_p,\qquad s_p=R_s\theta_p\pmod{L_s},
-\qquad L_s=2\pi R_s or C,
-\]
-keep in mind both x and s are periodic, the plan im about to give you may only assume one is so adapt it IF NECESSARY.
-
-where \(R_s\) is one fixed reference radius, such as the midpoint of the shell. Do **not** use each particle’s individual \(r_p\theta_p\), because then particles at different radii would have different effective circumferences.
-
-## 1. Construct the discrete shell-density field
-
-Divide the unwrapped surface into
-`N_x \times N_s` bins with dimensions
+## Band area
 
 \[
-\Delta x=\frac{L_x}{N_x},
-\qquad
-\Delta s=\frac{L_s}{N_s}.
+A_k(t)
+=
+\Delta x\,\Delta s
+\sum_{i,j}B^{(k)}_{ij}(t).
 \]
 
-Let
+## Mean width
 
-`n_ij(t)`
-
-be the number of shell particles in axial bin \(i\) and circumferential bin \(j\). The projected surface density is
-`\rho_{ij}(t)=\frac{n_{ij}(t)}{\Delta x\,\Delta s}.`
-
-The circumferential index is periodic:
+For a completely wrapped band,
 
 \[
-j+N_s\equiv j.
+\bar w_k(t)
+=
+\frac{A_k(t)}{L_s}
+=
+\frac{1}{N_s}\sum_jw_{kj}(t).
 \]
 
-And same for the axial `i + N_x \equiv i`
-Smooth the density weakly, for example with a Gaussian or beta kernel (whichever is best) whose width is approximately one bin.
+The area-based expression is generally more robust to individual noisy columns.
 
-The kernel must also wrap periodically in \(j\) and `i`.
+## Mean axial position
+
+Use the average centerline:
+
+\[
+X_k(t)
+=
+\frac{1}{N_s}
+\sum_{j=0}^{N_s-1}h_{kj}(t).
+\]
+
+This weights every circumferential position equally. The ordinary area centroid,
+
+\[
+X_k^{\rm area}
+=
+\frac{\sum_{ij}x_i B^{(k)}_{ij}}
+{\sum_{ij}B^{(k)}_{ij}},
+\]
+
+may also be recorded, but it is biased toward locally wider portions of the band.
+
+If \(x\) is periodic, unwrap \(X_k(t)\) in time before calculating displacements.
+
+## Width nonuniformity
+
+\[
+\sigma_{w,k}^2(t)
+=
+\frac{1}{N_s}
+\sum_j
+\left[w_{kj}(t)-\bar w_k(t)\right]^2.
+\]
+
+This distinguishes a nearly uniform band from one that opens and closes locally.
+
+## Centerline roughness
+
+\[
+\sigma_{h,k}^2(t)
+=
+\frac{1}{N_s}
+\sum_j
+\left[h_{kj}(t)-X_k(t)\right]^2.
+\]
+
+## Discrete interface length
+
+Use periodic indexing \(j+1\equiv0\) at \(j=N_s-1\):
+
+\[
+P_k=
+\sum_j
+\sqrt{
+\Delta s^2+
+\left(x^-_{k,j+1}-x^-_{kj}\right)^2
+}
++
+\sum_j
+\sqrt{
+\Delta s^2+
+\left(x^+_{k,j+1}-x^+_{kj}\right)^2
+}.
+\]
+
+For a straight uniform band,
+
+\[
+P_k\approx2L_s.
+\]
+
+Obliqueness, bending, and roughness increase \(P_k\).
 
 ---
 
-## 2. Convert density into a dilute mask
+## Circumferential shape modes
 
-Choose one fixed dilute–dense threshold \(\rho_c\) from the steady-state density distribution, preferably from the valley or crossing between the dilute and dense populations. I will choose this, so for now choose an arbitarry rho_c like 0.5 while I get the actual. You will plot the density distribution however as well in 
-this case, and mark the valley if possible, i'll just double check.
-
-Define
+Apply a discrete Fourier transform to the centerline:
 
 \[
-M_{ij}(t)=
-\begin{cases}
-1, & \bar\rho_{ij}(t)<\rho_c,\\
-0, & \bar\rho_{ij}(t)\ge \rho_c.
-\end{cases}
-\]
-
-Thus, \(M_{ij}=1\) represents a dilute cell.
-
-Use the same \(\rho_c\) for every frame. A frame-dependent threshold can generate artificial changes in band area and position.
-
-Very small isolated components may be removed using a minimum area cutoff, but avoid aggressive dilation or closing because that can artificially turn an almost-wrapped patch into a wrapped band.
-
-## 3. Group dilute cells into connected components
-
-Use 8-neighbor connectivity. Cell \((i,j)\) is connected to
-
-\[
-(i\pm1,j),\qquad
-(i,j\pm1),\qquad
-(i\pm1,j\pm1).
-\]
-
-The circumferential index is periodic. However, periodic connectivity alone does not determine whether a component actually winds around the cylinder.
-
-### Discrete winding test
-
-Create a three-copy mask:
-
-\[
-T_{iJ}=M_{i,\;J\bmod N_s},
-\qquad
-J=0,\ldots,3N_s-1.
-\]
-
-This produces a left copy, central copy, and right copy
-
-Label connected components in \(T\) using ordinary, nonperiodic connectivity in the enlarged \(J\) direction.
-
-For a dilute cell \((i,j)\) in the original mask, its copies are located at
-
-\[
-(i,j),\qquad
-(i,j+N_s),\qquad
-(i,j+2N_s).
-\]
-
-A component is classified as a circumferentially wrapped band when, for at least one cell,
-
-\[
-\operatorname{label}(i,j+N_s)
+\widetilde h_{k,n}
 =
-\operatorname{label}(i,j+2N_s).
+\frac{1}{N_s}
+\sum_{j=0}^{N_s-1}
+\left[h_{kj}-X_k\right]
+e^{-2\pi i n j/N_s}.
 \]
 
-That equality means there is a continuous dilute path connecting the central copy of the component to its copy one complete circumference away.
-
-A localized patch produces separate repeated components and fails this test.
-
-**IMPORTANT**: Do the same thing for `x`, as the axial thing is also periodic. Like I warned in the beginniing. 
-
-
-## 4. Extract the two band interfaces
-
-For band \(k\), define
+Define the mode amplitude
 
 \[
-B^{(k)}_{ij}(t)=
-\begin{cases}
-1,&\text{cell }(i,j)\text{ belongs to band }k,\\
-0,&\text{otherwise}.
-\end{cases}
+H_{k,n}=2\left|\widetilde h_{k,n}\right|.
 \]
 
-For each circumferential column \(j\), find
+Similarly, width modes are
 
 \[
-i^-_{kj}=\min\{i:B^{(k)}_{ij}=1\},
-\qquad
-i^+_{kj}=\max\{i:B^{(k)}_{ij}=1\}.
-\]
-
-If \(x_i\) denotes the center of axial cell \(i\), define the interface locations using the cell edges:
-
-\[
-x^-_{kj}=x_{i^-_{kj}}-\frac{\Delta x}{2},
-\]
-
-\[
-x^+_{kj}=x_{i^+_{kj}}+\frac{\Delta x}{2}.
-\]
-
-The discrete centerline and local width are then
-
-\[
-h_{kj}
+\widetilde w_{k,n}
 =
-\frac{x^+_{kj}+x^-_{kj}}{2},
+\frac{1}{N_s}
+\sum_j
+\left[w_{kj}-\bar w_k\right]
+e^{-2\pi i n j/N_s}.
 \]
+
+Interpretation:
+
+- \(H_{k,1}\): largest-scale displacement or oblique/trapezoidal shape;
+- \(H_{k,2}\): two-lobed deformation;
+- higher \(n\): smaller-scale interface roughness;
+- \(|\widetilde w_{k,n}|\): local opening and closing around the circumference.
+
+The allowed circumferential wave numbers are
 
 \[
-w_{kj}
-=
-x^+_{kj}-x^-_{kj}
-=
-\left(i^+_{kj}-i^-_{kj}+1\right)\Delta x.
+q_n=\frac{2\pi n}{L_s}=\frac{n}{R_s}.
 \]
 
-If one circumferential column contains multiple widely separated axial intervals belonging to the same component, flag the frame as geometrically complex. This may indicate branching, merging, a hole, or an unsuitable density threshold.
+This gives a direct connection between the observed band modes and cylinder radius.
 
-
-For now, inputting a safetensor should yield:
-- The density distribution with the peaks and valleys marked, in terms of the arial distribution. In fact, convert this to an area fraction if possible so we can standardize it, i.e divide it by the area of a single
- particle treated as as a circle with diameter D.
-- A movie of B, with different bands colored different colors, while the rest of the cylinder is just black. This should be a movie across time and make sure it is unwrapped and only for shell particles, so we can visually see whats going on.
-
-Use scipy if possible for a lot of the operations, and Jax on the GPU with CUDA instead of Numpy. This should also load the safetensor. THe current machine hosts no safetnesor nor does it have CUDA, i'll run this on a remote machine.
+Here are the outputs:
+ - A safetensor containing each of these fields
+ - A plot of each of the time based fields e.g field(t) netted over all bands, so the net (not the mean), so a plot of that versus time.
