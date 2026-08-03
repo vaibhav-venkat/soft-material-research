@@ -11,11 +11,14 @@ import jax.numpy as jnp
 import numpy as np
 
 from .components import label_dilute_bands
+from .characterization import N_MODES, characterize_band
 from .density import SurfaceGrid, make_density_kernel, validate_gpu
 from .distribution import plot_distribution
 from .interfaces import extract_interfaces
 from .io import frame_numbers, iter_frames, load_metadata
-from .movie import write_band_movie
+from .plots import plot_characterization
+from .storage import build_characterization_tensors, save_characterization
+from .tracking import BandTracker, TrackedFrame
 
 
 def analyze(
@@ -30,9 +33,6 @@ def analyze(
     start: int = 0,
     stop: int | None = None,
     stride: int = 1,
-    frame_delta: int = 10,
-    fps: int = 12,
-    dpi: int = 120,
 ) -> Path:
     metadata = load_metadata(input_dir)
     output_dir = output_dir or input_dir / "band_analysis_output"
@@ -45,13 +45,14 @@ def analyze(
         nx=max(1, round(n_mult * metadata.lx / metadata.particle_diameter)),
         ns=max(1, round(n_mult * metadata.circumference / metadata.particle_diameter)),
     )
+    if grid.ns < 2 * N_MODES + 1:
+        raise ValueError(
+            f"at least {2 * N_MODES + 1} circumferential bins are required "
+            f"for modes 1..{N_MODES}; got {grid.ns}"
+        )
     selected_frames = frame_numbers(metadata, start, stop, stride)
     if not selected_frames:
         raise ValueError("the selected frame range is empty")
-    if frame_delta < 1:
-        raise ValueError("frame_delta must be positive")
-    movie_frame_numbers = set(selected_frames[::frame_delta])
-
     density_for = make_density_kernel(
         grid,
         radius=metadata.radius,
@@ -59,9 +60,10 @@ def analyze(
         shell_epsilon=shell_epsilon_d * metadata.particle_diameter,
         smoothing_sigma=smoothing_sigma,
     )
-    movie_frames: list[tuple[int, int, np.ndarray]] = []
     area_fraction_samples: list[np.ndarray] = []
     frame_records: list[dict[str, object]] = []
+    tracked_frames: list[TrackedFrame] = []
+    tracker = BandTracker(grid.lx)
     particle_area = math.pi * metadata.particle_diameter**2 / 4.0
     shell_upper_radius = metadata.radius + shell_epsilon_d * metadata.particle_diameter
 
@@ -80,27 +82,23 @@ def analyze(
             density < rho_c,
             minimum_area=minimum_area,
         )
-        interface_records = []
+        characterized = []
         for component in components:
             interfaces = extract_interfaces(labels, component.label, grid)
-            finite_width = interfaces.width[np.isfinite(interfaces.width)]
-            interface_records.append(
-                {
-                    **asdict(component),
-                    "mean_width": float(np.mean(finite_width)) if finite_width.size else None,
-                    "geometrically_complex": interfaces.geometrically_complex,
-                }
+            characterized.append(
+                characterize_band(component, interfaces, grid)
             )
+        tracked = tracker.update(characterized)
+        tracked_frames.append(TrackedFrame(frame_index, step, tuple(tracked)))
         frame_records.append(
             {
                 "frame": frame_index,
                 "step": step,
                 "shell_particles": shell_count,
-                "bands": interface_records,
+                "band_count": len(tracked),
+                "track_ids": [band.track_id for band in tracked],
             }
         )
-        if frame_index in movie_frame_numbers:
-            movie_frames.append((frame_index, step, labels))
         print(
             f"[band_analysis] frame={frame_index} shell={shell_count} bands={len(components)}",
             flush=True,
@@ -113,15 +111,18 @@ def analyze(
         threshold=phi_c,
         output=output_dir / "density_distribution.png",
     )
-    write_band_movie(
-        movie_frames,
-        grid=grid,
-        output=output_dir / "dilute_bands.mp4",
-        fps=fps,
-        dpi=dpi,
+    characterization_tensors = build_characterization_tensors(
+        tracked_frames,
+        ns=grid.ns,
+        circumference=grid.circumference,
+    )
+    characterization_path = output_dir / "band_characterization.safetensors"
+    save_characterization(characterization_path, characterization_tensors)
+    characterization_plots = plot_characterization(
+        characterization_tensors, output_dir
     )
     result = {
-        "schema": "hexatic.band_analysis.v1",
+        "schema": "hexatic.band_analysis.v2",
         "input_dir": str(input_dir),
         "grid": {**asdict(grid), "dx": grid.dx, "ds": grid.ds},
         "n_mult": n_mult,
@@ -130,13 +131,13 @@ def analyze(
         "shell_epsilon_d": shell_epsilon_d,
         "smoothing_sigma_bins": smoothing_sigma,
         "minimum_area_cells": minimum_area,
-        "movie_frame_delta": frame_delta,
         "distribution_peaks_phi": features.peaks.tolist(),
         "distribution_valleys_phi": features.valleys.tolist(),
         "frames": frame_records,
         "outputs": {
             "density_distribution": "density_distribution.png",
-            "band_movie": "dilute_bands.mp4",
+            "band_characterization": characterization_path.name,
+            "characterization_plots": characterization_plots,
         },
     }
     result_path = output_dir / "analysis.json"
@@ -166,14 +167,6 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--start", type=int, default=0)
     parser.add_argument("--stop", type=int)
     parser.add_argument("--stride", type=int, default=1)
-    parser.add_argument(
-        "--frame-delta",
-        type=int,
-        default=10,
-        help="Render every Nth analyzed frame; analysis still uses all selected frames.",
-    )
-    parser.add_argument("--fps", type=int, default=12)
-    parser.add_argument("--dpi", type=int, default=120)
     return parser.parse_args()
 
 

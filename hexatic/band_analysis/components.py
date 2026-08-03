@@ -19,7 +19,7 @@ def label_dilute_bands(
     *,
     minimum_area: int = 1,
 ) -> tuple[np.ndarray, list[BandComponent]]:
-    """Label toroidal components that wind in either periodic direction."""
+    """Label dilute components that wind around ``s`` but not around ``x``."""
     nx, ns = dilute.shape
     ordinary_labels, count = label(
         dilute, structure=np.ones((3, 3), dtype=np.int8)
@@ -74,7 +74,10 @@ def label_dilute_bands(
                 == tiled_labels[ii + nx, jj + 2 * ns]
             )
         )
-        if not (winds_x or winds_s):
+        # Only a circumferential winding describes an axially localized band.
+        # Axial and doubly winding components have no well-defined axial width
+        # or center and are deliberately absent from every downstream output.
+        if winds_x or not winds_s:
             continue
         band_label = len(components) + 1
         output[cells] = band_label
