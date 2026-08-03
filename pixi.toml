@@ -76,6 +76,7 @@ new-sims-pipeline = "python -um hexatic.new_sims.run_pipeline"
 new-sims-dry-run = "python -um hexatic.new_sims.run_pipeline --dry-run"
 new-sims-plot = "python -um hexatic.new_sims_analysis.plot_correlation"
 new-sims-plot-all = "python -um hexatic.new_sims_analysis.plot_all"
+band-analysis = "python -um hexatic.band_analysis"
 [dependencies]
 python = "3.13.*"
 cmake = "*"

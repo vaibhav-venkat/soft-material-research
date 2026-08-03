@@ -157,27 +157,31 @@ def _hessian_diagnostics(
     )
 
 
-def _starts(empirical: np.ndarray, seed: int) -> tuple[np.ndarray, ...]:
+def _starts(
+    empirical: np.ndarray, seed: int, count: int = 8
+) -> tuple[np.ndarray, ...]:
+    if count < 2:
+        raise ValueError("optimizer starts must be at least two")
     empirical_raw = raw_parameters(empirical)
     generator = np.random.default_rng(seed)
     perturbed = tuple(
         empirical_raw + generator.normal(0.0, 0.75, len(PARAMETER_NAMES))
-        for _ in range(6)
+        for _ in range(count - 2)
     )
     generic = raw_parameters(np.asarray([1.0, 1.0, 0.1, 0.1, 1.0]))
     return (empirical_raw, *perturbed, generic)
 
 
 def optimize_parameters(
-    blocks: tuple[TransitionBlock, ...], *, seed: int = 0
+    blocks: tuple[TransitionBlock, ...], *, seed: int = 0, starts: int = 8
 ) -> OptimizationResult:
-    """Run exactly eight reproducible raw-space Optimistix BFGS fits."""
+    """Run reproducible empirical, perturbed, and generic BFGS fits."""
     if not blocks:
         raise ValueError("at least one training transition is required")
     empirical = empirical_parameters(blocks)
     solver = optx.BFGS(rtol=1e-8, atol=1e-8)
     runs: list[OptimizationRun] = []
-    for start in _starts(empirical, seed):
+    for start in _starts(empirical, seed, starts):
         solution = optx.minimise(
             negative_log_likelihood,
             solver,
@@ -206,7 +210,7 @@ def optimize_parameters(
         )
     finite_runs = [run for run in runs if np.isfinite(run.objective)]
     if not finite_runs:
-        raise RuntimeError("all eight BFGS starts produced nonfinite objectives")
+        raise RuntimeError("all BFGS starts produced nonfinite objectives")
     return OptimizationResult(
         best=min(finite_runs, key=lambda run: run.objective),
         runs=tuple(runs),

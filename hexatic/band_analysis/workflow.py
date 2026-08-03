@@ -18,7 +18,7 @@ from .storage import fingerprint
 from .validation import ValidationResult, validate_posterior
 
 
-LAG_CACHE_SCHEMA = "hexatic.band_lag.v1"
+LAG_CACHE_SCHEMA = "hexatic.band_lag.v2"
 
 
 @dataclass(frozen=True)
@@ -26,6 +26,7 @@ class AnalysisConfig:
     lags: tuple[int, ...] = (1, 2, 3, 5, 10)
     base_lag: int = 2
     optimizer_seed: int = 0
+    optimizer_starts: int = 8
     mcmc: MCMCConfig = MCMCConfig()
     predictive_draws: int = 200
     paths_per_segment: int = 200
@@ -35,6 +36,8 @@ class AnalysisConfig:
             raise ValueError("base lag must occur in configured lags")
         if len(set(self.lags)) != len(self.lags):
             raise ValueError("configured lags must be unique")
+        if self.optimizer_starts < 2:
+            raise ValueError("optimizer starts must be at least two")
 
 
 @dataclass(frozen=True)
@@ -129,7 +132,9 @@ def _compute_lag(
 ) -> tuple[dict[str, Any], dict[str, np.ndarray], az.InferenceData]:
     prepared = prepare_training_transitions(training, lag)
     optimization = optimize_parameters(
-        prepared.blocks, seed=config.optimizer_seed + lag
+        prepared.blocks,
+        seed=config.optimizer_seed + lag,
+        starts=config.optimizer_starts,
     )
     bayesian = run_bayesian_inference(
         prepared.blocks,
@@ -201,6 +206,17 @@ def _compute_lag(
             "weak_hessian": hessian.weak if hessian else None,
         },
         "validation": validation_metrics,
+        "data": {
+            "training_seeds": len({segment.seed_id for segment in training}),
+            "training_segments": len(training),
+            "training_transitions": int(
+                sum(block.current.shape[0] for block in prepared.blocks)
+            ),
+            "weighted_training_transitions": float(
+                sum(np.asarray(block.weight).sum() for block in prepared.blocks)
+            ),
+            "holdout_seeds": len(holdouts),
+        },
     }
     return metadata, arrays, bayesian.idata
 

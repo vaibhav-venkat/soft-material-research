@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -31,6 +32,12 @@ def _posterior_matrix(samples: np.ndarray) -> np.ndarray:
     return values
 
 
+def _concatenate(
+    values: list[np.ndarray], *, dtype: np.dtype[Any] = np.dtype(np.float64)
+) -> np.ndarray:
+    return np.concatenate(values) if values else np.empty(0, dtype=dtype)
+
+
 def _one_step(
     segments: list[StableSegment],
     lag: int,
@@ -48,12 +55,25 @@ def _one_step(
     low_parts: list[np.ndarray] = []
     high_parts: list[np.ndarray] = []
     residual_parts: list[np.ndarray] = []
+    residual_total_parts: list[np.ndarray] = []
+    residual_deviation_parts: list[np.ndarray] = []
+    residual_band_count_parts: list[np.ndarray] = []
+    residual_dt_parts: list[np.ndarray] = []
+    observed_delta_parts: list[np.ndarray] = []
+    predicted_delta_parts: list[np.ndarray] = []
+    observed_total_delta_parts: list[np.ndarray] = []
+    predicted_total_delta_parts: list[np.ndarray] = []
+    observed_deviation_parts: list[np.ndarray] = []
+    predicted_deviation_parts: list[np.ndarray] = []
+    observed_exchange_parts: list[np.ndarray] = []
+    predicted_exchange_parts: list[np.ndarray] = []
     residual_covariances: list[np.ndarray] = []
     residual_covariance_offsets = [0]
     log_scores: list[np.ndarray] = []
     covered = 0
     values = 0
     for block in blocks:
+        current = np.asarray(block.current)
         following = np.asarray(block.following)
         transition_rows = jax.vmap(transition, in_axes=(0, 0, None))
         means, covariances = jax.vmap(
@@ -84,6 +104,16 @@ def _one_step(
             (following - np.asarray(median_means))[..., None],
         )[..., 0]
         residual_parts.append(block_residuals.ravel())
+        residual_total_parts.append(
+            np.repeat(current.sum(axis=1), current.shape[1])
+        )
+        residual_deviation_parts.append(
+            (current - current.mean(axis=1, keepdims=True)).ravel()
+        )
+        residual_band_count_parts.append(
+            np.full(block_residuals.size, current.shape[1], dtype=np.int64)
+        )
+        residual_dt_parts.append(np.repeat(np.asarray(block.dt), current.shape[1]))
         residual_covariance = (
             np.cov(block_residuals, rowvar=False)
             if len(block_residuals) > 1
@@ -95,6 +125,26 @@ def _one_step(
         )
         observed_parts.append(following.ravel())
         mean_parts.append(predictive_mean.ravel())
+        observed_delta = following - current
+        predicted_delta = predictive_mean - current
+        observed_delta_parts.append(observed_delta.ravel())
+        predicted_delta_parts.append(predicted_delta.ravel())
+        observed_total_delta_parts.append(observed_delta.sum(axis=1))
+        predicted_total_delta_parts.append(predicted_delta.sum(axis=1))
+        observed_deviation_parts.append(
+            (following - following.mean(axis=1, keepdims=True)).ravel()
+        )
+        predicted_deviation_parts.append(
+            (
+                predictive_mean
+                - predictive_mean.mean(axis=1, keepdims=True)
+            ).ravel()
+        )
+        projection = np.eye(current.shape[1]) - np.ones(
+            (current.shape[1], current.shape[1])
+        ) / current.shape[1]
+        observed_exchange_parts.append((observed_delta @ projection).ravel())
+        predicted_exchange_parts.append((predicted_delta @ projection).ravel())
         low_parts.append(low.ravel())
         high_parts.append(high.ravel())
         log_scores.append(
@@ -119,6 +169,13 @@ def _one_step(
         )
         * scaling.area,
         "whitened_residual": whitened,
+        "residual_total_area": _concatenate(residual_total_parts) * scaling.area,
+        "residual_area_deviation": _concatenate(residual_deviation_parts)
+        * scaling.area,
+        "residual_band_count": _concatenate(
+            residual_band_count_parts, dtype=np.dtype(np.int64)
+        ),
+        "residual_dt": _concatenate(residual_dt_parts) * scaling.time,
         "whitened_residual_acf": _autocorrelation(whitened),
         "whitened_residual_covariance": (
             np.concatenate(residual_covariances)
@@ -128,6 +185,16 @@ def _one_step(
         "residual_covariance_offset": np.asarray(
             residual_covariance_offsets, dtype=np.int64
         ),
+        "observed_delta_area": _concatenate(observed_delta_parts) * scaling.area,
+        "predicted_delta_area": _concatenate(predicted_delta_parts) * scaling.area,
+        "observed_delta_total": _concatenate(observed_total_delta_parts) * scaling.area,
+        "predicted_delta_total": _concatenate(predicted_total_delta_parts) * scaling.area,
+        "observed_area_deviation": _concatenate(observed_deviation_parts) * scaling.area,
+        "predicted_area_deviation": _concatenate(predicted_deviation_parts) * scaling.area,
+        "observed_conservative_increment": _concatenate(observed_exchange_parts)
+        * scaling.area,
+        "predicted_conservative_increment": _concatenate(predicted_exchange_parts)
+        * scaling.area,
     }
     metrics = {
         "predictive_log_score": float(np.mean(np.concatenate(log_scores)))
@@ -185,16 +252,27 @@ def _paths(
     simulated_area_values: list[np.ndarray] = []
     observed_conservative: list[np.ndarray] = []
     simulated_conservative: list[np.ndarray] = []
+    observed_increment_values: list[np.ndarray] = []
+    simulated_increment_values: list[np.ndarray] = []
+    observed_path_values: list[np.ndarray] = []
+    observed_path_offsets = [0]
+    observed_path_band_counts: list[int] = []
     for segment_index, segment in enumerate(segments):
         normalized = scaling.normalize_segment(segment)
         observed_total = normalized.areas.sum(axis=1)
         observed_area_values.append(normalized.areas.ravel())
+        observed_path_values.append(normalized.areas.ravel() * scaling.area)
+        observed_path_offsets.append(
+            observed_path_offsets[-1] + normalized.areas.size
+        )
+        observed_path_band_counts.append(segment.n_bands)
         observed_conservative.append(
             (normalized.areas - normalized.areas.mean(axis=1, keepdims=True)).ravel()
         )
         observed_totals.append(observed_total)
         observed_acf.append(_autocorrelation(observed_total))
         observed_increment = np.diff(normalized.areas, axis=0)
+        observed_increment_values.append(observed_increment.ravel())
         observed_covariance = (
             np.cov(observed_increment, rowvar=False)
             if len(observed_increment) > 1
@@ -278,7 +356,9 @@ def _paths(
             simulated_totals.append(total)
             simulated_acf.append(_autocorrelation(total))
             if len(valid) > 1:
-                simulated_segment_increments.append(np.diff(valid, axis=0))
+                increment = np.diff(valid, axis=0)
+                simulated_segment_increments.append(increment)
+                simulated_increment_values.append(increment.ravel())
         combined_increment = (
             np.concatenate(simulated_segment_increments)
             if simulated_segment_increments
@@ -298,6 +378,15 @@ def _paths(
         "path_offset": np.asarray(path_offsets, dtype=np.int64),
         "path_band_count": np.asarray(path_band_counts, dtype=np.int64),
         "path_segment_index": np.asarray(path_segment_indices, dtype=np.int64),
+        "observed_path_area": (
+            np.concatenate(observed_path_values)
+            if observed_path_values
+            else np.empty(0)
+        ),
+        "observed_path_offset": np.asarray(observed_path_offsets, dtype=np.int64),
+        "observed_path_band_count": np.asarray(
+            observed_path_band_counts, dtype=np.int64
+        ),
         "observed_total": observed * scaling.area,
         "simulated_total": simulated * scaling.area,
         "observed_total_acf": np.concatenate(observed_acf) if observed_acf else np.empty(0),
@@ -346,6 +435,24 @@ def _paths(
         if simulated_difference.size
         else float("nan"),
     }
+    arrays.update(
+        {
+            "observed_area": observed_area * scaling.area,
+            "simulated_area": simulated_area * scaling.area,
+            "observed_conservative": observed_difference * scaling.area,
+            "simulated_conservative": simulated_difference * scaling.area,
+            "observed_area_increment": (
+                np.concatenate(observed_increment_values) * scaling.area
+                if observed_increment_values
+                else np.empty(0)
+            ),
+            "simulated_area_increment": (
+                np.concatenate(simulated_increment_values) * scaling.area
+                if simulated_increment_values
+                else np.empty(0)
+            ),
+        }
+    )
     return arrays, metrics
 
 
