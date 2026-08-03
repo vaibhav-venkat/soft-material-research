@@ -14,7 +14,7 @@ from .characterization import N_MODES, mode_wave_numbers
 from .tracking import TrackedFrame
 
 
-SCHEMA = "hexatic.band_characterization.v15"
+SCHEMA = "hexatic.band_characterization.v16"
 
 SCALAR_FIELDS = (
     "area",
@@ -91,6 +91,9 @@ def add_instantaneous_area_statistics(
         )
     )
     tensors["instantaneous_band_count"] = np.asarray(band_count, dtype=np.int64)
+    tensors["instantaneous_total_area"] = np.asarray(
+        jax.device_get(total_area_device)
+    )
     tensors["instantaneous_mean_area"] = np.asarray(mean_area)
     tensors["instantaneous_area_variance"] = np.asarray(area_variance)
     tensors["instantaneous_area_cv_squared"] = np.asarray(area_cv_squared)
@@ -305,8 +308,11 @@ def load_characterization(
         "instantaneous_area_variance",
         "instantaneous_area_cv_squared",
         "instantaneous_maximum_area_fraction",
+        "instantaneous_total_area",
         "dynamics_area_cv_squared_fixed_n_drift",
         "dynamics_area_cv_squared_fixed_n_count",
+        "dynamics_total_area_fixed_n_drift",
+        "dynamics_total_area_fixed_n_count",
         "dynamics_axial_position_drift",
         "position_msd",
         "neighbor_area_covariance",

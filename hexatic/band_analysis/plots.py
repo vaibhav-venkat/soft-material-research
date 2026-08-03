@@ -27,6 +27,7 @@ from .plotting.overview import (
     _plot_area_coupling,
     _plot_area_cv_squared_drift,
     _plot_area_heterogeneity_events,
+    _plot_total_area_drift,
 )
 
 
@@ -72,6 +73,7 @@ def plot_characterization(
     outputs.update(_plot_area_coupling(tensors, output_dir))
     outputs.update(_plot_area_heterogeneity_events(tensors, output_dir))
     outputs.update(_plot_area_cv_squared_drift(tensors, output_dir))
+    outputs.update(_plot_total_area_drift(tensors, output_dir))
     outputs.update(_plot_area_diffusion_fits(tensors, output_dir))
     outputs.update(_plot_area_geometry_fits(tensors, output_dir))
     outputs.update(_plot_area_increment_conservation(tensors, output_dir))
@@ -85,7 +87,7 @@ def plot_characterization(
     outputs.update(_plot_area_diagnostics(tensors, output_dir))
     if progress is not None:
         progress("stage=plots coupling=2/2 complete")
-        progress("stage=plots area_diagnostics=12/12 complete")
+        progress("stage=plots area_diagnostics=13/13 complete")
     return outputs
 
 

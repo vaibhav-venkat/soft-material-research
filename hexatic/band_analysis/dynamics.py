@@ -25,6 +25,7 @@ from .stochastic.common import (
 from .stochastic.conditional import (
     add_area_cv_squared_drift,
     add_conditional_dynamics,
+    add_total_area_drift,
 )
 from .stochastic.correlations import add_area_coupling, add_position_msd
 from .stochastic.markov import add_area_chapman_kolmogorov
@@ -55,6 +56,10 @@ def add_stochastic_statistics(
     add_area_cv_squared_drift(tensors, max_frame_lag=max_frame_lag)
     if progress is not None:
         progress("stage=stochastic area_cv_squared_fixed_n complete")
+        progress("stage=stochastic total_area_fixed_n start")
+    add_total_area_drift(tensors, max_frame_lag=max_frame_lag)
+    if progress is not None:
+        progress("stage=stochastic total_area_fixed_n complete")
         progress("stage=stochastic neighbor_relative_area start")
     add_neighbor_relative_area_drifts(tensors, max_frame_lag=max_frame_lag)
     if progress is not None:

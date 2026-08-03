@@ -183,4 +183,50 @@ def _plot_area_cv_squared_drift(
     return {"area_cv_squared_drift_fixed_n": filename}
 
 
+def _plot_total_area_drift(
+    tensors: dict[str, np.ndarray], output_dir: Path
+) -> dict[str, str]:
+    filename = "total_area_drift_fixed_n.png"
+    figure, axis = plt.subplots(figsize=(8.0, 5.0))
+    prefix = "dynamics_total_area_fixed_n"
+    centers = tensors[f"{prefix}_bin_center"]
+    drift = tensors[f"{prefix}_drift"]
+    mean_lags = tensors[f"{prefix}_mean_physical_lag"]
+    frame_lags = tensors["dynamics_frame_lag"]
+    colors = matplotlib.colormaps["viridis"](
+        np.linspace(0.05, 0.95, max(1, len(frame_lags)))
+    )
+    for lag_index, (frame_lag, color) in enumerate(
+        zip(frame_lags, colors, strict=True)
+    ):
+        usable = np.isfinite(centers) & np.isfinite(drift[lag_index])
+        if not np.any(usable):
+            continue
+        physical_lag = float(np.nanmean(mean_lags[lag_index, usable]))
+        axis.plot(
+            centers[usable],
+            drift[lag_index, usable],
+            "o-",
+            ms=3,
+            color=color,
+            label=(
+                rf"$\Delta m={int(frame_lag)}$, "
+                rf"$\Delta\tau={physical_lag:.4g}$"
+            ),
+        )
+    axis.axhline(0.0, color="0.65", linewidth=0.8)
+    axis.set(
+        xlabel=r"$A_T=\sum_i A_i$",
+        ylabel=r"$F_T(A_T)=\langle\Delta A_T\mid A_T\rangle/\Delta\tau$",
+        title="Fixed band count; event-free intervals only",
+    )
+    axis.grid(alpha=0.25)
+    handles, _ = axis.get_legend_handles_labels()
+    if handles:
+        axis.legend(fontsize=8)
+    figure.tight_layout()
+    figure.savefig(output_dir / filename, dpi=180)
+    plt.close(figure)
+    return {"total_area_drift_fixed_n": filename}
+
 

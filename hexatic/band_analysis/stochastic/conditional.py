@@ -169,23 +169,24 @@ def _fixed_n_event_free_scalar_reductions(
     return counts, sum_rate, sum_lag
 
 
-def add_area_cv_squared_drift(
+def _add_fixed_n_event_free_drift(
     tensors: dict[str, np.ndarray],
+    values_key: str,
+    prefix: str,
     *,
     max_frame_lag: int = MAX_FRAME_LAG,
     target_bins: int = TARGET_BINS,
     minimum_samples: int = MIN_BIN_SAMPLES,
     preferred_bin_samples: int = PREFERRED_BIN_SAMPLES,
 ) -> None:
-    """Estimate F_C(C) on fixed-band-count, event-free intervals."""
     if (
         max_frame_lag < 1
         or target_bins < 1
         or minimum_samples < 1
         or preferred_bin_samples < minimum_samples
     ):
-        raise ValueError("CV-area dynamics controls must be positive")
-    values = tensors["instantaneous_area_cv_squared"]
+        raise ValueError("scalar dynamics controls must be positive")
+    values = tensors[values_key]
     finite = values[np.isfinite(values)]
     edges = _quantile_edges(finite, target_bins, preferred_bin_samples)
     lag_count = min(max_frame_lag, max(0, len(values) - 1))
@@ -226,11 +227,49 @@ def add_area_cv_squared_drift(
                 sum_lag / safe_counts,
                 np.nan,
             )
-    prefix = "dynamics_area_cv_squared_fixed_n"
     tensors[f"{prefix}_bin_edges"] = stored_edges
     tensors[f"{prefix}_bin_center"] = centers
     tensors[f"{prefix}_drift"] = drift
     tensors[f"{prefix}_count"] = counts
     tensors[f"{prefix}_mean_physical_lag"] = mean_lag
 
+
+def add_area_cv_squared_drift(
+    tensors: dict[str, np.ndarray],
+    *,
+    max_frame_lag: int = MAX_FRAME_LAG,
+    target_bins: int = TARGET_BINS,
+    minimum_samples: int = MIN_BIN_SAMPLES,
+    preferred_bin_samples: int = PREFERRED_BIN_SAMPLES,
+) -> None:
+    """Estimate F_C(C) on fixed-band-count, event-free intervals."""
+    _add_fixed_n_event_free_drift(
+        tensors,
+        "instantaneous_area_cv_squared",
+        "dynamics_area_cv_squared_fixed_n",
+        max_frame_lag=max_frame_lag,
+        target_bins=target_bins,
+        minimum_samples=minimum_samples,
+        preferred_bin_samples=preferred_bin_samples,
+    )
+
+
+def add_total_area_drift(
+    tensors: dict[str, np.ndarray],
+    *,
+    max_frame_lag: int = MAX_FRAME_LAG,
+    target_bins: int = TARGET_BINS,
+    minimum_samples: int = MIN_BIN_SAMPLES,
+    preferred_bin_samples: int = PREFERRED_BIN_SAMPLES,
+) -> None:
+    """Estimate F_T(A_T) on fixed-band-count, event-free intervals."""
+    _add_fixed_n_event_free_drift(
+        tensors,
+        "instantaneous_total_area",
+        "dynamics_total_area_fixed_n",
+        max_frame_lag=max_frame_lag,
+        target_bins=target_bins,
+        minimum_samples=minimum_samples,
+        preferred_bin_samples=preferred_bin_samples,
+    )
 
