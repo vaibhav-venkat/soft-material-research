@@ -107,6 +107,10 @@ jenkspy = ">=0.4.1,<0.5"
 [pypi-dependencies]
 pysindy = { version = ">=2.1.0, <3", extras = ["miosr", "sbr", "cvxpy"] }
 desloppify = ">=1.0, <2"
+optimistix = "*"
+numpyro = "*"
+arviz = "*"
+h5netcdf = "*"
 
 [feature.big-lx-cuda12]
 platforms = ["linux-64"]

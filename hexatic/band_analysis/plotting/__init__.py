@@ -1,2 +1,0 @@
-"""Focused plotting implementation modules."""
-
