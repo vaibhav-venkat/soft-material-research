@@ -1,153 +1,166 @@
-Once again, account for x being periodic so you will to unwrap it when storing axial componets or anything that depends on x, which is a lot. This isn't covered below. If it turns out a to be aproplem to distinguish whether one end is the max or min based on the periodic image, then handle it in the earlier analysis stage to identify the bands themselves. You can assume a band doesn't travel more than one box length in one frame.
-
-The previous analysis delt with the x- and x+ storage, so you will need to make sure those are unwrapped. Either way a lot of the things we will be doing is based on relative motion of these bands later on, so it doesn't depend on the exact position of the each band.
+Use everythign in terms of the simulation time based ont he timestep, trajectory_write_frame step (which does vary), and the total steps. Let this be tau. This will be used for plotting, however regular analyze on the discrete will be computed with the difference in frames `delta t` which can be mapped back to the float `tau`, and should be mapped as such.
 
 
-# Discrete characterization of one band
+For band \(k\) at frame \(m\) and band \(\ell\) at frame \(m+1\), calculate their Jaccard overlap using Scipy
+\]
 
-## Band area
+
+Minimize the total cost using one-to-one assignment.
+
+Classify exceptions separately:
+
+- one old band overlaps two new bands: splitting;
+- two old bands overlap one new band: merging;
+- unmatched new band: birth;
+- unmatched old band: disappearance.
+
+For stable bands, require persistence for 5 frames before including them in the stochastic analysis.
+
+# C. Discrete dynamics
+
+For any measured band quantity
 
 \[
-A_k(t)
+z_k\in
+\left\{
+X_k,A_k,\bar w_k,P_k,H_{k,1},H_{k,2},\ldots
+\right\},
+\]
+
+define the increment
+
+\[
+\Delta z_k(t_m)
 =
-\Delta x\,\Delta s
-\sum_{i,j}B^{(k)}_{ij}(t).
+z_k(t_{m+1})-z_k(t_m).
 \]
 
-## Mean width
-
-For a completely wrapped band,
+Group observations into bins according to the current value \(z_k(t_m)\). The discrete conditional drift is
 
 \[
-\bar w_k(t)
+F_z(z_b)
 =
-\frac{A_k(t)}{L_s}
+\frac{1}{\Delta t}
+\left\langle
+\Delta z_k
+\mid z_k(t_m)\in z_b
+\right\rangle.
+\]
+
+The conditional diffusion is
+
+\[
+D_z(z_b)
 =
-\frac{1}{N_s}\sum_jw_{kj}(t).
+\frac{1}{2\Delta t}
+\left\langle
+\left[
+\Delta z_k-F_z(z_b)\Delta t
+\right]^2
+\mid z_k(t_m)\in z_b
+\right\rangle.
 \]
-
-The area-based expression is generally more robust to individual noisy columns.
-
-## Mean axial position
-
-Use the average centerline:
-
-\[
-X_k(t)
-=
-\frac{1}{N_s}
-\sum_{j=0}^{N_s-1}h_{kj}(t).
-\]
-
-This weights every circumferential position equally. The ordinary area centroid,
-
-\[
-X_k^{\rm area}
-=
-\frac{\sum_{ij}x_i B^{(k)}_{ij}}
-{\sum_{ij}B^{(k)}_{ij}},
-\]
-
-may also be recorded, but it is biased toward locally wider portions of the band.
-
-If \(x\) is periodic, unwrap \(X_k(t)\) in time before calculating displacements.
-
-## Width nonuniformity
-
-\[
-\sigma_{w,k}^2(t)
-=
-\frac{1}{N_s}
-\sum_j
-\left[w_{kj}(t)-\bar w_k(t)\right]^2.
-\]
-
-This distinguishes a nearly uniform band from one that opens and closes locally.
-
-## Centerline roughness
-
-\[
-\sigma_{h,k}^2(t)
-=
-\frac{1}{N_s}
-\sum_j
-\left[h_{kj}(t)-X_k(t)\right]^2.
-\]
-
-## Discrete interface length
-
-Use periodic indexing \(j+1\equiv0\) at \(j=N_s-1\):
-
-\[
-P_k=
-\sum_j
-\sqrt{
-\Delta s^2+
-\left(x^-_{k,j+1}-x^-_{kj}\right)^2
-}
-+
-\sum_j
-\sqrt{
-\Delta s^2+
-\left(x^+_{k,j+1}-x^+_{kj}\right)^2
-}.
-\]
-
-For a straight uniform band,
-
-\[
-P_k\approx2L_s.
-\]
-
-Obliqueness, bending, and roughness increase \(P_k\).
+Plot these values for different `delta t` with starting with just 1 frame, up to 10 frames:
 
 ---
 
-## Circumferential shape modes
+## Position dynamics
 
-Apply a discrete Fourier transform to the centerline:
+Plot `F_X(X)`
 
 \[
-\widetilde h_{k,n}
+\operatorname{MSD}_X(\tau)
 =
-\frac{1}{N_s}
-\sum_{j=0}^{N_s-1}
-\left[h_{kj}-X_k\right]
-e^{-2\pi i n j/N_s}.
+\left\langle
+[X_k(t+tau)-X_k(t)]^2
+\right\rangle.
 \]
 
-Define the mode amplitude
+and plot that on the same plot
+
+---
+
+## Width or area dynamics
+
+For all stable band, plot:
 
 \[
-H_{k,n}=2\left|\widetilde h_{k,n}\right|.
+F_A(A)
 \]
 
-Similarly, width modes are
+and `F_w_bar(w_bar)`
+
+Then plot `D_A`
+
+---
+
+## Shape-mode dynamics
+
+For each complex centerline mode, estimate
 
 \[
-\widetilde w_{k,n}
+\frac{
+\widetilde h_{k,n}(t_{m+1})
+-
+\widetilde h_{k,n}(t_m)
+}{\Delta t}.
+\]
+
+
+---
+
+## Coupling between multiple bands
+
+Sort bands by their axial positions and define their separations:
+
+\[
+\ell_k(t)=X_{k+1}(t)-X_k(t).
+\]
+
+To examine one band closing while another opens, calculate
+
+\[
+C_{k\ell}^{A}(\tau)
 =
-\frac{1}{N_s}
-\sum_j
-\left[w_{kj}-\bar w_k\right]
-e^{-2\pi i n j/N_s}.
+\left\langle
+\delta A_k(t)
+\delta A_\ell(t+\tau)
+\right\rangle,
 \]
 
-Interpretation:
-
-- \(H_{k,1}\): largest-scale displacement or oblique/trapezoidal shape;
-- \(H_{k,2}\): two-lobed deformation;
-- higher \(n\): smaller-scale interface roughness;
-- \(|\widetilde w_{k,n}|\): local opening and closing around the circumference.
-
-The allowed circumferential wave numbers are
+where
 
 \[
-q_n=\frac{2\pi n}{L_s}=\frac{n}{R_s}.
+\delta A_k=A_k-\langle A_k\rangle.
 \]
 
-This gives a direct connection between the observed band modes and cylinder radius.
+A negative correlation indicates that one band tends to gain dilute area while another loses it. Also track
 
-Here are the outputs:
- - A safetensor containing each of these fields
- - A plot of each of the time based fields e.g field(t) netted over all bands, so the net (not the mean), so a plot of that versus time.
+\[
+A_{\rm total}(t)=\sum_kA_k(t).
+\]
+
+Nearly constant \(A_{\rm total}\) together with anticorrelated \(A_k\) would support redistribution of dilute material between bands rather than independent creation and destruction. In order to test this, plot A_total against the mean mangitude of velocity of A_k, so if that mean magntiude is not zero we know there is some distribution
+
+---
+
+For every detected band and every frame, store
+
+\[
+\boxed{
+\{
+t,\,
+\text{band ID},\,
+X,\,
+A,\,
+\bar w,\,
+\sigma_w,\,
+\sigma_h,\,
+P,\,
+H_1,\,
+H_2,\ldots
+\}
+}
+\]
+
+With all the fields we mentioned here as well, i.e each F_X for each delta t. THis should be stored as a safetensor in the same safetensor you stored the other components. When something is passed with no `--overwrite` just plot using the safetensors.
