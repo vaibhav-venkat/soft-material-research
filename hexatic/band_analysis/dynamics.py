@@ -333,54 +333,112 @@ def add_position_msd(
     tensors["position_msd_count"] = counts
 
 
-def _neighbor_adjacency(positions: np.ndarray, stable: np.ndarray) -> np.ndarray:
-    """Build symmetric periodic nearest-neighbor adjacency per frame."""
-    n_time, n_tracks = stable.shape
-    adjacency = np.zeros((n_time, n_tracks, n_tracks), dtype=bool)
+def _neighbor_pair_slots(
+    positions: np.ndarray, stable: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Store unique periodic neighbor pairs in compact per-frame slots."""
+    n_time = stable.shape[0]
+    frame_pairs: list[list[tuple[int, int]]] = []
     for time_index in range(n_time):
         selected = np.flatnonzero(stable[time_index])
         if len(selected) < 2:
+            frame_pairs.append([])
             continue
         ordered = selected[np.argsort(positions[time_index, selected])]
         if len(ordered) == 2:
             first, second = int(ordered[0]), int(ordered[1])
-            adjacency[time_index, first, second] = True
-            adjacency[time_index, second, first] = True
+            frame_pairs.append([(min(first, second), max(first, second))])
             continue
         following = np.roll(ordered, -1)
-        adjacency[time_index, ordered, following] = True
-        adjacency[time_index, following, ordered] = True
-    return adjacency
+        frame_pairs.append(
+            sorted(
+                {
+                    (min(int(first), int(second)), max(int(first), int(second)))
+                    for first, second in zip(ordered, following, strict=True)
+                }
+            )
+        )
+    max_pairs = max((len(pairs) for pairs in frame_pairs), default=0)
+    first_slots = np.full((n_time, max_pairs), -1, dtype=np.int64)
+    second_slots = np.full((n_time, max_pairs), -1, dtype=np.int64)
+    for time_index, pairs in enumerate(frame_pairs):
+        for pair_index, (first, second) in enumerate(pairs):
+            first_slots[time_index, pair_index] = first
+            second_slots[time_index, pair_index] = second
+    return first_slots, second_slots
 
 
 @jax.jit
 def _batched_neighbor_covariance(
     centered: jax.Array,
-    adjacency: jax.Array,
+    first_slots: jax.Array,
+    second_slots: jax.Array,
     segments: jax.Array,
     times: jax.Array,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
-    n_time, n_tracks = centered.shape
+    n_time = centered.shape[0]
     starts = jnp.arange(n_time)
     lags = jnp.arange(1, n_time)[:, jnp.newaxis]
     ends = starts[jnp.newaxis, :] + lags
     valid_time = ends < n_time
     ends = jnp.minimum(ends, n_time - 1)
-    same_segment = segments[jnp.newaxis, :, :] == segments[ends]
+    safe_first = jnp.maximum(first_slots, 0)
+    safe_second = jnp.maximum(second_slots, 0)
+    end_first = first_slots[ends]
+    end_second = second_slots[ends]
+    safe_end_first = jnp.maximum(end_first, 0)
+    safe_end_second = jnp.maximum(end_second, 0)
+
+    start_first_values = jnp.take_along_axis(centered, safe_first, axis=1)
+    start_second_values = jnp.take_along_axis(centered, safe_second, axis=1)
+    end_centered = centered[ends]
+    end_first_values = jnp.take_along_axis(
+        end_centered, safe_end_first, axis=2
+    )
+    end_second_values = jnp.take_along_axis(
+        end_centered, safe_end_second, axis=2
+    )
+    start_first_segments = jnp.take_along_axis(segments, safe_first, axis=1)
+    start_second_segments = jnp.take_along_axis(segments, safe_second, axis=1)
+    end_segments = segments[ends]
+    end_first_segments = jnp.take_along_axis(
+        end_segments, safe_end_first, axis=2
+    )
+    end_second_segments = jnp.take_along_axis(
+        end_segments, safe_end_second, axis=2
+    )
+
     pair_valid = (
         valid_time[..., jnp.newaxis, jnp.newaxis]
-        & adjacency[jnp.newaxis, :, :, :]
-        & adjacency[ends]
-        & same_segment[..., :, jnp.newaxis]
-        & same_segment[..., jnp.newaxis, :]
+        & (first_slots[jnp.newaxis, :, :, jnp.newaxis] >= 0)
+        & (end_first[..., jnp.newaxis, :] >= 0)
+        & (
+            first_slots[jnp.newaxis, :, :, jnp.newaxis]
+            == end_first[..., jnp.newaxis, :]
+        )
+        & (
+            second_slots[jnp.newaxis, :, :, jnp.newaxis]
+            == end_second[..., jnp.newaxis, :]
+        )
+        & (
+            start_first_segments[jnp.newaxis, :, :, jnp.newaxis]
+            == end_first_segments[..., jnp.newaxis, :]
+        )
+        & (
+            start_second_segments[jnp.newaxis, :, :, jnp.newaxis]
+            == end_second_segments[..., jnp.newaxis, :]
+        )
     )
     products = (
-        centered[jnp.newaxis, :, :, jnp.newaxis]
-        * centered[ends][..., jnp.newaxis, :]
+        start_first_values[jnp.newaxis, :, :, jnp.newaxis]
+        * end_second_values[..., jnp.newaxis, :]
+        + start_second_values[jnp.newaxis, :, :, jnp.newaxis]
+        * end_first_values[..., jnp.newaxis, :]
     )
     delta_tau = times[ends] - times[jnp.newaxis, :]
     pair_valid &= delta_tau[..., jnp.newaxis, jnp.newaxis] > 0.0
-    counts = jnp.sum(pair_valid, axis=(1, 2, 3))
+    matched_pairs = jnp.sum(pair_valid, axis=(1, 2, 3))
+    counts = 2 * matched_pairs
     safe_counts = jnp.maximum(counts, 1)
     covariance = (
         jnp.sum(jnp.where(pair_valid, products, 0.0), axis=(1, 2, 3))
@@ -390,7 +448,7 @@ def _batched_neighbor_covariance(
         jnp.sum(
             jnp.where(
                 pair_valid,
-                delta_tau[..., jnp.newaxis, jnp.newaxis],
+                2.0 * delta_tau[..., jnp.newaxis, jnp.newaxis],
                 0.0,
             ),
             axis=(1, 2, 3),
@@ -458,13 +516,14 @@ def add_area_coupling(
         selected = stable & (segments == segment_id)
         centered[selected] = area[selected] - float(np.mean(area[selected]))
 
-    adjacency = _neighbor_adjacency(positions, stable)
+    first_slots, second_slots = _neighbor_pair_slots(positions, stable)
     lag_count = max(0, n_time - 1)
     if lag_count:
         physical_lag, covariance, counts = jax.device_get(
             _batched_neighbor_covariance(
                 jnp.asarray(centered),
-                jnp.asarray(adjacency),
+                jnp.asarray(first_slots),
+                jnp.asarray(second_slots),
                 jnp.asarray(segments),
                 jnp.asarray(times),
             )
