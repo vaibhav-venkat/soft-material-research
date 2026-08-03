@@ -10,6 +10,7 @@ from typing import Any, Callable
 
 import arviz as az
 import numpy as np
+from safetensors import safe_open
 from safetensors.numpy import load_file, save_file
 
 from .bayesian import MCMCConfig, run_bayesian_inference, save_inference_data
@@ -20,7 +21,7 @@ from .storage import fingerprint
 from .validation import ValidationResult, validate_posterior
 
 
-LAG_CACHE_SCHEMA = "hexatic.band_lag.v2"
+LAG_CACHE_SCHEMA = "hexatic.band_lag.v3"
 
 
 @dataclass(frozen=True)
@@ -81,11 +82,18 @@ def _save_json(path: Path, value: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
-def _save_arrays(path: Path, arrays: dict[str, np.ndarray]) -> None:
+def _save_arrays(
+    path: Path, arrays: dict[str, np.ndarray], *, cache_fingerprint: str
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
     save_file(
-        {key: np.ascontiguousarray(value) for key, value in arrays.items()}, temporary
+        {key: np.ascontiguousarray(value) for key, value in arrays.items()},
+        temporary,
+        metadata={
+            "schema": LAG_CACHE_SCHEMA,
+            "fingerprint": cache_fingerprint,
+        },
     )
     temporary.replace(path)
 
@@ -192,6 +200,9 @@ def _compute_lag(
         else:
             validation_metrics["holdout"] = {"aggregate": None, "per_seed": {}}
     hessian = optimization.best.hessian
+    physical_dt = np.concatenate(
+        [np.asarray(block.dt) for block in prepared.blocks]
+    ) * prepared.scaling.time
     metadata: dict[str, Any] = {
         "accepted": bayesian.diagnostics.accepted,
         "retried": bayesian.retried,
@@ -217,6 +228,9 @@ def _compute_lag(
             "weighted_training_transitions": float(
                 sum(np.asarray(block.weight).sum() for block in prepared.blocks)
             ),
+            "physical_dt_min": float(np.min(physical_dt)),
+            "physical_dt_median": float(np.median(physical_dt)),
+            "physical_dt_max": float(np.max(physical_dt)),
             "holdout_seeds": len(holdouts),
         },
     }
@@ -240,13 +254,26 @@ def _load_cache(
         or not posterior_path.exists()
     ):
         return None
+    with safe_open(arrays_path, framework="numpy") as handle:
+        arrays_metadata = dict(handle.metadata())
+    if (
+        arrays_metadata.get("schema") != LAG_CACHE_SCHEMA
+        or arrays_metadata.get("fingerprint") != expected_fingerprint
+    ):
+        raise ValueError(f"incompatible lag arrays cache {arrays_path}")
+    idata = az.from_netcdf(posterior_path, engine="h5netcdf")
+    if (
+        idata.posterior.attrs.get("band_analysis_fingerprint")
+        != expected_fingerprint
+    ):
+        raise ValueError(f"incompatible lag posterior cache {posterior_path}")
     return LagOutcome(
         lag=lag,
         accepted=bool(metadata["accepted"]),
         cached=True,
         metadata=metadata,
         arrays=load_file(arrays_path),
-        idata=az.from_netcdf(posterior_path, engine="h5netcdf"),
+        idata=idata,
     )
 
 
@@ -286,8 +313,21 @@ def run_analysis(
                 continue
         metadata, arrays, idata = compute_lag(lag, training, holdouts, config)
         arrays_path, posterior_path, metrics_path = _paths(output_dir, lag)
-        _save_arrays(arrays_path, arrays)
-        save_inference_data(posterior_path, idata)
+        _save_json(
+            metrics_path,
+            {
+                "schema": LAG_CACHE_SCHEMA,
+                "status": "incomplete",
+                "lag": lag,
+                "fingerprint": lag_fingerprint,
+            },
+        )
+        _save_arrays(
+            arrays_path, arrays, cache_fingerprint=lag_fingerprint
+        )
+        save_inference_data(
+            posterior_path, idata, fingerprint=lag_fingerprint
+        )
         completed = {
             **metadata,
             "schema": LAG_CACHE_SCHEMA,

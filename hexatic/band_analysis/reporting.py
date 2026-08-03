@@ -132,6 +132,10 @@ def _validation_lines(title: str, metrics: dict[str, Any] | None) -> list[str]:
         "simulated_total_mean",
         "observed_total_variance",
         "simulated_total_variance",
+        "observed_total_relaxation_time",
+        "simulated_total_relaxation_time",
+        "observed_conservative_relaxation_time",
+        "simulated_conservative_relaxation_time",
     )
     lines = [f"#### {title}", "", "| Metric | Value |", "|---|---:|"]
     lines.extend(
@@ -186,13 +190,16 @@ def write_report(
         "",
         "## Lag overview",
         "",
-        "| Lag | Physical Δτ | Status | Segments | Transitions | Seeds | Divergences | Cached |",
+        "| Lag | Median physical Δτ | Status | Segments | Transitions | Seeds | Divergences | Cached |",
         "|---:|---:|---|---:|---:|---:|---:|---|",
     ]
     for outcome in outcomes:
         data = outcome.metadata.get("data", {})
         diagnostics = outcome.metadata["diagnostics"]
-        physical_dt = outcome.lag * outcome.metadata["scaling"]["time"]
+        physical_dt = data.get(
+            "physical_dt_median",
+            outcome.lag * outcome.metadata["scaling"]["time"],
+        )
         lines.append(
             f"| {outcome.lag} | {_number(physical_dt)} | "
             f"{'accepted' if outcome.accepted else 'rejected'} | "

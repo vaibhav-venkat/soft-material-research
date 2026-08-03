@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from pathlib import Path
 import re
 from typing import Any, Callable
@@ -159,12 +158,24 @@ def _whitened_plot(outcome: LagOutcome, arrays: dict[str, np.ndarray], path: Pat
         axis.set(xlabel=label, ylabel="whitened residual")
     axes[1, 0].stem(np.arange(min(50, len(acf))), acf[:50])
     axes[1, 0].set_title("pooled residual ACF")
-    size = int(round(math.sqrt(len(covariance))))
-    if size * size == len(covariance) and size:
-        image = axes[1, 1].imshow(covariance.reshape(size, size), cmap="coolwarm")
-        figure.colorbar(image, ax=axes[1, 1], shrink=0.8)
-    else:
-        axes[1, 1].hist(covariance, bins=30)
+    offsets = arrays["residual_covariance_offset"]
+    band_counts = arrays["residual_covariance_band_count"]
+    diagonal: list[np.ndarray] = []
+    off_diagonal: list[np.ndarray] = []
+    for index, n_bands in enumerate(band_counts):
+        matrix = covariance[offsets[index] : offsets[index + 1]].reshape(
+            int(n_bands), int(n_bands)
+        )
+        diagonal.append(np.diag(matrix))
+        off_diagonal.append(matrix[~np.eye(int(n_bands), dtype=bool)])
+    if diagonal:
+        axes[1, 1].hist(np.concatenate(diagonal), bins=25, alpha=0.6, label="diagonal")
+        nonempty = [values for values in off_diagonal if len(values)]
+        if nonempty:
+            axes[1, 1].hist(
+                np.concatenate(nonempty), bins=25, alpha=0.6, label="off-diagonal"
+            )
+        axes[1, 1].legend()
     axes[1, 1].set_title("component covariance entries")
     figure.suptitle(f"Lag {outcome.lag}: whitened residuals")
     _save(path, figure)
@@ -188,53 +199,76 @@ def _predictive_plot(outcome: LagOutcome, arrays: dict[str, np.ndarray], path: P
         if observed_values is None or predicted_values is None:
             observed_values, predicted_values = observed, mean
         axis.hist(observed_values, bins=40, density=True, alpha=0.55, label="observed")
-        axis.hist(predicted_values, bins=40, density=True, alpha=0.55, label="predictive")
+        axis.hist(
+            predicted_values,
+            bins=40,
+            density=True,
+            alpha=0.55,
+            label="posterior predictive",
+        )
         axis.set_xlabel(label)
         axis.legend()
     figure.suptitle(f"Lag {outcome.lag}: one-step predictive check")
     _save(path, figure)
 
 
-def _path_totals(arrays: dict[str, np.ndarray], maximum: int = 30) -> list[np.ndarray]:
+def _path_totals(
+    arrays: dict[str, np.ndarray], maximum: int = 30
+) -> list[tuple[np.ndarray, np.ndarray]]:
     values = arrays["path_area"]
     offsets = arrays["path_offset"]
+    times = arrays["path_tau"]
+    time_offsets = arrays["path_time_offset"]
     counts = arrays["path_band_count"]
     totals = []
     for index, n_bands in enumerate(counts[:maximum]):
         path = values[offsets[index] : offsets[index + 1]].reshape(-1, int(n_bands))
-        totals.append(path.sum(axis=1))
+        tau = times[time_offsets[index] : time_offsets[index + 1]]
+        totals.append((tau - tau[0], path.sum(axis=1)))
     return totals
 
 
 def _trajectory_plot(outcome: LagOutcome, arrays: dict[str, np.ndarray], path: Path) -> None:
     figure, axis = plt.subplots(figsize=(9, 4))
-    for total in _path_totals(arrays):
-        axis.plot(total, color="tab:blue", alpha=0.12)
+    for tau, total in _path_totals(arrays):
+        axis.plot(tau, total, color="tab:blue", alpha=0.12)
     observed_values = arrays.get("observed_path_area")
     observed_offsets = arrays.get("observed_path_offset")
     observed_counts = arrays.get("observed_path_band_count")
     if observed_values is not None and observed_offsets is not None and observed_counts is not None:
         stop = int(observed_offsets[1])
         observed = observed_values[:stop].reshape(-1, int(observed_counts[0])).sum(axis=1)
+        observed_time_stop = int(arrays["observed_path_time_offset"][1])
+        observed_tau = arrays["observed_path_tau"][:observed_time_stop]
+        observed_tau = observed_tau - observed_tau[0]
     else:
         observed = arrays["observed_total"][:500]
-    axis.plot(observed, color="black", linewidth=2, label="observed segment 0")
-    axis.set(xlabel="frame within segment", ylabel=r"$A_T$")
+        observed_tau = np.arange(len(observed))
+    axis.plot(
+        observed_tau,
+        observed,
+        color="black",
+        linewidth=2,
+        label="observed segment 0",
+    )
+    axis.set(xlabel=r"physical time from segment start", ylabel=r"$A_T$")
     axis.legend()
     axis.set_title(f"Lag {outcome.lag}: posterior trajectories")
     _save(path, figure)
 
 
 def _long_time_plot(outcome: LagOutcome, arrays: dict[str, np.ndarray], path: Path) -> None:
-    figure, axes = plt.subplots(2, 2, figsize=(10, 8))
+    figure, axes = plt.subplots(2, 3, figsize=(14, 8))
     axes[0, 0].hist(arrays["observed_total"], bins=40, density=True, alpha=0.6, label="observed")
     axes[0, 0].hist(arrays["simulated_total"], bins=40, density=True, alpha=0.5, label="simulated")
     axes[0, 0].set_xlabel(r"$A_T$")
     axes[0, 0].legend()
-    for name, color in (("observed_total_acf", "black"), ("simulated_total_acf", "tab:blue")):
-        values = arrays[name]
-        axes[0, 1].plot(values[: min(100, len(values))], color=color, label=name.split("_")[0])
-    axes[0, 1].set(xlabel="pooled lag", ylabel=r"$A_T$ ACF")
+    for prefix, color in (("observed", "black"), ("simulated", "tab:blue")):
+        values = arrays[f"{prefix}_total_acf"]
+        lag_time = arrays[f"{prefix}_lag_time"]
+        stop = min(100, len(values), len(lag_time))
+        axes[0, 1].plot(lag_time[:stop], values[:stop], color=color, label=prefix)
+    axes[0, 1].set(xlabel="physical lag time", ylabel=r"$A_T$ ACF")
     axes[0, 1].legend()
     for axis, suffix, label in (
         (axes[1, 0], "area", r"$A_i$"),
@@ -247,23 +281,44 @@ def _long_time_plot(outcome: LagOutcome, arrays: dict[str, np.ndarray], path: Pa
             axis.hist(simulated_values, bins=40, density=True, alpha=0.5, label="simulated")
             axis.legend()
         axis.set_xlabel(label)
+    for prefix, color in (("observed", "black"), ("simulated", "tab:blue")):
+        acf = arrays[f"{prefix}_conservative_acf"]
+        lag_time = arrays[f"{prefix}_lag_time"]
+        stop = min(100, len(acf), len(lag_time))
+        axes[0, 2].plot(lag_time[:stop], acf[:stop], color=color, label=prefix)
+        msd = arrays[f"{prefix}_area_msd"]
+        stop = min(100, len(msd), len(lag_time))
+        axes[1, 2].plot(lag_time[:stop], msd[:stop], color=color, label=prefix)
+    axes[0, 2].set(xlabel="physical lag time", ylabel="conservative-mode ACF")
+    axes[1, 2].set(xlabel="physical lag time", ylabel=r"area MSD")
+    axes[0, 2].legend()
+    axes[1, 2].legend()
     figure.suptitle(f"Lag {outcome.lag}: long-time behavior")
     _save(path, figure)
 
 
 def _covariance_plot(outcome: LagOutcome, arrays: dict[str, np.ndarray], path: Path) -> None:
-    observed = arrays["observed_increment_covariance"]
-    simulated = arrays["simulated_increment_covariance"]
-    figure, axes = plt.subplots(1, 2, figsize=(10, 4))
-    limit = max(np.max(np.abs(observed), initial=0.0), np.max(np.abs(simulated), initial=0.0), 1e-12)
-    for axis, values, title in zip(axes, (observed, simulated), ("observed", "simulated"), strict=True):
-        size = int(round(math.sqrt(len(values))))
-        if size * size == len(values) and size:
-            image = axis.imshow(values.reshape(size, size), cmap="coolwarm", vmin=-limit, vmax=limit)
-            figure.colorbar(image, ax=axis, shrink=0.8)
-        else:
-            axis.hist(values, bins=30)
-        axis.set_title(f"{title} increment covariance")
+    figure, axes = plt.subplots(1, 3, figsize=(14, 4))
+    comparisons = (
+        ("increment_covariance", "band increments"),
+        ("conservative_increment_covariance", "conservative modes"),
+        ("increment_total_covariance", r"band increment vs. $\Delta A_T$"),
+    )
+    for axis, (suffix, title) in zip(axes, comparisons, strict=True):
+        observed = arrays[f"observed_{suffix}"]
+        simulated = arrays[f"simulated_{suffix}"]
+        axis.scatter(observed, simulated, s=10, alpha=0.5)
+        limit = max(
+            np.max(np.abs(observed), initial=0.0),
+            np.max(np.abs(simulated), initial=0.0),
+            1e-12,
+        )
+        axis.plot((-limit, limit), (-limit, limit), color="black", linewidth=0.8)
+        axis.set(
+            xlabel="observed covariance",
+            ylabel="simulated covariance",
+            title=title,
+        )
     figure.suptitle(f"Lag {outcome.lag}: covariance check")
     _save(path, figure)
 
@@ -328,14 +383,31 @@ def _cross_lag_parameters(outcomes: list[LagOutcome], path: Path) -> None:
 def _physical_dt(outcomes: list[LagOutcome], path: Path) -> None:
     figure, axis = plt.subplots(figsize=(7, 4))
     lag = np.asarray([outcome.lag for outcome in outcomes])
-    dt = np.asarray(
-        [outcome.lag * outcome.metadata["scaling"]["time"] for outcome in outcomes]
+    medians = np.asarray(
+        [outcome.metadata["data"]["physical_dt_median"] for outcome in outcomes]
+    )
+    lower = np.asarray(
+        [outcome.metadata["data"]["physical_dt_min"] for outcome in outcomes]
+    )
+    upper = np.asarray(
+        [outcome.metadata["data"]["physical_dt_max"] for outcome in outcomes]
     )
     colors = ["tab:blue" if outcome.accepted else "tab:red" for outcome in outcomes]
-    axis.scatter(lag, dt, c=colors)
-    for x, y, outcome in zip(lag, dt, outcomes, strict=True):
+    for x, median, low, high, color in zip(
+        lag, medians, lower, upper, colors, strict=True
+    ):
+        axis.errorbar(
+            x,
+            median,
+            yerr=np.asarray([[median - low], [high - median]]),
+            fmt="none",
+            ecolor=color,
+            capsize=3,
+        )
+    axis.scatter(lag, medians, c=colors)
+    for x, y, outcome in zip(lag, medians, outcomes, strict=True):
         axis.annotate("accepted" if outcome.accepted else "rejected", (x, y), xytext=(3, 4), textcoords="offset points")
-    axis.set(xlabel="frame lag", ylabel=r"physical $\Delta\tau$")
+    axis.set(xlabel="frame lag", ylabel=r"physical $\Delta\tau$ (min/median/max)")
     axis.set_title("Inference cadence")
     _save(path, figure)
 

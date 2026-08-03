@@ -193,9 +193,13 @@ def run_bayesian_inference(
     )
 
 
-def save_inference_data(path: Path, idata: az.InferenceData) -> None:
+def save_inference_data(
+    path: Path, idata: az.InferenceData, *, fingerprint: str | None = None
+) -> None:
     """Atomically write physical-unit posterior samples."""
     path.parent.mkdir(parents=True, exist_ok=True)
+    if fingerprint is not None:
+        idata.posterior.attrs["band_analysis_fingerprint"] = fingerprint
     temporary = path.with_suffix(path.suffix + ".tmp")
     idata.to_netcdf(temporary, engine="h5netcdf")
     temporary.replace(path)
