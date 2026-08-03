@@ -1,4 +1,4 @@
-"""Continue the half-N C=60.5D, Lx=8x case from the last frame of a GSD."""
+"""Continue a full- or half-N C=60.5D, Lx=8x case from a GSD."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import argparse
 from dataclasses import replace
 import json
 from pathlib import Path
+from typing import Literal
 
 import gsd.hoomd
 import hoomd
@@ -15,7 +16,8 @@ from hexatic.constants import cylinder
 from .analyze_case import analyze_case
 from .cases import CasePaths, get_case
 
-CASE_ID = "circ_60_5D_lx_8x_half_n"
+HALF_N_CASE_ID = "circ_60_5D_lx_8x_half_n"
+FULL_N_CASE_ID = "circ_60_5D_lx_8x"
 EXTRA_STEPS = 1_000_000_000
 TRAJECTORY_WRITE_PERIOD = 1_000_000
 EXPECTED_FRAME_COUNT = EXTRA_STEPS // TRAJECTORY_WRITE_PERIOD
@@ -54,16 +56,20 @@ def continue_case(
     *,
     gpu_id: int | None = None,
     seed: int | None = None,
+    population: Literal["half-n", "full-n"] = "half-n",
 ) -> None:
-    """Continue the fixed big-Lx case and analyze the resulting trajectory."""
+    """Continue the selected 8x big-Lx case and analyze its trajectory."""
     if gpu_id is not None and gpu_id < 0:
         raise ValueError("gpu_id must be non-negative")
+    if population not in ("half-n", "full-n"):
+        raise ValueError("population must be 'half-n' or 'full-n'")
     output_dir = output_dir.resolve()
     input_gsd = input_gsd.resolve()
     if not input_gsd.is_file():
         raise FileNotFoundError(f"Missing input GSD: {input_gsd}")
 
-    case = get_case(CASE_ID)
+    case_id = HALF_N_CASE_ID if population == "half-n" else FULL_N_CASE_ID
+    case = get_case(case_id)
     if seed is not None:
         case = replace(case, seed=seed)
     paths = CasePaths(case, output_dir)
@@ -104,6 +110,7 @@ def continue_case(
     metadata.update(
         status="running",
         continuation=True,
+        continuation_population=population,
         input_gsd=str(input_gsd),
         input_frame_count=input_frame_count,
         input_last_step=input_last_step,
@@ -185,7 +192,7 @@ def continue_case(
         f"[big_lx.continue] case={case.case_id} input_step={input_last_step} "
         f"extra_steps={EXTRA_STEPS} write_period={TRAJECTORY_WRITE_PERIOD} "
         f"tau_r={TAU_R} diffusion_period={ROTATIONAL_DIFFUSION_PERIOD} "
-        f"seed={case.seed} gpu={gpu_id}",
+        f"population={population} seed={case.seed} gpu={gpu_id}",
         flush=True,
     )
     sim.run(EXTRA_STEPS)
@@ -212,6 +219,7 @@ def continue_case(
             "case_id": case.case_id,
             "status": "complete",
             "continuation": True,
+            "continuation_population": population,
             "input_gsd": str(input_gsd),
             "input_last_step": input_last_step,
             "extra_steps": EXTRA_STEPS,
@@ -233,9 +241,9 @@ def continue_case(
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Continue the half-N C=60.5D, Lx=8x case for 10^9 steps from "
-            "the last frame of an input GSD, then run the standard big-Lx "
-            "analysis."
+            "Continue the full- or half-N C=60.5D, Lx=8x case for 10^9 "
+            "steps from the last frame of an input GSD, then run the "
+            "standard big-Lx analysis."
         )
     )
     parser.add_argument("output_dir", type=Path)
@@ -247,6 +255,22 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="Override the case seed for the continuation and downstream analysis.",
     )
+    population = parser.add_mutually_exclusive_group()
+    population.add_argument(
+        "--half-n",
+        dest="population",
+        action="store_const",
+        const="half-n",
+        help="Continue the half-occupancy case (default).",
+    )
+    population.add_argument(
+        "--full-n",
+        dest="population",
+        action="store_const",
+        const="full-n",
+        help="Continue the full-occupancy case.",
+    )
+    parser.set_defaults(population="half-n")
     return parser.parse_args()
 
 
@@ -257,6 +281,7 @@ def main() -> None:
         args.input_gsd,
         gpu_id=args.gpu_id,
         seed=args.seed,
+        population=args.population,
     )
 
 
