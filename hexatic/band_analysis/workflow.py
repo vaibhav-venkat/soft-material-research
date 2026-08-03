@@ -104,7 +104,7 @@ def _posterior_intervals(idata: az.InferenceData) -> dict[str, dict[str, float]]
     intervals: dict[str, dict[str, float]] = {}
     for name in PARAMETER_NAMES:
         values = np.asarray(idata.posterior[name]).reshape(-1)
-        hdi = np.asarray(az.hdi(values, hdi_prob=0.95))
+        hdi = np.asarray(az.hdi(values, prob=0.95))
         intervals[name] = {
             "median": float(np.median(values)),
             "hdi_low": float(hdi[0]),
