@@ -15,6 +15,7 @@ from .dynamics import (
     area_drift_constant_model,
     area_drift_cubic_model,
 )
+from .tracking import EventCode
 
 
 _LEGACY_NET_PLOTS = (
@@ -159,6 +160,87 @@ def _plot_area_coupling(tensors: dict[str, np.ndarray], output_dir: Path) -> dic
     plt.close(figure)
     outputs["stable_area_redistribution"] = redistribution_file
     return outputs
+
+
+def _plot_area_heterogeneity_events(
+    tensors: dict[str, np.ndarray], output_dir: Path
+) -> dict[str, str]:
+    filename = "area_heterogeneity_events.png"
+    figure, axes = plt.subplots(3, 1, figsize=(10.0, 10.0), sharex=True)
+    time = tensors["physical_time"]
+    metrics = (
+        (
+            tensors["instantaneous_area_variance"],
+            r"$V_A(t)$",
+        ),
+        (
+            tensors["instantaneous_area_cv_squared"],
+            r"$CV_A^2(t)$",
+        ),
+        (
+            tensors["instantaneous_maximum_area_fraction"],
+            r"$f_{\max}(t)$",
+        ),
+    )
+    for axis, (values, ylabel) in zip(axes, metrics, strict=True):
+        axis.plot(time, values, color="black", linewidth=1.4)
+        axis.set_ylabel(ylabel)
+        axis.grid(alpha=0.25)
+
+    event_styles = (
+        (EventCode.BIRTH, "birth", "tab:green", "^"),
+        (EventCode.DISAPPEARANCE, "death", "tab:red", "v"),
+        (EventCode.MERGE, "merge", "tab:orange", "X"),
+        (EventCode.SPLIT, "split", "tab:blue", "P"),
+    )
+    frame_event_code = tensors["frame_event_code"]
+    for event_code, label, color, marker in event_styles:
+        occurrences = np.sum(frame_event_code == int(event_code), axis=1)
+        event_indices = np.flatnonzero(occurrences > 0)
+        if not event_indices.size:
+            continue
+        for axis, (values, _) in zip(axes, metrics, strict=True):
+            for event_index in event_indices:
+                axis.axvline(
+                    time[event_index],
+                    color=color,
+                    linewidth=0.8,
+                    alpha=0.18,
+                    zorder=1,
+                )
+            finite_events = event_indices[np.isfinite(values[event_indices])]
+            if finite_events.size:
+                axis.scatter(
+                    time[finite_events],
+                    values[finite_events],
+                    s=45.0 + 12.0 * (occurrences[finite_events] - 1),
+                    color=color,
+                    marker=marker,
+                    edgecolors="white",
+                    linewidths=0.5,
+                    zorder=3,
+                    label=label if axis is axes[0] else None,
+                )
+        if not np.any(np.isfinite(metrics[0][0][event_indices])):
+            axes[0].axvline(
+                time[event_indices[0]],
+                color=color,
+                linewidth=0.8,
+                alpha=0.5,
+                label=label,
+            )
+
+    handles, _ = axes[0].get_legend_handles_labels()
+    if handles:
+        axes[0].legend(ncol=4, fontsize=8, loc="best")
+    axes[-1].set_xlabel(r"physical time $\tau$")
+    figure.suptitle(
+        "Instantaneous band-area heterogeneity and tracking events"
+    )
+    figure.tight_layout()
+    figure.savefig(output_dir / filename, dpi=180)
+    plt.close(figure)
+    return {"area_heterogeneity_events": filename}
 
 
 def _plot_normalized_neighbor_relative_area_drift(
@@ -599,6 +681,7 @@ def plot_characterization(
                 f"property={prop.slug}"
             )
     outputs.update(_plot_area_coupling(tensors, output_dir))
+    outputs.update(_plot_area_heterogeneity_events(tensors, output_dir))
     outputs.update(_plot_neighbor_relative_area_drift(tensors, output_dir))
     outputs.update(
         _plot_neighbor_relative_area_change_drift(tensors, output_dir)
@@ -609,5 +692,5 @@ def plot_characterization(
     outputs.update(_plot_area_diagnostics(tensors, output_dir))
     if progress is not None:
         progress("stage=plots coupling=2/2 complete")
-        progress("stage=plots area_diagnostics=7/7 complete")
+        progress("stage=plots area_diagnostics=8/8 complete")
     return outputs
