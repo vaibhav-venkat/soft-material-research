@@ -117,14 +117,13 @@ platforms = ["linux-64-cuda12"]
 
 [feature.big-lx-cuda12.dependencies]
 cuda-version = "12.*"
+jaxlib = { version = "*", build = "*cuda*" }
 
 [feature.big-lx-cuda12.pypi-dependencies]
 jax = { version = "*", extras = ["cuda12"] }
 optimistix = ">=0.1.0,<0.2"
 numpyro = ">=0.21.0,<0.22"
+dynamax = ">=1.0.2,<2"
 
 [environments.big-lx-cuda12]
 features = ["big-lx-cuda12"]
-
-[environments.big-lx-cuda12.dependencies]
-jaxlib = { version = "*", build = "*cuda*" }

@@ -18,8 +18,8 @@ from numpyro.infer import MCMC, NUTS, init_to_value
 from .model import (
     FITTED_PARAMETER_NAMES,
     Scaling,
-    TransitionBlock,
-    transition,
+    TrainingTransitions,
+    parameter_negative_log_likelihood,
 )
 
 
@@ -64,39 +64,32 @@ class BayesianResult:
 
 
 def coupled_area_model(
-    blocks: tuple[TransitionBlock, ...], empirical: np.ndarray
+    data: TrainingTransitions, empirical: np.ndarray
 ) -> None:
-    """Empirical-centered priors and the shared weighted transition likelihood."""
-    fitted_parameters = jnp.stack(
+    """Empirical-centered priors and the Kalman marginal likelihood."""
+    parameters = jnp.stack(
         [
             numpyro.sample(
                 name,
                 dist.LogNormal(jnp.log(empirical[index]), 0.5 if index == 4 else 1.0),
             )
-            for index, name in enumerate(FITTED_PARAMETER_NAMES, start=1)
+            for index, name in enumerate(FITTED_PARAMETER_NAMES)
         ]
     )
-    parameters = jnp.concatenate(
-        (jnp.zeros(1, dtype=jnp.float64), fitted_parameters)
+    numpyro.factor(
+        "kalman_marginal_likelihood",
+        -parameter_negative_log_likelihood(parameters, data),
     )
-    for index, block in enumerate(blocks):
-        means, covariances = jax.vmap(transition, in_axes=(0, 0, None))(
-            block.current, block.dt, parameters
-        )
-        log_density = dist.MultivariateNormal(means, covariance_matrix=covariances).log_prob(
-            block.following
-        )
-        numpyro.factor(f"transitions_{index}", jnp.sum(block.weight * log_density))
 
 
 def _run_once(
-    blocks: tuple[TransitionBlock, ...],
+    data: TrainingTransitions,
     empirical: np.ndarray,
     initial: np.ndarray,
     config: MCMCConfig,
     seed: int,
 ) -> MCMC:
-    initial_values = dict(zip(FITTED_PARAMETER_NAMES, initial[1:], strict=True))
+    initial_values = dict(zip(FITTED_PARAMETER_NAMES, initial, strict=True))
     kernel = NUTS(
         coupled_area_model,
         dense_mass=True,
@@ -116,7 +109,7 @@ def _run_once(
         0.0, 0.02, (config.chains, len(FITTED_PARAMETER_NAMES))
     )
     offsets -= offsets.mean(axis=0, keepdims=True)
-    unconstrained = np.log(initial[1:])[None, :] + offsets
+    unconstrained = np.log(initial)[None, :] + offsets
     initial_parameters = {
         name: jnp.asarray(
             unconstrained[:, index]
@@ -127,7 +120,7 @@ def _run_once(
     }
     sampler.run(
         jax.random.key(seed),
-        blocks,
+        data,
         jnp.asarray(empirical),
         init_params=initial_parameters,
         extra_fields=("potential_energy", "energy", "accept_prob", "num_steps"),
@@ -162,32 +155,31 @@ def _physical_idata(sampler: MCMC, scaling: Scaling) -> az.InferenceData:
     idata = az.from_numpyro(sampler)
     factors = np.asarray(
         [
-            1.0 / scaling.time,
+            scaling.time,
             1.0 / scaling.time,
             scaling.area**2 / scaling.time,
             scaling.area**2 / scaling.time,
             scaling.area,
         ]
     )
-    for name, factor in zip(FITTED_PARAMETER_NAMES, factors[1:], strict=True):
+    for name, factor in zip(FITTED_PARAMETER_NAMES, factors, strict=True):
         idata.posterior[name] = idata.posterior[name] * factor
-    idata.posterior["kappa_c"] = idata.posterior["kappa_T"] * 0.0
     idata.posterior.attrs["parameter_units"] = (
-        "rates: inverse physical time; diffusions: area^2/time; A_T_star: area"
+        "tau_p: physical time; kappa_T: inverse physical time; "
+        "diffusions: area^2/time; A_T_star: area"
     )
     return idata
 
 
 def _normalized_samples(sampler: MCMC) -> np.ndarray:
     samples = sampler.get_samples(group_by_chain=True)
-    fitted = np.stack(
+    return np.stack(
         [np.asarray(samples[name]) for name in FITTED_PARAMETER_NAMES], axis=-1
     )
-    return np.concatenate((np.zeros((*fitted.shape[:-1], 1)), fitted), axis=-1)
 
 
 def run_bayesian_inference(
-    blocks: tuple[TransitionBlock, ...],
+    data: TrainingTransitions,
     empirical: np.ndarray,
     initial: np.ndarray,
     scaling: Scaling,
@@ -197,14 +189,14 @@ def run_bayesian_inference(
 ) -> BayesianResult:
     """Run NUTS and perform exactly one prescribed retry after diagnostic failure."""
     logger.info(
-        "NUTS sampling with kappa_c=0 fixed: %d chains, %d warmup, %d draws, "
+        "NUTS sampling global state-space parameters: %d chains, %d warmup, %d draws, "
         "target acceptance %.2f",
         config.chains,
         config.warmup,
         config.draws,
         config.target_accept,
     )
-    sampler = _run_once(blocks, empirical, initial, config, seed)
+    sampler = _run_once(data, empirical, initial, config, seed)
     idata = _physical_idata(sampler, scaling)
     diagnostics = _diagnostics(idata)
     retried = not diagnostics.accepted
@@ -225,7 +217,7 @@ def run_bayesian_inference(
             used_config.warmup,
             used_config.target_accept,
         )
-        sampler = _run_once(blocks, empirical, initial, used_config, seed + 1)
+        sampler = _run_once(data, empirical, initial, used_config, seed + 1)
         idata = _physical_idata(sampler, scaling)
         diagnostics = _diagnostics(idata)
         logger.info(

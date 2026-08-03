@@ -12,8 +12,8 @@ import optimistix as optx
 
 from .model import (
     FITTED_PARAMETER_NAMES,
-    TransitionBlock,
-    fixed_conservative_negative_log_likelihood,
+    TrainingTransitions,
+    negative_log_likelihood,
     positive_parameters,
     raw_parameters,
 )
@@ -49,8 +49,9 @@ class OptimizationResult:
     empirical_parameters: np.ndarray
 
 
-def empirical_parameters(blocks: tuple[TransitionBlock, ...]) -> np.ndarray:
-    """Training-only OU and projected-increment starting estimates."""
+def empirical_parameters(data: TrainingTransitions) -> np.ndarray:
+    """Training-only total OU and persistent-rate starting estimates."""
+    blocks = data.blocks
     current_totals = np.concatenate(
         [np.asarray(block.current.sum(axis=1)) for block in blocks]
     )
@@ -79,64 +80,50 @@ def empirical_parameters(blocks: tuple[TransitionBlock, ...]) -> np.ndarray:
         float(np.sum(weights * total_residual**2 / (2.0 * dt)) / total_weight),
     )
 
-    conservative_x: list[np.ndarray] = []
-    conservative_y: list[np.ndarray] = []
-    conservative_dt: list[np.ndarray] = []
-    conservative_weight: list[np.ndarray] = []
-    for block in blocks:
-        current = np.asarray(block.current)
-        following = np.asarray(block.following)
-        n_bands = current.shape[1]
-        if n_bands == 1:
-            continue
-        projection = np.eye(n_bands) - np.ones((n_bands, n_bands)) / n_bands
-        allocation = current / current.sum(axis=1, keepdims=True)
-        total_increment = (following - current).sum(axis=1, keepdims=True)
-        exchange = (following - current - allocation * total_increment) @ projection
-        conservative_x.append(current @ projection)
-        conservative_y.append(exchange)
-        conservative_dt.append(np.asarray(block.dt))
-        conservative_weight.append(np.asarray(block.weight))
+    rates: list[np.ndarray] = []
+    rate_pairs: list[tuple[np.ndarray, np.ndarray]] = []
+    rate_intervals: list[np.ndarray] = []
+    for sequence in data.sequences:
+        conservative = np.asarray(sequence.conservative)
+        intervals = np.diff(np.asarray(sequence.tau))
+        sequence_rates = np.diff(conservative, axis=0) / intervals[:, None]
+        rates.append(sequence_rates.reshape(-1))
+        if len(sequence_rates) > 1:
+            rate_pairs.append((sequence_rates[:-1].reshape(-1), sequence_rates[1:].reshape(-1)))
+            rate_intervals.append(intervals[1:].repeat(sequence_rates.shape[1]))
 
-    if conservative_x:
-        numerator = 0.0
-        denominator = 0.0
-        for area, increment, block_dt, block_weight in zip(
-            conservative_x,
-            conservative_y,
-            conservative_dt,
-            conservative_weight,
-            strict=True,
-        ):
-            numerator += np.sum(block_weight[:, None] * area * increment / block_dt[:, None])
-            denominator += np.sum(block_weight[:, None] * area**2)
-        conservative_rate = max(1e-6, float(-numerator / max(denominator, 1e-12)))
-        diffusion_numerator = 0.0
-        diffusion_denominator = 0.0
-        for area, increment, block_dt, block_weight in zip(
-            conservative_x,
-            conservative_y,
-            conservative_dt,
-            conservative_weight,
-            strict=True,
-        ):
-            residual = increment + conservative_rate * area * block_dt[:, None]
-            diffusion_numerator += np.sum(
-                block_weight * np.sum(residual**2, axis=1) / (2.0 * block_dt)
+    if rates:
+        all_rates = np.concatenate(rates)
+        variance_rate = max(float(np.var(all_rates)), 1e-8)
+        if rate_pairs:
+            previous = np.concatenate([pair[0] for pair in rate_pairs])
+            following = np.concatenate([pair[1] for pair in rate_pairs])
+            correlation = float(
+                np.dot(previous - previous.mean(), following - following.mean())
+                / max(
+                    np.linalg.norm(previous - previous.mean())
+                    * np.linalg.norm(following - following.mean()),
+                    1e-12,
+                )
             )
-            diffusion_denominator += np.sum(block_weight * (area.shape[1] - 1))
-        diffusion_area = max(
-            1e-8, float(diffusion_numerator / diffusion_denominator)
-        )
+            representative_dt = float(np.median(np.concatenate(rate_intervals)))
+            tau_p = (
+                -representative_dt / np.log(np.clip(correlation, 0.05, 0.99))
+                if correlation > 0.0
+                else representative_dt
+            )
+        else:
+            tau_p = float(np.median(dt))
+        diffusion_u = max(variance_rate * tau_p, 1e-8)
     else:
-        conservative_rate = total_rate
-        diffusion_area = diffusion_total
+        tau_p = float(np.median(dt))
+        diffusion_u = diffusion_total
 
     return np.asarray(
         [
-            conservative_rate,
+            max(tau_p, 1e-6),
             total_rate,
-            diffusion_area,
+            diffusion_u,
             diffusion_total,
             max(area_star, 1e-6),
         ],
@@ -144,13 +131,9 @@ def empirical_parameters(blocks: tuple[TransitionBlock, ...]) -> np.ndarray:
     )
 
 
-def _hessian_diagnostics(
-    raw: np.ndarray, blocks: tuple[TransitionBlock, ...]
-) -> HessianDiagnostics:
+def _hessian_diagnostics(raw: np.ndarray, data: TrainingTransitions) -> HessianDiagnostics:
     matrix = np.asarray(
-        jax.hessian(fixed_conservative_negative_log_likelihood)(
-            jnp.asarray(raw), blocks
-        )
+        jax.hessian(negative_log_likelihood)(jnp.asarray(raw), data)
     )
     eigenvalues, eigenvectors = np.linalg.eigh(matrix)
     largest = float(np.max(eigenvalues))
@@ -172,47 +155,45 @@ def _starts(
 ) -> tuple[np.ndarray, ...]:
     if count < 2:
         raise ValueError("optimizer starts must be at least two")
-    empirical_raw = raw_parameters(empirical[1:])
+    empirical_raw = raw_parameters(empirical)
     generator = np.random.default_rng(seed)
     perturbed = tuple(
         empirical_raw + generator.normal(0.0, 0.75, len(FITTED_PARAMETER_NAMES))
         for _ in range(count - 2)
     )
-    generic = raw_parameters(np.asarray([1.0, 0.1, 0.1, 1.0]))
+    generic = raw_parameters(np.asarray([1.0, 0.1, 0.1, 0.1, 1.0]))
     return (empirical_raw, *perturbed, generic)
 
 
 def optimize_parameters(
-    blocks: tuple[TransitionBlock, ...], *, seed: int = 0, starts: int = 8
+    data: TrainingTransitions, *, seed: int = 0, starts: int = 8
 ) -> OptimizationResult:
     """Run reproducible empirical, perturbed, and generic BFGS fits."""
-    if not blocks:
+    if not data.blocks or not data.sequences:
         raise ValueError("at least one training transition is required")
-    empirical = empirical_parameters(blocks)
+    empirical = empirical_parameters(data)
     logger.info(
-        "BFGS fixed kappa_c=0; empirical fitted start: %s",
-        np.array2string(empirical[1:], precision=4),
+        "BFGS empirical start [tau_p, kappa_T, D_u, D_T, A_T_star]: %s",
+        np.array2string(empirical, precision=4),
     )
     solver = optx.BFGS(rtol=1e-8, atol=1e-8)
     runs: list[OptimizationRun] = []
     for index, start in enumerate(_starts(empirical, seed, starts), start=1):
         logger.info("BFGS start %d/%d", index, starts)
         solution = optx.minimise(
-            fixed_conservative_negative_log_likelihood,
+            negative_log_likelihood,
             solver,
             jnp.asarray(start),
-            args=blocks,
+            args=data,
             max_steps=2_000,
             throw=False,
         )
         raw = np.asarray(solution.value)
         objective = float(
-            fixed_conservative_negative_log_likelihood(jnp.asarray(raw), blocks)
+            negative_log_likelihood(jnp.asarray(raw), data)
         )
         gradient = np.asarray(
-            jax.grad(fixed_conservative_negative_log_likelihood)(
-                jnp.asarray(raw), blocks
-            )
+            jax.grad(negative_log_likelihood)(jnp.asarray(raw), data)
         )
         finite = bool(
             np.isfinite(objective)
@@ -222,16 +203,11 @@ def optimize_parameters(
         runs.append(
             OptimizationRun(
                 raw_parameters=raw,
-                parameters=np.concatenate(
-                    (
-                        np.zeros(1, dtype=np.float64),
-                        np.asarray(positive_parameters(jnp.asarray(raw))),
-                    )
-                ),
+                parameters=np.asarray(positive_parameters(jnp.asarray(raw))),
                 objective=objective,
                 gradient_norm=float(np.linalg.norm(gradient)),
                 result=str(solution.result),
-                hessian=_hessian_diagnostics(raw, blocks) if finite else None,
+                hessian=_hessian_diagnostics(raw, data) if finite else None,
             )
         )
         logger.info(

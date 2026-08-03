@@ -10,7 +10,14 @@ import jax.numpy as jnp
 import numpy as np
 from scipy.special import logsumexp
 
-from .model import Scaling, build_transition_blocks, transition, transition_log_density
+from .model import (
+    Scaling,
+    build_state_space_sequences,
+    build_transition_blocks,
+    persistent_innovations,
+    transition,
+    transition_log_density,
+)
 from .segments import StableSegment
 
 
@@ -269,26 +276,34 @@ def _pooled_autocorrelation(series: list[np.ndarray]) -> np.ndarray:
 def _temporal_residual_acf(
     segments: list[StableSegment], lag: int, parameters: np.ndarray
 ) -> np.ndarray:
-    """Pool ACFs along phase-offset sequences of non-overlapping transitions."""
+    """Pool total-mode and conservative Kalman innovations without overlap."""
     series: list[np.ndarray] = []
-    transition_rows = jax.vmap(transition, in_axes=(0, 0, None))
+    tau_p, kappa_total, diffusion_u, diffusion_total, area_star = parameters
     for segment in segments:
         if len(segment.tau) <= lag:
             continue
-        current = jnp.asarray(segment.areas[:-lag])
-        following = np.asarray(segment.areas[lag:])
-        dt = jnp.asarray(segment.tau[lag:] - segment.tau[:-lag])
-        means, covariances = transition_rows(current, dt, jnp.asarray(parameters))
-        residuals = np.linalg.solve(
-            np.linalg.cholesky(np.asarray(covariances)),
-            (following - np.asarray(means))[..., None],
-        )[..., 0]
-        for component in range(segment.n_bands):
-            series.extend(
-                residuals[phase::lag, component]
-                for phase in range(lag)
-                if len(residuals[phase::lag, component])
+        for phase in range(lag):
+            areas = segment.areas[phase::lag]
+            tau = segment.tau[phase::lag]
+            if len(tau) < 2:
+                continue
+            current_total = areas[:-1].sum(axis=1)
+            following_total = areas[1:].sum(axis=1)
+            intervals = np.diff(tau)
+            total_mean = current_total - kappa_total * (
+                current_total - area_star
+            ) * intervals
+            total_residual = (following_total - total_mean) / np.sqrt(
+                2.0 * diffusion_total * intervals
             )
+            series.append(total_residual)
+        for sequence in build_state_space_sequences([segment], lag):
+            innovations = np.asarray(
+                persistent_innovations(
+                    sequence, jnp.asarray(tau_p), jnp.asarray(diffusion_u)
+                )
+            )
+            series.extend(innovations[:, component] for component in range(innovations.shape[1]))
     return _pooled_autocorrelation(series)
 
 
@@ -445,9 +460,14 @@ def _paths(
             (paths_per_segment, *sampled_areas.shape), np.nan, dtype=np.float64
         )
         paths[:, 0] = sampled_areas[0]
+        rates = generator.standard_normal(
+            (paths_per_segment, segment.n_bands)
+        ) @ projection
+        rates *= np.sqrt(
+            segment_parameters[:, 2] / segment_parameters[:, 0]
+        )[:, None]
         stops = np.full(paths_per_segment, len(sampled_areas), dtype=np.int64)
         active = np.ones(paths_per_segment, dtype=bool)
-        transition_paths = jax.vmap(transition, in_axes=(0, None, 0))
         for frame in range(len(sampled_areas) - 1):
             current = paths[:, frame]
             valid_current = (
@@ -462,33 +482,33 @@ def _paths(
             indices = np.flatnonzero(active)
             if not len(indices):
                 break
-            means, covariances = transition_paths(
-                jnp.asarray(current[indices]),
-                sampled_tau[frame + 1] - sampled_tau[frame],
-                jnp.asarray(segment_parameters[indices]),
+            parameters = segment_parameters[indices]
+            step = sampled_tau[frame + 1] - sampled_tau[frame]
+            totals = current[indices].sum(axis=1)
+            conservative = current[indices] - totals[:, None] / segment.n_bands
+            following_totals = (
+                totals
+                - parameters[:, 1] * (totals - parameters[:, 4]) * step
+                + np.sqrt(2.0 * parameters[:, 3] * step)
+                * generator.standard_normal(len(indices))
             )
-            try:
-                cholesky = np.linalg.cholesky(np.asarray(covariances))
-            except np.linalg.LinAlgError:
-                good: list[int] = []
-                factors: list[np.ndarray] = []
-                for local, covariance in enumerate(np.asarray(covariances)):
-                    try:
-                        factors.append(np.linalg.cholesky(covariance))
-                        good.append(local)
-                    except np.linalg.LinAlgError:
-                        failed = indices[local]
-                        active[failed] = False
-                        stops[failed] = frame + 1
-                        terminated += 1
-                indices = indices[np.asarray(good, dtype=np.int64)]
-                means = means[jnp.asarray(good, dtype=jnp.int64)]
-                cholesky = np.asarray(factors)
-            if not len(indices):
-                continue
-            noise = generator.standard_normal(np.asarray(means).shape)
-            following = np.asarray(means) + np.einsum(
-                "...ij,...j->...i", cholesky, noise
+            following = (
+                conservative
+                + rates[indices] * step
+                + following_totals[:, None] / segment.n_bands
+            )
+            decay = np.exp(-step / parameters[:, 0])
+            rate_noise = generator.standard_normal(
+                (len(indices), segment.n_bands)
+            ) @ projection
+            rates[indices] = (
+                decay[:, None] * rates[indices]
+                + np.sqrt(
+                    parameters[:, 2]
+                    / parameters[:, 0]
+                    * (1.0 - decay**2)
+                )[:, None]
+                * rate_noise
             )
             finite = np.all(np.isfinite(following), axis=1)
             failed_indices = indices[~finite]

@@ -49,9 +49,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--lag",
         dest="lags",
         type=int,
-        choices=(1, 2),
+        choices=(1, 2, 3, 5, 10),
         action="append",
-        help="fitting lag; only lags 1 and 2 are supported",
+        help="fitting lag; repeat to override the default lags 1, 2, 3, 5, 10",
     )
     parser.add_argument("--base-lag", type=int, default=2)
     parser.add_argument("--optimizer-starts", type=int, default=8)
@@ -156,7 +156,7 @@ def _configs(args: argparse.Namespace) -> tuple[ExtractionConfig, AnalysisConfig
         retry_target_accept=args.retry_target_accept,
     )
     analysis = AnalysisConfig(
-        lags=tuple(args.lags or (1, 2)),
+        lags=tuple(args.lags or (1, 2, 3, 5, 10)),
         base_lag=args.base_lag,
         optimizer_seed=args.seed,
         optimizer_starts=args.optimizer_starts,

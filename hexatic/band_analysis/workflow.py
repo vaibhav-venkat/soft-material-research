@@ -25,13 +25,13 @@ from .storage import fingerprint
 from .validation import ValidationResult, validate_posterior
 
 
-LAG_CACHE_SCHEMA = "hexatic.band_lag.v5"
+LAG_CACHE_SCHEMA = "hexatic.band_lag.v6"
 logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
 class AnalysisConfig:
-    lags: tuple[int, ...] = (1, 2)
+    lags: tuple[int, ...] = (1, 2, 3, 5, 10)
     base_lag: int = 2
     optimizer_seed: int = 0
     optimizer_starts: int = 8
@@ -40,8 +40,8 @@ class AnalysisConfig:
     paths_per_segment: int = 200
 
     def __post_init__(self) -> None:
-        if not set(self.lags) <= {1, 2}:
-            raise ValueError("only fitting lags 1 and 2 are supported")
+        if any(lag < 1 for lag in self.lags):
+            raise ValueError("fitting lags must be positive")
         if self.base_lag not in self.lags:
             raise ValueError("base lag must occur in configured lags")
         if len(set(self.lags)) != len(self.lags):
@@ -152,12 +152,12 @@ def _compute_lag(
     transition_count = sum(block.current.shape[0] for block in prepared.blocks)
     logger.info("lag %d: optimizing %d transitions", lag, transition_count)
     optimization = optimize_parameters(
-        prepared.blocks,
+        prepared,
         seed=config.optimizer_seed + lag,
         starts=config.optimizer_starts,
     )
     bayesian = run_bayesian_inference(
-        prepared.blocks,
+        prepared,
         optimization.empirical_parameters,
         optimization.best.parameters,
         prepared.scaling,
@@ -269,6 +269,7 @@ def _load_cache(
         if metadata.get("schema") in {
             "hexatic.band_lag.v3",
             "hexatic.band_lag.v4",
+            "hexatic.band_lag.v5",
         }:
             logger.info("lag %d: rebuilding stale inference cache", lag)
             return None
