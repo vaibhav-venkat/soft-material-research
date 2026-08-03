@@ -383,7 +383,7 @@ def _weighted_rmse(
 
 
 def add_area_drift_fits(tensors: dict[str, np.ndarray]) -> None:
-    """Fit the constant, linear-restoring, and cubic area-drift models."""
+    """Fit the constant, signed-linear, and cubic area-drift models."""
     centers = tensors["dynamics_area_bin_center"]
     drift = tensors["dynamics_area_drift"]
     counts = tensors["dynamics_area_count"]
@@ -433,26 +433,20 @@ def add_area_drift_fits(tensors: dict[str, np.ndarray]) -> None:
 
         if area.size < 2 or np.ptp(area) <= 0.0:
             continue
-        slope, intercept = np.polyfit(area, observed, 1, w=np.sqrt(weights))
-        kappa_guess = max(np.finfo(float).eps, -float(slope))
-        area_star_guess = float(intercept / kappa_guess)
-        try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", OptimizeWarning)
-                linear_parameters, _ = curve_fit(
-                    area_drift_linear_model,
-                    area,
-                    observed,
-                    p0=(kappa_guess, area_star_guess),
-                    sigma=sigma,
-                    absolute_sigma=False,
-                    bounds=((np.finfo(float).eps, -np.inf), (np.inf, np.inf)),
-                    maxfev=50_000,
-                )
-        except (RuntimeError, ValueError, FloatingPointError):
-            linear_parameters = None
-        if linear_parameters is not None:
-            kappa_a, area_star = (float(value) for value in linear_parameters)
+        slope, intercept = (
+            float(value)
+            for value in np.polyfit(area, observed, 1, w=np.sqrt(weights))
+        )
+        kappa_a = -slope
+        slope_tolerance = (
+            np.finfo(float).eps
+            * max(1.0, abs(intercept))
+            / max(1.0, float(np.ptp(area)))
+        )
+        linear_parameters: tuple[float, float] | None = None
+        if abs(kappa_a) > slope_tolerance:
+            area_star = intercept / kappa_a
+            linear_parameters = (kappa_a, area_star)
             linear_prediction = area_drift_linear_model(area, kappa_a, area_star)
             outputs["area_drift_linear_fit_valid"][lag_index] = True
             outputs["area_drift_linear_fit_kappa_a"][lag_index] = kappa_a
@@ -467,12 +461,12 @@ def add_area_drift_fits(tensors: dict[str, np.ndarray]) -> None:
         initial_kappa = (
             float(linear_parameters[0])
             if linear_parameters is not None
-            else kappa_guess
+            else -slope
         )
         initial_area_star = (
             float(linear_parameters[1])
             if linear_parameters is not None
-            else area_star_guess
+            else float(np.average(area, weights=weights))
         )
 
         def scaled_cubic_model(

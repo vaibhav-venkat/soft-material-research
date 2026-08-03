@@ -124,7 +124,7 @@ def analyze(
             existing = json.loads(result_path.read_text())
         existing.update(
             {
-                "schema": "hexatic.band_analysis.v5",
+                "schema": "hexatic.band_analysis.v6",
                 "input_dir": str(input_dir),
                 "configuration": configuration,
                 "outputs": {
@@ -264,7 +264,7 @@ def analyze(
         characterization_tensors, output_dir, progress=progress
     )
     result = {
-        "schema": "hexatic.band_analysis.v5",
+        "schema": "hexatic.band_analysis.v6",
         "input_dir": str(input_dir),
         "configuration": configuration,
         "compute_provenance": compute_provenance,

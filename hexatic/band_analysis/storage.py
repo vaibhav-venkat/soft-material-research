@@ -14,7 +14,7 @@ from .characterization import N_MODES, mode_wave_numbers
 from .tracking import TrackedFrame
 
 
-SCHEMA = "hexatic.band_characterization.v5"
+SCHEMA = "hexatic.band_characterization.v6"
 
 SCALAR_FIELDS = (
     "area",
