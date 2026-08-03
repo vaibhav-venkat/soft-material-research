@@ -8,6 +8,8 @@ from typing import Any, Iterator
 import numpy as np
 from safetensors import safe_open
 
+from .storage import fingerprint
+
 
 @dataclass(frozen=True)
 class InputMetadata:
@@ -19,6 +21,30 @@ class InputMetadata:
     particle_diameter: float
     run_steps: int
     trajectory_write_period: int
+
+    @property
+    def source_fingerprint(self) -> str:
+        return fingerprint(self.manifest)
+
+    @property
+    def compatibility_fingerprint(self) -> str:
+        case = {
+            key: value
+            for key, value in self.manifest["case"].items()
+            if key not in {"case_id", "label", "seed"}
+        }
+        preprocessing_keys = (
+            "pocket_radius",
+            "gaussian_cutoff_multiplier",
+            "gaussian_cutoff",
+            "dtype",
+        )
+        preprocessing = {
+            key: self.manifest[key]
+            for key in preprocessing_keys
+            if key in self.manifest
+        }
+        return fingerprint({"case": case, "preprocessing": preprocessing})
 
 
 def load_metadata(input_dir: Path) -> InputMetadata:
@@ -37,6 +63,23 @@ def load_metadata(input_dir: Path) -> InputMetadata:
         run_steps=int(case["run_steps"]),
         trajectory_write_period=int(case["trajectory_write_period"]),
     )
+
+
+def require_compatible_seeds(metadata: list[InputMetadata]) -> str:
+    if not metadata:
+        raise ValueError("at least one input directory is required")
+    expected = metadata[0].compatibility_fingerprint
+    incompatible = [
+        str(item.input_dir)
+        for item in metadata[1:]
+        if item.compatibility_fingerprint != expected
+    ]
+    if incompatible:
+        raise ValueError(
+            "seed manifests do not describe the same physical case and preprocessing: "
+            + ", ".join(incompatible)
+        )
+    return expected
 
 
 def frame_numbers(

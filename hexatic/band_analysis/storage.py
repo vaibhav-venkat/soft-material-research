@@ -1,283 +1,66 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
 
-import jax
-import jax.numpy as jnp
 import numpy as np
 from safetensors import safe_open
 from safetensors.numpy import load_file, save_file
 
-from .characterization import N_MODES, mode_wave_numbers
-from .tracking import TrackedFrame
+from .segments import StableSegment
 
 
-SCHEMA = "hexatic.band_characterization.v17"
-
-SCALAR_FIELDS = (
-    "area",
-    "mean_width",
-    "wrapped_axial_position",
-    "unwrapped_axial_position",
-    "displacement",
-    "width_variance",
-    "centerline_variance",
-    "interface_length",
-)
-
-NET_FIELDS = (
-    "area",
-    "mean_width",
-    "axial_displacement",
-    "width_variance",
-    "centerline_variance",
-    "interface_length",
-)
+SCHEMA = "hexatic.band_segments.v1"
 
 
-def add_instantaneous_area_statistics(
-    tensors: dict[str, np.ndarray],
-) -> None:
-    """Add per-frame area variance, squared CV, and largest-area fraction."""
-    valid_device = jnp.asarray(tensors["valid"])
-    stable_device = jnp.asarray(tensors["stable"])
-    area_device = jnp.asarray(tensors["area"])
-    n_time, n_tracks = area_device.shape
-    band_count_device = jnp.sum(valid_device, axis=1)
-    safe_band_count = jnp.maximum(band_count_device, 1)
-    total_area_device = jnp.sum(
-        jnp.where(valid_device, area_device, 0.0), axis=1
-    )
-    stable_band_count_device = jnp.sum(stable_device, axis=1)
-    stable_total_area_device = jnp.sum(
-        jnp.where(stable_device, area_device, 0.0), axis=1
-    )
-    mean_area_device = total_area_device / safe_band_count
-    area_variance_device = jnp.sum(
-        jnp.where(
-            valid_device,
-            (area_device - mean_area_device[:, jnp.newaxis]) ** 2,
-            0.0,
-        ),
-        axis=1,
-    ) / safe_band_count
-    if n_tracks:
-        maximum_area_device = jnp.max(
-            jnp.where(valid_device, area_device, -jnp.inf), axis=1
-        )
-    else:
-        maximum_area_device = jnp.full(n_time, jnp.nan)
-    has_bands = band_count_device > 0
-    area_cv_squared_device = jnp.where(
-        has_bands & (mean_area_device != 0.0),
-        area_variance_device / mean_area_device**2,
-        jnp.nan,
-    )
-    maximum_area_fraction_device = jnp.where(
-        has_bands & (total_area_device != 0.0),
-        maximum_area_device / total_area_device,
-        jnp.nan,
-    )
-    (
-        band_count,
-        mean_area,
-        area_variance,
-        area_cv_squared,
-        maximum_area_fraction,
-    ) = jax.device_get(
-        (
-            band_count_device,
-            jnp.where(has_bands, mean_area_device, jnp.nan),
-            jnp.where(has_bands, area_variance_device, jnp.nan),
-            area_cv_squared_device,
-            maximum_area_fraction_device,
-        )
-    )
-    tensors["instantaneous_band_count"] = np.asarray(band_count, dtype=np.int64)
-    tensors["instantaneous_stable_band_count"] = np.asarray(
-        jax.device_get(stable_band_count_device), dtype=np.int64
-    )
-    tensors["instantaneous_total_area"] = np.asarray(
-        jax.device_get(stable_total_area_device)
-    )
-    tensors["instantaneous_mean_area"] = np.asarray(mean_area)
-    tensors["instantaneous_area_variance"] = np.asarray(area_variance)
-    tensors["instantaneous_area_cv_squared"] = np.asarray(area_cv_squared)
-    tensors["instantaneous_maximum_area_fraction"] = np.asarray(
-        maximum_area_fraction
-    )
+def fingerprint(value: Any) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
-def build_characterization_tensors(
-    frames: list[TrackedFrame],
-    *,
-    ns: int,
-    circumference: float,
-    timestep: float,
-    run_steps: int,
-    trajectory_write_period: int,
-    persistence_frames: int = 5,
-) -> dict[str, np.ndarray]:
-    """Build padded time-by-track tensors; validity defines occupied slots."""
-    if timestep <= 0.0:
-        raise ValueError("timestep must be positive")
-    if persistence_frames < 1:
-        raise ValueError("persistence_frames must be positive")
-    n_time = len(frames)
-    n_tracks = 1 + max(
-        (band.track_id for frame in frames for band in frame.bands),
-        default=-1,
-    )
-    max_events = max((len(frame.events) for frame in frames), default=0)
-    steps = np.asarray([frame.step for frame in frames], dtype=np.int64)
-    if len(steps) > 1 and np.any(np.diff(steps) <= 0):
-        raise ValueError("simulation steps must be strictly increasing")
-    tensors: dict[str, np.ndarray] = {
-        "frame_index": np.asarray(
-            [frame.frame_index for frame in frames], dtype=np.int64
-        ),
-        "simulation_step": steps,
-        "physical_time": steps.astype(np.float64) * timestep,
-        "timestep": np.asarray(timestep, dtype=np.float64),
-        "run_steps": np.asarray(run_steps, dtype=np.int64),
-        "run_duration_tau": np.asarray(run_steps * timestep, dtype=np.float64),
-        "trajectory_write_period": np.asarray(
-            trajectory_write_period, dtype=np.int64
-        ),
-        "track_id": np.arange(n_tracks, dtype=np.int64),
-        "valid": np.zeros((n_time, n_tracks), dtype=bool),
-        "stable": np.zeros((n_time, n_tracks), dtype=bool),
-        "segment_id": np.full((n_time, n_tracks), -1, dtype=np.int64),
-        "assignment_jaccard": np.full((n_time, n_tracks), np.nan),
-        "event_code": np.zeros((n_time, n_tracks), dtype=np.int8),
-        "event_boundary": np.zeros((n_time, n_tracks), dtype=bool),
-        "lower": np.full((n_time, n_tracks, ns), np.nan),
-        "upper": np.full((n_time, n_tracks, ns), np.nan),
-        "centerline": np.full((n_time, n_tracks, ns), np.nan),
-        "local_width": np.full((n_time, n_tracks, ns), np.nan),
-        "geometrically_complex": np.zeros((n_time, n_tracks), dtype=bool),
-        "q_n": mode_wave_numbers(circumference),
-        "frame_event_count": np.asarray(
-            [len(frame.events) for frame in frames], dtype=np.int64
-        ),
-        "frame_event_code": np.zeros((n_time, max_events), dtype=np.int8),
-        "frame_event_old_track_id": np.full(
-            (n_time, max_events), -1, dtype=np.int64
-        ),
-        "frame_event_new_track_id": np.full(
-            (n_time, max_events), -1, dtype=np.int64
-        ),
-        "frame_event_jaccard": np.full((n_time, max_events), np.nan),
-    }
-    for name in SCALAR_FIELDS:
-        tensors[name] = np.full((n_time, n_tracks), np.nan)
-    for prefix in ("centerline_mode", "width_mode"):
-        for part in ("real", "imag", "amplitude"):
-            tensors[f"{prefix}_{part}"] = np.full(
-                (n_time, n_tracks, N_MODES), np.nan
-            )
-
-    for time_index, frame in enumerate(frames):
-        for event_index, event in enumerate(frame.events):
-            tensors["frame_event_code"][time_index, event_index] = int(event.code)
-            tensors["frame_event_old_track_id"][time_index, event_index] = (
-                event.old_track_id
-            )
-            tensors["frame_event_new_track_id"][time_index, event_index] = (
-                event.new_track_id
-            )
-            tensors["frame_event_jaccard"][time_index, event_index] = event.jaccard
-        for tracked in frame.bands:
-            track_id = tracked.track_id
-            band = tracked.characterization
-            tensors["valid"][time_index, track_id] = True
-            tensors["segment_id"][time_index, track_id] = tracked.segment_id
-            tensors["assignment_jaccard"][time_index, track_id] = (
-                tracked.assignment_jaccard
-            )
-            tensors["event_code"][time_index, track_id] = int(tracked.event_code)
-            tensors["event_boundary"][time_index, track_id] = tracked.event_boundary
-            tensors["lower"][time_index, track_id] = band.lower
-            tensors["upper"][time_index, track_id] = band.upper
-            tensors["centerline"][time_index, track_id] = band.centerline
-            tensors["local_width"][time_index, track_id] = band.width
-            tensors["geometrically_complex"][time_index, track_id] = (
-                band.geometrically_complex
-            )
-            for name in SCALAR_FIELDS:
-                tensors[name][time_index, track_id] = getattr(band, name)
-            tensors["centerline_mode_real"][time_index, track_id] = (
-                band.centerline_modes.real
-            )
-            tensors["centerline_mode_imag"][time_index, track_id] = (
-                band.centerline_modes.imag
-            )
-            tensors["centerline_mode_amplitude"][time_index, track_id] = (
-                band.centerline_amplitudes
-            )
-            tensors["width_mode_real"][time_index, track_id] = band.width_modes.real
-            tensors["width_mode_imag"][time_index, track_id] = band.width_modes.imag
-            tensors["width_mode_amplitude"][time_index, track_id] = (
-                band.width_amplitudes
-            )
-
-    valid_segments = tensors["segment_id"][tensors["valid"]]
-    if valid_segments.size:
-        segment_ids, counts = np.unique(valid_segments, return_counts=True)
-        stable_ids = segment_ids[counts >= persistence_frames]
-        tensors["stable"] = tensors["valid"] & np.isin(
-            tensors["segment_id"], stable_ids
-        )
-
-    valid = tensors["valid"]
-    valid_device = jnp.asarray(valid)
-    add_instantaneous_area_statistics(tensors)
-    for name in NET_FIELDS:
-        source = "displacement" if name == "axial_displacement" else name
-        tensors[f"net_{name}"] = np.asarray(
-            jax.device_get(
-                jnp.sum(
-                    jnp.where(valid_device, jnp.asarray(tensors[source]), 0.0),
-                    axis=1,
-                )
-            )
-        )
-    tensors["net_centerline_mode_amplitude"] = np.asarray(
-        jax.device_get(
-            jnp.sum(
-                jnp.where(
-                    valid_device[..., jnp.newaxis],
-                    jnp.asarray(tensors["centerline_mode_amplitude"]),
-                    0.0,
-                ),
-                axis=1,
-            )
-        )
-    )
-    tensors["net_width_mode_amplitude"] = np.asarray(
-        jax.device_get(
-            jnp.sum(
-                jnp.where(
-                    valid_device[..., jnp.newaxis],
-                    jnp.asarray(tensors["width_mode_amplitude"]),
-                    0.0,
-                ),
-                axis=1,
-            )
-        )
-    )
-    return tensors
-
-
-def save_characterization(
+def save_seed_segments(
     path: Path,
-    tensors: dict[str, np.ndarray],
+    segments: list[StableSegment],
     *,
-    configuration: dict[str, Any],
-    compute_provenance: dict[str, str],
+    seed_id: str,
+    source_fingerprint: str,
+    settings: dict[str, Any],
 ) -> None:
+    """Atomically store one seed's ragged stable segments."""
+    lengths = np.asarray(
+        [len(segment.tau) for segment in segments], dtype=np.int64
+    )
+    band_counts = np.asarray(
+        [segment.n_bands for segment in segments], dtype=np.int64
+    )
+    tensors = {
+        "segment_length": lengths,
+        "band_count": band_counts,
+        "time_offset": np.concatenate(([0], np.cumsum(lengths))).astype(np.int64),
+        "track_offset": np.concatenate(([0], np.cumsum(band_counts))).astype(
+            np.int64
+        ),
+        "area_offset": np.concatenate(
+            ([0], np.cumsum(lengths * band_counts))
+        ).astype(np.int64),
+        "tau": np.concatenate([segment.tau for segment in segments])
+        if segments
+        else np.empty(0, dtype=np.float64),
+        "frame_index": np.concatenate(
+            [segment.frame_indices for segment in segments]
+        )
+        if segments
+        else np.empty(0, dtype=np.int64),
+        "track_id": np.asarray(
+            [track_id for segment in segments for track_id in segment.track_ids],
+            dtype=np.int64,
+        ),
+        "area": np.concatenate([segment.areas.ravel() for segment in segments])
+        if segments
+        else np.empty(0, dtype=np.float64),
+    }
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
     save_file(
@@ -285,83 +68,68 @@ def save_characterization(
         temporary,
         metadata={
             "schema": SCHEMA,
-            "axial_component": "x",
-            "circumferential_coordinate": "s",
-            "configuration": json.dumps(configuration, sort_keys=True),
-            "compute_provenance": json.dumps(compute_provenance, sort_keys=True),
+            "seed_id": seed_id,
+            "source_fingerprint": source_fingerprint,
+            "settings": json.dumps(settings, sort_keys=True),
+            "settings_fingerprint": fingerprint(settings),
         },
     )
     temporary.replace(path)
 
 
-def load_characterization(
+def load_seed_segments(
     path: Path,
-) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
+    *,
+    source_fingerprint: str | None = None,
+    settings: dict[str, Any] | None = None,
+) -> tuple[list[StableSegment], dict[str, Any]]:
     with safe_open(path, framework="numpy") as handle:
-        metadata = handle.metadata()
+        metadata = dict(handle.metadata())
     if metadata.get("schema") != SCHEMA:
-        raise ValueError(
-            f"incompatible characterization cache {path}; rerun with --overwrite"
-        )
-    try:
-        configuration = json.loads(metadata["configuration"])
-    except (KeyError, json.JSONDecodeError) as error:
-        raise ValueError(
-            f"incomplete characterization cache {path}; rerun with --overwrite"
-        ) from error
+        raise ValueError(f"incompatible segment cache {path}; rerun with --overwrite")
+    if (
+        source_fingerprint is not None
+        and metadata.get("source_fingerprint") != source_fingerprint
+    ):
+        raise ValueError(f"input changed for segment cache {path}; rerun with --overwrite")
+    if settings is not None and metadata.get("settings_fingerprint") != fingerprint(
+        settings
+    ):
+        raise ValueError(f"settings changed for segment cache {path}; rerun with --overwrite")
+
     tensors = load_file(path)
     required = {
-        "physical_time",
-        "stable",
-        "instantaneous_area_variance",
-        "instantaneous_area_cv_squared",
-        "instantaneous_maximum_area_fraction",
-        "instantaneous_total_area",
-        "instantaneous_stable_band_count",
-        "dynamics_area_cv_squared_fixed_n_drift",
-        "dynamics_area_cv_squared_fixed_n_count",
-        "dynamics_total_area_fixed_n_drift",
-        "dynamics_total_area_fixed_n_count",
-        "dynamics_axial_position_drift",
-        "position_msd",
-        "neighbor_area_covariance",
-        "area_diffusion_fit_alpha",
-        "area_diffusion_fit_valid",
-        "area_diffusion_constant_fit_d0",
-        "area_diffusion_sqrt_fit_gamma",
-        "area_diffusion_perimeter_fit_gamma_p",
-        "area_width_fit_a0",
-        "area_width_fit_a1",
-        "perimeter_area_fit_p0",
-        "perimeter_area_fit_ba",
-        "area_increment_covariance",
-        "area_increment_covariance_frame_lag",
-        "area_increment_c1",
-        "area_increment_r_cons",
-        "area_increment_r_cons_frame_lag",
-        "area_drift_constant_fit_nu",
-        "area_drift_constant_fit_rmse",
-        "area_drift_cubic_fit_c1",
-        "area_drift_cubic_fit_c3",
-        "area_drift_cubic_fit_area_star",
-        "area_drift_cubic_fit_rmse",
-        "neighbor_relative_area",
-        "dynamics_neighbor_relative_area_drift",
-        "neighbor_relative_area_fit_lambda",
-        "neighbor_relative_area_fit_rmse",
-        "dynamics_neighbor_relative_area_change_drift",
-        "dynamics_neighbor_relative_area_change_count",
-        "neighbor_relative_area_change_fit_lambda",
-        "neighbor_relative_area_change_fit_rmse",
-        "normalized_neighbor_relative_area",
-        "dynamics_normalized_neighbor_relative_area_drift",
-        "area_ck_weighted_total_variation",
-        "area_ck_direct_probability",
+        "segment_length",
+        "band_count",
+        "time_offset",
+        "track_offset",
+        "area_offset",
+        "tau",
+        "frame_index",
+        "track_id",
+        "area",
     }
-    missing = sorted(required - tensors.keys())
-    if missing:
-        raise ValueError(
-            f"incomplete characterization cache {path} (missing {missing}); "
-            "rerun with --overwrite"
+    if missing := sorted(required - tensors.keys()):
+        raise ValueError(f"incomplete segment cache {path}: missing {missing}")
+    seed_id = metadata.get("seed_id", "")
+    segments = []
+    for index, (length, n_bands) in enumerate(
+        zip(tensors["segment_length"], tensors["band_count"], strict=True)
+    ):
+        time_start, time_stop = tensors["time_offset"][index : index + 2]
+        track_start, track_stop = tensors["track_offset"][index : index + 2]
+        area_start, area_stop = tensors["area_offset"][index : index + 2]
+        segments.append(
+            StableSegment(
+                seed_id=seed_id,
+                track_ids=tuple(
+                    int(value) for value in tensors["track_id"][track_start:track_stop]
+                ),
+                frame_indices=tensors["frame_index"][time_start:time_stop].copy(),
+                tau=tensors["tau"][time_start:time_stop].copy(),
+                areas=tensors["area"][area_start:area_stop]
+                .reshape(int(length), int(n_bands))
+                .copy(),
+            )
         )
-    return tensors, configuration
+    return segments, metadata

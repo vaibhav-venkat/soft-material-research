@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from importlib import import_module
 import math
-from typing import Callable
-
-import jax
-import jax.numpy as jnp
+from typing import Any, Callable
 
 
 @dataclass(frozen=True)
@@ -25,12 +23,16 @@ class SurfaceGrid:
 
 
 def validate_gpu() -> None:
+    jax = import_module("jax")
+
     devices = [device for device in jax.devices() if device.platform == "gpu"]
     if not devices:
         raise RuntimeError("band analysis requires a JAX GPU/CUDA device")
 
 
-def _gaussian_kernel(sigma: float) -> tuple[jax.Array, jax.Array]:
+def _gaussian_kernel(sigma: float) -> tuple[Any, Any]:
+    jnp = import_module("jax.numpy")
+
     radius = max(1, int(math.ceil(4.0 * sigma)))
     offsets = jnp.arange(-radius, radius + 1)
     values = jnp.exp(-0.5 * (offsets / sigma) ** 2)
@@ -44,8 +46,11 @@ def make_density_kernel(
     particle_diameter: float,
     shell_epsilon: float,
     smoothing_sigma: float,
-) -> Callable[[jax.Array], tuple[jax.Array, jax.Array, jax.Array]]:
+) -> Callable[[Any], tuple[Any, Any, Any]]:
     """Build a JIT-compiled shell histogram and periodic Gaussian smoother."""
+    jax = import_module("jax")
+    jnp = import_module("jax.numpy")
+
     _, weights = _gaussian_kernel(smoothing_sigma)
     offset_values = range(-(weights.shape[0] // 2), weights.shape[0] // 2 + 1)
     lower_radius = radius - particle_diameter - shell_epsilon
@@ -82,8 +87,10 @@ def make_density_batch_kernel(
     particle_diameter: float,
     shell_epsilon: float,
     smoothing_sigma: float,
-) -> Callable[[jax.Array], tuple[jax.Array, jax.Array, jax.Array]]:
+) -> Callable[[Any], tuple[Any, Any, Any]]:
     """Build a batched density kernel over equally sized trajectory frames."""
+    jax = import_module("jax")
+
     single_frame = make_density_kernel(
         grid,
         radius=radius,
