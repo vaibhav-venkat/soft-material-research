@@ -46,6 +46,7 @@ def analyze(
     stride: int = 1,
     timestep: float = float(cylinder.SIMULATION.timestep),
     frame_batch_size: int = 16,
+    persistence_frames: int = 5,
     overwrite: bool = False,
 ) -> Path:
     analysis_started = time.perf_counter()
@@ -63,6 +64,8 @@ def analyze(
         raise ValueError("timestep must be finite and positive")
     if frame_batch_size < 1:
         raise ValueError("frame_batch_size must be positive")
+    if persistence_frames < 1:
+        raise ValueError("persistence_frames must be positive")
     grid = SurfaceGrid(
         lx=metadata.lx,
         circumference=metadata.circumference,
@@ -92,7 +95,7 @@ def analyze(
         "stride": stride,
         "timestep": timestep,
         "frame_batch_size": frame_batch_size,
-        "persistence_frames": 5,
+        "persistence_frames": persistence_frames,
         "overlap_threshold": 0.05,
         "maximum_frame_lag": 10,
         "target_bins": 20,
@@ -222,6 +225,7 @@ def analyze(
         timestep=timestep,
         run_steps=metadata.run_steps,
         trajectory_write_period=metadata.trajectory_write_period,
+        persistence_frames=persistence_frames,
     )
     progress("stage=storage build_padded_tensors_complete")
     add_stochastic_statistics(characterization_tensors, progress=progress)
@@ -311,6 +315,12 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         default=16,
         help="Number of trajectory frames deposited per GPU call (default: 16).",
+    )
+    parser.add_argument(
+        "--persistence-frames",
+        type=int,
+        default=5,
+        help="Consecutive analyzed frames required for a stable segment (default: 5).",
     )
     parser.add_argument(
         "--overwrite",
