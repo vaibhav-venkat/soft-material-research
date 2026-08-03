@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 import hashlib
 import json
@@ -38,6 +39,7 @@ class AnalysisConfig:
     mcmc: MCMCConfig = MCMCConfig()
     predictive_draws: int = 200
     paths_per_segment: int = 200
+    parallel: int = 1
 
     def __post_init__(self) -> None:
         if any(lag < 1 for lag in self.lags):
@@ -48,6 +50,8 @@ class AnalysisConfig:
             raise ValueError("configured lags must be unique")
         if self.optimizer_starts < 2:
             raise ValueError("optimizer starts must be at least two")
+        if self.parallel < 1:
+            raise ValueError("parallel lag workers must be at least one")
 
 
 @dataclass(frozen=True)
@@ -317,10 +321,11 @@ def run_analysis(
         tuple[dict[str, Any], dict[str, np.ndarray], az.InferenceData],
     ] = _compute_lag,
 ) -> list[LagOutcome]:
-    """Process and atomically cache lags one at a time in configured order."""
+    """Process and atomically cache independent lags with bounded concurrency."""
     if not training:
         raise ValueError("at least one training segment is required")
     settings = asdict(config)
+    settings.pop("parallel")
     data_fingerprint = fingerprint(
         {
             "training": segments_fingerprint(training),
@@ -331,7 +336,8 @@ def run_analysis(
             "settings": settings,
         }
     )
-    outcomes: list[LagOutcome] = []
+    outcomes_by_lag: dict[int, LagOutcome] = {}
+    pending: list[tuple[int, str]] = []
     for lag in config.lags:
         logger.info("lag %d: checking cache", lag)
         lag_fingerprint = fingerprint({"analysis": data_fingerprint, "lag": lag})
@@ -339,8 +345,11 @@ def run_analysis(
             cached = _load_cache(output_dir, lag, lag_fingerprint)
             if cached is not None:
                 logger.info("lag %d: reusing completed cache", lag)
-                outcomes.append(cached)
+                outcomes_by_lag[lag] = cached
                 continue
+        pending.append((lag, lag_fingerprint))
+
+    def compute_and_save(lag: int, lag_fingerprint: str) -> LagOutcome:
         logger.info("lag %d: starting inference", lag)
         metadata, arrays, idata = compute_lag(lag, training, holdouts, config)
         arrays_path, posterior_path, metrics_path = _paths(output_dir, lag)
@@ -368,13 +377,35 @@ def run_analysis(
             "fingerprint": lag_fingerprint,
         }
         _save_json(metrics_path, completed)
-        outcomes.append(
-            LagOutcome(lag, bool(metadata["accepted"]), False, completed, arrays, idata)
+        outcome = LagOutcome(
+            lag, bool(metadata["accepted"]), False, completed, arrays, idata
         )
         logger.info(
             "lag %d: complete (accepted=%s)", lag, bool(metadata["accepted"])
         )
-    return outcomes
+        return outcome
+
+    worker_count = min(config.parallel, len(pending))
+    if worker_count > 1:
+        logger.info(
+            "running %d uncached lags with %d parallel GPU workers",
+            len(pending),
+            worker_count,
+        )
+        with ThreadPoolExecutor(
+            max_workers=worker_count, thread_name_prefix="band-lag"
+        ) as executor:
+            futures = {
+                executor.submit(compute_and_save, lag, lag_fingerprint): lag
+                for lag, lag_fingerprint in pending
+            }
+            for future in as_completed(futures):
+                lag = futures[future]
+                outcomes_by_lag[lag] = future.result()
+    else:
+        for lag, lag_fingerprint in pending:
+            outcomes_by_lag[lag] = compute_and_save(lag, lag_fingerprint)
+    return [outcomes_by_lag[lag] for lag in config.lags]
 
 
 def stable_lags(outcomes: list[LagOutcome], base_lag: int = 2) -> tuple[int, ...]:
