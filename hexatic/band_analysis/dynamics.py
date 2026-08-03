@@ -287,13 +287,13 @@ def add_conditional_dynamics(
             )
 
 
-def neighbor_relative_area(
+def _neighbor_area_contrast_and_mean(
     area: np.ndarray,
     wrapped_positions: np.ndarray,
     stable: np.ndarray,
-) -> np.ndarray:
-    """Return each stable band's area relative to its two cyclic neighbors."""
-    relative = np.full(area.shape, np.nan)
+) -> tuple[np.ndarray, np.ndarray]:
+    contrast = np.full(area.shape, np.nan)
+    local_average = np.full(area.shape, np.nan)
     for time_index in range(area.shape[0]):
         selected = np.flatnonzero(
             stable[time_index]
@@ -307,38 +307,65 @@ def neighbor_relative_area(
         ]
         previous = np.roll(ordered, 1)
         following = np.roll(ordered, -1)
-        relative[time_index, ordered] = area[time_index, ordered] - 0.5 * (
+        contrast[time_index, ordered] = area[time_index, ordered] - 0.5 * (
             area[time_index, previous] + area[time_index, following]
         )
+        local_average[time_index, ordered] = (
+            area[time_index, previous]
+            + area[time_index, ordered]
+            + area[time_index, following]
+        ) / 3.0
+    return contrast, local_average
+
+
+def neighbor_relative_area(
+    area: np.ndarray,
+    wrapped_positions: np.ndarray,
+    stable: np.ndarray,
+) -> np.ndarray:
+    """Return each stable band's raw area contrast with cyclic neighbors."""
+    contrast, _ = _neighbor_area_contrast_and_mean(
+        area, wrapped_positions, stable
+    )
+    return contrast
+
+
+def normalized_neighbor_relative_area(
+    area: np.ndarray,
+    wrapped_positions: np.ndarray,
+    stable: np.ndarray,
+) -> np.ndarray:
+    """Return each stable band's dimensionless contrast with cyclic neighbors."""
+    contrast, local_average = _neighbor_area_contrast_and_mean(
+        area, wrapped_positions, stable
+    )
+    relative = np.full(area.shape, np.nan)
+    usable = np.isfinite(contrast) & (local_average != 0.0)
+    relative[usable] = contrast[usable] / local_average[usable]
     return relative
 
 
-def add_neighbor_relative_area_drift(
+def _add_neighbor_conditioned_area_drift(
     tensors: dict[str, np.ndarray],
+    conditioning: np.ndarray,
+    prefix: str,
     *,
     max_frame_lag: int = MAX_FRAME_LAG,
     target_bins: int = TARGET_BINS,
     minimum_samples: int = MIN_BIN_SAMPLES,
     preferred_bin_samples: int = PREFERRED_BIN_SAMPLES,
 ) -> None:
-    """Estimate ``<Delta A_i | delta A_i> / Delta tau`` for stable bands."""
     if (
         max_frame_lag < 1
         or target_bins < 1
         or minimum_samples < 1
         or preferred_bin_samples < minimum_samples
     ):
-        raise ValueError("neighbor-relative area controls must be positive")
+        raise ValueError("neighbor-area controls must be positive")
     area = tensors["area"]
     stable = tensors["stable"]
-    relative = neighbor_relative_area(
-        area,
-        tensors["wrapped_axial_position"],
-        stable,
-    )
-    tensors["neighbor_relative_area"] = relative
     edges = _quantile_edges(
-        relative[stable & np.isfinite(relative)],
+        conditioning[stable & np.isfinite(conditioning)],
         target_bins,
         preferred_bin_samples,
     )
@@ -356,7 +383,7 @@ def add_neighbor_relative_area_drift(
             reduced = jax.device_get(
                 _conditional_reductions(
                     jnp.asarray(area),
-                    jnp.asarray(relative),
+                    jnp.asarray(conditioning),
                     jnp.asarray(stable),
                     jnp.asarray(tensors["segment_id"]),
                     jnp.asarray(tensors["physical_time"]),
@@ -381,12 +408,92 @@ def add_neighbor_relative_area_drift(
                 sum_lag / safe_counts,
                 np.nan,
             )
-    prefix = "dynamics_neighbor_relative_area"
     tensors[f"{prefix}_bin_edges"] = stored_edges
     tensors[f"{prefix}_bin_center"] = centers
     tensors[f"{prefix}_drift"] = drift
     tensors[f"{prefix}_count"] = counts
     tensors[f"{prefix}_mean_physical_lag"] = mean_lag
+
+
+def add_neighbor_relative_area_drifts(
+    tensors: dict[str, np.ndarray],
+    *,
+    max_frame_lag: int = MAX_FRAME_LAG,
+    target_bins: int = TARGET_BINS,
+    minimum_samples: int = MIN_BIN_SAMPLES,
+    preferred_bin_samples: int = PREFERRED_BIN_SAMPLES,
+) -> None:
+    """Estimate area drift conditioned on raw and normalized neighbor contrast."""
+    area = tensors["area"]
+    positions = tensors["wrapped_axial_position"]
+    stable = tensors["stable"]
+    contrast, local_average = _neighbor_area_contrast_and_mean(
+        area, positions, stable
+    )
+    normalized = np.full(area.shape, np.nan)
+    usable = np.isfinite(contrast) & (local_average != 0.0)
+    normalized[usable] = contrast[usable] / local_average[usable]
+    tensors["neighbor_relative_area"] = contrast
+    tensors["normalized_neighbor_relative_area"] = normalized
+    controls = {
+        "max_frame_lag": max_frame_lag,
+        "target_bins": target_bins,
+        "minimum_samples": minimum_samples,
+        "preferred_bin_samples": preferred_bin_samples,
+    }
+    _add_neighbor_conditioned_area_drift(
+        tensors,
+        contrast,
+        "dynamics_neighbor_relative_area",
+        **controls,
+    )
+    _add_neighbor_conditioned_area_drift(
+        tensors,
+        normalized,
+        "dynamics_normalized_neighbor_relative_area",
+        **controls,
+    )
+
+
+def add_neighbor_relative_area_fit(tensors: dict[str, np.ndarray]) -> None:
+    """Fit ``F_deltaA = lambda * deltaA`` through the origin for each lag."""
+    prefix = "dynamics_neighbor_relative_area"
+    centers = tensors[f"{prefix}_bin_center"]
+    drift = tensors[f"{prefix}_drift"]
+    counts = tensors[f"{prefix}_count"]
+    mean_lags = tensors[f"{prefix}_mean_physical_lag"]
+    lag_count = drift.shape[0]
+    valid = np.zeros(lag_count, dtype=bool)
+    slope = np.full(lag_count, np.nan)
+    rmse = np.full(lag_count, np.nan)
+    physical_lag = np.full(lag_count, np.nan)
+    for lag_index in range(lag_count):
+        usable = (
+            np.isfinite(centers)
+            & np.isfinite(drift[lag_index])
+            & np.isfinite(mean_lags[lag_index])
+            & (counts[lag_index] > 0)
+        )
+        if np.count_nonzero(usable) < 2:
+            continue
+        values = centers[usable]
+        observed = drift[lag_index, usable]
+        weights = counts[lag_index, usable].astype(float)
+        denominator = float(np.sum(weights * values**2))
+        if denominator <= 0.0:
+            continue
+        fitted_slope = float(np.sum(weights * values * observed) / denominator)
+        predicted = fitted_slope * values
+        valid[lag_index] = True
+        slope[lag_index] = fitted_slope
+        rmse[lag_index] = _weighted_rmse(observed, predicted, weights)
+        physical_lag[lag_index] = float(
+            np.average(mean_lags[lag_index, usable], weights=weights)
+        )
+    tensors["neighbor_relative_area_fit_valid"] = valid
+    tensors["neighbor_relative_area_fit_lambda"] = slope
+    tensors["neighbor_relative_area_fit_rmse"] = rmse
+    tensors["neighbor_relative_area_fit_physical_lag"] = physical_lag
 
 
 def add_area_diffusion_fit(tensors: dict[str, np.ndarray]) -> None:
@@ -1063,10 +1170,13 @@ def add_stochastic_statistics(
     )
     if progress is not None:
         progress("stage=stochastic neighbor_relative_area start")
-    add_neighbor_relative_area_drift(
+    add_neighbor_relative_area_drifts(
         tensors,
         max_frame_lag=max_frame_lag,
     )
+    if progress is not None:
+        progress("stage=stochastic neighbor_relative_area fits_start")
+    add_neighbor_relative_area_fit(tensors)
     if progress is not None:
         progress("stage=stochastic neighbor_relative_area complete")
         progress("stage=stochastic area_drift_fits start")
