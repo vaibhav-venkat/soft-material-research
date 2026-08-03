@@ -4,13 +4,15 @@ from .components import BandComponent, label_dilute_bands
 from .characterization import BandCharacterization, characterize_band
 from .density import SurfaceGrid
 from .interfaces import BandInterfaces, extract_interfaces
-from .tracking import BandTracker, TrackedBand, TrackedFrame
+from .tracking import BandTracker, EventCode, EventRecord, TrackedBand, TrackedFrame
 
 __all__ = [
     "BandComponent",
     "BandCharacterization",
     "BandInterfaces",
     "BandTracker",
+    "EventCode",
+    "EventRecord",
     "SurfaceGrid",
     "TrackedBand",
     "TrackedFrame",

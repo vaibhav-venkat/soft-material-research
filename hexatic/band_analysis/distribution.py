@@ -7,6 +7,8 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import jax
+import jax.numpy as jnp
 import numpy as np
 from scipy.ndimage import gaussian_filter1d
 from scipy.signal import find_peaks
@@ -19,7 +21,10 @@ class DistributionFeatures:
 
 
 def find_features(values: np.ndarray, bins: int = 160) -> tuple[np.ndarray, np.ndarray, DistributionFeatures]:
-    counts, edges = np.histogram(values, bins=bins, density=True)
+    counts_device, edges_device = jnp.histogram(
+        jnp.asarray(values), bins=bins, density=True
+    )
+    counts, edges = jax.device_get((counts_device, edges_device))
     centers = 0.5 * (edges[:-1] + edges[1:])
     smooth = gaussian_filter1d(counts, sigma=1.5)
     prominence = 0.02 * float(np.max(smooth))
