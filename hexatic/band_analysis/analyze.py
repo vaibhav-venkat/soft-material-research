@@ -19,7 +19,7 @@ from hexatic.constants import cylinder
 from .components import label_dilute_bands
 from .characterization import N_MODES, characterize_band
 from .density import SurfaceGrid, make_density_batch_kernel, validate_gpu
-from .dynamics import add_stochastic_statistics
+from .dynamics import MAX_FRAME_LAG, add_stochastic_statistics
 from .distribution import plot_distribution
 from .interfaces import extract_interfaces
 from .io import frame_numbers, iter_frames, load_metadata
@@ -47,6 +47,7 @@ def analyze(
     timestep: float = float(cylinder.SIMULATION.timestep),
     frame_batch_size: int = 16,
     persistence_frames: int = 5,
+    maximum_frame_lag: int = MAX_FRAME_LAG,
     overwrite: bool = False,
 ) -> Path:
     analysis_started = time.perf_counter()
@@ -66,6 +67,8 @@ def analyze(
         raise ValueError("frame_batch_size must be positive")
     if persistence_frames < 1:
         raise ValueError("persistence_frames must be positive")
+    if maximum_frame_lag < 2:
+        raise ValueError("maximum_frame_lag must be at least 2")
     grid = SurfaceGrid(
         lx=metadata.lx,
         circumference=metadata.circumference,
@@ -97,7 +100,7 @@ def analyze(
         "frame_batch_size": frame_batch_size,
         "persistence_frames": persistence_frames,
         "overlap_threshold": 0.05,
-        "maximum_frame_lag": 10,
+        "maximum_frame_lag": maximum_frame_lag,
         "target_bins": 20,
         "minimum_bin_samples": 50,
         "preferred_bin_samples": 100,
@@ -121,7 +124,7 @@ def analyze(
             existing = json.loads(result_path.read_text())
         existing.update(
             {
-                "schema": "hexatic.band_analysis.v4",
+                "schema": "hexatic.band_analysis.v5",
                 "input_dir": str(input_dir),
                 "configuration": configuration,
                 "outputs": {
@@ -228,7 +231,11 @@ def analyze(
         persistence_frames=persistence_frames,
     )
     progress("stage=storage build_padded_tensors_complete")
-    add_stochastic_statistics(characterization_tensors, progress=progress)
+    add_stochastic_statistics(
+        characterization_tensors,
+        max_frame_lag=maximum_frame_lag,
+        progress=progress,
+    )
     compute_provenance = {
         "jax_backend": jax.default_backend(),
         "jax_device": str(jax.devices()[0]),
@@ -257,7 +264,7 @@ def analyze(
         characterization_tensors, output_dir, progress=progress
     )
     result = {
-        "schema": "hexatic.band_analysis.v4",
+        "schema": "hexatic.band_analysis.v5",
         "input_dir": str(input_dir),
         "configuration": configuration,
         "compute_provenance": compute_provenance,
@@ -322,6 +329,15 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         default=5,
         help="Consecutive analyzed frames required for a stable segment (default: 5).",
+    )
+    parser.add_argument(
+        "--maximum-frame-lag",
+        type=int,
+        default=MAX_FRAME_LAG,
+        help=(
+            "Largest analyzed frame lag for conditional drift and diffusion "
+            f"(default: {MAX_FRAME_LAG})."
+        ),
     )
     parser.add_argument(
         "--overwrite",

@@ -9,7 +9,13 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from .dynamics import DYNAMIC_PROPERTIES, area_diffusion_model
+from .dynamics import (
+    DYNAMIC_PROPERTIES,
+    area_diffusion_model,
+    area_drift_constant_model,
+    area_drift_cubic_model,
+    area_drift_linear_model,
+)
 
 
 _LEGACY_NET_PLOTS = (
@@ -160,6 +166,106 @@ def _plot_area_diagnostics(
     tensors: dict[str, np.ndarray], output_dir: Path
 ) -> dict[str, str]:
     outputs: dict[str, str] = {}
+
+    drift_fit_file = "area_drift_fits.png"
+    frame_lags = tensors["dynamics_frame_lag"]
+    lag_count = len(frame_lags)
+    figure, axes = plt.subplots(
+        max(1, lag_count),
+        1,
+        figsize=(9.0, max(4.8, 4.2 * lag_count)),
+        squeeze=False,
+    )
+    centers = tensors["dynamics_area_bin_center"]
+    drift = tensors["dynamics_area_drift"]
+    physical_lags = tensors["area_drift_fit_physical_lag"]
+    for lag_index, frame_lag in enumerate(frame_lags):
+        axis = axes[lag_index, 0]
+        usable = np.isfinite(centers) & np.isfinite(drift[lag_index])
+        axis.plot(
+            centers[usable],
+            drift[lag_index, usable],
+            "o",
+            color="black",
+            label=r"measured $F_A$",
+        )
+        if np.any(usable):
+            fit_area = np.linspace(
+                float(np.min(centers[usable])),
+                float(np.max(centers[usable])),
+                300,
+            )
+            if tensors["area_drift_constant_fit_valid"][lag_index]:
+                nu = float(tensors["area_drift_constant_fit_nu"][lag_index])
+                rmse = float(tensors["area_drift_constant_fit_rmse"][lag_index])
+                axis.plot(
+                    fit_area,
+                    area_drift_constant_model(fit_area, nu),
+                    "--",
+                    label=rf"$-\nu$: $\nu={nu:.4g}$; RMSE={rmse:.4g}",
+                )
+            if tensors["area_drift_linear_fit_valid"][lag_index]:
+                kappa_a = float(
+                    tensors["area_drift_linear_fit_kappa_a"][lag_index]
+                )
+                area_star = float(
+                    tensors["area_drift_linear_fit_area_star"][lag_index]
+                )
+                rmse = float(tensors["area_drift_linear_fit_rmse"][lag_index])
+                axis.plot(
+                    fit_area,
+                    area_drift_linear_model(fit_area, kappa_a, area_star),
+                    "-.",
+                    label=(
+                        rf"linear: $\kappa_A={kappa_a:.4g}$, "
+                        rf"$A_\ast={area_star:.4g}$; RMSE={rmse:.4g}"
+                    ),
+                )
+            if tensors["area_drift_cubic_fit_valid"][lag_index]:
+                c1 = float(tensors["area_drift_cubic_fit_c1"][lag_index])
+                c3 = float(tensors["area_drift_cubic_fit_c3"][lag_index])
+                area_star = float(
+                    tensors["area_drift_cubic_fit_area_star"][lag_index]
+                )
+                rmse = float(tensors["area_drift_cubic_fit_rmse"][lag_index])
+                axis.plot(
+                    fit_area,
+                    area_drift_cubic_model(fit_area, c1, c3, area_star),
+                    ":",
+                    linewidth=2.0,
+                    label=(
+                        rf"cubic: $c_1={c1:.4g}$, $c_3={c3:.4g}$, "
+                        rf"$A_\ast={area_star:.4g}$; RMSE={rmse:.4g}"
+                    ),
+                )
+        physical_lag = float(physical_lags[lag_index])
+        axis.set(
+            xlabel=r"initial band area $A$",
+            ylabel=r"$F_A(A;\Delta\tau)$",
+            title=(
+                rf"frame lag {int(frame_lag)}; "
+                rf"$\Delta\tau={physical_lag:.4g}$"
+            ),
+        )
+        axis.axhline(0.0, color="0.65", linewidth=0.8)
+        axis.grid(alpha=0.25)
+        handles, _ = axis.get_legend_handles_labels()
+        if handles:
+            axis.legend(fontsize=8)
+    if not lag_count:
+        axes[0, 0].text(
+            0.5,
+            0.5,
+            "no conditional lags available",
+            ha="center",
+            va="center",
+            transform=axes[0, 0].transAxes,
+        )
+        axes[0, 0].set_axis_off()
+    figure.tight_layout()
+    figure.savefig(output_dir / drift_fit_file, dpi=180)
+    plt.close(figure)
+    outputs["area_drift_fits"] = drift_fit_file
 
     perimeter_file = "stable_interface_length_vs_area.png"
     figure, axis = plt.subplots(figsize=(7.0, 5.0))
@@ -319,5 +425,5 @@ def plot_characterization(
     outputs.update(_plot_area_diagnostics(tensors, output_dir))
     if progress is not None:
         progress("stage=plots coupling=2/2 complete")
-        progress("stage=plots area_diagnostics=3/3 complete")
+        progress("stage=plots area_diagnostics=4/4 complete")
     return outputs

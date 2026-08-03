@@ -13,7 +13,7 @@ from scipy.optimize import OptimizeWarning, curve_fit
 from .characterization import N_MODES
 
 
-MAX_FRAME_LAG = 10
+MAX_FRAME_LAG = 2
 TARGET_BINS = 20
 MIN_BIN_SAMPLES = 50
 PREFERRED_BIN_SAMPLES = 100
@@ -27,6 +27,31 @@ def area_diffusion_model(
     alpha: float,
 ) -> np.ndarray:
     return np.asarray(d0 + gamma * np.asarray(area) ** alpha)
+
+
+def area_drift_constant_model(
+    area: np.ndarray | float,
+    nu: float,
+) -> np.ndarray:
+    return np.broadcast_to(-nu, np.asarray(area).shape)
+
+
+def area_drift_linear_model(
+    area: np.ndarray | float,
+    kappa_a: float,
+    area_star: float,
+) -> np.ndarray:
+    return np.asarray(-kappa_a * (np.asarray(area) - area_star))
+
+
+def area_drift_cubic_model(
+    area: np.ndarray | float,
+    c1: float,
+    c3: float,
+    area_star: float,
+) -> np.ndarray:
+    centered = np.asarray(area) - area_star
+    return np.asarray(-c1 * centered - c3 * centered**3)
 
 
 @dataclass(frozen=True)
@@ -347,6 +372,149 @@ def add_area_diffusion_fit(tensors: dict[str, np.ndarray]) -> None:
     tensors["area_diffusion_fit_alpha"] = alpha_values
     tensors["area_diffusion_fit_r_squared"] = r_squared
     tensors["area_diffusion_fit_physical_lag"] = physical_lags
+
+
+def _weighted_rmse(
+    observed: np.ndarray,
+    predicted: np.ndarray,
+    weights: np.ndarray,
+) -> float:
+    return float(np.sqrt(np.average((observed - predicted) ** 2, weights=weights)))
+
+
+def add_area_drift_fits(tensors: dict[str, np.ndarray]) -> None:
+    """Fit the constant, linear-restoring, and cubic area-drift models."""
+    centers = tensors["dynamics_area_bin_center"]
+    drift = tensors["dynamics_area_drift"]
+    counts = tensors["dynamics_area_count"]
+    mean_lags = tensors["dynamics_area_mean_physical_lag"]
+    lag_count = drift.shape[0]
+
+    outputs = {
+        "area_drift_fit_physical_lag": np.full(lag_count, np.nan),
+        "area_drift_constant_fit_valid": np.zeros(lag_count, dtype=bool),
+        "area_drift_constant_fit_nu": np.full(lag_count, np.nan),
+        "area_drift_constant_fit_rmse": np.full(lag_count, np.nan),
+        "area_drift_linear_fit_valid": np.zeros(lag_count, dtype=bool),
+        "area_drift_linear_fit_kappa_a": np.full(lag_count, np.nan),
+        "area_drift_linear_fit_area_star": np.full(lag_count, np.nan),
+        "area_drift_linear_fit_rmse": np.full(lag_count, np.nan),
+        "area_drift_cubic_fit_valid": np.zeros(lag_count, dtype=bool),
+        "area_drift_cubic_fit_c1": np.full(lag_count, np.nan),
+        "area_drift_cubic_fit_c3": np.full(lag_count, np.nan),
+        "area_drift_cubic_fit_area_star": np.full(lag_count, np.nan),
+        "area_drift_cubic_fit_rmse": np.full(lag_count, np.nan),
+    }
+
+    for lag_index in range(lag_count):
+        usable = (
+            np.isfinite(centers)
+            & np.isfinite(drift[lag_index])
+            & np.isfinite(mean_lags[lag_index])
+            & (counts[lag_index] > 0)
+        )
+        if not np.any(usable):
+            continue
+        area = centers[usable]
+        observed = drift[lag_index, usable]
+        weights = counts[lag_index, usable].astype(float)
+        sigma = 1.0 / np.sqrt(weights)
+        outputs["area_drift_fit_physical_lag"][lag_index] = float(
+            np.average(mean_lags[lag_index, usable], weights=weights)
+        )
+
+        nu = -float(np.average(observed, weights=weights))
+        constant_prediction = area_drift_constant_model(area, nu)
+        outputs["area_drift_constant_fit_valid"][lag_index] = True
+        outputs["area_drift_constant_fit_nu"][lag_index] = nu
+        outputs["area_drift_constant_fit_rmse"][lag_index] = _weighted_rmse(
+            observed, constant_prediction, weights
+        )
+
+        if area.size < 2 or np.ptp(area) <= 0.0:
+            continue
+        slope, intercept = np.polyfit(area, observed, 1, w=np.sqrt(weights))
+        kappa_guess = max(np.finfo(float).eps, -float(slope))
+        area_star_guess = float(intercept / kappa_guess)
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", OptimizeWarning)
+                linear_parameters, _ = curve_fit(
+                    area_drift_linear_model,
+                    area,
+                    observed,
+                    p0=(kappa_guess, area_star_guess),
+                    sigma=sigma,
+                    absolute_sigma=False,
+                    bounds=((np.finfo(float).eps, -np.inf), (np.inf, np.inf)),
+                    maxfev=50_000,
+                )
+        except (RuntimeError, ValueError, FloatingPointError):
+            linear_parameters = None
+        if linear_parameters is not None:
+            kappa_a, area_star = (float(value) for value in linear_parameters)
+            linear_prediction = area_drift_linear_model(area, kappa_a, area_star)
+            outputs["area_drift_linear_fit_valid"][lag_index] = True
+            outputs["area_drift_linear_fit_kappa_a"][lag_index] = kappa_a
+            outputs["area_drift_linear_fit_area_star"][lag_index] = area_star
+            outputs["area_drift_linear_fit_rmse"][lag_index] = _weighted_rmse(
+                observed, linear_prediction, weights
+            )
+
+        if area.size < 3:
+            continue
+        area_scale = float(np.ptp(area))
+        initial_kappa = (
+            float(linear_parameters[0])
+            if linear_parameters is not None
+            else kappa_guess
+        )
+        initial_area_star = (
+            float(linear_parameters[1])
+            if linear_parameters is not None
+            else area_star_guess
+        )
+
+        def scaled_cubic_model(
+            values: np.ndarray,
+            scaled_c1: float,
+            scaled_c3: float,
+            area_star: float,
+        ) -> np.ndarray:
+            centered = (values - area_star) / area_scale
+            return -scaled_c1 * centered - scaled_c3 * centered**3
+
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", OptimizeWarning)
+                cubic_parameters, _ = curve_fit(
+                    scaled_cubic_model,
+                    area,
+                    observed,
+                    p0=(initial_kappa * area_scale, 0.0, initial_area_star),
+                    sigma=sigma,
+                    absolute_sigma=False,
+                    method="trf",
+                    x_scale="jac",
+                    max_nfev=50_000,
+                )
+        except (RuntimeError, ValueError, FloatingPointError):
+            continue
+        scaled_c1, scaled_c3, area_star = (
+            float(value) for value in cubic_parameters
+        )
+        c1 = scaled_c1 / area_scale
+        c3 = scaled_c3 / area_scale**3
+        cubic_prediction = area_drift_cubic_model(area, c1, c3, area_star)
+        outputs["area_drift_cubic_fit_valid"][lag_index] = True
+        outputs["area_drift_cubic_fit_c1"][lag_index] = c1
+        outputs["area_drift_cubic_fit_c3"][lag_index] = c3
+        outputs["area_drift_cubic_fit_area_star"][lag_index] = area_star
+        outputs["area_drift_cubic_fit_rmse"][lag_index] = _weighted_rmse(
+            observed, cubic_prediction, weights
+        )
+
+    tensors.update(outputs)
 
 
 @partial(
@@ -828,18 +996,25 @@ def add_area_coupling(
 def add_stochastic_statistics(
     tensors: dict[str, np.ndarray],
     *,
+    max_frame_lag: int = MAX_FRAME_LAG,
     progress: ProgressCallback | None = None,
 ) -> None:
     if progress is not None:
         progress("stage=stochastic conditional_start")
-    add_conditional_dynamics(tensors, progress=progress)
+    add_conditional_dynamics(
+        tensors, max_frame_lag=max_frame_lag, progress=progress
+    )
     if progress is not None:
+        progress("stage=stochastic area_drift_fits start")
+    add_area_drift_fits(tensors)
+    if progress is not None:
+        progress("stage=stochastic area_drift_fits complete")
         progress("stage=stochastic area_diffusion_fit start")
     add_area_diffusion_fit(tensors)
     if progress is not None:
         progress("stage=stochastic area_diffusion_fit complete")
         progress("stage=stochastic chapman_kolmogorov start")
-    add_area_chapman_kolmogorov(tensors)
+    add_area_chapman_kolmogorov(tensors, max_frame_lag=max_frame_lag)
     if progress is not None:
         progress("stage=stochastic chapman_kolmogorov complete")
         progress("stage=stochastic msd_start")
