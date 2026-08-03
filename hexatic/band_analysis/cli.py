@@ -149,7 +149,7 @@ def _configs(args: argparse.Namespace) -> tuple[ExtractionConfig, AnalysisConfig
         retry_target_accept=args.retry_target_accept,
     )
     analysis = AnalysisConfig(
-        lags=tuple(args.lags or (1, 2, 3, 5, 10)),
+        lags=tuple(args.lags or (1, 2)),
         base_lag=args.base_lag,
         optimizer_seed=args.seed,
         optimizer_starts=args.optimizer_starts,

@@ -168,10 +168,9 @@ def transition_log_density(
     )
 
 
-def negative_log_likelihood(
-    raw: jax.Array, blocks: tuple[TransitionBlock, ...]
+def parameter_negative_log_likelihood(
+    parameters: jax.Array, blocks: tuple[TransitionBlock, ...]
 ) -> jax.Array:
-    parameters = positive_parameters(raw)
     objective = jnp.asarray(0.0, dtype=jnp.float64)
     for block in blocks:
         log_density = jax.vmap(transition_log_density, in_axes=(0, 0, 0, None))(
@@ -179,3 +178,9 @@ def negative_log_likelihood(
         )
         objective -= jnp.sum(block.weight * log_density)
     return objective
+
+
+def negative_log_likelihood(
+    raw: jax.Array, blocks: tuple[TransitionBlock, ...]
+) -> jax.Array:
+    return parameter_negative_log_likelihood(positive_parameters(raw), blocks)

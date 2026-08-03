@@ -269,6 +269,7 @@ def _pooled_autocorrelation(series: list[np.ndarray]) -> np.ndarray:
 def _temporal_residual_acf(
     segments: list[StableSegment], lag: int, parameters: np.ndarray
 ) -> np.ndarray:
+    """Pool ACFs along phase-offset sequences of non-overlapping transitions."""
     series: list[np.ndarray] = []
     transition_rows = jax.vmap(transition, in_axes=(0, 0, None))
     for segment in segments:
@@ -282,7 +283,12 @@ def _temporal_residual_acf(
             np.linalg.cholesky(np.asarray(covariances)),
             (following - np.asarray(means))[..., None],
         )[..., 0]
-        series.extend(residuals[:, component] for component in range(segment.n_bands))
+        for component in range(segment.n_bands):
+            series.extend(
+                residuals[phase::lag, component]
+                for phase in range(lag)
+                if len(residuals[phase::lag, component])
+            )
     return _pooled_autocorrelation(series)
 
 

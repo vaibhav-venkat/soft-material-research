@@ -227,6 +227,10 @@ def write_report(
                 f"{_number(optimization['condition_number'])}. "
                 f"Nonpositive eigenvalue: {optimization['nonpositive_hessian']}; "
                 f"weak mode: {optimization['weak_hessian']}. "
+                f"Profile-best kappa_c: "
+                f"{_number(optimization['profile_best_kappa_c'])}; "
+                f"profile delta-log-likelihood at zero: "
+                f"{_number(optimization['profile_delta_log_likelihood_at_zero'])}. "
                 f"NUTS retry used: {outcome.metadata['retried']}; "
                 f"divergences: {diagnostics['divergences']}.",
             ]

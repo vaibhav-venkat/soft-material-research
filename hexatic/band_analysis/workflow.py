@@ -15,20 +15,25 @@ from safetensors import safe_open
 from safetensors.numpy import load_file, save_file
 
 from .bayesian import MCMCConfig, run_bayesian_inference, save_inference_data
-from .inference import OptimizationResult, optimize_parameters
-from .model import PARAMETER_NAMES, prepare_training_transitions
+from .inference import (
+    OptimizationResult,
+    ProfileLikelihood,
+    optimize_parameters,
+    profile_kappa_c,
+)
+from .model import PARAMETER_NAMES, TrainingTransitions, prepare_training_transitions
 from .segments import StableSegment
 from .storage import fingerprint
 from .validation import ValidationResult, validate_posterior
 
 
-LAG_CACHE_SCHEMA = "hexatic.band_lag.v3"
+LAG_CACHE_SCHEMA = "hexatic.band_lag.v4"
 logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
 class AnalysisConfig:
-    lags: tuple[int, ...] = (1, 2, 3, 5, 10)
+    lags: tuple[int, ...] = (1, 2)
     base_lag: int = 2
     optimizer_seed: int = 0
     optimizer_starts: int = 8
@@ -113,13 +118,18 @@ def _posterior_intervals(idata: az.InferenceData) -> dict[str, dict[str, float]]
     return intervals
 
 
-def _optimization_arrays(result: OptimizationResult) -> dict[str, np.ndarray]:
+def _optimization_arrays(
+    result: OptimizationResult, profile: ProfileLikelihood
+) -> dict[str, np.ndarray]:
     arrays = {
         "bfgs_raw_parameters": np.stack([run.raw_parameters for run in result.runs]),
         "bfgs_parameters": np.stack([run.parameters for run in result.runs]),
         "bfgs_objective": np.asarray([run.objective for run in result.runs]),
         "bfgs_gradient_norm": np.asarray([run.gradient_norm for run in result.runs]),
         "empirical_parameters": result.empirical_parameters,
+        "profile_kappa_c": profile.kappa_c,
+        "profile_objective": profile.objective,
+        "profile_delta_log_likelihood": profile.delta_log_likelihood,
     }
     if result.best.hessian is not None:
         arrays.update(
@@ -130,6 +140,39 @@ def _optimization_arrays(result: OptimizationResult) -> dict[str, np.ndarray]:
             }
         )
     return arrays
+
+
+def _conservative_mode_arrays(
+    prepared: TrainingTransitions,
+) -> dict[str, np.ndarray]:
+    modes: list[np.ndarray] = []
+    velocities: list[np.ndarray] = []
+    for block in prepared.blocks:
+        current = np.asarray(block.current)
+        if current.shape[1] == 1:
+            continue
+        projection = np.eye(current.shape[1]) - np.ones(
+            (current.shape[1], current.shape[1])
+        ) / current.shape[1]
+        increment = np.asarray(block.following) - current
+        modes.append((current @ projection).ravel())
+        velocities.append(
+            ((increment @ projection) / np.asarray(block.dt)[:, None]).ravel()
+        )
+    return {
+        "conservative_mode": (
+            np.concatenate(modes) * prepared.scaling.area
+            if modes
+            else np.empty(0)
+        ),
+        "conservative_velocity": (
+            np.concatenate(velocities)
+            * prepared.scaling.area
+            / prepared.scaling.time
+            if velocities
+            else np.empty(0)
+        ),
+    }
 
 
 def _prefixed(validation: ValidationResult, prefix: str) -> dict[str, np.ndarray]:
@@ -151,6 +194,29 @@ def _compute_lag(
         seed=config.optimizer_seed + lag,
         starts=config.optimizer_starts,
     )
+    physical_profile_grid = np.unique(
+        np.concatenate(
+            (
+                np.asarray([0.0]),
+                np.logspace(-7, 1, 9),
+                prepared.scaling.parameters_to_physical(
+                    optimization.best.parameters
+                )[:1]
+                * np.asarray([0.25, 0.5, 1.0, 2.0, 4.0]),
+            )
+        )
+    )
+    logger.info("lag %d: profiling kappa_c", lag)
+    profile = profile_kappa_c(
+        prepared.blocks,
+        optimization.best,
+        physical_profile_grid * prepared.scaling.time,
+    )
+    profile = ProfileLikelihood(
+        kappa_c=profile.kappa_c / prepared.scaling.time,
+        objective=profile.objective,
+        delta_log_likelihood=profile.delta_log_likelihood,
+    )
     bayesian = run_bayesian_inference(
         prepared.blocks,
         optimization.empirical_parameters,
@@ -159,7 +225,8 @@ def _compute_lag(
         config=config.mcmc,
         seed=config.optimizer_seed + lag,
     )
-    arrays = _optimization_arrays(optimization)
+    arrays = _optimization_arrays(optimization, profile)
+    arrays.update(_conservative_mode_arrays(prepared))
     arrays["normalized_posterior"] = bayesian.normalized_samples
     validation_metrics: dict[str, Any] = {}
     if bayesian.diagnostics.accepted:
@@ -233,6 +300,12 @@ def _compute_lag(
             "condition_number": hessian.condition_number if hessian else None,
             "nonpositive_hessian": hessian.nonpositive if hessian else None,
             "weak_hessian": hessian.weak if hessian else None,
+            "profile_best_kappa_c": float(
+                profile.kappa_c[np.argmax(profile.delta_log_likelihood)]
+            ),
+            "profile_delta_log_likelihood_at_zero": float(
+                profile.delta_log_likelihood[np.argmin(profile.kappa_c)]
+            ),
         },
         "validation": validation_metrics,
         "data": {
@@ -261,6 +334,9 @@ def _load_cache(
         return None
     metadata = json.loads(metrics_path.read_text())
     if metadata.get("schema") != LAG_CACHE_SCHEMA:
+        if metadata.get("schema") == "hexatic.band_lag.v3":
+            logger.info("lag %d: rebuilding stale v3 inference cache", lag)
+            return None
         raise ValueError(f"incompatible lag cache {metrics_path}")
     if metadata.get("fingerprint") != expected_fingerprint:
         raise ValueError(f"settings or inputs changed for lag cache {metrics_path}")

@@ -14,6 +14,7 @@ from .model import (
     PARAMETER_NAMES,
     TransitionBlock,
     negative_log_likelihood,
+    parameter_negative_log_likelihood,
     positive_parameters,
     raw_parameters,
 )
@@ -47,6 +48,13 @@ class OptimizationResult:
     best: OptimizationRun
     runs: tuple[OptimizationRun, ...]
     empirical_parameters: np.ndarray
+
+
+@dataclass(frozen=True)
+class ProfileLikelihood:
+    kappa_c: np.ndarray
+    objective: np.ndarray
+    delta_log_likelihood: np.ndarray
 
 
 def empirical_parameters(blocks: tuple[TransitionBlock, ...]) -> np.ndarray:
@@ -237,4 +245,63 @@ def optimize_parameters(
         best=best,
         runs=tuple(runs),
         empirical_parameters=empirical,
+    )
+
+
+def _profile_objective(
+    raw_other: jax.Array,
+    args: tuple[tuple[TransitionBlock, ...], jax.Array],
+) -> jax.Array:
+    blocks, fixed_kappa_c = args
+    parameters = jnp.concatenate(
+        (jnp.atleast_1d(fixed_kappa_c), positive_parameters(raw_other))
+    )
+    return parameter_negative_log_likelihood(parameters, blocks)
+
+
+def profile_kappa_c(
+    blocks: tuple[TransitionBlock, ...],
+    optimum: OptimizationRun,
+    values: np.ndarray,
+) -> ProfileLikelihood:
+    """Fix normalized kappa_c and reoptimize the other four parameters."""
+    grid = np.unique(np.asarray(values, dtype=np.float64))
+    if np.any(grid < 0.0):
+        raise ValueError("profile kappa_c values must be nonnegative")
+    solver = optx.BFGS(rtol=1e-8, atol=1e-8)
+    initial = raw_parameters(optimum.parameters[1:])
+    objectives = []
+    for index, fixed in enumerate(grid, start=1):
+        logger.info(
+            "kappa_c profile %d/%d: fixed normalized value=%.6g",
+            index,
+            len(grid),
+            fixed,
+        )
+        solution = optx.minimise(
+            _profile_objective,
+            solver,
+            jnp.asarray(initial),
+            args=(blocks, jnp.asarray(fixed)),
+            max_steps=2_000,
+            throw=False,
+        )
+        objective = float(
+            _profile_objective(
+                solution.value, (blocks, jnp.asarray(fixed))
+            )
+        )
+        objectives.append(objective)
+        logger.info(
+            "kappa_c profile %d/%d finished: objective=%.6g",
+            index,
+            len(grid),
+            objective,
+        )
+    objective_array = np.asarray(objectives, dtype=np.float64)
+    reference = min(float(optimum.objective), float(np.min(objective_array)))
+    return ProfileLikelihood(
+        kappa_c=grid,
+        objective=objective_array,
+        delta_log_likelihood=reference - objective_array,
     )

@@ -125,6 +125,45 @@ def _hessian_plot(outcome: LagOutcome, path: Path) -> None:
     _save(path, figure)
 
 
+def _conservative_drift_plot(outcome: LagOutcome, path: Path) -> None:
+    mode = outcome.arrays.get("conservative_mode", np.empty(0))
+    velocity = outcome.arrays.get("conservative_velocity", np.empty(0))
+    if not len(mode):
+        _placeholder(
+            path,
+            f"Lag {outcome.lag}: conservative drift",
+            "No multi-band conservative modes are available.",
+        )
+        return
+    figure, axis = plt.subplots(figsize=(7, 5))
+    image = axis.hexbin(mode, velocity, gridsize=60, bins="log", mincnt=1)
+    figure.colorbar(image, ax=axis, label="log sample count")
+    axis.axhline(0.0, color="black", linewidth=0.8)
+    axis.axvline(0.0, color="black", linewidth=0.8)
+    axis.set(
+        xlabel=r"conservative mode $x=P_n A$",
+        ylabel=r"$\Delta x/\Delta\tau$",
+        title=f"Lag {outcome.lag}: conservative-mode drift",
+    )
+    _save(path, figure)
+
+
+def _profile_likelihood_plot(outcome: LagOutcome, path: Path) -> None:
+    kappa_c = outcome.arrays["profile_kappa_c"]
+    delta_log_likelihood = outcome.arrays["profile_delta_log_likelihood"]
+    figure, axis = plt.subplots(figsize=(7, 5))
+    axis.plot(kappa_c, delta_log_likelihood, "o-")
+    axis.axhline(0.0, color="black", linewidth=0.8)
+    axis.axhline(-1.92, color="tab:red", linestyle="--", linewidth=0.8)
+    axis.set_xscale("symlog", linthresh=1e-7)
+    axis.set(
+        xlabel=r"fixed physical $\kappa_c$",
+        ylabel=r"$\Delta\log L(\kappa_c)$",
+        title=f"Lag {outcome.lag}: conservative-rate profile likelihood",
+    )
+    _save(path, figure)
+
+
 def _validation_arrays(outcome: LagOutcome, prefix: str) -> dict[str, np.ndarray]:
     return {
         key[len(prefix) :]: value
@@ -157,7 +196,10 @@ def _whitened_plot(outcome: LagOutcome, arrays: dict[str, np.ndarray], path: Pat
         axis.axhline(0.0, color="black", linewidth=0.8)
         axis.set(xlabel=label, ylabel="whitened residual")
     axes[1, 0].stem(np.arange(min(50, len(acf))), acf[:50])
-    axes[1, 0].set_title("pooled residual ACF")
+    axes[1, 0].set(
+        title="non-overlapping residual ACF",
+        xlabel="separation in fitted transitions",
+    )
     offsets = arrays["residual_covariance_offset"]
     band_counts = arrays["residual_covariance_band_count"]
     diagonal: list[np.ndarray] = []
@@ -342,6 +384,8 @@ def plot_lag(outcome: LagOutcome, output_dir: Path) -> list[str]:
     directory.mkdir(parents=True, exist_ok=True)
     _posterior_plots(outcome, directory)
     _hessian_plot(outcome, directory / "hessian.png")
+    _conservative_drift_plot(outcome, directory / "conservative_drift.png")
+    _profile_likelihood_plot(outcome, directory / "profile_kappa_c.png")
     validation_paths = {
         "whitened_residual.png": _whitened_plot,
         "predictive.png": _predictive_plot,
