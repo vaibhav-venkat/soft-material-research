@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import logging
 
 import jax
@@ -162,7 +162,27 @@ def _starts(
         for _ in range(count - 2)
     )
     generic = raw_parameters(np.asarray([1.0, 0.1, 0.1, 0.1, 1.0]))
-    return (empirical_raw, *perturbed, generic)
+    return (empirical_raw, generic, *perturbed)
+
+
+def _same_stationary_optimum(runs: list[OptimizationRun]) -> bool:
+    """Require three finite, well-converged and parameter-consistent solutions."""
+    if len(runs) < 3:
+        return False
+    recent = runs[-3:]
+    if not all(
+        np.isfinite(run.objective)
+        and run.gradient_norm < 1e-3
+        and np.all(np.isfinite(run.parameters))
+        for run in recent
+    ):
+        return False
+    objectives = np.asarray([run.objective for run in recent])
+    objective_tolerance = 1e-7 * max(1.0, abs(float(objectives.min())))
+    if float(np.ptp(objectives)) > objective_tolerance:
+        return False
+    log_parameters = np.log(np.stack([run.parameters for run in recent]))
+    return bool(np.max(np.ptp(log_parameters, axis=0)) < 0.05)
 
 
 def optimize_parameters(
@@ -195,11 +215,6 @@ def optimize_parameters(
         gradient = np.asarray(
             jax.grad(negative_log_likelihood)(jnp.asarray(raw), data)
         )
-        finite = bool(
-            np.isfinite(objective)
-            and np.all(np.isfinite(raw))
-            and np.all(np.isfinite(gradient))
-        )
         runs.append(
             OptimizationRun(
                 raw_parameters=raw,
@@ -207,7 +222,7 @@ def optimize_parameters(
                 objective=objective,
                 gradient_norm=float(np.linalg.norm(gradient)),
                 result=str(solution.result),
-                hessian=_hessian_diagnostics(raw, data) if finite else None,
+                hessian=None,
             )
         )
         logger.info(
@@ -218,10 +233,26 @@ def optimize_parameters(
             runs[-1].gradient_norm,
             runs[-1].result,
         )
-    finite_runs = [run for run in runs if np.isfinite(run.objective)]
-    if not finite_runs:
+        if index < starts and _same_stationary_optimum(runs):
+            logger.info(
+                "BFGS stopping after %d/%d starts: three starts reached the "
+                "same stationary optimum",
+                index,
+                starts,
+            )
+            break
+    finite_indices = [
+        index for index, run in enumerate(runs) if np.isfinite(run.objective)
+    ]
+    if not finite_indices:
         raise RuntimeError("all BFGS starts produced nonfinite objectives")
-    best = min(finite_runs, key=lambda run: run.objective)
+    best_index = min(finite_indices, key=lambda index: runs[index].objective)
+    logger.info("BFGS computing Hessian once at the selected optimum")
+    best = replace(
+        runs[best_index],
+        hessian=_hessian_diagnostics(runs[best_index].raw_parameters, data),
+    )
+    runs[best_index] = best
     logger.info(
         "BFGS selected objective=%.6g gradient_norm=%.3g",
         best.objective,
