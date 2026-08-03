@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 
 import jax
 import jax.numpy as jnp
@@ -16,6 +17,9 @@ from .model import (
     positive_parameters,
     raw_parameters,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -181,9 +185,11 @@ def optimize_parameters(
     if not blocks:
         raise ValueError("at least one training transition is required")
     empirical = empirical_parameters(blocks)
+    logger.info("BFGS empirical start: %s", np.array2string(empirical, precision=4))
     solver = optx.BFGS(rtol=1e-8, atol=1e-8)
     runs: list[OptimizationRun] = []
-    for start in _starts(empirical, seed, starts):
+    for index, start in enumerate(_starts(empirical, seed, starts), start=1):
+        logger.info("BFGS start %d/%d", index, starts)
         solution = optx.minimise(
             negative_log_likelihood,
             solver,
@@ -210,11 +216,25 @@ def optimize_parameters(
                 hessian=_hessian_diagnostics(raw, blocks) if finite else None,
             )
         )
+        logger.info(
+            "BFGS start %d/%d finished: objective=%.6g gradient_norm=%.3g result=%s",
+            index,
+            starts,
+            objective,
+            runs[-1].gradient_norm,
+            runs[-1].result,
+        )
     finite_runs = [run for run in runs if np.isfinite(run.objective)]
     if not finite_runs:
         raise RuntimeError("all BFGS starts produced nonfinite objectives")
+    best = min(finite_runs, key=lambda run: run.objective)
+    logger.info(
+        "BFGS selected objective=%.6g gradient_norm=%.3g",
+        best.objective,
+        best.gradient_norm,
+    )
     return OptimizationResult(
-        best=min(finite_runs, key=lambda run: run.objective),
+        best=best,
         runs=tuple(runs),
         empirical_parameters=empirical,
     )

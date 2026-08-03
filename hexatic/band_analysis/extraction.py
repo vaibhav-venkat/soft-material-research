@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from itertools import islice
+import logging
 import math
 from pathlib import Path
 
@@ -18,6 +19,9 @@ from .io import InputMetadata, frame_numbers, iter_frames
 from .segments import StableSegment, build_stable_segments
 from .storage import load_seed_segments, save_seed_segments
 from .tracking import BandTracker, DetectionFrame
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -77,6 +81,7 @@ def extract_seed_segments(
     """Extract or reuse one seed without modifying its input directory."""
     settings = extraction_settings(metadata, config)
     if cache_path.exists() and not overwrite:
+        logger.info("reusing segment cache: %s", cache_path)
         segments, _ = load_seed_segments(
             cache_path,
             source_fingerprint=metadata.source_fingerprint,
@@ -88,6 +93,10 @@ def extract_seed_segments(
     if not selected:
         raise ValueError(f"selected frame range is empty for {metadata.input_dir}")
     validate_gpu()
+    logger.info(
+        "depositing density and detecting bands in %d frames on the active GPU",
+        len(selected),
+    )
     grid = _grid(metadata, config)
     density_for = make_density_batch_kernel(
         grid,
@@ -98,6 +107,9 @@ def extract_seed_segments(
     )
     detections: list[DetectionFrame] = []
     frames = iter_frames(metadata, set(selected))
+    processed = 0
+    progress_interval = max(config.frame_batch_size, math.ceil(len(selected) / 10))
+    next_progress = progress_interval
     while batch := list(islice(frames, config.frame_batch_size)):
         coordinates = np.stack([item[2] for item in batch])
         densities_device, _, outside_device = density_for(
@@ -129,6 +141,12 @@ def extract_seed_segments(
                     bands,
                 )
             )
+        processed += len(batch)
+        if processed >= next_progress or processed == len(selected):
+            logger.info("extraction progress: %d/%d frames", processed, len(selected))
+            while next_progress <= processed:
+                next_progress += progress_interval
+    logger.info("tracking detected bands and debouncing topology events")
     tracker = BandTracker(
         overlap_threshold=config.overlap_threshold,
         persistence_frames=config.persistence_frames,
@@ -145,6 +163,7 @@ def extract_seed_segments(
         source_fingerprint=metadata.source_fingerprint,
         settings=settings,
     )
+    logger.info("saved segment cache: %s", cache_path)
     return segments
 
 

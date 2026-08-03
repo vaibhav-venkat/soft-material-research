@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 import hashlib
 import json
+import logging
 from pathlib import Path
 from typing import Any, Callable
 
@@ -22,6 +23,7 @@ from .validation import ValidationResult, validate_posterior
 
 
 LAG_CACHE_SCHEMA = "hexatic.band_lag.v3"
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -140,7 +142,10 @@ def _compute_lag(
     holdouts: dict[str, list[StableSegment]],
     config: AnalysisConfig,
 ) -> tuple[dict[str, Any], dict[str, np.ndarray], az.InferenceData]:
+    logger.info("lag %d: preparing normalized transitions", lag)
     prepared = prepare_training_transitions(training, lag)
+    transition_count = sum(block.current.shape[0] for block in prepared.blocks)
+    logger.info("lag %d: optimizing %d transitions", lag, transition_count)
     optimization = optimize_parameters(
         prepared.blocks,
         seed=config.optimizer_seed + lag,
@@ -158,6 +163,7 @@ def _compute_lag(
     arrays["normalized_posterior"] = bayesian.normalized_samples
     validation_metrics: dict[str, Any] = {}
     if bayesian.diagnostics.accepted:
+        logger.info("lag %d: validating training posterior", lag)
         training_validation = validate_posterior(
             training,
             lag,
@@ -171,6 +177,13 @@ def _compute_lag(
         validation_metrics["training"] = training_validation.metrics
         holdout_metrics: dict[str, Any] = {}
         for index, (seed_id, segments) in enumerate(holdouts.items()):
+            logger.info(
+                "lag %d: validating holdout %d/%d (%s)",
+                lag,
+                index + 1,
+                len(holdouts),
+                seed_id,
+            )
             result = validate_posterior(
                 segments,
                 lag,
@@ -183,6 +196,7 @@ def _compute_lag(
             arrays.update(_prefixed(result, f"holdout_{index}_"))
             holdout_metrics[seed_id] = result.metrics
         if holdouts:
+            logger.info("lag %d: validating aggregate holdout", lag)
             aggregate = validate_posterior(
                 [segment for segments in holdouts.values() for segment in segments],
                 lag,
@@ -199,6 +213,8 @@ def _compute_lag(
             }
         else:
             validation_metrics["holdout"] = {"aggregate": None, "per_seed": {}}
+    else:
+        logger.info("lag %d: skipping predictive validation after MCMC rejection", lag)
     hessian = optimization.best.hessian
     physical_dt = np.concatenate(
         [np.asarray(block.dt) for block in prepared.blocks]
@@ -305,14 +321,18 @@ def run_analysis(
     )
     outcomes: list[LagOutcome] = []
     for lag in config.lags:
+        logger.info("lag %d: checking cache", lag)
         lag_fingerprint = fingerprint({"analysis": data_fingerprint, "lag": lag})
         if not overwrite:
             cached = _load_cache(output_dir, lag, lag_fingerprint)
             if cached is not None:
+                logger.info("lag %d: reusing completed cache", lag)
                 outcomes.append(cached)
                 continue
+        logger.info("lag %d: starting inference", lag)
         metadata, arrays, idata = compute_lag(lag, training, holdouts, config)
         arrays_path, posterior_path, metrics_path = _paths(output_dir, lag)
+        logger.info("lag %d: saving inference artifacts", lag)
         _save_json(
             metrics_path,
             {
@@ -338,6 +358,9 @@ def run_analysis(
         _save_json(metrics_path, completed)
         outcomes.append(
             LagOutcome(lag, bool(metadata["accepted"]), False, completed, arrays, idata)
+        )
+        logger.info(
+            "lag %d: complete (accepted=%s)", lag, bool(metadata["accepted"])
         )
     return outcomes
 

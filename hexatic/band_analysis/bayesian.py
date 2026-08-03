@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,9 @@ import numpyro.distributions as dist
 from numpyro.infer import MCMC, NUTS, init_to_value
 
 from .model import PARAMETER_NAMES, Scaling, TransitionBlock, transition
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -170,10 +174,22 @@ def run_bayesian_inference(
     seed: int = 0,
 ) -> BayesianResult:
     """Run NUTS and perform exactly one prescribed retry after diagnostic failure."""
+    logger.info(
+        "NUTS sampling: %d chains, %d warmup, %d draws, target acceptance %.2f",
+        config.chains,
+        config.warmup,
+        config.draws,
+        config.target_accept,
+    )
     sampler = _run_once(blocks, empirical, initial, config, seed)
     idata = _physical_idata(sampler, scaling)
     diagnostics = _diagnostics(idata)
     retried = not diagnostics.accepted
+    logger.info(
+        "NUTS diagnostics: accepted=%s divergences=%d",
+        diagnostics.accepted,
+        diagnostics.divergences,
+    )
     used_config = config
     if retried:
         used_config = replace(
@@ -181,9 +197,19 @@ def run_bayesian_inference(
             warmup=config.retry_warmup,
             target_accept=config.retry_target_accept,
         )
+        logger.info(
+            "retrying NUTS: %d warmup, target acceptance %.2f",
+            used_config.warmup,
+            used_config.target_accept,
+        )
         sampler = _run_once(blocks, empirical, initial, used_config, seed + 1)
         idata = _physical_idata(sampler, scaling)
         diagnostics = _diagnostics(idata)
+        logger.info(
+            "NUTS retry diagnostics: accepted=%s divergences=%d",
+            diagnostics.accepted,
+            diagnostics.divergences,
+        )
     return BayesianResult(
         idata=idata,
         normalized_samples=_normalized_samples(sampler),
