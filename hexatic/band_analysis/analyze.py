@@ -32,6 +32,11 @@ from .storage import (
 from .tracking import BandTracker, TrackedFrame
 
 
+def _finite_json_float(value: np.ndarray) -> float | None:
+    result = float(value)
+    return result if math.isfinite(result) else None
+
+
 def analyze(
     input_dir: Path,
     *,
@@ -124,9 +129,17 @@ def analyze(
             existing = json.loads(result_path.read_text())
         existing.update(
             {
-                "schema": "hexatic.band_analysis.v13",
+                "schema": "hexatic.band_analysis.v14",
                 "input_dir": str(input_dir),
                 "configuration": configuration,
+                "stochastic_summary": {
+                    "area_increment_c1": _finite_json_float(
+                        tensors["area_increment_c1"]
+                    ),
+                    "area_increment_r_cons": _finite_json_float(
+                        tensors["area_increment_r_cons"]
+                    ),
+                },
                 "outputs": {
                     "density_distribution": "density_distribution.png",
                     "band_characterization": characterization_path.name,
@@ -244,6 +257,7 @@ def analyze(
             "distribution histogram; net and area-heterogeneity reductions; "
             "conditional moments; "
             "fixed-count event-free area-CV drift; "
+            "area-diffusion perimeter binning; increment covariances; "
             "raw and normalized neighbor-relative area drift; "
             "neighbor-relative area-increment drift; "
             "area transition matrices and Chapman-Kolmogorov discrepancy; "
@@ -252,7 +266,8 @@ def analyze(
         "cpu_operations": (
             "connected components; morphology reductions and Fourier modes; "
             "Hungarian assignment; event topology; "
-            "neighbor topology; distribution peak detection; plotting"
+            "neighbor topology; morphology regression; distribution peak "
+            "detection; plotting"
         ),
     }
     progress(f"stage=storage save_start path={characterization_path}")
@@ -268,7 +283,7 @@ def analyze(
         characterization_tensors, output_dir, progress=progress
     )
     result = {
-        "schema": "hexatic.band_analysis.v13",
+        "schema": "hexatic.band_analysis.v14",
         "input_dir": str(input_dir),
         "configuration": configuration,
         "compute_provenance": compute_provenance,
@@ -281,6 +296,14 @@ def analyze(
         "minimum_area_cells": minimum_area,
         "distribution_peaks_phi": features.peaks.tolist(),
         "distribution_valleys_phi": features.valleys.tolist(),
+        "stochastic_summary": {
+            "area_increment_c1": _finite_json_float(
+                characterization_tensors["area_increment_c1"]
+            ),
+            "area_increment_r_cons": _finite_json_float(
+                characterization_tensors["area_increment_r_cons"]
+            ),
+        },
         "frames": frame_records,
         "outputs": {
             "density_distribution": "density_distribution.png",

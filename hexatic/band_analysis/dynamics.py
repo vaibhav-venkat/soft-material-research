@@ -870,8 +870,56 @@ def add_neighbor_relative_area_change_fit(
     tensors["neighbor_relative_area_change_fit_physical_lag"] = physical_lag
 
 
+@partial(jax.jit, static_argnames=("lag_count", "bin_count"))
+def _area_bin_perimeter_reductions(
+    area: jax.Array,
+    perimeter: jax.Array,
+    stable: jax.Array,
+    segments: jax.Array,
+    edges: jax.Array,
+    *,
+    lag_count: int,
+    bin_count: int,
+) -> tuple[jax.Array, jax.Array]:
+    n_time = area.shape[0]
+    starts = jnp.arange(n_time)
+    lags = jnp.arange(1, lag_count + 1)[:, jnp.newaxis]
+    ends = starts[jnp.newaxis, :] + lags
+    valid_time = ends < n_time
+    ends = jnp.minimum(ends, n_time - 1)
+    valid = (
+        valid_time[..., jnp.newaxis]
+        & stable[jnp.newaxis, :, :]
+        & stable[ends]
+        & (segments[jnp.newaxis, :, :] == segments[ends])
+        & jnp.isfinite(area[jnp.newaxis, :, :])
+        & jnp.isfinite(area[ends])
+        & jnp.isfinite(perimeter[jnp.newaxis, :, :])
+    )
+    bins = jnp.searchsorted(edges, area, side="right") - 1
+    bins = jnp.clip(bins, 0, bin_count - 1)
+    offsets = jnp.arange(lag_count)[:, jnp.newaxis, jnp.newaxis] * bin_count
+    group_count = lag_count * bin_count
+    groups = jnp.where(
+        valid, offsets + bins[jnp.newaxis, :, :], group_count
+    ).ravel()
+    counts = jnp.bincount(groups, length=group_count + 1)[:-1].reshape(
+        lag_count, bin_count
+    )
+    sums = jnp.bincount(
+        groups,
+        weights=jnp.where(
+            valid,
+            perimeter[jnp.newaxis, :, :],
+            0.0,
+        ).ravel(),
+        length=group_count + 1,
+    )[:-1].reshape(lag_count, bin_count)
+    return counts, sums
+
+
 def add_area_diffusion_fit(tensors: dict[str, np.ndarray]) -> None:
-    """Fit ``D_A(A) = D0 + Gamma A**alpha`` independently for each lag."""
+    """Compare four conditional area-diffusion models at every lag."""
     centers = tensors["dynamics_area_bin_center"]
     diffusion = tensors["dynamics_area_diffusion"]
     counts = tensors["dynamics_area_count"]
@@ -881,8 +929,42 @@ def add_area_diffusion_fit(tensors: dict[str, np.ndarray]) -> None:
     gamma_values = np.full(lag_count, np.nan)
     alpha_values = np.full(lag_count, np.nan)
     r_squared = np.full(lag_count, np.nan)
+    full_rmse = np.full(lag_count, np.nan)
     physical_lags = np.full(lag_count, np.nan)
     fit_valid = np.zeros(lag_count, dtype=bool)
+    constant_valid = np.zeros(lag_count, dtype=bool)
+    constant_d0 = np.full(lag_count, np.nan)
+    constant_rmse = np.full(lag_count, np.nan)
+    sqrt_valid = np.zeros(lag_count, dtype=bool)
+    sqrt_gamma = np.full(lag_count, np.nan)
+    sqrt_rmse = np.full(lag_count, np.nan)
+    perimeter_valid = np.zeros(lag_count, dtype=bool)
+    perimeter_gamma = np.full(lag_count, np.nan)
+    perimeter_rmse = np.full(lag_count, np.nan)
+    mean_perimeter = np.full(diffusion.shape, np.nan)
+
+    finite_edges = tensors["dynamics_area_bin_edges"]
+    finite_edges = finite_edges[np.isfinite(finite_edges)]
+    if lag_count and finite_edges.size >= 2:
+        bin_count = len(finite_edges) - 1
+        perimeter_reduced = jax.device_get(
+            _area_bin_perimeter_reductions(
+                jnp.asarray(tensors["area"]),
+                jnp.asarray(tensors["interface_length"]),
+                jnp.asarray(tensors["stable"]),
+                jnp.asarray(tensors["segment_id"]),
+                jnp.asarray(finite_edges),
+                lag_count=lag_count,
+                bin_count=bin_count,
+            )
+        )
+        perimeter_counts = np.asarray(perimeter_reduced[0])
+        perimeter_sums = np.asarray(perimeter_reduced[1])
+        mean_perimeter[:, :bin_count] = np.where(
+            perimeter_counts > 0,
+            perimeter_sums / np.maximum(perimeter_counts, 1),
+            np.nan,
+        )
 
     for lag_index in range(lag_count):
         usable = (
@@ -892,11 +974,62 @@ def add_area_diffusion_fit(tensors: dict[str, np.ndarray]) -> None:
             & (centers > 0.0)
             & (counts[lag_index] > 0)
         )
-        if np.count_nonzero(usable) < 4:
+        if not np.any(usable):
             continue
         area = centers[usable]
         observed = diffusion[lag_index, usable]
         weights = counts[lag_index, usable].astype(float)
+        physical_lags[lag_index] = float(
+            np.average(mean_lags[lag_index, usable], weights=weights)
+        )
+
+        fitted_d0 = float(np.average(observed, weights=weights))
+        constant_valid[lag_index] = True
+        constant_d0[lag_index] = fitted_d0
+        constant_rmse[lag_index] = _weighted_rmse(
+            observed, np.full(observed.shape, fitted_d0), weights
+        )
+
+        sqrt_area = np.sqrt(area)
+        sqrt_denominator = float(np.sum(weights * sqrt_area**2))
+        if sqrt_denominator > 0.0:
+            fitted_gamma = float(
+                np.sum(weights * sqrt_area * observed) / sqrt_denominator
+            )
+            sqrt_valid[lag_index] = True
+            sqrt_gamma[lag_index] = fitted_gamma
+            sqrt_rmse[lag_index] = _weighted_rmse(
+                observed, fitted_gamma * sqrt_area, weights
+            )
+
+        perimeter = mean_perimeter[lag_index, usable]
+        perimeter_usable = np.isfinite(perimeter)
+        if np.any(perimeter_usable):
+            perimeter_weights = weights[perimeter_usable]
+            perimeter_values = perimeter[perimeter_usable]
+            perimeter_observed = observed[perimeter_usable]
+            denominator = float(
+                np.sum(perimeter_weights * perimeter_values**2)
+            )
+            if denominator > 0.0:
+                fitted_gamma_p = float(
+                    np.sum(
+                        perimeter_weights
+                        * perimeter_values
+                        * perimeter_observed
+                    )
+                    / denominator
+                )
+                perimeter_valid[lag_index] = True
+                perimeter_gamma[lag_index] = fitted_gamma_p
+                perimeter_rmse[lag_index] = _weighted_rmse(
+                    perimeter_observed,
+                    fitted_gamma_p * perimeter_values,
+                    perimeter_weights,
+                )
+
+        if np.count_nonzero(usable) < 4:
+            continue
         area_scale = float(np.median(area))
 
         def scaled_model(
@@ -937,9 +1070,7 @@ def add_area_diffusion_fit(tensors: dict[str, np.ndarray]) -> None:
         r_squared[lag_index] = (
             1.0 - residual_sum / total_sum if total_sum > 0.0 else np.nan
         )
-        physical_lags[lag_index] = float(
-            np.average(mean_lags[lag_index, usable], weights=weights)
-        )
+        full_rmse[lag_index] = _weighted_rmse(observed, predicted, weights)
         fit_valid[lag_index] = True
 
     tensors["area_diffusion_fit_valid"] = fit_valid
@@ -947,7 +1078,18 @@ def add_area_diffusion_fit(tensors: dict[str, np.ndarray]) -> None:
     tensors["area_diffusion_fit_gamma"] = gamma_values
     tensors["area_diffusion_fit_alpha"] = alpha_values
     tensors["area_diffusion_fit_r_squared"] = r_squared
+    tensors["area_diffusion_fit_rmse"] = full_rmse
     tensors["area_diffusion_fit_physical_lag"] = physical_lags
+    tensors["area_diffusion_bin_mean_perimeter"] = mean_perimeter
+    tensors["area_diffusion_constant_fit_valid"] = constant_valid
+    tensors["area_diffusion_constant_fit_d0"] = constant_d0
+    tensors["area_diffusion_constant_fit_rmse"] = constant_rmse
+    tensors["area_diffusion_sqrt_fit_valid"] = sqrt_valid
+    tensors["area_diffusion_sqrt_fit_gamma"] = sqrt_gamma
+    tensors["area_diffusion_sqrt_fit_rmse"] = sqrt_rmse
+    tensors["area_diffusion_perimeter_fit_valid"] = perimeter_valid
+    tensors["area_diffusion_perimeter_fit_gamma_p"] = perimeter_gamma
+    tensors["area_diffusion_perimeter_fit_rmse"] = perimeter_rmse
 
 
 def _weighted_rmse(
@@ -956,6 +1098,147 @@ def _weighted_rmse(
     weights: np.ndarray,
 ) -> float:
     return float(np.sqrt(np.average((observed - predicted) ** 2, weights=weights)))
+
+
+def add_area_geometry_fits(tensors: dict[str, np.ndarray]) -> None:
+    """Fit stable-band area-width and perimeter-area linear relationships."""
+    stable = tensors["stable"]
+    area = tensors["area"]
+    width = tensors["mean_width"]
+    perimeter = tensors["interface_length"]
+
+    width_usable = stable & np.isfinite(area) & np.isfinite(width)
+    width_count = int(np.count_nonzero(width_usable))
+    width_valid = width_count >= 2 and np.ptp(width[width_usable]) > 0.0
+    area_a0 = area_a1 = area_rmse = np.nan
+    if width_valid:
+        area_a1, area_a0 = (
+            float(value)
+            for value in np.polyfit(width[width_usable], area[width_usable], 1)
+        )
+        predicted = area_a0 + area_a1 * width[width_usable]
+        area_rmse = float(np.sqrt(np.mean((area[width_usable] - predicted) ** 2)))
+
+    perimeter_usable = stable & np.isfinite(area) & np.isfinite(perimeter)
+    perimeter_count = int(np.count_nonzero(perimeter_usable))
+    perimeter_valid = (
+        perimeter_count >= 2 and np.ptp(area[perimeter_usable]) > 0.0
+    )
+    perimeter_p0 = perimeter_ba = perimeter_rmse = np.nan
+    if perimeter_valid:
+        perimeter_ba, perimeter_p0 = (
+            float(value)
+            for value in np.polyfit(
+                area[perimeter_usable], perimeter[perimeter_usable], 1
+            )
+        )
+        predicted = perimeter_p0 + perimeter_ba * area[perimeter_usable]
+        perimeter_rmse = float(
+            np.sqrt(np.mean((perimeter[perimeter_usable] - predicted) ** 2))
+        )
+
+    tensors["area_width_fit_valid"] = np.asarray(width_valid)
+    tensors["area_width_fit_count"] = np.asarray(width_count, dtype=np.int64)
+    tensors["area_width_fit_a0"] = np.asarray(area_a0)
+    tensors["area_width_fit_a1"] = np.asarray(area_a1)
+    tensors["area_width_fit_rmse"] = np.asarray(area_rmse)
+    tensors["perimeter_area_fit_valid"] = np.asarray(perimeter_valid)
+    tensors["perimeter_area_fit_count"] = np.asarray(
+        perimeter_count, dtype=np.int64
+    )
+    tensors["perimeter_area_fit_p0"] = np.asarray(perimeter_p0)
+    tensors["perimeter_area_fit_ba"] = np.asarray(perimeter_ba)
+    tensors["perimeter_area_fit_rmse"] = np.asarray(perimeter_rmse)
+
+
+def add_area_increment_conservation(tensors: dict[str, np.ndarray]) -> None:
+    """Compute spatial increment covariance and conservation ratio at lag one."""
+    area = tensors["area"]
+    valid = tensors["valid"]
+    segments = tensors["segment_id"]
+    positions = tensors["wrapped_axial_position"]
+    event_count = tensors["frame_event_count"]
+    grouped: dict[int, list[np.ndarray]] = {}
+    for time_index in range(max(0, area.shape[0] - 1)):
+        if event_count[time_index + 1] != 0:
+            continue
+        selected = np.flatnonzero(valid[time_index])
+        if selected.size < 2 or np.count_nonzero(valid[time_index + 1]) != selected.size:
+            continue
+        if not np.all(valid[time_index + 1, selected]):
+            continue
+        if not np.array_equal(
+            segments[time_index, selected],
+            segments[time_index + 1, selected],
+        ):
+            continue
+        ordered = selected[np.argsort(positions[time_index, selected])]
+        increments = area[time_index + 1, ordered] - area[time_index, ordered]
+        if np.all(np.isfinite(increments)):
+            grouped.setdefault(int(selected.size), []).append(increments)
+
+    usable_groups = {
+        band_count: np.stack(samples)
+        for band_count, samples in grouped.items()
+        if len(samples) >= 2
+    }
+    maximum_band_count = max(usable_groups, default=0)
+    covariance_sum = np.zeros(maximum_band_count)
+    covariance_count = np.zeros(maximum_band_count, dtype=np.int64)
+    band_counts = np.asarray(sorted(usable_groups), dtype=np.int64)
+    r_cons_by_count = np.full(len(band_counts), np.nan)
+    sample_count = np.zeros(len(band_counts), dtype=np.int64)
+    total_numerator = 0.0
+    total_denominator = 0.0
+    for group_index, band_count in enumerate(band_counts):
+        samples = jnp.asarray(usable_groups[int(band_count)])
+        centered = samples - jnp.mean(samples)
+        covariances = jnp.stack(
+            [
+                jnp.mean(centered * jnp.roll(centered, -separation, axis=1))
+                for separation in range(int(band_count))
+            ]
+        )
+        total_increment = jnp.sum(samples, axis=1)
+        numerator = jnp.var(total_increment)
+        denominator = jnp.sum(jnp.var(samples, axis=0))
+        covariance_values, numerator_value, denominator_value = jax.device_get(
+            (covariances, numerator, denominator)
+        )
+        pair_count = int(samples.shape[0] * samples.shape[1])
+        covariance_sum[: int(band_count)] += (
+            np.asarray(covariance_values) * pair_count
+        )
+        covariance_count[: int(band_count)] += pair_count
+        sample_count[group_index] = int(samples.shape[0])
+        if float(denominator_value) > 0.0:
+            r_cons_by_count[group_index] = float(
+                numerator_value / denominator_value
+            )
+            total_numerator += float(samples.shape[0] * numerator_value)
+            total_denominator += float(samples.shape[0] * denominator_value)
+
+    covariance = np.where(
+        covariance_count > 0,
+        covariance_sum / np.maximum(covariance_count, 1),
+        np.nan,
+    )
+    tensors["area_increment_covariance_separation"] = np.arange(
+        maximum_band_count, dtype=np.int64
+    )
+    tensors["area_increment_covariance"] = covariance
+    tensors["area_increment_covariance_count"] = covariance_count
+    tensors["area_increment_c1"] = np.asarray(
+        covariance[1] if covariance.size > 1 else np.nan
+    )
+    tensors["area_increment_r_cons"] = np.asarray(
+        total_numerator / total_denominator
+        if total_denominator > 0.0
+        else np.nan
+    )
+    tensors["area_increment_r_cons_band_count"] = band_counts
+    tensors["area_increment_r_cons_by_band_count"] = r_cons_by_count
+    tensors["area_increment_r_cons_sample_count"] = sample_count
 
 
 def add_area_drift_fits(tensors: dict[str, np.ndarray]) -> None:
@@ -1577,6 +1860,10 @@ def add_stochastic_statistics(
     add_area_diffusion_fit(tensors)
     if progress is not None:
         progress("stage=stochastic area_diffusion_fit complete")
+        progress("stage=stochastic area_geometry_fits start")
+    add_area_geometry_fits(tensors)
+    if progress is not None:
+        progress("stage=stochastic area_geometry_fits complete")
         progress("stage=stochastic chapman_kolmogorov start")
     add_area_chapman_kolmogorov(tensors, max_frame_lag=max_frame_lag)
     if progress is not None:
@@ -1587,4 +1874,8 @@ def add_stochastic_statistics(
         progress("stage=stochastic area_coupling_start")
     add_area_coupling(tensors, progress=progress)
     if progress is not None:
+        progress("stage=stochastic area_increment_conservation start")
+    add_area_increment_conservation(tensors)
+    if progress is not None:
+        progress("stage=stochastic area_increment_conservation complete")
         progress("stage=stochastic complete")

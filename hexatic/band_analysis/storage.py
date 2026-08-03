@@ -14,7 +14,7 @@ from .characterization import N_MODES, mode_wave_numbers
 from .tracking import TrackedFrame
 
 
-SCHEMA = "hexatic.band_characterization.v13"
+SCHEMA = "hexatic.band_characterization.v14"
 
 SCALAR_FIELDS = (
     "area",
@@ -312,6 +312,16 @@ def load_characterization(
         "neighbor_area_covariance",
         "area_diffusion_fit_alpha",
         "area_diffusion_fit_valid",
+        "area_diffusion_constant_fit_d0",
+        "area_diffusion_sqrt_fit_gamma",
+        "area_diffusion_perimeter_fit_gamma_p",
+        "area_width_fit_a0",
+        "area_width_fit_a1",
+        "perimeter_area_fit_p0",
+        "perimeter_area_fit_ba",
+        "area_increment_covariance",
+        "area_increment_c1",
+        "area_increment_r_cons",
         "area_drift_constant_fit_nu",
         "area_drift_constant_fit_rmse",
         "area_drift_cubic_fit_c1",
