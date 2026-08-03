@@ -1,3 +1,5 @@
+"""Debounce topology changes and assign persistent identities to detected bands."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -122,6 +124,43 @@ class BandTracker:
         self._next_track_id += 1
         return track_id
 
+    def _candidate_outcome(
+        self,
+        active: dict[int, _TrackState],
+        frames: list[DetectionFrame],
+        index: int,
+        initial_edges: np.ndarray,
+    ) -> tuple[str, int | None, dict[int, int] | None]:
+        """Follow one proposed topology through its confirmation window."""
+        candidate_bands = frames[index].bands
+        for candidate_index in range(index + 1, index + self.persistence_frames):
+            if candidate_index >= len(frames):
+                return "incomplete", None, None
+
+            next_bands = frames[candidate_index].bands
+            _, old_edges = self._edges(active, next_bands)
+            restored = self._unique_mapping(old_edges)
+            if restored is not None:
+                return "restored", candidate_index, restored
+
+            candidate_active = {
+                row: _TrackState(band) for row, band in enumerate(candidate_bands)
+            }
+            _, continuation_edges = self._edges(candidate_active, next_bands)
+            continuation = self._unique_mapping(continuation_edges)
+            if continuation is None:
+                return "changed", candidate_index, None
+
+            ordered_bands = tuple(
+                next_bands[continuation[row]] for row in range(len(candidate_bands))
+            )
+            _, ordered_edges = self._edges(active, ordered_bands)
+            if not np.array_equal(ordered_edges, initial_edges):
+                return "changed", candidate_index, None
+            candidate_bands = ordered_bands
+
+        return "confirmed", None, None
+
     @staticmethod
     def _tracked(
         track_id: int,
@@ -184,22 +223,13 @@ class BandTracker:
                 index += 1
                 continue
 
-            restore_at = None
-            restore_mapping = None
-            confirmation_stop = index + self.persistence_frames
-            for candidate_index in range(
-                index + 1, min(confirmation_stop, len(frames))
-            ):
-                _, candidate_edges = self._edges(active, frames[candidate_index].bands)
-                candidate_mapping = self._unique_mapping(candidate_edges)
-                if candidate_mapping is not None:
-                    restore_at = candidate_index
-                    restore_mapping = candidate_mapping
-                    break
-
-            if restore_at is not None and restore_mapping is not None:
+            outcome, outcome_at, restore_mapping = self._candidate_outcome(
+                active, frames, index, edges
+            )
+            if outcome == "restored":
+                assert outcome_at is not None and restore_mapping is not None
                 epoch += 1
-                for gap in frames[index:restore_at]:
+                for gap in frames[index:outcome_at]:
                     output.append(
                         TrackedFrame(
                             gap.frame_index,
@@ -211,7 +241,7 @@ class BandTracker:
                             tracking_epoch=epoch,
                         )
                     )
-                restored = frames[restore_at]
+                restored = frames[outcome_at]
                 tracked = []
                 next_active = {}
                 for row, column in restore_mapping.items():
@@ -236,10 +266,28 @@ class BandTracker:
                         tracking_epoch=epoch,
                     )
                 )
-                index = restore_at + 1
+                index = outcome_at + 1
                 continue
 
-            if confirmation_stop > len(frames):
+            if outcome == "changed":
+                assert outcome_at is not None
+                epoch += 1
+                for gap in frames[index:outcome_at]:
+                    output.append(
+                        TrackedFrame(
+                            gap.frame_index,
+                            gap.step,
+                            gap.tau,
+                            (),
+                            (EventRecord(EventCode.TRANSIENT_GAP, tuple(old_ids)),),
+                            clean=False,
+                            tracking_epoch=epoch,
+                        )
+                    )
+                index = outcome_at
+                continue
+
+            if outcome == "incomplete":
                 epoch += 1
                 for gap in frames[index:]:
                     output.append(
