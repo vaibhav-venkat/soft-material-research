@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
-import jax
-import jax.numpy as jnp
 import numpy as np
 
 from .components import BandComponent
@@ -45,38 +43,15 @@ def minimum_image(delta: float, period: float) -> float:
     return float((delta + 0.5 * period) % period - 0.5 * period)
 
 
-@jax.jit
-def _morphology_reductions(
-    lower: jax.Array,
-    upper: jax.Array,
-    centerline: jax.Array,
-    width: jax.Array,
-    mean_width: float,
-    ds: float,
-    lx: float,
-) -> tuple[jax.Array, ...]:
-    def curve_length(values: jax.Array) -> jax.Array:
-        differences = jnp.roll(values, -1) - values
-        differences = (differences + 0.5 * lx) % lx - 0.5 * lx
-        return jnp.sum(jnp.hypot(ds, differences))
+def _periodic_curve_length(values: np.ndarray, ds: float, lx: float) -> float:
+    differences = np.roll(values, -1) - values
+    differences = (differences + 0.5 * lx) % lx - 0.5 * lx
+    return float(np.sum(np.hypot(ds, differences)))
 
-    position = jnp.mean(centerline)
-    centerline_modes = (
-        jnp.fft.fft(centerline - position)[: N_MODES + 1][1:]
-        / centerline.size
-    )
-    width_modes = (
-        jnp.fft.fft(width - jnp.mean(width))[: N_MODES + 1][1:]
-        / width.size
-    )
-    return (
-        position,
-        jnp.mean((width - mean_width) ** 2),
-        jnp.mean((centerline - position) ** 2),
-        curve_length(lower) + curve_length(upper),
-        centerline_modes,
-        width_modes,
-    )
+
+def _modes(values: np.ndarray) -> np.ndarray:
+    centered = values - np.mean(values)
+    return np.fft.fft(centered)[: N_MODES + 1][1:] / values.size
 
 
 def characterize_band(
@@ -107,23 +82,16 @@ def characterize_band(
 
     area = component.area_cells * grid.dx * grid.ds
     mean_width = area / grid.circumference
-    reductions = jax.device_get(
-        _morphology_reductions(
-            jnp.asarray(interfaces.lower),
-            jnp.asarray(interfaces.upper),
-            jnp.asarray(interfaces.centerline),
-            jnp.asarray(interfaces.width),
-            mean_width,
-            grid.ds,
-            grid.lx,
-        )
+    position = float(np.mean(interfaces.centerline))
+    width_variance = float(np.mean((interfaces.width - mean_width) ** 2))
+    centerline_variance = float(
+        np.mean((interfaces.centerline - position) ** 2)
     )
-    position = float(reductions[0])
-    width_variance = float(reductions[1])
-    centerline_variance = float(reductions[2])
-    interface_length = float(reductions[3])
-    centerline_modes = np.asarray(reductions[4])
-    width_modes = np.asarray(reductions[5])
+    interface_length = _periodic_curve_length(
+        interfaces.lower, grid.ds, grid.lx
+    ) + _periodic_curve_length(interfaces.upper, grid.ds, grid.lx)
+    centerline_modes = _modes(interfaces.centerline)
+    width_modes = _modes(interfaces.width)
     return BandCharacterization(
         label=component.label,
         lower=interfaces.lower.copy(),

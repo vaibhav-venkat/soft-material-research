@@ -38,19 +38,31 @@ def label_dilute_bands(
         if first_root != second_root:
             parents[second_root] = first_root
 
-    for i, j in np.argwhere(dilute):
-        source = int(ordinary_labels[i, j])
-        for di in (-1, 0, 1):
-            for dj in (-1, 0, 1):
-                neighbor = int(ordinary_labels[(i + di) % nx, (j + dj) % ns])
-                if neighbor:
-                    union(source, neighbor)
+    # Interior connections are already represented by ``ordinary_labels``.
+    # Only the two periodic seams can join otherwise distinct labels. Gather
+    # those label pairs with vectorized rolls, then union each unique pair.
+    seam_pairs: list[np.ndarray] = []
+    first_x = ordinary_labels[0]
+    last_x = ordinary_labels[-1]
+    for shift in (-1, 0, 1):
+        across_x = np.roll(last_x, -shift)
+        valid = (first_x != 0) & (across_x != 0)
+        seam_pairs.append(np.column_stack((first_x[valid], across_x[valid])))
+    first_s = ordinary_labels[:, 0]
+    last_s = ordinary_labels[:, -1]
+    for shift in (-1, 0, 1):
+        across_s = np.roll(last_s, -shift)
+        valid = (first_s != 0) & (across_s != 0)
+        seam_pairs.append(np.column_stack((first_s[valid], across_s[valid])))
+    nonempty_pairs = [pairs for pairs in seam_pairs if len(pairs)]
+    if nonempty_pairs:
+        for first, second in np.unique(np.concatenate(nonempty_pairs), axis=0):
+            union(int(first), int(second))
 
     tiled = np.tile(dilute, (3, 3))
     tiled_labels, _ = label(tiled, structure=np.ones((3, 3), dtype=np.int8))
-    roots = np.zeros_like(ordinary_labels)
-    for component_label in range(1, count + 1):
-        roots[ordinary_labels == component_label] = find(component_label)
+    root_lookup = np.asarray([find(value) for value in range(count + 1)])
+    roots = root_lookup[ordinary_labels]
     output = np.zeros_like(ordinary_labels, dtype=np.int32)
     components: list[BandComponent] = []
 

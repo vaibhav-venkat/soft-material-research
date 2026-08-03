@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 from typing import Callable
 
 import jax
@@ -101,6 +102,74 @@ def _quantile_edges(
     return edges
 
 
+@partial(jax.jit, static_argnames=("lag_count", "bin_count"))
+def _conditional_reductions(
+    values: jax.Array,
+    conditioning: jax.Array,
+    stable: jax.Array,
+    segments: jax.Array,
+    times: jax.Array,
+    edges: jax.Array,
+    *,
+    lag_count: int,
+    bin_count: int,
+) -> tuple[jax.Array, ...]:
+    """Reduce every lag and bin without host synchronization."""
+    n_time, n_tracks = values.shape
+    starts = jnp.arange(n_time)
+    lags = jnp.arange(1, lag_count + 1)[:, jnp.newaxis]
+    ends = starts[jnp.newaxis, :] + lags
+    valid_time = ends < n_time
+    ends = jnp.minimum(ends, n_time - 1)
+
+    initial_values = jnp.broadcast_to(
+        values[jnp.newaxis, :, :], (lag_count, n_time, n_tracks)
+    )
+    final_values = values[ends]
+    initial_conditioning = jnp.broadcast_to(
+        conditioning[jnp.newaxis, :, :], (lag_count, n_time, n_tracks)
+    )
+    final_stable = stable[ends]
+    final_segments = segments[ends]
+    delta_tau = times[ends] - times[jnp.newaxis, :]
+    pair_lags = delta_tau[..., jnp.newaxis]
+    valid = (
+        valid_time[..., jnp.newaxis]
+        & stable[jnp.newaxis, :, :]
+        & final_stable
+        & (segments[jnp.newaxis, :, :] == final_segments)
+        & jnp.isfinite(initial_values)
+        & jnp.isfinite(final_values)
+        & (pair_lags > 0.0)
+    )
+
+    bins = jnp.searchsorted(edges, initial_conditioning, side="right") - 1
+    bins = jnp.clip(bins, 0, bin_count - 1)
+    lag_offsets = (
+        jnp.arange(lag_count)[:, jnp.newaxis, jnp.newaxis] * bin_count
+    )
+    group_count = lag_count * bin_count
+    groups = jnp.where(valid, lag_offsets + bins, group_count).ravel()
+    increments = final_values - initial_values
+    safe_lags = jnp.where(valid, pair_lags, 1.0)
+
+    def reduce(weights: jax.Array) -> jax.Array:
+        return jnp.bincount(
+            groups,
+            weights=jnp.where(valid, weights, 0.0).ravel(),
+            length=group_count + 1,
+        )[:-1].reshape(lag_count, bin_count)
+
+    counts = jnp.bincount(groups, length=group_count + 1)[:-1].reshape(
+        lag_count, bin_count
+    )
+    sum_rate = reduce(increments / safe_lags)
+    sum_square_over_lag = reduce(increments**2 / safe_lags)
+    sum_increment = reduce(increments)
+    sum_lag = reduce(jnp.broadcast_to(pair_lags, valid.shape))
+    return counts, sum_rate, sum_square_over_lag, sum_increment, sum_lag
+
+
 def add_conditional_dynamics(
     tensors: dict[str, np.ndarray],
     *,
@@ -137,62 +206,43 @@ def add_conditional_dynamics(
         counts = np.zeros((lag_count, target_bins), dtype=np.int64)
         mean_lag = np.full((lag_count, target_bins), np.nan)
         if edges.size:
+            bin_count = len(edges) - 1
             stored_edges[: len(edges)] = edges
-            centers[: len(edges) - 1] = 0.5 * (edges[:-1] + edges[1:])
-            values_device = jnp.asarray(values)
-            conditioning_device = jnp.asarray(conditioning)
-            stable_device = jnp.asarray(stable)
-            segments_device = jnp.asarray(segments)
-            times_device = jnp.asarray(times)
-            for lag_index, lag in enumerate(range(1, lag_count + 1)):
-                delta_tau = times_device[lag:] - times_device[:-lag]
-                valid = (
-                    stable_device[:-lag]
-                    & stable_device[lag:]
-                    & (segments_device[:-lag] == segments_device[lag:])
-                    & jnp.isfinite(values_device[:-lag])
-                    & jnp.isfinite(values_device[lag:])
+            centers[:bin_count] = 0.5 * (edges[:-1] + edges[1:])
+            if lag_count:
+                reduced = jax.device_get(
+                    _conditional_reductions(
+                        jnp.asarray(values),
+                        jnp.asarray(conditioning),
+                        jnp.asarray(stable),
+                        jnp.asarray(segments),
+                        jnp.asarray(times),
+                        jnp.asarray(edges),
+                        lag_count=lag_count,
+                        bin_count=bin_count,
+                    )
                 )
-                valid &= delta_tau[:, np.newaxis] > 0.0
-                initial = conditioning_device[:-lag]
-                increments = values_device[lag:] - values_device[:-lag]
-                pair_lags = jnp.broadcast_to(delta_tau[:, np.newaxis], valid.shape)
-                for bin_index in range(len(edges) - 1):
-                    upper_comparison = (
-                        initial <= edges[bin_index + 1]
-                        if bin_index == len(edges) - 2
-                        else initial < edges[bin_index + 1]
-                    )
-                    selected = (
-                        valid
-                        & (initial >= edges[bin_index])
-                        & upper_comparison
-                    )
-                    count = int(jax.device_get(jnp.sum(selected)))
-                    counts[lag_index, bin_index] = count
-                    if count < minimum_samples:
-                        continue
-                    dz = jnp.where(selected, increments, 0.0)
-                    dt = jnp.where(selected, pair_lags, 1.0)
-                    estimate_device = jnp.sum(dz / dt) / count
-                    estimate = float(jax.device_get(estimate_device))
-                    drift[lag_index, bin_index] = estimate
-                    diffusion[lag_index, bin_index] = float(
-                        jax.device_get(
-                            jnp.sum(
-                                jnp.where(
-                                    selected,
-                                    (increments - estimate_device * pair_lags) ** 2
-                                    / (2.0 * pair_lags),
-                                    0.0,
-                                )
-                            )
-                            / count
-                        )
-                    )
-                    mean_lag[lag_index, bin_index] = float(
-                        jax.device_get(jnp.sum(jnp.where(selected, pair_lags, 0.0)) / count)
-                    )
+                reduced_counts = np.asarray(reduced[0], dtype=np.int64)
+                sum_rate = np.asarray(reduced[1])
+                sum_square_over_lag = np.asarray(reduced[2])
+                sum_increment = np.asarray(reduced[3])
+                sum_lag = np.asarray(reduced[4])
+                counts[:, :bin_count] = reduced_counts
+                usable = reduced_counts >= minimum_samples
+                safe_counts = np.maximum(reduced_counts, 1)
+                estimates = sum_rate / safe_counts
+                diffusion_values = (
+                    sum_square_over_lag
+                    - 2.0 * estimates * sum_increment
+                    + estimates**2 * sum_lag
+                ) / (2.0 * safe_counts)
+                drift[:, :bin_count] = np.where(usable, estimates, np.nan)
+                diffusion[:, :bin_count] = np.where(
+                    usable, np.maximum(diffusion_values, 0.0), np.nan
+                )
+                mean_lag[:, :bin_count] = np.where(
+                    usable, sum_lag / safe_counts, np.nan
+                )
 
         prefix = f"dynamics_{prop.slug}"
         tensors[f"{prefix}_bin_edges"] = stored_edges
@@ -208,69 +258,187 @@ def add_conditional_dynamics(
             )
 
 
+@jax.jit
+def _batched_position_msd(
+    values: jax.Array,
+    stable: jax.Array,
+    segments: jax.Array,
+    times: jax.Array,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    n_time, n_tracks = values.shape
+    lag_count = n_time - 1
+    starts = jnp.arange(n_time)
+    lags = jnp.arange(1, n_time)[:, jnp.newaxis]
+    ends = starts[jnp.newaxis, :] + lags
+    valid_time = ends < n_time
+    ends = jnp.minimum(ends, n_time - 1)
+    final_values = values[ends]
+    delta_tau = times[ends] - times[jnp.newaxis, :]
+    valid = (
+        valid_time[..., jnp.newaxis]
+        & stable[jnp.newaxis, :, :]
+        & stable[ends]
+        & (segments[jnp.newaxis, :, :] == segments[ends])
+        & (delta_tau[..., jnp.newaxis] > 0.0)
+    )
+    displacement = final_values - values[jnp.newaxis, :, :]
+    counts = jnp.sum(valid, axis=(1, 2))
+    safe_counts = jnp.maximum(counts, 1)
+    msd = jnp.sum(jnp.where(valid, displacement**2, 0.0), axis=(1, 2)) / safe_counts
+    physical_lag = (
+        jnp.sum(
+            jnp.where(valid, delta_tau[..., jnp.newaxis], 0.0),
+            axis=(1, 2),
+        )
+        / safe_counts
+    )
+    usable = counts > 0
+    return (
+        jnp.where(usable, physical_lag, jnp.nan),
+        jnp.where(usable, msd, jnp.nan),
+        counts,
+    )
+
+
 def add_position_msd(
     tensors: dict[str, np.ndarray],
     *,
     progress: ProgressCallback | None = None,
 ) -> None:
-    values = jnp.asarray(tensors["unwrapped_axial_position"])
-    stable = jnp.asarray(tensors["stable"])
-    segments = jnp.asarray(tensors["segment_id"])
-    times = jnp.asarray(tensors["physical_time"])
+    values = tensors["unwrapped_axial_position"]
+    stable = tensors["stable"]
+    segments = tensors["segment_id"]
+    times = tensors["physical_time"]
     lag_count = max(0, len(times) - 1)
     frame_lags = np.arange(1, lag_count + 1, dtype=np.int64)
-    physical_lags = np.full(lag_count, np.nan)
-    msd = np.full(lag_count, np.nan)
-    counts = np.zeros(lag_count, dtype=np.int64)
-    report_interval = max(1, lag_count // 10)
-    for lag_index, lag in enumerate(frame_lags):
-        delta_tau = times[lag:] - times[:-lag]
-        valid = (
-            stable[:-lag]
-            & stable[lag:]
-            & (segments[:-lag] == segments[lag:])
+    if lag_count:
+        physical_lags, msd, counts = jax.device_get(
+            _batched_position_msd(
+                jnp.asarray(values),
+                jnp.asarray(stable),
+                jnp.asarray(segments),
+                jnp.asarray(times),
+            )
         )
-        valid &= delta_tau[:, np.newaxis] > 0.0
-        count = int(jax.device_get(jnp.sum(valid)))
-        counts[lag_index] = count
-        if count:
-            displacement = values[lag:] - values[:-lag]
-            pair_lags = jnp.broadcast_to(delta_tau[:, np.newaxis], valid.shape)
-            msd[lag_index] = float(
-                jax.device_get(
-                    jnp.sum(jnp.where(valid, displacement**2, 0.0)) / count
-                )
-            )
-            physical_lags[lag_index] = float(
-                jax.device_get(
-                    jnp.sum(jnp.where(valid, pair_lags, 0.0)) / count
-                )
-            )
-        completed = lag_index + 1
-        if progress is not None and (
-            completed % report_interval == 0 or completed == lag_count
-        ):
-            progress(f"stage=stochastic msd_lags={completed}/{lag_count}")
+        counts = np.asarray(counts, dtype=np.int64)
+    else:
+        physical_lags = np.empty(0)
+        msd = np.empty(0)
+        counts = np.empty(0, dtype=np.int64)
+    if progress is not None:
+        progress(f"stage=stochastic msd_lags={lag_count}/{lag_count}")
     tensors["position_msd_frame_lag"] = frame_lags
     tensors["position_msd_physical_lag"] = physical_lags
     tensors["position_msd"] = msd
     tensors["position_msd_count"] = counts
 
 
-def _neighbor_pairs(positions: np.ndarray, selected: np.ndarray) -> set[tuple[int, int]]:
-    if len(selected) < 2:
-        return set()
-    ordered = selected[np.argsort(positions[selected])]
-    if len(ordered) == 2:
-        first, second = int(ordered[0]), int(ordered[1])
-        return {(min(first, second), max(first, second))}
-    pairs: set[tuple[int, int]] = set()
-    for first_value, second_value in zip(
-        ordered, np.roll(ordered, -1), strict=True
-    ):
-        first, second = int(first_value), int(second_value)
-        pairs.add((min(first, second), max(first, second)))
-    return pairs
+def _neighbor_adjacency(positions: np.ndarray, stable: np.ndarray) -> np.ndarray:
+    """Build symmetric periodic nearest-neighbor adjacency per frame."""
+    n_time, n_tracks = stable.shape
+    adjacency = np.zeros((n_time, n_tracks, n_tracks), dtype=bool)
+    for time_index in range(n_time):
+        selected = np.flatnonzero(stable[time_index])
+        if len(selected) < 2:
+            continue
+        ordered = selected[np.argsort(positions[time_index, selected])]
+        if len(ordered) == 2:
+            first, second = int(ordered[0]), int(ordered[1])
+            adjacency[time_index, first, second] = True
+            adjacency[time_index, second, first] = True
+            continue
+        following = np.roll(ordered, -1)
+        adjacency[time_index, ordered, following] = True
+        adjacency[time_index, following, ordered] = True
+    return adjacency
+
+
+@jax.jit
+def _batched_neighbor_covariance(
+    centered: jax.Array,
+    adjacency: jax.Array,
+    segments: jax.Array,
+    times: jax.Array,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    n_time, n_tracks = centered.shape
+    starts = jnp.arange(n_time)
+    lags = jnp.arange(1, n_time)[:, jnp.newaxis]
+    ends = starts[jnp.newaxis, :] + lags
+    valid_time = ends < n_time
+    ends = jnp.minimum(ends, n_time - 1)
+    same_segment = segments[jnp.newaxis, :, :] == segments[ends]
+    pair_valid = (
+        valid_time[..., jnp.newaxis, jnp.newaxis]
+        & adjacency[jnp.newaxis, :, :, :]
+        & adjacency[ends]
+        & same_segment[..., :, jnp.newaxis]
+        & same_segment[..., jnp.newaxis, :]
+    )
+    products = (
+        centered[jnp.newaxis, :, :, jnp.newaxis]
+        * centered[ends][..., jnp.newaxis, :]
+    )
+    delta_tau = times[ends] - times[jnp.newaxis, :]
+    pair_valid &= delta_tau[..., jnp.newaxis, jnp.newaxis] > 0.0
+    counts = jnp.sum(pair_valid, axis=(1, 2, 3))
+    safe_counts = jnp.maximum(counts, 1)
+    covariance = (
+        jnp.sum(jnp.where(pair_valid, products, 0.0), axis=(1, 2, 3))
+        / safe_counts
+    )
+    physical_lag = (
+        jnp.sum(
+            jnp.where(
+                pair_valid,
+                delta_tau[..., jnp.newaxis, jnp.newaxis],
+                0.0,
+            ),
+            axis=(1, 2, 3),
+        )
+        / safe_counts
+    )
+    usable = counts > 0
+    return (
+        jnp.where(usable, physical_lag, jnp.nan),
+        jnp.where(usable, covariance, jnp.nan),
+        counts,
+    )
+
+
+@jax.jit
+def _area_time_series(
+    area: jax.Array,
+    stable: jax.Array,
+    segments: jax.Array,
+    times: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    n_time = area.shape[0]
+    stable_total = jnp.where(
+        jnp.any(stable, axis=1),
+        jnp.sum(jnp.where(stable, area, 0.0), axis=1),
+        jnp.nan,
+    )
+    mean_absolute_rate = jnp.full(n_time, jnp.nan)
+    if n_time > 1:
+        adjacent_dt = times[1:] - times[:-1]
+        adjacent_valid = (
+            stable[:-1]
+            & stable[1:]
+            & (segments[:-1] == segments[1:])
+            & (adjacent_dt[:, jnp.newaxis] > 0.0)
+        )
+        adjacent_count = jnp.sum(adjacent_valid, axis=1)
+        adjacent_sum = jnp.sum(
+            jnp.where(adjacent_valid, jnp.abs(area[1:] - area[:-1]), 0.0),
+            axis=1,
+        )
+        adjacent_rate = jnp.where(
+            adjacent_count > 0,
+            adjacent_sum / adjacent_count / adjacent_dt,
+            jnp.nan,
+        )
+        mean_absolute_rate = mean_absolute_rate.at[1:].set(adjacent_rate)
+    return stable_total, mean_absolute_rate
 
 
 def add_area_coupling(
@@ -279,113 +447,45 @@ def add_area_coupling(
     progress: ProgressCallback | None = None,
 ) -> None:
     area = tensors["area"]
-    area_device = jnp.asarray(area)
     positions = tensors["wrapped_axial_position"]
     stable = tensors["stable"]
     segments = tensors["segment_id"]
     times = tensors["physical_time"]
     n_time = len(times)
 
-    centered_device = jnp.full_like(area_device, jnp.nan)
+    centered = np.full_like(area, np.nan)
     for segment_id in np.unique(segments[stable]):
         selected = stable & (segments == segment_id)
-        selected_device = jnp.asarray(selected)
-        mean_area = jnp.sum(jnp.where(selected_device, area_device, 0.0)) / jnp.sum(
-            selected_device
-        )
-        centered_device = jnp.where(
-            selected_device, area_device - mean_area, centered_device
-        )
+        centered[selected] = area[selected] - float(np.mean(area[selected]))
 
-    neighbors = [
-        _neighbor_pairs(positions[time_index], np.flatnonzero(stable[time_index]))
-        for time_index in range(n_time)
-    ]
+    adjacency = _neighbor_adjacency(positions, stable)
     lag_count = max(0, n_time - 1)
-    covariance = np.full(lag_count, np.nan)
-    physical_lag = np.full(lag_count, np.nan)
-    counts = np.zeros(lag_count, dtype=np.int64)
-    report_interval = max(1, lag_count // 10)
-    for lag_index, lag in enumerate(range(1, lag_count + 1)):
-        first_times: list[int] = []
-        second_times: list[int] = []
-        first_tracks: list[int] = []
-        second_tracks: list[int] = []
-        pair_lags: list[float] = []
-        for first_time in range(n_time - lag):
-            second_time = first_time + lag
-            dt = float(times[second_time] - times[first_time])
-            if dt <= 0.0:
-                continue
-            for first, second in neighbors[first_time] & neighbors[second_time]:
-                if (
-                    segments[first_time, first] != segments[second_time, first]
-                    or segments[first_time, second] != segments[second_time, second]
-                ):
-                    continue
-                first_times.extend((first_time, first_time))
-                second_times.extend((second_time, second_time))
-                first_tracks.extend((first, second))
-                second_tracks.extend((second, first))
-                pair_lags.extend((dt, dt))
-        counts[lag_index] = len(first_times)
-        if first_times:
-            products_device = (
-                centered_device[jnp.asarray(first_times), jnp.asarray(first_tracks)]
-                * centered_device[
-                    jnp.asarray(second_times), jnp.asarray(second_tracks)
-                ]
+    if lag_count:
+        physical_lag, covariance, counts = jax.device_get(
+            _batched_neighbor_covariance(
+                jnp.asarray(centered),
+                jnp.asarray(adjacency),
+                jnp.asarray(segments),
+                jnp.asarray(times),
             )
-            covariance[lag_index] = float(
-                jax.device_get(jnp.mean(products_device))
-            )
-            physical_lag[lag_index] = float(
-                jax.device_get(jnp.mean(jnp.asarray(pair_lags)))
-            )
-        completed = lag_index + 1
-        if progress is not None and (
-            completed % report_interval == 0 or completed == lag_count
-        ):
-            progress(
-                f"stage=stochastic area_coupling_lags={completed}/{lag_count}"
-            )
+        )
+        counts = np.asarray(counts, dtype=np.int64)
+    else:
+        physical_lag = np.empty(0)
+        covariance = np.empty(0)
+        counts = np.empty(0, dtype=np.int64)
+    if progress is not None:
+        progress(
+            f"stage=stochastic area_coupling_lags={lag_count}/{lag_count}"
+        )
 
-    stable_device = jnp.asarray(stable)
-    segments_device = jnp.asarray(segments)
-    stable_total_device = jnp.where(
-        jnp.any(stable_device, axis=1),
-        jnp.sum(jnp.where(stable_device, area_device, 0.0), axis=1),
-        jnp.nan,
-    )
-    mean_absolute_rate_device = jnp.full(n_time, jnp.nan)
-    if n_time > 1:
-        adjacent_valid = (
-            stable_device[:-1]
-            & stable_device[1:]
-            & (segments_device[:-1] == segments_device[1:])
+    stable_total, mean_absolute_rate = jax.device_get(
+        _area_time_series(
+            jnp.asarray(area),
+            jnp.asarray(stable),
+            jnp.asarray(segments),
+            jnp.asarray(times),
         )
-        adjacent_dt = jnp.asarray(times[1:] - times[:-1])
-        adjacent_valid &= adjacent_dt[:, np.newaxis] > 0.0
-        adjacent_count = jnp.sum(adjacent_valid, axis=1)
-        adjacent_sum = jnp.sum(
-            jnp.where(
-                adjacent_valid,
-                jnp.abs(area_device[1:] - area_device[:-1]),
-                0.0,
-            ),
-            axis=1,
-        )
-        adjacent_rate = jnp.where(
-            adjacent_count > 0,
-            adjacent_sum / adjacent_count / adjacent_dt,
-            jnp.nan,
-        )
-        mean_absolute_rate_device = mean_absolute_rate_device.at[1:].set(
-            adjacent_rate
-        )
-    stable_total = np.asarray(jax.device_get(stable_total_device))
-    mean_absolute_rate = np.asarray(
-        jax.device_get(mean_absolute_rate_device)
     )
 
     tensors["neighbor_area_covariance_frame_lag"] = np.arange(

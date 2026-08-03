@@ -73,3 +73,22 @@ def make_density_kernel(
         return smoothed / (grid.dx * grid.ds), jnp.sum(shell), outside
 
     return kernel
+
+
+def make_density_batch_kernel(
+    grid: SurfaceGrid,
+    *,
+    radius: float,
+    particle_diameter: float,
+    shell_epsilon: float,
+    smoothing_sigma: float,
+) -> Callable[[jax.Array], tuple[jax.Array, jax.Array, jax.Array]]:
+    """Build a batched density kernel over equally sized trajectory frames."""
+    single_frame = make_density_kernel(
+        grid,
+        radius=radius,
+        particle_diameter=particle_diameter,
+        shell_epsilon=shell_epsilon,
+        smoothing_sigma=smoothing_sigma,
+    )
+    return jax.jit(jax.vmap(single_frame))

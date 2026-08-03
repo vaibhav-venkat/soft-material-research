@@ -4,6 +4,7 @@ import argparse
 from collections import Counter
 from dataclasses import asdict
 import hashlib
+from itertools import islice
 import json
 import math
 from pathlib import Path
@@ -17,7 +18,7 @@ from hexatic.constants import cylinder
 
 from .components import label_dilute_bands
 from .characterization import N_MODES, characterize_band
-from .density import SurfaceGrid, make_density_kernel, validate_gpu
+from .density import SurfaceGrid, make_density_batch_kernel, validate_gpu
 from .dynamics import add_stochastic_statistics
 from .distribution import plot_distribution
 from .interfaces import extract_interfaces
@@ -44,6 +45,7 @@ def analyze(
     stop: int | None = None,
     stride: int = 1,
     timestep: float = float(cylinder.SIMULATION.timestep),
+    frame_batch_size: int = 16,
     overwrite: bool = False,
 ) -> Path:
     analysis_started = time.perf_counter()
@@ -59,6 +61,8 @@ def analyze(
         raise ValueError("n_mult must be positive")
     if not math.isfinite(timestep) or timestep <= 0.0:
         raise ValueError("timestep must be finite and positive")
+    if frame_batch_size < 1:
+        raise ValueError("frame_batch_size must be positive")
     grid = SurfaceGrid(
         lx=metadata.lx,
         circumference=metadata.circumference,
@@ -87,6 +91,7 @@ def analyze(
         "stop": stop,
         "stride": stride,
         "timestep": timestep,
+        "frame_batch_size": frame_batch_size,
         "persistence_frames": 5,
         "overlap_threshold": 0.05,
         "maximum_frame_lag": 10,
@@ -132,7 +137,7 @@ def analyze(
         f"grid={grid.nx}x{grid.ns}"
     )
     validate_gpu()
-    density_for = make_density_kernel(
+    density_batch_for = make_density_batch_kernel(
         grid,
         radius=metadata.radius,
         particle_diameter=metadata.particle_diameter,
@@ -146,48 +151,57 @@ def analyze(
     particle_area = math.pi * metadata.particle_diameter**2 / 4.0
     shell_upper_radius = metadata.radius + shell_epsilon_d * metadata.particle_diameter
 
-    for frame_index, step, coords in iter_frames(metadata, set(selected_frames)):
-        density_device, shell_count_device, outside_device = density_for(
-            jnp.asarray(coords, dtype=jnp.float32)
+    frame_iterator = iter_frames(metadata, set(selected_frames))
+    while batch := list(islice(frame_iterator, frame_batch_size)):
+        coordinates = np.stack([item[2] for item in batch])
+        density_device, shell_count_device, outside_device = density_batch_for(
+            jnp.asarray(coordinates, dtype=jnp.float32)
         )
-        if bool(jax.device_get(outside_device)):
-            raise AssertionError(
-                f"found a particle outside R + eps = {shell_upper_radius:.8g}"
+        densities, shell_counts, outside = jax.device_get(
+            (density_device, shell_count_device, outside_device)
+        )
+        for (frame_index, step, _), density, shell_count_value, is_outside in zip(
+            batch, densities, shell_counts, outside, strict=True
+        ):
+            if bool(is_outside):
+                raise AssertionError(
+                    f"found a particle outside R + eps = {shell_upper_radius:.8g}"
+                )
+            density = np.asarray(density)
+            shell_count = int(shell_count_value)
+            area_fraction_samples.append((density * particle_area).ravel())
+            labels, components = label_dilute_bands(
+                density < rho_c,
+                minimum_area=minimum_area,
             )
-        density = np.asarray(jax.device_get(density_device))
-        shell_count = int(jax.device_get(shell_count_device))
-        area_fraction_samples.append((density * particle_area).ravel())
-        labels, components = label_dilute_bands(
-            density < rho_c,
-            minimum_area=minimum_area,
-        )
-        characterized = []
-        for component in components:
-            interfaces = extract_interfaces(labels, component.label, grid)
-            characterized.append(
-                characterize_band(component, interfaces, grid)
+            characterized = []
+            for component in components:
+                interfaces = extract_interfaces(labels, component.label, grid)
+                characterized.append(
+                    characterize_band(component, interfaces, grid)
+                )
+            masks = [labels == component.label for component in components]
+            tracked, events = tracker.update(characterized, masks)
+            tracked_frames.append(
+                TrackedFrame(frame_index, step, tuple(tracked), events)
             )
-        masks = [labels == component.label for component in components]
-        tracked, events = tracker.update(characterized, masks)
-        tracked_frames.append(
-            TrackedFrame(frame_index, step, tuple(tracked), events)
-        )
-        event_counts = Counter(event.code.name.lower() for event in events)
-        frame_records.append(
-            {
-                "frame": frame_index,
-                "step": step,
-                "shell_particles": shell_count,
-                "band_count": len(tracked),
-                "track_ids": [band.track_id for band in tracked],
-                "segment_ids": [band.segment_id for band in tracked],
-                "events": dict(event_counts),
-            }
-        )
-        print(
-            f"[band_analysis] frame={frame_index} shell={shell_count} bands={len(components)}",
-            flush=True,
-        )
+            event_counts = Counter(event.code.name.lower() for event in events)
+            frame_records.append(
+                {
+                    "frame": frame_index,
+                    "step": step,
+                    "shell_particles": shell_count,
+                    "band_count": len(tracked),
+                    "track_ids": [band.track_id for band in tracked],
+                    "segment_ids": [band.segment_id for band in tracked],
+                    "events": dict(event_counts),
+                }
+            )
+            print(
+                f"[band_analysis] frame={frame_index} shell={shell_count} "
+                f"bands={len(components)}",
+                flush=True,
+            )
 
     progress(f"stage=frames complete count={len(tracked_frames)}")
     progress("stage=distribution concatenate")
@@ -215,12 +229,13 @@ def analyze(
         "jax_backend": jax.default_backend(),
         "jax_device": str(jax.devices()[0]),
         "gpu_operations": (
-            "density deposition; morphology reductions and Fourier modes; "
+            "batched density deposition; "
             "distribution histogram; net reductions; conditional moments; "
             "axial MSD; area covariance and rates"
         ),
         "cpu_operations": (
-            "connected components; Hungarian assignment; event topology; "
+            "connected components; morphology reductions and Fourier modes; "
+            "Hungarian assignment; event topology; "
             "neighbor topology; distribution peak detection; plotting"
         ),
     }
@@ -290,6 +305,12 @@ def _parse_args() -> argparse.Namespace:
         type=float,
         default=float(cylinder.SIMULATION.timestep),
         help="Simulation time per integration step (default: cylinder constants).",
+    )
+    parser.add_argument(
+        "--frame-batch-size",
+        type=int,
+        default=16,
+        help="Number of trajectory frames deposited per GPU call (default: 16).",
     )
     parser.add_argument(
         "--overwrite",
