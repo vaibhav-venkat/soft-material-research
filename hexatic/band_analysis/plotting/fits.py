@@ -166,13 +166,16 @@ def _plot_area_increment_conservation(
     axis.plot(separation[usable], covariance[usable], "o-", color="black")
     c1 = float(tensors["area_increment_c1"])
     r_cons = float(tensors["area_increment_r_cons"])
+    covariance_lag = int(tensors["area_increment_covariance_frame_lag"])
+    conservation_lag = int(tensors["area_increment_r_cons_frame_lag"])
     axis.axhline(0.0, color="0.65", linewidth=0.8)
     axis.set(
         xlabel=r"cyclic band separation $r$",
         ylabel=r"$C_r=\operatorname{Cov}(\Delta A_i,\Delta A_{i+r})$",
         title=(
-            "Fixed band count; event-free one-frame increments\n"
-            rf"$C_1={c1:.6g}$; $r_{{\rm cons}}={r_cons:.6g}$"
+            "Fixed band count; event-free intervals\n"
+            rf"$C_1={c1:.6g}$ (lag {covariance_lag}); "
+            rf"$r_{{\rm cons}}={r_cons:.6g}$ (lag {conservation_lag})"
         ),
     )
     axis.grid(alpha=0.25)
@@ -180,6 +183,5 @@ def _plot_area_increment_conservation(
     figure.savefig(output_dir / filename, dpi=180)
     plt.close(figure)
     return {"area_increment_conservation": filename}
-
 
 

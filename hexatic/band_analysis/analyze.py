@@ -129,7 +129,7 @@ def analyze(
             existing = json.loads(result_path.read_text())
         existing.update(
             {
-                "schema": "hexatic.band_analysis.v14",
+                "schema": "hexatic.band_analysis.v15",
                 "input_dir": str(input_dir),
                 "configuration": configuration,
                 "stochastic_summary": {
@@ -138,6 +138,12 @@ def analyze(
                     ),
                     "area_increment_r_cons": _finite_json_float(
                         tensors["area_increment_r_cons"]
+                    ),
+                    "area_increment_c1_frame_lag": int(
+                        tensors["area_increment_covariance_frame_lag"]
+                    ),
+                    "area_increment_r_cons_frame_lag": int(
+                        tensors["area_increment_r_cons_frame_lag"]
                     ),
                 },
                 "outputs": {
@@ -283,7 +289,7 @@ def analyze(
         characterization_tensors, output_dir, progress=progress
     )
     result = {
-        "schema": "hexatic.band_analysis.v14",
+        "schema": "hexatic.band_analysis.v15",
         "input_dir": str(input_dir),
         "configuration": configuration,
         "compute_provenance": compute_provenance,
@@ -302,6 +308,12 @@ def analyze(
             ),
             "area_increment_r_cons": _finite_json_float(
                 characterization_tensors["area_increment_r_cons"]
+            ),
+            "area_increment_c1_frame_lag": int(
+                characterization_tensors["area_increment_covariance_frame_lag"]
+            ),
+            "area_increment_r_cons_frame_lag": int(
+                characterization_tensors["area_increment_r_cons_frame_lag"]
             ),
         },
         "frames": frame_records,

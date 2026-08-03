@@ -296,77 +296,97 @@ def add_area_geometry_fits(tensors: dict[str, np.ndarray]) -> None:
 
 
 def add_area_increment_conservation(tensors: dict[str, np.ndarray]) -> None:
-    """Compute spatial increment covariance and conservation ratio at lag one."""
+    """Compute lag-1 spatial covariance and the lag-2 conservation ratio."""
     area = tensors["area"]
     valid = tensors["valid"]
     segments = tensors["segment_id"]
     positions = tensors["wrapped_axial_position"]
     event_count = tensors["frame_event_count"]
-    grouped: dict[int, list[np.ndarray]] = {}
-    for time_index in range(max(0, area.shape[0] - 1)):
-        if event_count[time_index + 1] != 0:
-            continue
-        selected = np.flatnonzero(valid[time_index])
-        if selected.size < 2 or np.count_nonzero(valid[time_index + 1]) != selected.size:
-            continue
-        if not np.all(valid[time_index + 1, selected]):
-            continue
-        if not np.array_equal(
-            segments[time_index, selected],
-            segments[time_index + 1, selected],
-        ):
-            continue
-        ordered = selected[np.argsort(positions[time_index, selected])]
-        increments = area[time_index + 1, ordered] - area[time_index, ordered]
-        if np.all(np.isfinite(increments)):
-            grouped.setdefault(int(selected.size), []).append(increments)
 
-    usable_groups = {
-        band_count: np.stack(samples)
-        for band_count, samples in grouped.items()
-        if len(samples) >= 2
-    }
-    maximum_band_count = max(usable_groups, default=0)
+    def grouped_increments(frame_lag: int) -> dict[int, np.ndarray]:
+        grouped: dict[int, list[np.ndarray]] = {}
+        for time_index in range(max(0, area.shape[0] - frame_lag)):
+            end_index = time_index + frame_lag
+            if np.any(event_count[time_index + 1 : end_index + 1] != 0):
+                continue
+            selected = np.flatnonzero(valid[time_index])
+            if selected.size < 2:
+                continue
+            interval_valid = True
+            for sampled_index in range(time_index + 1, end_index + 1):
+                interval_valid &= (
+                    np.count_nonzero(valid[sampled_index]) == selected.size
+                    and np.all(valid[sampled_index, selected])
+                    and np.array_equal(
+                        segments[time_index, selected],
+                        segments[sampled_index, selected],
+                    )
+                )
+            if not interval_valid:
+                continue
+            ordered = selected[np.argsort(positions[time_index, selected])]
+            increments = area[end_index, ordered] - area[time_index, ordered]
+            if np.all(np.isfinite(increments)):
+                grouped.setdefault(int(selected.size), []).append(increments)
+        return {
+            band_count: np.stack(samples)
+            for band_count, samples in grouped.items()
+            if len(samples) >= 2
+        }
+
+    covariance_groups = grouped_increments(1)
+    conservation_groups = grouped_increments(2)
+    maximum_band_count = max(covariance_groups, default=0)
     covariance_sum = np.zeros(maximum_band_count)
     covariance_count = np.zeros(maximum_band_count, dtype=np.int64)
-    band_counts = np.asarray(sorted(usable_groups), dtype=np.int64)
+    for band_count, group in covariance_groups.items():
+        samples = jnp.asarray(group)
+        centered = samples - jnp.mean(samples)
+        covariance_values = np.asarray(
+            jax.device_get(
+                jnp.stack(
+                    [
+                        jnp.mean(
+                            centered
+                            * jnp.roll(centered, -separation, axis=1)
+                        )
+                        for separation in range(band_count)
+                    ]
+                )
+            )
+        )
+        pair_count = int(samples.shape[0] * samples.shape[1])
+        covariance_sum[:band_count] += covariance_values * pair_count
+        covariance_count[:band_count] += pair_count
+
+    band_counts = np.asarray(sorted(conservation_groups), dtype=np.int64)
     r_cons_by_count = np.full(len(band_counts), np.nan)
     sample_count = np.zeros(len(band_counts), dtype=np.int64)
     total_numerator = 0.0
     total_denominator = 0.0
     for group_index, band_count in enumerate(band_counts):
-        samples = jnp.asarray(usable_groups[int(band_count)])
-        centered = samples - jnp.mean(samples)
-        covariances = jnp.stack(
-            [
-                jnp.mean(centered * jnp.roll(centered, -separation, axis=1))
-                for separation in range(int(band_count))
-            ]
-        )
-        total_increment = jnp.sum(samples, axis=1)
-        numerator = jnp.var(total_increment)
-        denominator = jnp.sum(jnp.var(samples, axis=0))
-        covariance_values, numerator_value, denominator_value = jax.device_get(
-            (covariances, numerator, denominator)
-        )
-        pair_count = int(samples.shape[0] * samples.shape[1])
-        covariance_sum[: int(band_count)] += (
-            np.asarray(covariance_values) * pair_count
-        )
-        covariance_count[: int(band_count)] += pair_count
-        sample_count[group_index] = int(samples.shape[0])
-        if float(denominator_value) > 0.0:
-            r_cons_by_count[group_index] = float(
-                numerator_value / denominator_value
+        samples = jnp.asarray(conservation_groups[int(band_count)])
+        numerator, denominator = jax.device_get(
+            (
+                jnp.var(jnp.sum(samples, axis=1)),
+                jnp.sum(jnp.var(samples, axis=0)),
             )
-            total_numerator += float(samples.shape[0] * numerator_value)
-            total_denominator += float(samples.shape[0] * denominator_value)
+        )
+        sample_count[group_index] = int(samples.shape[0])
+        if float(denominator) > 0.0:
+            r_cons_by_count[group_index] = float(numerator / denominator)
+            total_numerator += float(samples.shape[0] * numerator)
+            total_denominator += float(samples.shape[0] * denominator)
 
     covariance = np.where(
         covariance_count > 0,
         covariance_sum / np.maximum(covariance_count, 1),
         np.nan,
     )
+    tensors["area_increment_covariance_frame_lag"] = np.asarray(
+        1, dtype=np.int64
+    )
+    tensors["area_increment_r_cons_frame_lag"] = np.asarray(2, dtype=np.int64)
     tensors["area_increment_covariance_separation"] = np.arange(
         maximum_band_count, dtype=np.int64
     )
@@ -480,6 +500,5 @@ def add_area_drift_fits(tensors: dict[str, np.ndarray]) -> None:
         )
 
     tensors.update(outputs)
-
 
 
