@@ -17,6 +17,8 @@ class InputMetadata:
     circumference: float
     radius: float
     particle_diameter: float
+    run_steps: int
+    trajectory_write_period: int
 
 
 def load_metadata(input_dir: Path) -> InputMetadata:
@@ -32,6 +34,8 @@ def load_metadata(input_dir: Path) -> InputMetadata:
         circumference=float(case["circumference"]),
         radius=float(case["radius"]),
         particle_diameter=float(case["particle_diameter"]),
+        run_steps=int(case["run_steps"]),
+        trajectory_write_period=int(case["trajectory_write_period"]),
     )
 
 
