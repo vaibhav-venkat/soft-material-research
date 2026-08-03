@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy import stats
 
-from .model import PARAMETER_NAMES
+from .model import FITTED_PARAMETER_NAMES, PARAMETER_NAMES
 from .workflow import LagOutcome
 
 
@@ -59,7 +59,7 @@ def _arviz_plot(
 
 
 def _posterior_plots(outcome: LagOutcome, directory: Path) -> None:
-    names = list(PARAMETER_NAMES)
+    names = list(FITTED_PARAMETER_NAMES)
     _arviz_plot(
         directory / "posterior_trace.png",
         f"Lag {outcome.lag}: posterior and trace",
@@ -114,53 +114,20 @@ def _hessian_plot(outcome: LagOutcome, path: Path) -> None:
         return
     figure, axes = plt.subplots(1, 2, figsize=(10, 4))
     image = axes[0].imshow(matrix, cmap="coolwarm", aspect="auto")
-    axes[0].set_xticks(range(5), [PARAMETER_LABELS[name] for name in PARAMETER_NAMES])
-    axes[0].set_yticks(range(5), [PARAMETER_LABELS[name] for name in PARAMETER_NAMES])
+    axes[0].set_xticks(
+        range(len(FITTED_PARAMETER_NAMES)),
+        [PARAMETER_LABELS[name] for name in FITTED_PARAMETER_NAMES],
+    )
+    axes[0].set_yticks(
+        range(len(FITTED_PARAMETER_NAMES)),
+        [PARAMETER_LABELS[name] for name in FITTED_PARAMETER_NAMES],
+    )
     figure.colorbar(image, ax=axes[0], shrink=0.8)
     axes[1].plot(np.arange(1, len(eigenvalues) + 1), eigenvalues, "o-")
     axes[1].axhline(0.0, color="black", linewidth=0.8)
     axes[1].set_xlabel("ordered mode")
     axes[1].set_ylabel("raw-space eigenvalue")
     figure.suptitle(f"Lag {outcome.lag}: local identifiability")
-    _save(path, figure)
-
-
-def _conservative_drift_plot(outcome: LagOutcome, path: Path) -> None:
-    mode = outcome.arrays.get("conservative_mode", np.empty(0))
-    velocity = outcome.arrays.get("conservative_velocity", np.empty(0))
-    if not len(mode):
-        _placeholder(
-            path,
-            f"Lag {outcome.lag}: conservative drift",
-            "No multi-band conservative modes are available.",
-        )
-        return
-    figure, axis = plt.subplots(figsize=(7, 5))
-    image = axis.hexbin(mode, velocity, gridsize=60, bins="log", mincnt=1)
-    figure.colorbar(image, ax=axis, label="log sample count")
-    axis.axhline(0.0, color="black", linewidth=0.8)
-    axis.axvline(0.0, color="black", linewidth=0.8)
-    axis.set(
-        xlabel=r"conservative mode $x=P_n A$",
-        ylabel=r"$\Delta x/\Delta\tau$",
-        title=f"Lag {outcome.lag}: conservative-mode drift",
-    )
-    _save(path, figure)
-
-
-def _profile_likelihood_plot(outcome: LagOutcome, path: Path) -> None:
-    kappa_c = outcome.arrays["profile_kappa_c"]
-    delta_log_likelihood = outcome.arrays["profile_delta_log_likelihood"]
-    figure, axis = plt.subplots(figsize=(7, 5))
-    axis.plot(kappa_c, delta_log_likelihood, "o-")
-    axis.axhline(0.0, color="black", linewidth=0.8)
-    axis.axhline(-1.92, color="tab:red", linestyle="--", linewidth=0.8)
-    axis.set_xscale("symlog", linthresh=1e-7)
-    axis.set(
-        xlabel=r"fixed physical $\kappa_c$",
-        ylabel=r"$\Delta\log L(\kappa_c)$",
-        title=f"Lag {outcome.lag}: conservative-rate profile likelihood",
-    )
     _save(path, figure)
 
 
@@ -382,10 +349,10 @@ def _negative_plot(outcome: LagOutcome, metrics: dict[str, Any], path: Path) -> 
 def plot_lag(outcome: LagOutcome, output_dir: Path) -> list[str]:
     directory = output_dir / f"lag_{outcome.lag}" / "plots"
     directory.mkdir(parents=True, exist_ok=True)
+    for obsolete in ("conservative_drift.png", "profile_kappa_c.png"):
+        (directory / obsolete).unlink(missing_ok=True)
     _posterior_plots(outcome, directory)
     _hessian_plot(outcome, directory / "hessian.png")
-    _conservative_drift_plot(outcome, directory / "conservative_drift.png")
-    _profile_likelihood_plot(outcome, directory / "profile_kappa_c.png")
     validation_paths = {
         "whitened_residual.png": _whitened_plot,
         "predictive.png": _predictive_plot,

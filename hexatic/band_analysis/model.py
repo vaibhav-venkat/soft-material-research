@@ -15,6 +15,7 @@ from .segments import StableSegment
 jax.config.update("jax_enable_x64", True)
 
 PARAMETER_NAMES = ("kappa_c", "kappa_T", "D_A", "D_T", "A_T_star")
+FITTED_PARAMETER_NAMES = PARAMETER_NAMES[1:]
 JITTER = 1e-10
 
 
@@ -184,3 +185,12 @@ def negative_log_likelihood(
     raw: jax.Array, blocks: tuple[TransitionBlock, ...]
 ) -> jax.Array:
     return parameter_negative_log_likelihood(positive_parameters(raw), blocks)
+
+
+def fixed_conservative_negative_log_likelihood(
+    raw: jax.Array, blocks: tuple[TransitionBlock, ...]
+) -> jax.Array:
+    parameters = jnp.concatenate(
+        (jnp.zeros(1, dtype=jnp.float64), positive_parameters(raw))
+    )
+    return parameter_negative_log_likelihood(parameters, blocks)

@@ -103,15 +103,16 @@ def _parameter_table(outcome: LagOutcome) -> list[str]:
     diagnostics = outcome.metadata["diagnostics"]
     for name in PARAMETER_NAMES:
         posterior = outcome.metadata["posterior"][name]
+        label = "kappa_c (fixed)" if name == "kappa_c" else name
         interval = (
             f"[{_number(posterior['hdi_low'])}, "
             f"{_number(posterior['hdi_high'])}]"
         )
         lines.append(
-            f"| {name} | {_number(posterior['median'])} | {interval} | "
-            f"{_number(diagnostics['rhat'][name])} | "
-            f"{_number(diagnostics['ess_bulk'][name])} | "
-            f"{_number(diagnostics['ess_tail'][name])} |"
+            f"| {label} | {_number(posterior['median'])} | {interval} | "
+            f"{_number(diagnostics['rhat'].get(name))} | "
+            f"{_number(diagnostics['ess_bulk'].get(name))} | "
+            f"{_number(diagnostics['ess_tail'].get(name))} |"
         )
     return lines
 
@@ -185,6 +186,9 @@ def write_report(
         "",
         stability,
         "",
+        "The conservative restoring rate kappa_c is fixed exactly to zero; "
+        "the remaining four parameters are inferred.",
+        "",
         "Rejected lags retain posterior and sampler diagnostics, but are excluded "
         "from predictive, holdout, and lag-stability conclusions.",
         "",
@@ -227,10 +231,6 @@ def write_report(
                 f"{_number(optimization['condition_number'])}. "
                 f"Nonpositive eigenvalue: {optimization['nonpositive_hessian']}; "
                 f"weak mode: {optimization['weak_hessian']}. "
-                f"Profile-best kappa_c: "
-                f"{_number(optimization['profile_best_kappa_c'])}; "
-                f"profile delta-log-likelihood at zero: "
-                f"{_number(optimization['profile_delta_log_likelihood_at_zero'])}. "
                 f"NUTS retry used: {outcome.metadata['retried']}; "
                 f"divergences: {diagnostics['divergences']}.",
             ]

@@ -45,7 +45,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="held-out big-lx analysis directory; repeat for multiple seeds",
     )
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--lag", dest="lags", type=int, action="append")
+    parser.add_argument(
+        "--lag",
+        dest="lags",
+        type=int,
+        choices=(1, 2),
+        action="append",
+        help="fitting lag; only lags 1 and 2 are supported",
+    )
     parser.add_argument("--base-lag", type=int, default=2)
     parser.add_argument("--optimizer-starts", type=int, default=8)
     parser.add_argument("--chains", type=int, default=4)

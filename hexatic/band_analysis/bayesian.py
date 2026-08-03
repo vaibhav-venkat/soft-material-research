@@ -15,7 +15,12 @@ import numpyro
 import numpyro.distributions as dist
 from numpyro.infer import MCMC, NUTS, init_to_value
 
-from .model import PARAMETER_NAMES, Scaling, TransitionBlock, transition
+from .model import (
+    FITTED_PARAMETER_NAMES,
+    Scaling,
+    TransitionBlock,
+    transition,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -62,14 +67,17 @@ def coupled_area_model(
     blocks: tuple[TransitionBlock, ...], empirical: np.ndarray
 ) -> None:
     """Empirical-centered priors and the shared weighted transition likelihood."""
-    parameters = jnp.stack(
+    fitted_parameters = jnp.stack(
         [
             numpyro.sample(
                 name,
                 dist.LogNormal(jnp.log(empirical[index]), 0.5 if index == 4 else 1.0),
             )
-            for index, name in enumerate(PARAMETER_NAMES)
+            for index, name in enumerate(FITTED_PARAMETER_NAMES, start=1)
         ]
+    )
+    parameters = jnp.concatenate(
+        (jnp.zeros(1, dtype=jnp.float64), fitted_parameters)
     )
     for index, block in enumerate(blocks):
         means, covariances = jax.vmap(transition, in_axes=(0, 0, None))(
@@ -88,7 +96,7 @@ def _run_once(
     config: MCMCConfig,
     seed: int,
 ) -> MCMC:
-    initial_values = dict(zip(PARAMETER_NAMES, initial, strict=True))
+    initial_values = dict(zip(FITTED_PARAMETER_NAMES, initial[1:], strict=True))
     kernel = NUTS(
         coupled_area_model,
         dense_mass=True,
@@ -104,16 +112,18 @@ def _run_once(
         progress_bar=False,
     )
     generator = np.random.default_rng(seed)
-    offsets = generator.normal(0.0, 0.02, (config.chains, len(PARAMETER_NAMES)))
+    offsets = generator.normal(
+        0.0, 0.02, (config.chains, len(FITTED_PARAMETER_NAMES))
+    )
     offsets -= offsets.mean(axis=0, keepdims=True)
-    unconstrained = np.log(initial)[None, :] + offsets
+    unconstrained = np.log(initial[1:])[None, :] + offsets
     initial_parameters = {
         name: jnp.asarray(
             unconstrained[:, index]
             if config.chains > 1
             else unconstrained[0, index]
         )
-        for index, name in enumerate(PARAMETER_NAMES)
+        for index, name in enumerate(FITTED_PARAMETER_NAMES)
     }
     sampler.run(
         jax.random.key(seed),
@@ -126,10 +136,18 @@ def _run_once(
 
 
 def _diagnostics(idata: az.InferenceData) -> MCMCDiagnostics:
-    summary = az.summary(idata, var_names=list(PARAMETER_NAMES), round_to=None)
-    rhat = {name: float(summary.loc[name, "r_hat"]) for name in PARAMETER_NAMES}
-    bulk = {name: float(summary.loc[name, "ess_bulk"]) for name in PARAMETER_NAMES}
-    tail = {name: float(summary.loc[name, "ess_tail"]) for name in PARAMETER_NAMES}
+    summary = az.summary(idata, var_names=list(FITTED_PARAMETER_NAMES), round_to=None)
+    rhat = {
+        name: float(summary.loc[name, "r_hat"]) for name in FITTED_PARAMETER_NAMES
+    }
+    bulk = {
+        name: float(summary.loc[name, "ess_bulk"])
+        for name in FITTED_PARAMETER_NAMES
+    }
+    tail = {
+        name: float(summary.loc[name, "ess_tail"])
+        for name in FITTED_PARAMETER_NAMES
+    }
     divergences = int(np.asarray(idata.sample_stats["diverging"]).sum())
     accepted = (
         all(value < 1.01 for value in rhat.values())
@@ -151,8 +169,9 @@ def _physical_idata(sampler: MCMC, scaling: Scaling) -> az.InferenceData:
             scaling.area,
         ]
     )
-    for name, factor in zip(PARAMETER_NAMES, factors, strict=True):
+    for name, factor in zip(FITTED_PARAMETER_NAMES, factors[1:], strict=True):
         idata.posterior[name] = idata.posterior[name] * factor
+    idata.posterior["kappa_c"] = idata.posterior["kappa_T"] * 0.0
     idata.posterior.attrs["parameter_units"] = (
         "rates: inverse physical time; diffusions: area^2/time; A_T_star: area"
     )
@@ -161,7 +180,10 @@ def _physical_idata(sampler: MCMC, scaling: Scaling) -> az.InferenceData:
 
 def _normalized_samples(sampler: MCMC) -> np.ndarray:
     samples = sampler.get_samples(group_by_chain=True)
-    return np.stack([np.asarray(samples[name]) for name in PARAMETER_NAMES], axis=-1)
+    fitted = np.stack(
+        [np.asarray(samples[name]) for name in FITTED_PARAMETER_NAMES], axis=-1
+    )
+    return np.concatenate((np.zeros((*fitted.shape[:-1], 1)), fitted), axis=-1)
 
 
 def run_bayesian_inference(
@@ -175,7 +197,8 @@ def run_bayesian_inference(
 ) -> BayesianResult:
     """Run NUTS and perform exactly one prescribed retry after diagnostic failure."""
     logger.info(
-        "NUTS sampling: %d chains, %d warmup, %d draws, target acceptance %.2f",
+        "NUTS sampling with kappa_c=0 fixed: %d chains, %d warmup, %d draws, "
+        "target acceptance %.2f",
         config.chains,
         config.warmup,
         config.draws,

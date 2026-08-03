@@ -11,10 +11,9 @@ import numpy as np
 import optimistix as optx
 
 from .model import (
-    PARAMETER_NAMES,
+    FITTED_PARAMETER_NAMES,
     TransitionBlock,
-    negative_log_likelihood,
-    parameter_negative_log_likelihood,
+    fixed_conservative_negative_log_likelihood,
     positive_parameters,
     raw_parameters,
 )
@@ -48,13 +47,6 @@ class OptimizationResult:
     best: OptimizationRun
     runs: tuple[OptimizationRun, ...]
     empirical_parameters: np.ndarray
-
-
-@dataclass(frozen=True)
-class ProfileLikelihood:
-    kappa_c: np.ndarray
-    objective: np.ndarray
-    delta_log_likelihood: np.ndarray
 
 
 def empirical_parameters(blocks: tuple[TransitionBlock, ...]) -> np.ndarray:
@@ -155,7 +147,11 @@ def empirical_parameters(blocks: tuple[TransitionBlock, ...]) -> np.ndarray:
 def _hessian_diagnostics(
     raw: np.ndarray, blocks: tuple[TransitionBlock, ...]
 ) -> HessianDiagnostics:
-    matrix = np.asarray(jax.hessian(negative_log_likelihood)(jnp.asarray(raw), blocks))
+    matrix = np.asarray(
+        jax.hessian(fixed_conservative_negative_log_likelihood)(
+            jnp.asarray(raw), blocks
+        )
+    )
     eigenvalues, eigenvectors = np.linalg.eigh(matrix)
     largest = float(np.max(eigenvalues))
     nonpositive = bool(np.any(eigenvalues <= 0.0))
@@ -176,13 +172,13 @@ def _starts(
 ) -> tuple[np.ndarray, ...]:
     if count < 2:
         raise ValueError("optimizer starts must be at least two")
-    empirical_raw = raw_parameters(empirical)
+    empirical_raw = raw_parameters(empirical[1:])
     generator = np.random.default_rng(seed)
     perturbed = tuple(
-        empirical_raw + generator.normal(0.0, 0.75, len(PARAMETER_NAMES))
+        empirical_raw + generator.normal(0.0, 0.75, len(FITTED_PARAMETER_NAMES))
         for _ in range(count - 2)
     )
-    generic = raw_parameters(np.asarray([1.0, 1.0, 0.1, 0.1, 1.0]))
+    generic = raw_parameters(np.asarray([1.0, 0.1, 0.1, 1.0]))
     return (empirical_raw, *perturbed, generic)
 
 
@@ -193,13 +189,16 @@ def optimize_parameters(
     if not blocks:
         raise ValueError("at least one training transition is required")
     empirical = empirical_parameters(blocks)
-    logger.info("BFGS empirical start: %s", np.array2string(empirical, precision=4))
+    logger.info(
+        "BFGS fixed kappa_c=0; empirical fitted start: %s",
+        np.array2string(empirical[1:], precision=4),
+    )
     solver = optx.BFGS(rtol=1e-8, atol=1e-8)
     runs: list[OptimizationRun] = []
     for index, start in enumerate(_starts(empirical, seed, starts), start=1):
         logger.info("BFGS start %d/%d", index, starts)
         solution = optx.minimise(
-            negative_log_likelihood,
+            fixed_conservative_negative_log_likelihood,
             solver,
             jnp.asarray(start),
             args=blocks,
@@ -207,8 +206,14 @@ def optimize_parameters(
             throw=False,
         )
         raw = np.asarray(solution.value)
-        objective = float(negative_log_likelihood(jnp.asarray(raw), blocks))
-        gradient = np.asarray(jax.grad(negative_log_likelihood)(jnp.asarray(raw), blocks))
+        objective = float(
+            fixed_conservative_negative_log_likelihood(jnp.asarray(raw), blocks)
+        )
+        gradient = np.asarray(
+            jax.grad(fixed_conservative_negative_log_likelihood)(
+                jnp.asarray(raw), blocks
+            )
+        )
         finite = bool(
             np.isfinite(objective)
             and np.all(np.isfinite(raw))
@@ -217,7 +222,12 @@ def optimize_parameters(
         runs.append(
             OptimizationRun(
                 raw_parameters=raw,
-                parameters=np.asarray(positive_parameters(jnp.asarray(raw))),
+                parameters=np.concatenate(
+                    (
+                        np.zeros(1, dtype=np.float64),
+                        np.asarray(positive_parameters(jnp.asarray(raw))),
+                    )
+                ),
                 objective=objective,
                 gradient_norm=float(np.linalg.norm(gradient)),
                 result=str(solution.result),
@@ -245,63 +255,4 @@ def optimize_parameters(
         best=best,
         runs=tuple(runs),
         empirical_parameters=empirical,
-    )
-
-
-def _profile_objective(
-    raw_other: jax.Array,
-    args: tuple[tuple[TransitionBlock, ...], jax.Array],
-) -> jax.Array:
-    blocks, fixed_kappa_c = args
-    parameters = jnp.concatenate(
-        (jnp.atleast_1d(fixed_kappa_c), positive_parameters(raw_other))
-    )
-    return parameter_negative_log_likelihood(parameters, blocks)
-
-
-def profile_kappa_c(
-    blocks: tuple[TransitionBlock, ...],
-    optimum: OptimizationRun,
-    values: np.ndarray,
-) -> ProfileLikelihood:
-    """Fix normalized kappa_c and reoptimize the other four parameters."""
-    grid = np.unique(np.asarray(values, dtype=np.float64))
-    if np.any(grid < 0.0):
-        raise ValueError("profile kappa_c values must be nonnegative")
-    solver = optx.BFGS(rtol=1e-8, atol=1e-8)
-    initial = raw_parameters(optimum.parameters[1:])
-    objectives = []
-    for index, fixed in enumerate(grid, start=1):
-        logger.info(
-            "kappa_c profile %d/%d: fixed normalized value=%.6g",
-            index,
-            len(grid),
-            fixed,
-        )
-        solution = optx.minimise(
-            _profile_objective,
-            solver,
-            jnp.asarray(initial),
-            args=(blocks, jnp.asarray(fixed)),
-            max_steps=2_000,
-            throw=False,
-        )
-        objective = float(
-            _profile_objective(
-                solution.value, (blocks, jnp.asarray(fixed))
-            )
-        )
-        objectives.append(objective)
-        logger.info(
-            "kappa_c profile %d/%d finished: objective=%.6g",
-            index,
-            len(grid),
-            objective,
-        )
-    objective_array = np.asarray(objectives, dtype=np.float64)
-    reference = min(float(optimum.objective), float(np.min(objective_array)))
-    return ProfileLikelihood(
-        kappa_c=grid,
-        objective=objective_array,
-        delta_log_likelihood=reference - objective_array,
     )
