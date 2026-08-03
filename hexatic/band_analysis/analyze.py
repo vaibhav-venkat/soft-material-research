@@ -22,8 +22,7 @@ def analyze(
     input_dir: Path,
     *,
     output_dir: Path | None = None,
-    nx: int | None = None,
-    ns: int | None = None,
+    n_mult: float = 1.0,
     rho_c: float = 0.5,
     shell_epsilon_d: float = 0.05,
     smoothing_sigma: float = 1.0,
@@ -38,11 +37,13 @@ def analyze(
     metadata = load_metadata(input_dir)
     output_dir = output_dir or input_dir / "band_analysis_output"
     output_dir.mkdir(parents=True, exist_ok=True)
+    if n_mult <= 0.0:
+        raise ValueError("n_mult must be positive")
     grid = SurfaceGrid(
         lx=metadata.lx,
         circumference=metadata.circumference,
-        nx=nx or max(1, round(metadata.lx / metadata.particle_diameter)),
-        ns=ns or max(1, round(metadata.circumference / metadata.particle_diameter)),
+        nx=max(1, round(n_mult * metadata.lx / metadata.particle_diameter)),
+        ns=max(1, round(n_mult * metadata.circumference / metadata.particle_diameter)),
     )
     selected_frames = frame_numbers(metadata, start, stop, stride)
     if not selected_frames:
@@ -123,6 +124,7 @@ def analyze(
         "schema": "hexatic.band_analysis.v1",
         "input_dir": str(input_dir),
         "grid": {**asdict(grid), "dx": grid.dx, "ds": grid.ds},
+        "n_mult": n_mult,
         "rho_c": rho_c,
         "phi_c": phi_c,
         "shell_epsilon_d": shell_epsilon_d,
@@ -148,8 +150,15 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--input-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path)
-    parser.add_argument("--nx", type=int)
-    parser.add_argument("--ns", type=int)
+    parser.add_argument(
+        "--n-mult",
+        type=float,
+        default=1.0,
+        help=(
+            "Grid-resolution multiplier: Nx=round(n_mult*Lx/D) and "
+            "Ns=round(n_mult*C/D); default 1.0."
+        ),
+    )
     parser.add_argument("--rho-c", type=float, default=0.5)
     parser.add_argument("--shell-epsilon-d", type=float, default=0.05)
     parser.add_argument("--smoothing-sigma", type=float, default=1.0)

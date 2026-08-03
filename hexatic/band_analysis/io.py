@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 import numpy as np
-from safetensors.numpy import load_file
+from safetensors import safe_open
 
 
 @dataclass(frozen=True)
@@ -58,9 +58,12 @@ def iter_frames(
         if not wanted:
             continue
         path = metadata.input_dir / str(shard["file"])
-        tensors = load_file(path)
-        if "coords" not in tensors or "step" not in tensors:
-            raise KeyError(f"{path} must contain coords and step tensors")
-        for frame in wanted:
-            local = frame - shard_start
-            yield frame, int(tensors["step"][local]), tensors["coords"][local]
+        with safe_open(path, framework="numpy") as tensors:
+            keys = tensors.keys()
+            if "coords" not in keys or "step" not in keys:
+                raise KeyError(f"{path} must contain coords and step tensors")
+            coords = tensors.get_slice("coords")
+            steps = tensors.get_slice("step")
+            for frame in wanted:
+                local = frame - shard_start
+                yield frame, int(steps[local]), np.asarray(coords[local])
