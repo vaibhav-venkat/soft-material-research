@@ -2,7 +2,7 @@
 authors = ["Vaibhav Venkat <vaibhav@vaibhavvenkat.com>"]
 channels = ["conda-forge", "main", "r", "msys2"]
 name = "sap"
-platforms = ["osx-arm64", "linux-64"]
+platforms = ["osx-arm64", "linux-64", { name = "linux-64-cuda12", platform = "linux-64", cuda = "12" }]
 version = "0.1.0"
 
 [tasks]
@@ -104,27 +104,27 @@ rust-src = ">=1.96.0,<2"
 hdf5 = ">=1.14,<2"
 freud = ">=3.5.0,<4"
 jenkspy = ">=0.4.1,<0.5"
+arviz = ">=1.2.0,<2"
 
 [pypi-dependencies]
 pysindy = { version = ">=2.1.0, <3", extras = ["miosr", "sbr", "cvxpy"] }
 desloppify = ">=1.0, <2"
-optimistix = "*"
-numpyro = "*"
-arviz = "*"
 h5netcdf = "*"
 h5py = "*"
 
 [feature.big-lx-cuda12]
-platforms = ["linux-64"]
+platforms = ["linux-64-cuda12"]
 
 [feature.big-lx-cuda12.dependencies]
 cuda-version = "12.*"
 
 [feature.big-lx-cuda12.pypi-dependencies]
-jax = { version = ">=0.10.2,<0.11", extras = ["cuda12"] }
+jax = { version = "*", extras = ["cuda12"] }
+optimistix = ">=0.1.0,<0.2"
+numpyro = ">=0.21.0,<0.22"
 
-[feature.big-lx-cuda12.system-requirements]
-cuda = "12.9"
+[environments.big-lx-cuda12]
+features = ["big-lx-cuda12"]
 
-[environments]
-big-lx-cuda12 = ["big-lx-cuda12"]
+[environments.big-lx-cuda12.dependencies]
+jaxlib = { version = "*", build = "*cuda*" }
