@@ -1,3 +1,5 @@
+"""Store compatible segment and inference artifacts atomically."""
+
 from __future__ import annotations
 
 import hashlib

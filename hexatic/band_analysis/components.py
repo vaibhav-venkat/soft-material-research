@@ -1,3 +1,5 @@
+"""Identify connected winding components in periodic density masks."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

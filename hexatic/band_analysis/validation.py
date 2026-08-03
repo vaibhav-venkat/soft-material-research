@@ -1,3 +1,5 @@
+"""Evaluate residual, predictive, trajectory, and holdout behavior."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

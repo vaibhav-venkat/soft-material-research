@@ -1,3 +1,5 @@
+"""Write consolidated metrics and Markdown analysis reports."""
+
 from __future__ import annotations
 
 from dataclasses import asdict

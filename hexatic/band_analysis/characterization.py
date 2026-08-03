@@ -1,3 +1,5 @@
+"""Reduce detected winding components to physical band observables."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

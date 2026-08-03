@@ -1,3 +1,5 @@
+"""Coordinate sequential lag inference with resumable cached artifacts."""
+
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass

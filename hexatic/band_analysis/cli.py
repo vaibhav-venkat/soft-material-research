@@ -1,3 +1,5 @@
+"""Parse command-line options and run the cached analysis workflow."""
+
 from __future__ import annotations
 
 import argparse

@@ -1,3 +1,5 @@
+"""Render posterior, predictive, residual, and holdout diagnostics."""
+
 from __future__ import annotations
 
 import math

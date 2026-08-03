@@ -1,3 +1,5 @@
+"""Sample coupled area-model posteriors and assess chain convergence."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, replace

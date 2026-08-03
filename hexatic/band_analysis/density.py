@@ -1,3 +1,5 @@
+"""Construct surface-density grids and detect dilute band masks."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

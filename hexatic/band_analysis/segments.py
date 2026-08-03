@@ -1,3 +1,5 @@
+"""Build maximal clean fixed-identity segments for area inference."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

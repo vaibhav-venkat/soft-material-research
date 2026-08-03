@@ -1,3 +1,5 @@
+"""Fit normalized coupled area dynamics with deterministic optimization."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

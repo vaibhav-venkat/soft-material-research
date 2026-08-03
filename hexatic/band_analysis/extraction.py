@@ -1,3 +1,5 @@
+"""Extract stable band segments from one simulation directory."""
+
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass

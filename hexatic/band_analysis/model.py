@@ -1,3 +1,5 @@
+"""Define scaling, transitions, and likelihoods for the coupled area SDE."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

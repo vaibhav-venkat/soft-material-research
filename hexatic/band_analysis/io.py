@@ -1,3 +1,5 @@
+"""Load simulation arrays and metadata used by band extraction."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
