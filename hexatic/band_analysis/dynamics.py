@@ -36,14 +36,6 @@ def area_drift_constant_model(
     return np.broadcast_to(-nu, np.asarray(area).shape)
 
 
-def area_drift_linear_model(
-    area: np.ndarray | float,
-    kappa_a: float,
-    area_star: float,
-) -> np.ndarray:
-    return np.asarray(-kappa_a * (np.asarray(area) - area_star))
-
-
 def area_drift_cubic_model(
     area: np.ndarray | float,
     c1: float,
@@ -176,6 +168,7 @@ def _conditional_reductions(
         & (segments[jnp.newaxis, :, :] == final_segments)
         & jnp.isfinite(initial_values)
         & jnp.isfinite(final_values)
+        & jnp.isfinite(initial_conditioning)
         & (pair_lags > 0.0)
     )
 
@@ -294,6 +287,108 @@ def add_conditional_dynamics(
             )
 
 
+def neighbor_relative_area(
+    area: np.ndarray,
+    wrapped_positions: np.ndarray,
+    stable: np.ndarray,
+) -> np.ndarray:
+    """Return each stable band's area relative to its two cyclic neighbors."""
+    relative = np.full(area.shape, np.nan)
+    for time_index in range(area.shape[0]):
+        selected = np.flatnonzero(
+            stable[time_index]
+            & np.isfinite(area[time_index])
+            & np.isfinite(wrapped_positions[time_index])
+        )
+        if selected.size < 2:
+            continue
+        ordered = selected[
+            np.argsort(wrapped_positions[time_index, selected])
+        ]
+        previous = np.roll(ordered, 1)
+        following = np.roll(ordered, -1)
+        relative[time_index, ordered] = area[time_index, ordered] - 0.5 * (
+            area[time_index, previous] + area[time_index, following]
+        )
+    return relative
+
+
+def add_neighbor_relative_area_drift(
+    tensors: dict[str, np.ndarray],
+    *,
+    max_frame_lag: int = MAX_FRAME_LAG,
+    target_bins: int = TARGET_BINS,
+    minimum_samples: int = MIN_BIN_SAMPLES,
+    preferred_bin_samples: int = PREFERRED_BIN_SAMPLES,
+) -> None:
+    """Estimate ``<Delta A_i | delta A_i> / Delta tau`` for stable bands."""
+    if (
+        max_frame_lag < 1
+        or target_bins < 1
+        or minimum_samples < 1
+        or preferred_bin_samples < minimum_samples
+    ):
+        raise ValueError("neighbor-relative area controls must be positive")
+    area = tensors["area"]
+    stable = tensors["stable"]
+    relative = neighbor_relative_area(
+        area,
+        tensors["wrapped_axial_position"],
+        stable,
+    )
+    tensors["neighbor_relative_area"] = relative
+    edges = _quantile_edges(
+        relative[stable & np.isfinite(relative)],
+        target_bins,
+        preferred_bin_samples,
+    )
+    lag_count = min(max_frame_lag, max(0, area.shape[0] - 1))
+    stored_edges = np.full(target_bins + 1, np.nan)
+    centers = np.full(target_bins, np.nan)
+    drift = np.full((lag_count, target_bins), np.nan)
+    counts = np.zeros((lag_count, target_bins), dtype=np.int64)
+    mean_lag = np.full((lag_count, target_bins), np.nan)
+    if edges.size:
+        bin_count = len(edges) - 1
+        stored_edges[: len(edges)] = edges
+        centers[:bin_count] = 0.5 * (edges[:-1] + edges[1:])
+        if lag_count:
+            reduced = jax.device_get(
+                _conditional_reductions(
+                    jnp.asarray(area),
+                    jnp.asarray(relative),
+                    jnp.asarray(stable),
+                    jnp.asarray(tensors["segment_id"]),
+                    jnp.asarray(tensors["physical_time"]),
+                    jnp.asarray(edges),
+                    lag_count=lag_count,
+                    bin_count=bin_count,
+                )
+            )
+            reduced_counts = np.asarray(reduced[0], dtype=np.int64)
+            sum_rate = np.asarray(reduced[1])
+            sum_lag = np.asarray(reduced[4])
+            usable = reduced_counts >= minimum_samples
+            safe_counts = np.maximum(reduced_counts, 1)
+            counts[:, :bin_count] = reduced_counts
+            drift[:, :bin_count] = np.where(
+                usable,
+                sum_rate / safe_counts,
+                np.nan,
+            )
+            mean_lag[:, :bin_count] = np.where(
+                usable,
+                sum_lag / safe_counts,
+                np.nan,
+            )
+    prefix = "dynamics_neighbor_relative_area"
+    tensors[f"{prefix}_bin_edges"] = stored_edges
+    tensors[f"{prefix}_bin_center"] = centers
+    tensors[f"{prefix}_drift"] = drift
+    tensors[f"{prefix}_count"] = counts
+    tensors[f"{prefix}_mean_physical_lag"] = mean_lag
+
+
 def add_area_diffusion_fit(tensors: dict[str, np.ndarray]) -> None:
     """Fit ``D_A(A) = D0 + Gamma A**alpha`` independently for each lag."""
     centers = tensors["dynamics_area_bin_center"]
@@ -383,7 +478,7 @@ def _weighted_rmse(
 
 
 def add_area_drift_fits(tensors: dict[str, np.ndarray]) -> None:
-    """Fit the constant, signed-linear, and cubic area-drift models."""
+    """Fit the constant and cubic area-drift models."""
     centers = tensors["dynamics_area_bin_center"]
     drift = tensors["dynamics_area_drift"]
     counts = tensors["dynamics_area_count"]
@@ -395,10 +490,6 @@ def add_area_drift_fits(tensors: dict[str, np.ndarray]) -> None:
         "area_drift_constant_fit_valid": np.zeros(lag_count, dtype=bool),
         "area_drift_constant_fit_nu": np.full(lag_count, np.nan),
         "area_drift_constant_fit_rmse": np.full(lag_count, np.nan),
-        "area_drift_linear_fit_valid": np.zeros(lag_count, dtype=bool),
-        "area_drift_linear_fit_kappa_a": np.full(lag_count, np.nan),
-        "area_drift_linear_fit_area_star": np.full(lag_count, np.nan),
-        "area_drift_linear_fit_rmse": np.full(lag_count, np.nan),
         "area_drift_cubic_fit_valid": np.zeros(lag_count, dtype=bool),
         "area_drift_cubic_fit_c1": np.full(lag_count, np.nan),
         "area_drift_cubic_fit_c3": np.full(lag_count, np.nan),
@@ -431,43 +522,15 @@ def add_area_drift_fits(tensors: dict[str, np.ndarray]) -> None:
             observed, constant_prediction, weights
         )
 
-        if area.size < 2 or np.ptp(area) <= 0.0:
+        if area.size < 3 or np.ptp(area) <= 0.0:
             continue
-        slope, intercept = (
+        slope, _ = (
             float(value)
             for value in np.polyfit(area, observed, 1, w=np.sqrt(weights))
         )
-        kappa_a = -slope
-        slope_tolerance = (
-            np.finfo(float).eps
-            * max(1.0, abs(intercept))
-            / max(1.0, float(np.ptp(area)))
-        )
-        linear_parameters: tuple[float, float] | None = None
-        if abs(kappa_a) > slope_tolerance:
-            area_star = intercept / kappa_a
-            linear_parameters = (kappa_a, area_star)
-            linear_prediction = area_drift_linear_model(area, kappa_a, area_star)
-            outputs["area_drift_linear_fit_valid"][lag_index] = True
-            outputs["area_drift_linear_fit_kappa_a"][lag_index] = kappa_a
-            outputs["area_drift_linear_fit_area_star"][lag_index] = area_star
-            outputs["area_drift_linear_fit_rmse"][lag_index] = _weighted_rmse(
-                observed, linear_prediction, weights
-            )
-
-        if area.size < 3:
-            continue
         area_scale = float(np.ptp(area))
-        initial_kappa = (
-            float(linear_parameters[0])
-            if linear_parameters is not None
-            else -slope
-        )
-        initial_area_star = (
-            float(linear_parameters[1])
-            if linear_parameters is not None
-            else float(np.average(area, weights=weights))
-        )
+        initial_c1 = -slope
+        initial_area_star = float(np.average(area, weights=weights))
 
         def scaled_cubic_model(
             values: np.ndarray,
@@ -485,7 +548,7 @@ def add_area_drift_fits(tensors: dict[str, np.ndarray]) -> None:
                     scaled_cubic_model,
                     area,
                     observed,
-                    p0=(initial_kappa * area_scale, 0.0, initial_area_star),
+                    p0=(initial_c1 * area_scale, 0.0, initial_area_star),
                     sigma=sigma,
                     absolute_sigma=False,
                     method="trf",
@@ -999,6 +1062,13 @@ def add_stochastic_statistics(
         tensors, max_frame_lag=max_frame_lag, progress=progress
     )
     if progress is not None:
+        progress("stage=stochastic neighbor_relative_area start")
+    add_neighbor_relative_area_drift(
+        tensors,
+        max_frame_lag=max_frame_lag,
+    )
+    if progress is not None:
+        progress("stage=stochastic neighbor_relative_area complete")
         progress("stage=stochastic area_drift_fits start")
     add_area_drift_fits(tensors)
     if progress is not None:

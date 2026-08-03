@@ -14,7 +14,7 @@ from .characterization import N_MODES, mode_wave_numbers
 from .tracking import TrackedFrame
 
 
-SCHEMA = "hexatic.band_characterization.v6"
+SCHEMA = "hexatic.band_characterization.v7"
 
 SCALAR_FIELDS = (
     "area",
@@ -246,13 +246,12 @@ def load_characterization(
         "area_diffusion_fit_valid",
         "area_drift_constant_fit_nu",
         "area_drift_constant_fit_rmse",
-        "area_drift_linear_fit_kappa_a",
-        "area_drift_linear_fit_area_star",
-        "area_drift_linear_fit_rmse",
         "area_drift_cubic_fit_c1",
         "area_drift_cubic_fit_c3",
         "area_drift_cubic_fit_area_star",
         "area_drift_cubic_fit_rmse",
+        "neighbor_relative_area",
+        "dynamics_neighbor_relative_area_drift",
         "area_ck_weighted_total_variation",
         "area_ck_direct_probability",
     }
