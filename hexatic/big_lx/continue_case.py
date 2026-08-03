@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import json
 from pathlib import Path
 
@@ -52,6 +53,7 @@ def continue_case(
     input_gsd: Path,
     *,
     gpu_id: int | None = None,
+    seed: int | None = None,
 ) -> None:
     """Continue the fixed big-Lx case and analyze the resulting trajectory."""
     if gpu_id is not None and gpu_id < 0:
@@ -62,6 +64,8 @@ def continue_case(
         raise FileNotFoundError(f"Missing input GSD: {input_gsd}")
 
     case = get_case(CASE_ID)
+    if seed is not None:
+        case = replace(case, seed=seed)
     paths = CasePaths(case, output_dir)
     _prepare_outputs(paths)
 
@@ -181,7 +185,7 @@ def continue_case(
         f"[big_lx.continue] case={case.case_id} input_step={input_last_step} "
         f"extra_steps={EXTRA_STEPS} write_period={TRAJECTORY_WRITE_PERIOD} "
         f"tau_r={TAU_R} diffusion_period={ROTATIONAL_DIFFUSION_PERIOD} "
-        f"gpu={gpu_id}",
+        f"seed={case.seed} gpu={gpu_id}",
         flush=True,
     )
     sim.run(EXTRA_STEPS)
@@ -237,12 +241,23 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("output_dir", type=Path)
     parser.add_argument("input_gsd", type=Path)
     parser.add_argument("--gpu-id", type=int, default=None)
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Override the case seed for the continuation and downstream analysis.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = _parse_args()
-    continue_case(args.output_dir, args.input_gsd, gpu_id=args.gpu_id)
+    continue_case(
+        args.output_dir,
+        args.input_gsd,
+        gpu_id=args.gpu_id,
+        seed=args.seed,
+    )
 
 
 if __name__ == "__main__":
