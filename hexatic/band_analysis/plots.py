@@ -216,6 +216,76 @@ def _plot_area_diagnostics(
     figure.savefig(output_dir / alpha_file, dpi=180)
     plt.close(figure)
     outputs["area_diffusion_alpha"] = alpha_file
+
+    ck_file = "area_chapman_kolmogorov.png"
+    figure, axes = plt.subplots(2, 2, figsize=(12.0, 9.0))
+    lag = tensors["area_ck_base_physical_lag"]
+    discrepancy = tensors["area_ck_weighted_total_variation"]
+    usable_lag = np.isfinite(lag) & np.isfinite(discrepancy)
+    axes[0, 0].plot(lag[usable_lag], discrepancy[usable_lag], "o-", color="black")
+    axes[0, 0].set(
+        xlabel=r"base physical lag $\Delta\tau$",
+        ylabel="weighted total-variation discrepancy",
+    )
+    axes[0, 0].set_ylim(bottom=0.0)
+    axes[0, 0].grid(alpha=0.25)
+
+    valid_lags = np.flatnonzero(usable_lag)
+    if valid_lags.size:
+        lag_index = int(valid_lags[-1])
+        direct = tensors["area_ck_direct_probability"][lag_index]
+        composed = tensors["area_ck_composed_probability"][lag_index]
+        difference = np.abs(direct - composed)
+        finite_probability = np.concatenate(
+            (direct[np.isfinite(direct)], composed[np.isfinite(composed)])
+        )
+        probability_max = (
+            float(np.max(finite_probability)) if finite_probability.size else 1.0
+        )
+        panels = (
+            (direct, r"direct $P_{2\Delta\tau}$", probability_max),
+            (composed, r"composed $P_{\Delta\tau}^2$", probability_max),
+            (difference, "absolute difference", None),
+        )
+        centers = tensors["dynamics_area_bin_center"]
+        finite_centers = np.flatnonzero(np.isfinite(centers))
+        last_bin = int(finite_centers[-1] + 1) if finite_centers.size else 0
+        for axis, (matrix, title, vmax) in zip(
+            (axes[0, 1], axes[1, 0], axes[1, 1]), panels, strict=True
+        ):
+            image = axis.imshow(
+                matrix[:last_bin, :last_bin],
+                origin="lower",
+                aspect="auto",
+                interpolation="nearest",
+                vmin=0.0,
+                vmax=vmax,
+            )
+            axis.set(
+                xlabel="final area bin",
+                ylabel="initial area bin",
+                title=title,
+            )
+            figure.colorbar(image, ax=axis, shrink=0.85)
+        figure.suptitle(
+            "Area Chapman–Kolmogorov test: "
+            rf"$\Delta\tau={float(lag[lag_index]):.4g}$; stable segments only"
+        )
+    else:
+        for axis in (axes[0, 1], axes[1, 0], axes[1, 1]):
+            axis.text(
+                0.5,
+                0.5,
+                "insufficient rows with at least 50 increments",
+                ha="center",
+                va="center",
+                transform=axis.transAxes,
+            )
+            axis.set_axis_off()
+    figure.tight_layout()
+    figure.savefig(output_dir / ck_file, dpi=180)
+    plt.close(figure)
+    outputs["area_chapman_kolmogorov"] = ck_file
     return outputs
 
 
@@ -249,5 +319,5 @@ def plot_characterization(
     outputs.update(_plot_area_diagnostics(tensors, output_dir))
     if progress is not None:
         progress("stage=plots coupling=2/2 complete")
-        progress("stage=plots area_diagnostics=2/2 complete")
+        progress("stage=plots area_diagnostics=3/3 complete")
     return outputs
