@@ -139,8 +139,12 @@ def conservative_segment_slope(segment: StableSegment) -> np.ndarray:
 def conservative_segment_slopes(
     segments: list[StableSegment],
 ) -> tuple[np.ndarray, ...]:
-    """Return endpoint slopes projected by P_n for every segment."""
-    return tuple(conservative_segment_slope(segment) for segment in segments)
+    """Return projected endpoint slopes for segments with positive duration."""
+    return tuple(
+        conservative_segment_slope(segment)
+        for segment in segments
+        if len(segment.tau) >= 2 and segment.tau[-1] > segment.tau[0]
+    )
 
 
 def estimate_slope_variance(slopes: tuple[np.ndarray, ...]) -> float:
@@ -157,7 +161,11 @@ def build_state_space_sequences(
 ) -> tuple[StateSpaceSequence, ...]:
     sequences = []
     for segment in segments:
-        if segment.n_bands == 1:
+        if (
+            segment.n_bands == 1
+            or len(segment.tau) < 2
+            or segment.tau[-1] <= segment.tau[0]
+        ):
             continue
         basis = _helmert_basis(segment.n_bands)
         slope = conservative_segment_slope(segment)
