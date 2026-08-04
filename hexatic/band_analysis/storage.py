@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 import hashlib
 import json
 from pathlib import Path
@@ -14,12 +16,38 @@ from safetensors.numpy import load_file, save_file
 from .segments import StableSegment
 
 
-SCHEMA = "hexatic.band_segments.v1"
-
-
 def fingerprint(value: Any) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+@contextmanager
+def atomic_path(path: Path) -> Iterator[Path]:
+    """Yield a sibling temporary path that replaces `path` on clean exit."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    yield temporary
+    temporary.replace(path)
+
+
+def write_text(path: Path, value: str) -> None:
+    with atomic_path(path) as temporary:
+        temporary.write_text(value)
+
+
+def write_json(path: Path, value: Any) -> None:
+    write_text(path, json.dumps(value, indent=2, sort_keys=True) + "\n")
+
+
+def write_arrays(
+    path: Path, arrays: dict[str, np.ndarray], metadata: dict[str, str]
+) -> None:
+    with atomic_path(path) as temporary:
+        save_file(
+            {key: np.ascontiguousarray(value) for key, value in arrays.items()},
+            temporary,
+            metadata=metadata,
+        )
 
 
 def save_seed_segments(
@@ -63,20 +91,16 @@ def save_seed_segments(
         if segments
         else np.empty(0, dtype=np.float64),
     }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    save_file(
-        {name: np.ascontiguousarray(value) for name, value in tensors.items()},
-        temporary,
-        metadata={
-            "schema": SCHEMA,
+    write_arrays(
+        path,
+        tensors,
+        {
             "seed_id": seed_id,
             "source_fingerprint": source_fingerprint,
             "settings": json.dumps(settings, sort_keys=True),
             "settings_fingerprint": fingerprint(settings),
         },
     )
-    temporary.replace(path)
 
 
 def load_seed_segments(
@@ -87,8 +111,6 @@ def load_seed_segments(
 ) -> tuple[list[StableSegment], dict[str, Any]]:
     with safe_open(path, framework="numpy") as handle:
         metadata = dict(handle.metadata())
-    if metadata.get("schema") != SCHEMA:
-        raise ValueError(f"incompatible segment cache {path}; rerun with --overwrite")
     if (
         source_fingerprint is not None
         and metadata.get("source_fingerprint") != source_fingerprint

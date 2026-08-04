@@ -105,6 +105,8 @@ hdf5 = ">=1.14,<2"
 freud = ">=3.5.0,<4"
 jenkspy = ">=0.4.1,<0.5"
 arviz = ">=1.2.0,<2"
+optimistix = ">=0.1.0,<0.2"
+numpyro = ">=0.21.0,<0.22"
 
 [pypi-dependencies]
 pysindy = { version = ">=2.1.0, <3", extras = ["miosr", "sbr", "cvxpy"] }

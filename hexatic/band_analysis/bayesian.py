@@ -16,11 +16,12 @@ import numpyro.distributions as dist
 from numpyro.infer import MCMC, NUTS, init_to_value
 
 from .model import (
-    FITTED_PARAMETER_NAMES,
+    PARAMETER_NAMES,
     Scaling,
     TrainingTransitions,
     parameter_negative_log_likelihood,
 )
+from .storage import atomic_path
 
 
 logger = logging.getLogger(__name__)
@@ -73,7 +74,7 @@ def coupled_area_model(
                 name,
                 dist.LogNormal(jnp.log(empirical[index]), 0.5 if index == 4 else 1.0),
             )
-            for index, name in enumerate(FITTED_PARAMETER_NAMES)
+            for index, name in enumerate(PARAMETER_NAMES)
         ]
     )
     numpyro.factor(
@@ -89,7 +90,7 @@ def _run_once(
     config: MCMCConfig,
     seed: int,
 ) -> MCMC:
-    initial_values = dict(zip(FITTED_PARAMETER_NAMES, initial, strict=True))
+    initial_values = dict(zip(PARAMETER_NAMES, initial, strict=True))
     kernel = NUTS(
         coupled_area_model,
         dense_mass=True,
@@ -106,7 +107,7 @@ def _run_once(
     )
     generator = np.random.default_rng(seed)
     offsets = generator.normal(
-        0.0, 0.02, (config.chains, len(FITTED_PARAMETER_NAMES))
+        0.0, 0.02, (config.chains, len(PARAMETER_NAMES))
     )
     offsets -= offsets.mean(axis=0, keepdims=True)
     unconstrained = np.log(initial)[None, :] + offsets
@@ -116,7 +117,7 @@ def _run_once(
             if config.chains > 1
             else unconstrained[0, index]
         )
-        for index, name in enumerate(FITTED_PARAMETER_NAMES)
+        for index, name in enumerate(PARAMETER_NAMES)
     }
     sampler.run(
         jax.random.key(seed),
@@ -129,17 +130,17 @@ def _run_once(
 
 
 def _diagnostics(idata: az.InferenceData) -> MCMCDiagnostics:
-    summary = az.summary(idata, var_names=list(FITTED_PARAMETER_NAMES), round_to=None)
+    summary = az.summary(idata, var_names=list(PARAMETER_NAMES), round_to=None)
     rhat = {
-        name: float(summary.loc[name, "r_hat"]) for name in FITTED_PARAMETER_NAMES
+        name: float(summary.loc[name, "r_hat"]) for name in PARAMETER_NAMES
     }
     bulk = {
         name: float(summary.loc[name, "ess_bulk"])
-        for name in FITTED_PARAMETER_NAMES
+        for name in PARAMETER_NAMES
     }
     tail = {
         name: float(summary.loc[name, "ess_tail"])
-        for name in FITTED_PARAMETER_NAMES
+        for name in PARAMETER_NAMES
     }
     divergences = int(np.asarray(idata.sample_stats["diverging"]).sum())
     accepted = (
@@ -153,16 +154,9 @@ def _diagnostics(idata: az.InferenceData) -> MCMCDiagnostics:
 
 def _physical_idata(sampler: MCMC, scaling: Scaling) -> az.InferenceData:
     idata = az.from_numpyro(sampler)
-    factors = np.asarray(
-        [
-            scaling.time,
-            1.0 / scaling.time,
-            scaling.area**2 / scaling.time,
-            scaling.area**2 / scaling.time,
-            scaling.area,
-        ]
-    )
-    for name, factor in zip(FITTED_PARAMETER_NAMES, factors, strict=True):
+    for name, factor in zip(
+        PARAMETER_NAMES, scaling.parameter_factors, strict=True
+    ):
         idata.posterior[name] = idata.posterior[name] * factor
     idata.posterior.attrs["parameter_units"] = (
         "tau_p: physical time; kappa_T: inverse physical time; "
@@ -174,7 +168,7 @@ def _physical_idata(sampler: MCMC, scaling: Scaling) -> az.InferenceData:
 def _normalized_samples(sampler: MCMC) -> np.ndarray:
     samples = sampler.get_samples(group_by_chain=True)
     return np.stack(
-        [np.asarray(samples[name]) for name in FITTED_PARAMETER_NAMES], axis=-1
+        [np.asarray(samples[name]) for name in PARAMETER_NAMES], axis=-1
     )
 
 
@@ -239,9 +233,7 @@ def save_inference_data(
     path: Path, idata: az.InferenceData, *, fingerprint: str | None = None
 ) -> None:
     """Atomically write physical-unit posterior samples."""
-    path.parent.mkdir(parents=True, exist_ok=True)
     if fingerprint is not None:
         idata.posterior.attrs["band_analysis_fingerprint"] = fingerprint
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    idata.to_netcdf(temporary, engine="h5netcdf")
-    temporary.replace(path)
+    with atomic_path(path) as temporary:
+        idata.to_netcdf(temporary, engine="h5netcdf")

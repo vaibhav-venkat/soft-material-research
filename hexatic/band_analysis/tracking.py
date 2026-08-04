@@ -60,9 +60,23 @@ class TrackedFrame:
     tracking_epoch: int = 0
 
 
-@dataclass(frozen=True)
-class _TrackState:
-    band: DetectedBand
+def _gap_frames(
+    frames: list[DetectionFrame], old_ids: list[int], epoch: int
+) -> list[TrackedFrame]:
+    """Emit unclean, band-less frames spanning a transient tracking gap."""
+    events = (EventRecord(EventCode.TRANSIENT_GAP, tuple(old_ids)),)
+    return [
+        TrackedFrame(
+            gap.frame_index,
+            gap.step,
+            gap.tau,
+            (),
+            events,
+            clean=False,
+            tracking_epoch=epoch,
+        )
+        for gap in frames
+    ]
 
 
 class BandTracker:
@@ -91,7 +105,7 @@ class BandTracker:
 
     def _edges(
         self,
-        active: dict[int, _TrackState],
+        active: dict[int, DetectedBand],
         bands: tuple[DetectedBand, ...],
     ) -> tuple[list[int], np.ndarray]:
         old_ids = sorted(active)
@@ -99,7 +113,7 @@ class BandTracker:
         for row, track_id in enumerate(old_ids):
             for column, band in enumerate(bands):
                 edges[row, column] = (
-                    self._overlap(active[track_id].band.mask, band.mask)
+                    self._overlap(active[track_id].mask, band.mask)
                     >= self.overlap_threshold
                 )
         return old_ids, edges
@@ -126,7 +140,7 @@ class BandTracker:
 
     def _candidate_outcome(
         self,
-        active: dict[int, _TrackState],
+        active: dict[int, DetectedBand],
         frames: list[DetectionFrame],
         index: int,
         initial_edges: np.ndarray,
@@ -143,18 +157,17 @@ class BandTracker:
             if restored is not None:
                 return "restored", candidate_index, restored
 
-            candidate_active = {
-                row: _TrackState(band) for row, band in enumerate(candidate_bands)
-            }
+            candidate_active = dict(enumerate(candidate_bands))
             _, continuation_edges = self._edges(candidate_active, next_bands)
             continuation = self._unique_mapping(continuation_edges)
             if continuation is None:
                 return "changed", candidate_index, None
 
-            ordered_bands = tuple(
-                next_bands[continuation[row]] for row in range(len(candidate_bands))
-            )
-            _, ordered_edges = self._edges(active, ordered_bands)
+            order = [continuation[row] for row in range(len(candidate_bands))]
+            ordered_bands = tuple(next_bands[column] for column in order)
+            # _edges sorts `active` identically either way, so reordering the
+            # bands only permutes the columns of the overlaps already computed.
+            ordered_edges = old_edges[:, order]
             if not np.array_equal(ordered_edges, initial_edges):
                 return "changed", candidate_index, None
             candidate_bands = ordered_bands
@@ -175,16 +188,34 @@ class BandTracker:
             event_code,
         )
 
+    @classmethod
+    def _continue_tracks(
+        cls,
+        mapping: dict[int, int],
+        old_ids: list[int],
+        bands: tuple[DetectedBand, ...],
+        event_code: EventCode = EventCode.NONE,
+    ) -> tuple[list[TrackedBand], dict[int, DetectedBand]]:
+        """Carry existing identities onto the bands they map to."""
+        tracked = []
+        next_active = {}
+        for row, column in mapping.items():
+            track_id = old_ids[row]
+            band = bands[column]
+            tracked.append(cls._tracked(track_id, band, event_code))
+            next_active[track_id] = band
+        return tracked, next_active
+
     def track(self, frames: list[DetectionFrame]) -> list[TrackedFrame]:
         if not frames:
             return []
         self._next_track_id = 0
         epoch = 0
-        active: dict[int, _TrackState] = {}
+        active: dict[int, DetectedBand] = {}
         initial_bands = []
         for band in frames[0].bands:
             track_id = self._new_id()
-            active[track_id] = _TrackState(band)
+            active[track_id] = band
             initial_bands.append(self._tracked(track_id, band, EventCode.BIRTH))
         output = [
             TrackedFrame(
@@ -203,14 +234,9 @@ class BandTracker:
             old_ids, edges = self._edges(active, frame.bands)
             mapping = self._unique_mapping(edges)
             if mapping is not None:
-                tracked = []
-                next_active = {}
-                for row, column in mapping.items():
-                    track_id = old_ids[row]
-                    band = frame.bands[column]
-                    tracked.append(self._tracked(track_id, band))
-                    next_active[track_id] = _TrackState(band)
-                active = next_active
+                tracked, active = self._continue_tracks(
+                    mapping, old_ids, frame.bands
+                )
                 output.append(
                     TrackedFrame(
                         frame.frame_index,
@@ -229,27 +255,11 @@ class BandTracker:
             if outcome == "restored":
                 assert outcome_at is not None and restore_mapping is not None
                 epoch += 1
-                for gap in frames[index:outcome_at]:
-                    output.append(
-                        TrackedFrame(
-                            gap.frame_index,
-                            gap.step,
-                            gap.tau,
-                            (),
-                            (EventRecord(EventCode.TRANSIENT_GAP, tuple(old_ids)),),
-                            clean=False,
-                            tracking_epoch=epoch,
-                        )
-                    )
+                output.extend(_gap_frames(frames[index:outcome_at], old_ids, epoch))
                 restored = frames[outcome_at]
-                tracked = []
-                next_active = {}
-                for row, column in restore_mapping.items():
-                    track_id = old_ids[row]
-                    band = restored.bands[column]
-                    tracked.append(self._tracked(track_id, band, EventCode.RESTORED))
-                    next_active[track_id] = _TrackState(band)
-                active = next_active
+                tracked, active = self._continue_tracks(
+                    restore_mapping, old_ids, restored.bands, EventCode.RESTORED
+                )
                 output.append(
                     TrackedFrame(
                         restored.frame_index,
@@ -272,35 +282,13 @@ class BandTracker:
             if outcome == "changed":
                 assert outcome_at is not None
                 epoch += 1
-                for gap in frames[index:outcome_at]:
-                    output.append(
-                        TrackedFrame(
-                            gap.frame_index,
-                            gap.step,
-                            gap.tau,
-                            (),
-                            (EventRecord(EventCode.TRANSIENT_GAP, tuple(old_ids)),),
-                            clean=False,
-                            tracking_epoch=epoch,
-                        )
-                    )
+                output.extend(_gap_frames(frames[index:outcome_at], old_ids, epoch))
                 index = outcome_at
                 continue
 
             if outcome == "incomplete":
                 epoch += 1
-                for gap in frames[index:]:
-                    output.append(
-                        TrackedFrame(
-                            gap.frame_index,
-                            gap.step,
-                            gap.tau,
-                            (),
-                            (EventRecord(EventCode.TRANSIENT_GAP, tuple(old_ids)),),
-                            clean=False,
-                            tracking_epoch=epoch,
-                        )
-                    )
+                output.extend(_gap_frames(frames[index:], old_ids, epoch))
                 break
 
             old_degree = np.sum(edges, axis=1)
@@ -317,13 +305,9 @@ class BandTracker:
                 for row in range(len(old_ids))
                 if row not in safe_pairs
             )
-            tracked = []
-            next_active = {}
-            for row, column in safe_pairs.items():
-                track_id = old_ids[row]
-                band = frame.bands[column]
-                tracked.append(self._tracked(track_id, band))
-                next_active[track_id] = _TrackState(band)
+            tracked, next_active = self._continue_tracks(
+                safe_pairs, old_ids, frame.bands
+            )
 
             created = []
             event_codes = []
@@ -346,7 +330,7 @@ class BandTracker:
                 created.append(track_id)
                 event_codes.append(code)
                 tracked.append(self._tracked(track_id, band, code))
-                next_active[track_id] = _TrackState(band)
+                next_active[track_id] = band
 
             if not created:
                 code = EventCode.DISAPPEARANCE

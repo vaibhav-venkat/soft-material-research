@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy import stats
 
-from .model import FITTED_PARAMETER_NAMES, PARAMETER_NAMES
+from .model import PARAMETER_NAMES
 from .workflow import LagOutcome
 
 
@@ -59,7 +59,7 @@ def _arviz_plot(
 
 
 def _posterior_plots(outcome: LagOutcome, directory: Path) -> None:
-    names = list(FITTED_PARAMETER_NAMES)
+    names = list(PARAMETER_NAMES)
     _arviz_plot(
         directory / "posterior_trace.png",
         f"Lag {outcome.lag}: posterior and trace",
@@ -115,12 +115,12 @@ def _hessian_plot(outcome: LagOutcome, path: Path) -> None:
     figure, axes = plt.subplots(1, 2, figsize=(10, 4))
     image = axes[0].imshow(matrix, cmap="coolwarm", aspect="auto")
     axes[0].set_xticks(
-        range(len(FITTED_PARAMETER_NAMES)),
-        [PARAMETER_LABELS[name] for name in FITTED_PARAMETER_NAMES],
+        range(len(PARAMETER_NAMES)),
+        [PARAMETER_LABELS[name] for name in PARAMETER_NAMES],
     )
     axes[0].set_yticks(
-        range(len(FITTED_PARAMETER_NAMES)),
-        [PARAMETER_LABELS[name] for name in FITTED_PARAMETER_NAMES],
+        range(len(PARAMETER_NAMES)),
+        [PARAMETER_LABELS[name] for name in PARAMETER_NAMES],
     )
     figure.colorbar(image, ax=axes[0], shrink=0.8)
     axes[1].plot(np.arange(1, len(eigenvalues) + 1), eigenvalues, "o-")
@@ -191,10 +191,6 @@ def _whitened_plot(outcome: LagOutcome, arrays: dict[str, np.ndarray], path: Pat
 
 
 def _predictive_plot(outcome: LagOutcome, arrays: dict[str, np.ndarray], path: Path) -> None:
-    observed = arrays["one_step_observed"]
-    mean = arrays["one_step_mean"]
-    low = arrays["one_step_low"]
-    high = arrays["one_step_high"]
     figure, axes = plt.subplots(2, 2, figsize=(11, 8))
     comparisons = (
         ("delta_total", r"$\Delta A_T$"),
@@ -203,10 +199,8 @@ def _predictive_plot(outcome: LagOutcome, arrays: dict[str, np.ndarray], path: P
         ("conservative_increment", "conservative increment"),
     )
     for axis, (suffix, label) in zip(axes.ravel(), comparisons, strict=True):
-        observed_values = arrays.get(f"observed_{suffix}")
-        predicted_values = arrays.get(f"predicted_{suffix}")
-        if observed_values is None or predicted_values is None:
-            observed_values, predicted_values = observed, mean
+        observed_values = arrays[f"observed_{suffix}"]
+        predicted_values = arrays[f"predicted_{suffix}"]
         axis.hist(observed_values, bins=40, density=True, alpha=0.55, label="observed")
         axis.hist(
             predicted_values,
@@ -241,18 +235,16 @@ def _trajectory_plot(outcome: LagOutcome, arrays: dict[str, np.ndarray], path: P
     figure, axis = plt.subplots(figsize=(9, 4))
     for tau, total in _path_totals(arrays):
         axis.plot(tau, total, color="tab:blue", alpha=0.12)
-    observed_values = arrays.get("observed_path_area")
-    observed_offsets = arrays.get("observed_path_offset")
-    observed_counts = arrays.get("observed_path_band_count")
-    if observed_values is not None and observed_offsets is not None and observed_counts is not None:
-        stop = int(observed_offsets[1])
-        observed = observed_values[:stop].reshape(-1, int(observed_counts[0])).sum(axis=1)
-        observed_time_stop = int(arrays["observed_path_time_offset"][1])
-        observed_tau = arrays["observed_path_tau"][:observed_time_stop]
-        observed_tau = observed_tau - observed_tau[0]
-    else:
-        observed = arrays["observed_total"][:500]
-        observed_tau = np.arange(len(observed))
+    observed_counts = arrays["observed_path_band_count"]
+    stop = int(arrays["observed_path_offset"][1])
+    observed = (
+        arrays["observed_path_area"][:stop]
+        .reshape(-1, int(observed_counts[0]))
+        .sum(axis=1)
+    )
+    observed_time_stop = int(arrays["observed_path_time_offset"][1])
+    observed_tau = arrays["observed_path_tau"][:observed_time_stop]
+    observed_tau = observed_tau - observed_tau[0]
     axis.plot(
         observed_tau,
         observed,
@@ -273,31 +265,28 @@ def _long_time_plot(outcome: LagOutcome, arrays: dict[str, np.ndarray], path: Pa
     axes[0, 0].set_xlabel(r"$A_T$")
     axes[0, 0].legend()
     for prefix, color in (("observed", "black"), ("simulated", "tab:blue")):
-        values = arrays[f"{prefix}_total_acf"]
         lag_time = arrays[f"{prefix}_lag_time"]
-        stop = min(100, len(values), len(lag_time))
-        axes[0, 1].plot(lag_time[:stop], values[:stop], color=color, label=prefix)
+        for target, key in (
+            (axes[0, 1], f"{prefix}_total_acf"),
+            (axes[0, 2], f"{prefix}_conservative_acf"),
+            (axes[1, 2], f"{prefix}_area_msd"),
+        ):
+            values = arrays[key]
+            stop = min(100, len(values), len(lag_time))
+            target.plot(lag_time[:stop], values[:stop], color=color, label=prefix)
     axes[0, 1].set(xlabel="physical lag time", ylabel=r"$A_T$ ACF")
     axes[0, 1].legend()
     for axis, suffix, label in (
         (axes[1, 0], "area", r"$A_i$"),
         (axes[1, 1], "conservative", r"$A_i-\bar A$"),
     ):
-        observed_values = arrays.get(f"observed_{suffix}", np.empty(0))
-        simulated_values = arrays.get(f"simulated_{suffix}", np.empty(0))
+        observed_values = arrays[f"observed_{suffix}"]
+        simulated_values = arrays[f"simulated_{suffix}"]
         if observed_values.size:
             axis.hist(observed_values, bins=40, density=True, alpha=0.6, label="observed")
             axis.hist(simulated_values, bins=40, density=True, alpha=0.5, label="simulated")
             axis.legend()
         axis.set_xlabel(label)
-    for prefix, color in (("observed", "black"), ("simulated", "tab:blue")):
-        acf = arrays[f"{prefix}_conservative_acf"]
-        lag_time = arrays[f"{prefix}_lag_time"]
-        stop = min(100, len(acf), len(lag_time))
-        axes[0, 2].plot(lag_time[:stop], acf[:stop], color=color, label=prefix)
-        msd = arrays[f"{prefix}_area_msd"]
-        stop = min(100, len(msd), len(lag_time))
-        axes[1, 2].plot(lag_time[:stop], msd[:stop], color=color, label=prefix)
     axes[0, 2].set(xlabel="physical lag time", ylabel="conservative-mode ACF")
     axes[1, 2].set(xlabel="physical lag time", ylabel=r"area MSD")
     axes[0, 2].legend()
@@ -349,8 +338,6 @@ def _negative_plot(outcome: LagOutcome, metrics: dict[str, Any], path: Path) -> 
 def plot_lag(outcome: LagOutcome, output_dir: Path) -> list[str]:
     directory = output_dir / f"lag_{outcome.lag}" / "plots"
     directory.mkdir(parents=True, exist_ok=True)
-    for obsolete in ("conservative_drift.png", "profile_kappa_c.png"):
-        (directory / obsolete).unlink(missing_ok=True)
     _posterior_plots(outcome, directory)
     _hessian_plot(outcome, directory / "hessian.png")
     validation_paths = {
@@ -376,8 +363,8 @@ def plot_lag(outcome: LagOutcome, output_dir: Path) -> list[str]:
 
 def _cross_lag_parameters(outcomes: list[LagOutcome], path: Path) -> None:
     figure, axes = plt.subplots(2, 3, figsize=(13, 8))
+    accepted = [outcome for outcome in outcomes if outcome.accepted]
     for axis, name in zip(axes.ravel(), PARAMETER_NAMES, strict=False):
-        accepted = [outcome for outcome in outcomes if outcome.accepted]
         if accepted:
             lag = np.asarray([outcome.lag for outcome in accepted])
             intervals = [outcome.metadata["posterior"][name] for outcome in accepted]

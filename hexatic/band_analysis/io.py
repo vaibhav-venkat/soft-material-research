@@ -52,8 +52,6 @@ class InputMetadata:
 def load_metadata(input_dir: Path) -> InputMetadata:
     manifest_path = input_dir / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
-    if manifest.get("schema") != "hexatic.big_lx.analysis.v1":
-        raise ValueError(f"Unsupported manifest schema in {manifest_path}")
     case = manifest["case"]
     return InputMetadata(
         input_dir=input_dir,

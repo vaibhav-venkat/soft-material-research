@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict
+from dataclasses import asdict, fields
 import logging
 from pathlib import Path
 from typing import Sequence
@@ -11,13 +11,8 @@ from typing import Sequence
 from hexatic.constants import cylinder
 
 from .bayesian import MCMCConfig
-from .extraction import (
-    ExtractionConfig,
-    extract_seed_segments,
-    validate_extraction_config,
-)
+from .extraction import ExtractionConfig, extract_seed_segments
 from .io import InputMetadata, load_metadata, require_compatible_seeds
-from .plots import plot_lag, plot_summary
 from .reporting import write_configuration, write_metrics, write_report
 from .segments import StableSegment
 from .workflow import AnalysisConfig, run_analysis
@@ -27,6 +22,11 @@ logger = logging.getLogger(__name__)
 
 
 def build_parser() -> argparse.ArgumentParser:
+    analysis = AnalysisConfig()
+    mcmc = MCMCConfig()
+    extraction_defaults = ExtractionConfig(
+        timestep=float(cylinder.SIMULATION.timestep)
+    )
     parser = argparse.ArgumentParser(
         description="Fit the coupled stable-band area SDE across simulation seeds."
     )
@@ -49,37 +49,38 @@ def build_parser() -> argparse.ArgumentParser:
         "--lag",
         dest="lags",
         type=int,
-        choices=(1, 2, 3, 5, 10),
+        choices=analysis.lags,
         action="append",
-        help="fitting lag; repeat to override the default lags 1, 2, 3, 5, 10",
+        help="fitting lag; repeat to override the default lags "
+        + ", ".join(map(str, analysis.lags)),
     )
-    parser.add_argument("--base-lag", type=int, default=2)
-    parser.add_argument("--optimizer-starts", type=int, default=8)
-    parser.add_argument("--chains", type=int, default=4)
-    parser.add_argument("--warmup", type=int, default=1_500)
-    parser.add_argument("--draws", type=int, default=1_500)
-    parser.add_argument("--target-accept", type=float, default=0.90)
-    parser.add_argument("--retry-warmup", type=int, default=3_000)
-    parser.add_argument("--retry-target-accept", type=float, default=0.95)
-    parser.add_argument("--predictive-draws", type=int, default=200)
-    parser.add_argument("--paths-per-segment", type=int, default=200)
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--base-lag", type=int, default=analysis.base_lag)
+    parser.add_argument(
+        "--optimizer-starts", type=int, default=analysis.optimizer_starts
+    )
+    parser.add_argument("--chains", type=int, default=mcmc.chains)
+    parser.add_argument("--warmup", type=int, default=mcmc.warmup)
+    parser.add_argument("--draws", type=int, default=mcmc.draws)
+    parser.add_argument("--target-accept", type=float, default=mcmc.target_accept)
+    parser.add_argument("--retry-warmup", type=int, default=mcmc.retry_warmup)
+    parser.add_argument(
+        "--retry-target-accept", type=float, default=mcmc.retry_target_accept
+    )
+    parser.add_argument(
+        "--predictive-draws", type=int, default=analysis.predictive_draws
+    )
+    parser.add_argument(
+        "--paths-per-segment", type=int, default=analysis.paths_per_segment
+    )
+    parser.add_argument("--seed", type=int, default=analysis.optimizer_seed)
 
     extraction = parser.add_argument_group("stable-band extraction")
-    extraction.add_argument("--grid-multiplier", type=float, default=1.0)
-    extraction.add_argument("--density-threshold", type=float, default=0.5)
-    extraction.add_argument("--shell-epsilon-d", type=float, default=0.05)
-    extraction.add_argument("--smoothing-sigma", type=float, default=1.0)
-    extraction.add_argument("--minimum-area-cells", type=int, default=4)
-    extraction.add_argument("--start", type=int, default=0)
-    extraction.add_argument("--stop", type=int)
-    extraction.add_argument("--stride", type=int, default=1)
-    extraction.add_argument(
-        "--timestep", type=float, default=float(cylinder.SIMULATION.timestep)
-    )
-    extraction.add_argument("--frame-batch-size", type=int, default=16)
-    extraction.add_argument("--persistence-frames", type=int, default=5)
-    extraction.add_argument("--overlap-threshold", type=float, default=0.05)
+    for name, value in asdict(extraction_defaults).items():
+        flag = "--" + name.replace("_", "-")
+        if name == "stop":
+            extraction.add_argument(flag, type=int)
+        else:
+            extraction.add_argument(flag, type=type(value), default=value)
     parser.add_argument(
         "--overwrite",
         action="store_true",
@@ -133,20 +134,8 @@ def _extract_all(
 
 def _configs(args: argparse.Namespace) -> tuple[ExtractionConfig, AnalysisConfig]:
     extraction = ExtractionConfig(
-        grid_multiplier=args.grid_multiplier,
-        density_threshold=args.density_threshold,
-        shell_epsilon_d=args.shell_epsilon_d,
-        smoothing_sigma=args.smoothing_sigma,
-        minimum_area_cells=args.minimum_area_cells,
-        start=args.start,
-        stop=args.stop,
-        stride=args.stride,
-        timestep=args.timestep,
-        frame_batch_size=args.frame_batch_size,
-        persistence_frames=args.persistence_frames,
-        overlap_threshold=args.overlap_threshold,
+        **{field.name: getattr(args, field.name) for field in fields(ExtractionConfig)}
     )
-    validate_extraction_config(extraction)
     mcmc = MCMCConfig(
         chains=args.chains,
         warmup=args.warmup,
@@ -156,7 +145,7 @@ def _configs(args: argparse.Namespace) -> tuple[ExtractionConfig, AnalysisConfig
         retry_target_accept=args.retry_target_accept,
     )
     analysis = AnalysisConfig(
-        lags=tuple(args.lags or (1, 2, 3, 5, 10)),
+        lags=tuple(args.lags) if args.lags else AnalysisConfig.lags,
         base_lag=args.base_lag,
         optimizer_seed=args.seed,
         optimizer_starts=args.optimizer_starts,
@@ -190,7 +179,6 @@ def run(args: argparse.Namespace) -> Path:
     logger.info("input manifests are compatible")
     output_dir = args.output_dir.resolve()
     configuration = {
-        "schema": "hexatic.band_analysis.configuration.v1",
         "training_inputs": [str(path) for path in training_paths],
         "holdout_inputs": [str(path) for path in holdout_paths],
         "output_dir": str(output_dir),
@@ -223,6 +211,9 @@ def run(args: argparse.Namespace) -> Path:
         overwrite=args.overwrite,
     )
     logger.info("writing configuration, plots, metrics, and report")
+    # Imported here so matplotlib is only loaded when a run reaches rendering.
+    from .plots import plot_lag, plot_summary
+
     write_configuration(output_dir, configuration)
     for outcome in outcomes:
         logger.info("rendering lag %d plots", outcome.lag)

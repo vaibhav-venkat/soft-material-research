@@ -7,12 +7,12 @@ import hashlib
 import json
 import logging
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import arviz as az
 import numpy as np
 from safetensors import safe_open
-from safetensors.numpy import load_file, save_file
+from safetensors.numpy import load_file
 
 from .bayesian import MCMCConfig, run_bayesian_inference, save_inference_data
 from .inference import (
@@ -21,11 +21,10 @@ from .inference import (
 )
 from .model import PARAMETER_NAMES, prepare_training_transitions
 from .segments import StableSegment
-from .storage import fingerprint
+from .storage import fingerprint, write_arrays, write_json
 from .validation import ValidationResult, validate_posterior
 
 
-LAG_CACHE_SCHEMA = "hexatic.band_lag.v8"
 logger = logging.getLogger(__name__)
 
 
@@ -80,29 +79,6 @@ def _paths(output_dir: Path, lag: int) -> tuple[Path, Path, Path]:
         directory / "posterior.nc",
         directory / "metrics.json",
     )
-
-
-def _save_json(path: Path, value: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
-    temporary.replace(path)
-
-
-def _save_arrays(
-    path: Path, arrays: dict[str, np.ndarray], *, cache_fingerprint: str
-) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    save_file(
-        {key: np.ascontiguousarray(value) for key, value in arrays.items()},
-        temporary,
-        metadata={
-            "schema": LAG_CACHE_SCHEMA,
-            "fingerprint": cache_fingerprint,
-        },
-    )
-    temporary.replace(path)
 
 
 def _posterior_intervals(idata: az.InferenceData) -> dict[str, dict[str, float]]:
@@ -270,9 +246,7 @@ def _compute_lag(
         "data": {
             "training_seeds": len({segment.seed_id for segment in training}),
             "training_segments": len(training),
-            "training_transitions": int(
-                sum(block.current.shape[0] for block in prepared.blocks)
-            ),
+            "training_transitions": int(transition_count),
             "weighted_training_transitions": float(
                 sum(np.asarray(block.weight).sum() for block in prepared.blocks)
             ),
@@ -292,17 +266,6 @@ def _load_cache(
     if not metrics_path.exists():
         return None
     metadata = json.loads(metrics_path.read_text())
-    if metadata.get("schema") != LAG_CACHE_SCHEMA:
-        if metadata.get("schema") in {
-            "hexatic.band_lag.v3",
-            "hexatic.band_lag.v4",
-            "hexatic.band_lag.v5",
-            "hexatic.band_lag.v6",
-            "hexatic.band_lag.v7",
-        }:
-            logger.info("lag %d: rebuilding stale inference cache", lag)
-            return None
-        raise ValueError(f"incompatible lag cache {metrics_path}")
     if metadata.get("fingerprint") != expected_fingerprint:
         raise ValueError(f"settings or inputs changed for lag cache {metrics_path}")
     if (
@@ -313,10 +276,7 @@ def _load_cache(
         return None
     with safe_open(arrays_path, framework="numpy") as handle:
         arrays_metadata = dict(handle.metadata())
-    if (
-        arrays_metadata.get("schema") != LAG_CACHE_SCHEMA
-        or arrays_metadata.get("fingerprint") != expected_fingerprint
-    ):
+    if arrays_metadata.get("fingerprint") != expected_fingerprint:
         raise ValueError(f"incompatible lag arrays cache {arrays_path}")
     idata = az.from_netcdf(posterior_path, engine="h5netcdf")
     if (
@@ -341,10 +301,6 @@ def run_analysis(
     *,
     config: AnalysisConfig = AnalysisConfig(),
     overwrite: bool = False,
-    compute_lag: Callable[
-        [int, list[StableSegment], dict[str, list[StableSegment]], AnalysisConfig],
-        tuple[dict[str, Any], dict[str, np.ndarray], az.InferenceData],
-    ] = _compute_lag,
 ) -> list[LagOutcome]:
     """Process and atomically cache lags sequentially in configured order."""
     if not training:
@@ -371,32 +327,28 @@ def run_analysis(
                 outcomes.append(cached)
                 continue
         logger.info("lag %d: starting inference", lag)
-        metadata, arrays, idata = compute_lag(lag, training, holdouts, config)
+        metadata, arrays, idata = _compute_lag(lag, training, holdouts, config)
         arrays_path, posterior_path, metrics_path = _paths(output_dir, lag)
         logger.info("lag %d: saving inference artifacts", lag)
-        _save_json(
+        write_json(
             metrics_path,
             {
-                "schema": LAG_CACHE_SCHEMA,
                 "status": "incomplete",
                 "lag": lag,
                 "fingerprint": lag_fingerprint,
             },
         )
-        _save_arrays(
-            arrays_path, arrays, cache_fingerprint=lag_fingerprint
-        )
+        write_arrays(arrays_path, arrays, {"fingerprint": lag_fingerprint})
         save_inference_data(
             posterior_path, idata, fingerprint=lag_fingerprint
         )
         completed = {
             **metadata,
-            "schema": LAG_CACHE_SCHEMA,
             "status": "complete",
             "lag": lag,
             "fingerprint": lag_fingerprint,
         }
-        _save_json(metrics_path, completed)
+        write_json(metrics_path, completed)
         outcomes.append(
             LagOutcome(
                 lag,

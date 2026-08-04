@@ -11,14 +11,18 @@ from typing import Any
 import numpy as np
 
 from .model import PARAMETER_NAMES
+from .storage import write_json, write_text
 from .workflow import AnalysisConfig, LagOutcome, stable_lags
 
 
-def _atomic_text(path: Path, value: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(value)
-    temporary.replace(path)
+def _base_and_stable(
+    outcomes: list[LagOutcome], config: AnalysisConfig
+) -> tuple[LagOutcome | None, tuple[int, ...]]:
+    """Resolve the base-lag outcome and the lags stable against it."""
+    base = next(
+        (outcome for outcome in outcomes if outcome.lag == config.base_lag), None
+    )
+    return base, stable_lags(outcomes, config.base_lag)
 
 
 def _json_value(value: Any) -> Any:
@@ -35,10 +39,7 @@ def _json_value(value: Any) -> Any:
 
 def write_configuration(output_dir: Path, configuration: dict[str, Any]) -> Path:
     path = output_dir / "configuration.json"
-    _atomic_text(
-        path,
-        json.dumps(_json_value(configuration), indent=2, sort_keys=True) + "\n",
-    )
+    write_json(path, _json_value(configuration))
     return path
 
 
@@ -46,12 +47,8 @@ def consolidated_metrics(
     outcomes: list[LagOutcome], config: AnalysisConfig
 ) -> dict[str, Any]:
     accepted = [outcome.lag for outcome in outcomes if outcome.accepted]
-    stable = stable_lags(outcomes, config.base_lag)
-    base = next(
-        (outcome for outcome in outcomes if outcome.lag == config.base_lag), None
-    )
+    base, stable = _base_and_stable(outcomes, config)
     return {
-        "schema": "hexatic.band_analysis.metrics.v1",
         "base_lag": config.base_lag,
         "base_lag_accepted": bool(base and base.accepted),
         "accepted_lags": accepted,
@@ -84,7 +81,7 @@ def write_metrics(
 ) -> Path:
     path = output_dir / "metrics.json"
     value = consolidated_metrics(outcomes, config)
-    _atomic_text(path, json.dumps(_json_value(value), indent=2, sort_keys=True) + "\n")
+    write_json(path, _json_value(value))
     return path
 
 
@@ -162,10 +159,7 @@ def _matrix_table(matrix: np.ndarray) -> list[str]:
 def write_report(
     output_dir: Path, outcomes: list[LagOutcome], config: AnalysisConfig
 ) -> Path:
-    stable = stable_lags(outcomes, config.base_lag)
-    base = next(
-        (outcome for outcome in outcomes if outcome.lag == config.base_lag), None
-    )
+    base, stable = _base_and_stable(outcomes, config)
     if base is None or not base.accepted:
         stability = (
             f"No stable range is reported because base lag {config.base_lag} "
@@ -302,5 +296,5 @@ def write_report(
         ]
     )
     path = output_dir / "report.md"
-    _atomic_text(path, "\n".join(lines))
+    write_text(path, "\n".join(lines))
     return path

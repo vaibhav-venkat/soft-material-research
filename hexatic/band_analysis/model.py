@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import NamedTuple
 
 import jax
+import scipy.linalg as linalg
 import jax.numpy as jnp
 import numpy as np
 
@@ -15,7 +17,6 @@ from .segments import StableSegment
 jax.config.update("jax_enable_x64", True)
 
 PARAMETER_NAMES = ("tau_p", "kappa_T", "D_u", "D_T", "A_T_star")
-FITTED_PARAMETER_NAMES = PARAMETER_NAMES
 JITTER = 1e-10
 
 
@@ -72,28 +73,16 @@ class Scaling:
             areas=segment.areas / self.area,
         )
 
-    def parameters_to_physical(self, normalized: np.ndarray) -> np.ndarray:
-        tau_p, kappa_T, diffusion_u, diffusion_total, area_star = normalized
+    @property
+    def parameter_factors(self) -> np.ndarray:
+        """Normalized-to-physical multipliers, ordered as PARAMETER_NAMES."""
         return np.asarray(
             [
-                tau_p * self.time,
-                kappa_T / self.time,
-                diffusion_u * self.area**2 / self.time,
-                diffusion_total * self.area**2 / self.time,
-                area_star * self.area,
-            ],
-            dtype=np.float64,
-        )
-
-    def parameters_to_normalized(self, physical: np.ndarray) -> np.ndarray:
-        tau_p, kappa_T, diffusion_u, diffusion_total, area_star = physical
-        return np.asarray(
-            [
-                tau_p / self.time,
-                kappa_T * self.time,
-                diffusion_u * self.time / self.area**2,
-                diffusion_total * self.time / self.area**2,
-                area_star / self.area,
+                self.time,
+                1.0 / self.time,
+                self.area**2 / self.time,
+                self.area**2 / self.time,
+                self.area,
             ],
             dtype=np.float64,
         )
@@ -118,13 +107,21 @@ def prepare_training_transitions(
     )
 
 
+@lru_cache(maxsize=None)
 def _helmert_basis(n_bands: int) -> np.ndarray:
-    basis = np.zeros((n_bands, n_bands - 1), dtype=np.float64)
-    for column in range(n_bands - 1):
-        count = column + 1
-        basis[:count, column] = 1.0 / np.sqrt(count * (count + 1))
-        basis[count, column] = -count / np.sqrt(count * (count + 1))
+    basis = linalg.helmert(n_bands, full=False).T.copy()
+    basis.setflags(write=False)
     return basis
+
+
+@lru_cache(maxsize=None)
+def conservative_projection(n_bands: int) -> np.ndarray:
+    """Return the zero-sum projector P_n = I - 11^T/n."""
+    projection = np.eye(n_bands, dtype=np.float64) - np.ones(
+        (n_bands, n_bands), dtype=np.float64
+    ) / n_bands
+    projection.setflags(write=False)
+    return projection
 
 
 def conservative_segment_slope(segment: StableSegment) -> np.ndarray:
@@ -262,27 +259,31 @@ def build_transition_blocks(
     segments: list[StableSegment], lag: int
 ) -> tuple[TransitionBlock, ...]:
     """Use every lagged transition wholly contained in a clean segment."""
-    grouped: dict[int, list[tuple[np.ndarray, np.ndarray, float]]] = {}
+    grouped: dict[int, list[tuple[np.ndarray, np.ndarray, np.ndarray]]] = {}
     for segment in segments:
-        for start in range(len(segment.tau) - lag):
-            grouped.setdefault(segment.n_bands, []).append(
-                (
-                    segment.areas[start],
-                    segment.areas[start + lag],
-                    float(segment.tau[start + lag] - segment.tau[start]),
-                )
+        count = len(segment.tau) - lag
+        if count <= 0:
+            continue
+        grouped.setdefault(segment.n_bands, []).append(
+            (
+                segment.areas[:count],
+                segment.areas[lag:],
+                segment.tau[lag:] - segment.tau[:count],
             )
-    return tuple(
-        TransitionBlock(
-            current=jnp.asarray([item[0] for item in transitions], dtype=jnp.float64),
-            following=jnp.asarray(
-                [item[1] for item in transitions], dtype=jnp.float64
-            ),
-            dt=jnp.asarray([item[2] for item in transitions], dtype=jnp.float64),
-            weight=jnp.full(len(transitions), 1.0 / lag, dtype=jnp.float64),
         )
-        for _, transitions in sorted(grouped.items())
-    )
+
+    blocks = []
+    for _, parts in sorted(grouped.items()):
+        current, following, dt = (np.concatenate(field) for field in zip(*parts))
+        blocks.append(
+            TransitionBlock(
+                current=jnp.asarray(current, dtype=jnp.float64),
+                following=jnp.asarray(following, dtype=jnp.float64),
+                dt=jnp.asarray(dt, dtype=jnp.float64),
+                weight=jnp.full(len(dt), 1.0 / lag, dtype=jnp.float64),
+            )
+        )
+    return tuple(blocks)
 
 
 def positive_parameters(raw_parameters: jax.Array) -> jax.Array:
@@ -303,9 +304,7 @@ def transition(
     """Unconditional one-step moments used by posterior predictive checks."""
     tau_p, kappa_total, diffusion_u, diffusion_total, area_star = parameters
     n_bands = area.shape[-1]
-    projection = jnp.eye(n_bands, dtype=jnp.float64) - jnp.ones(
-        (n_bands, n_bands), dtype=jnp.float64
-    ) / n_bands
+    projection = jnp.asarray(conservative_projection(n_bands))
     total = jnp.sum(area)
     allocation = jnp.ones(n_bands, dtype=jnp.float64) / n_bands
     drift = -kappa_total * (total - area_star) * allocation

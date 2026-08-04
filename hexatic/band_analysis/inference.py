@@ -11,7 +11,7 @@ import numpy as np
 import optimistix as optx
 
 from .model import (
-    FITTED_PARAMETER_NAMES,
+    PARAMETER_NAMES,
     TrainingTransitions,
     negative_log_likelihood,
     positive_parameters,
@@ -164,7 +164,7 @@ def _starts(
     empirical_raw = raw_parameters(empirical)
     generator = np.random.default_rng(seed)
     perturbed = tuple(
-        empirical_raw + generator.normal(0.0, 0.75, len(FITTED_PARAMETER_NAMES))
+        empirical_raw + generator.normal(0.0, 0.75, len(PARAMETER_NAMES))
         for _ in range(count - 2)
     )
     generic = raw_parameters(np.asarray([1.0, 0.1, 0.1, 0.1, 1.0]))

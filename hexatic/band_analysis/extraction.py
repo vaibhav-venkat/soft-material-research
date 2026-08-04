@@ -39,14 +39,23 @@ class ExtractionConfig:
     persistence_frames: int = 5
     overlap_threshold: float = 0.05
 
+    def __post_init__(self) -> None:
+        if self.grid_multiplier <= 0.0 or self.smoothing_sigma <= 0.0:
+            raise ValueError("grid multiplier and smoothing sigma must be positive")
+        if not math.isfinite(self.timestep) or self.timestep <= 0.0:
+            raise ValueError("timestep must be finite and positive")
+        if self.minimum_area_cells < 1 or self.frame_batch_size < 1:
+            raise ValueError("minimum area and frame batch size must be positive")
+        if self.persistence_frames < 1 or self.stride < 1:
+            raise ValueError("persistence and stride must be positive")
+
 
 def extraction_settings(
-    metadata: InputMetadata, config: ExtractionConfig
+    metadata: InputMetadata, config: ExtractionConfig, grid: SurfaceGrid | None = None
 ) -> dict[str, object]:
-    grid = _grid(metadata, config)
     return {
         "extraction": asdict(config),
-        "grid": asdict(grid),
+        "grid": asdict(grid if grid is not None else _grid(metadata, config)),
         "physical_case": metadata.compatibility_fingerprint,
     }
 
@@ -79,7 +88,8 @@ def extract_seed_segments(
     overwrite: bool = False,
 ) -> list[StableSegment]:
     """Extract or reuse one seed without modifying its input directory."""
-    settings = extraction_settings(metadata, config)
+    grid = _grid(metadata, config)
+    settings = extraction_settings(metadata, config, grid)
     if cache_path.exists() and not overwrite:
         logger.info("reusing segment cache: %s", cache_path)
         segments, _ = load_seed_segments(
@@ -97,7 +107,6 @@ def extract_seed_segments(
         "depositing density and detecting bands in %d frames on the active GPU",
         len(selected),
     )
-    grid = _grid(metadata, config)
     density_for = make_density_batch_kernel(
         grid,
         radius=metadata.radius,
@@ -165,14 +174,3 @@ def extract_seed_segments(
     )
     logger.info("saved segment cache: %s", cache_path)
     return segments
-
-
-def validate_extraction_config(config: ExtractionConfig) -> None:
-    if config.grid_multiplier <= 0.0 or config.smoothing_sigma <= 0.0:
-        raise ValueError("grid multiplier and smoothing sigma must be positive")
-    if not math.isfinite(config.timestep) or config.timestep <= 0.0:
-        raise ValueError("timestep must be finite and positive")
-    if config.minimum_area_cells < 1 or config.frame_batch_size < 1:
-        raise ValueError("minimum area and frame batch size must be positive")
-    if config.persistence_frames < 1 or config.stride < 1:
-        raise ValueError("persistence and stride must be positive")

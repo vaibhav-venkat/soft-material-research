@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 
 import numpy as np
 
@@ -19,10 +20,17 @@ class DetectedBand:
     mask: np.ndarray
 
 
+@lru_cache(maxsize=None)
+def _axial_phasor(nx: int) -> np.ndarray:
+    """Cache the per-column unit phasors; they depend only on the grid width."""
+    phasor = np.exp(1j * (2.0 * np.pi * (np.arange(nx) + 0.5) / nx))
+    phasor.setflags(write=False)
+    return phasor
+
+
 def _periodic_axial_center(mask: np.ndarray, grid: SurfaceGrid) -> float:
     axial_cells = np.count_nonzero(mask, axis=1)
-    phase = 2.0 * np.pi * (np.arange(grid.nx) + 0.5) / grid.nx
-    moment = np.sum(axial_cells * np.exp(1j * phase))
+    moment = np.sum(axial_cells * _axial_phasor(grid.nx))
     if abs(moment) < 1.0e-12:
         raise ValueError("band has no unique periodic axial center")
     return float((np.angle(moment) % (2.0 * np.pi)) * grid.lx / (2.0 * np.pi))

@@ -18,7 +18,6 @@ from .inference import (
     optimize_parameters,
 )
 from .model import (
-    FITTED_PARAMETER_NAMES,
     PARAMETER_NAMES,
     JITTER,
     PersistentRateBlock,
@@ -68,7 +67,6 @@ __all__ = [
     "MCMCDiagnostics",
     "OptimizationResult",
     "OptimizationRun",
-    "FITTED_PARAMETER_NAMES",
     "PARAMETER_NAMES",
     "PersistentRateBlock",
     "Scaling",
