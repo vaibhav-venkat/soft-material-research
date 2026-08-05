@@ -41,6 +41,21 @@ class EventRecord:
 
 
 @dataclass(frozen=True)
+class EventEdges:
+    """Bipartite overlap structure of one event transition.
+
+    Row ``i`` is the pre-event track ``old_track_ids[i]``; column ``j`` is the
+    post-event track ``new_track_ids[j]``, in ``DetectionFrame.bands`` order --
+    *not* the order of ``TrackedFrame.bands``, which is sorted by track id.
+    Rows with no assigned column (no ``True`` edge) are deaths.
+    """
+
+    edges: np.ndarray
+    old_track_ids: tuple[int, ...]
+    new_track_ids: tuple[int, ...]
+
+
+@dataclass(frozen=True)
 class TrackedBand:
     track_id: int
     area: float
@@ -58,6 +73,7 @@ class TrackedFrame:
     events: tuple[EventRecord, ...] = ()
     clean: bool = True
     tracking_epoch: int = 0
+    edges: EventEdges | None = None
 
 
 def _gap_frames(
@@ -308,6 +324,9 @@ class BandTracker:
             tracked, next_active = self._continue_tracks(
                 safe_pairs, old_ids, frame.bands
             )
+            column_ids = [-1] * len(frame.bands)
+            for row, column in safe_pairs.items():
+                column_ids[column] = old_ids[row]
 
             created = []
             event_codes = []
@@ -328,6 +347,7 @@ class BandTracker:
                     code = EventCode.UNCERTAIN
                 track_id = self._new_id()
                 created.append(track_id)
+                column_ids[column] = track_id
                 event_codes.append(code)
                 tracked.append(self._tracked(track_id, band, code))
                 next_active[track_id] = band
@@ -352,6 +372,7 @@ class BandTracker:
                     tuple(sorted(tracked, key=lambda item: item.track_id)),
                     (EventRecord(code, retired, tuple(created)),),
                     tracking_epoch=epoch,
+                    edges=EventEdges(edges, tuple(old_ids), tuple(column_ids)),
                 )
             )
             index += 1
