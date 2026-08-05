@@ -429,8 +429,8 @@ def _paths(
             sampled_areas[:, component] for component in range(segment.n_bands)
         )
         observed_deviation = sampled_areas - sampled_areas.mean(axis=1, keepdims=True)
-        slope = conservative_segment_slope(normalized)
-        if len(sampled_tau) > 1:
+        if len(sampled_tau) > 1 and normalized.tau[-1] > normalized.tau[0]:
+            slope = conservative_segment_slope(normalized)
             transfer_rate = np.diff(observed_deviation, axis=0) / np.diff(
                 sampled_tau
             )[:, None] - slope
