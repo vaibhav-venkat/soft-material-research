@@ -342,9 +342,15 @@ def _grouped_msd_quantiles(
     return np.nanquantile(padded, (0.025, 0.975), axis=0)
 
 
-def _per_series_autocorrelation(series: list[np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
-    """Autocorrelate each series alone, flattened with its offsets."""
-    curves = [_pooled_autocorrelation([values]) for values in series]
+def _grouped_autocorrelation(
+    series: list[np.ndarray], group_sizes: list[int]
+) -> tuple[np.ndarray, np.ndarray]:
+    """Autocorrelate each group of series alone, flattened with its offsets."""
+    curves = []
+    start = 0
+    for size in group_sizes:
+        curves.append(_pooled_autocorrelation(series[start : start + size]))
+        start += size
     offsets = np.cumsum([0, *(len(curve) for curve in curves)], dtype=np.int64)
     return _concatenate(curves), offsets
 
@@ -449,6 +455,7 @@ def _paths(
     observed_tau_series: list[np.ndarray] = []
     simulated_tau_series: list[np.ndarray] = []
     observed_transfer_rate_series: list[np.ndarray] = []
+    observed_transfer_rate_counts: list[int] = []
     simulated_transfer_rate_series: list[np.ndarray] = []
     observed_transfer_rate_tau: list[np.ndarray] = []
     simulated_transfer_rate_tau: list[np.ndarray] = []
@@ -483,6 +490,7 @@ def _paths(
         )
         observed_transfer_rate_series.extend(transfer_rate)
         observed_transfer_rate_tau.extend(transfer_tau)
+        observed_transfer_rate_counts.append(len(transfer_rate))
         observed_conservative.append(observed_deviation.ravel())
         observed_conservative_series.extend(
             observed_deviation[:, component] for component in range(segment.n_bands)
@@ -671,8 +679,11 @@ def _paths(
     simulated_path_area = simulated_area * scaling.area
     observed_total_acf = _pooled_autocorrelation(observed_total_series)
     simulated_total_acf = _pooled_autocorrelation(simulated_total_series)
-    segment_total_acf, segment_total_acf_offsets = _per_series_autocorrelation(
-        observed_total_series
+    segment_total_acf, segment_total_acf_offsets = _grouped_autocorrelation(
+        observed_total_series, [1] * len(observed_total_series)
+    )
+    segment_transfer_acf, segment_transfer_acf_offsets = _grouped_autocorrelation(
+        observed_transfer_rate_series, observed_transfer_rate_counts
     )
     observed_conservative_acf = _pooled_autocorrelation(
         observed_conservative_series
@@ -742,6 +753,8 @@ def _paths(
         * scaling.area**2,
         "observed_segment_total_acf": segment_total_acf,
         "observed_segment_total_acf_offset": segment_total_acf_offsets,
+        "observed_segment_transfer_rate_acf": segment_transfer_acf,
+        "observed_segment_transfer_rate_acf_offset": segment_transfer_acf_offsets,
         "observed_lag_time": observed_lag_times,
         "simulated_lag_time": simulated_lag_times,
         "observed_increment_covariance": _concatenate(observed_covariances)

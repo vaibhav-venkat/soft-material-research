@@ -341,29 +341,47 @@ def _long_time_plot(outcome: LagOutcome, arrays: dict[str, np.ndarray], path: Pa
 def _segment_total_acf_plot(
     outcome: LagOutcome, arrays: dict[str, np.ndarray], path: Path
 ) -> None:
-    """Per-segment A_T autocorrelation, to test whether a pooled shoulder is real."""
-    figure, axis = plt.subplots(figsize=(7, 5))
-    curves = arrays["observed_segment_total_acf"]
-    offsets = arrays["observed_segment_total_acf_offset"]
-    lag_time = arrays["observed_lag_time"]
-    for index in range(len(offsets) - 1):
-        values = curves[offsets[index] : offsets[index + 1]]
-        stop = min(800, len(values), len(lag_time))
-        axis.plot(lag_time[:stop], values[:stop], color="black", alpha=0.35, linewidth=1)
-    for key, color, label in (
-        ("observed_total_acf", "black", "observed (pooled)"),
-        ("simulated_total_acf", "tab:blue", "simulated (pooled)"),
-    ):
-        values = arrays[key]
-        stop = min(800, len(values), len(lag_time))
-        axis.plot(lag_time[:stop], values[:stop], color=color, linewidth=2.5, label=label)
-    axis.axhline(0.0, color="grey", linewidth=0.8, linestyle=":")
-    axis.set(xlabel="physical lag time", ylabel=r"$A_T$ ACF")
-    axis.set_title(
-        f"Lag {outcome.lag}: per-segment $A_T$ ACF "
-        f"({len(offsets) - 1} segments, thin lines)"
+    """Per-segment ACFs, to test whether a pooled feature is one segment or many."""
+    figure, axes = plt.subplots(1, 2, figsize=(14, 5))
+    panels = (
+        (axes[0], "segment_total_acf", "total_acf", "observed_lag_time", r"$A_T$ ACF"),
+        (
+            axes[1],
+            "segment_transfer_rate_acf",
+            "transfer_rate_acf",
+            "observed_transfer_rate_lag_time",
+            "transfer-rate ACF",
+        ),
     )
-    axis.legend()
+    for axis, segment_key, pooled_key, time_key, label in panels:
+        curves = arrays[f"observed_{segment_key}"]
+        offsets = arrays[f"observed_{segment_key}_offset"]
+        lag_time = arrays[time_key]
+        drawn = 0
+        for index in range(len(offsets) - 1):
+            values = curves[offsets[index] : offsets[index + 1]]
+            stop = min(800, len(values), len(lag_time))
+            if stop < 2:
+                continue
+            axis.plot(
+                lag_time[:stop], values[:stop], color="black", alpha=0.35, linewidth=1
+            )
+            drawn += 1
+        for prefix, color in (("observed", "black"), ("simulated", "tab:blue")):
+            values = arrays[f"{prefix}_{pooled_key}"]
+            stop = min(800, len(values), len(lag_time))
+            axis.plot(
+                lag_time[:stop],
+                values[:stop],
+                color=color,
+                linewidth=2.5,
+                label=f"{prefix} (pooled)",
+            )
+        axis.axhline(0.0, color="grey", linewidth=0.8, linestyle=":")
+        axis.set(xlabel="physical lag time", ylabel=label)
+        axis.set_title(f"{drawn} segments (thin lines)")
+        axis.legend()
+    figure.suptitle(f"Lag {outcome.lag}: per-segment autocorrelation")
     _save(path, figure)
 
 
