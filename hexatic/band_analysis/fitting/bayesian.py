@@ -15,16 +15,30 @@ import numpyro
 import numpyro.distributions as dist
 from numpyro.infer import MCMC, NUTS, init_to_value
 
+from .masked_model import (
+    MaskedTrainingTransitions,
+    parameter_negative_log_likelihood as masked_parameter_negative_log_likelihood,
+)
 from .model import (
     PARAMETER_NAMES,
     Scaling,
     TrainingTransitions,
-    parameter_negative_log_likelihood,
+    parameter_negative_log_likelihood as clean_parameter_negative_log_likelihood,
 )
 from ..pipeline.storage import atomic_path
 
 
 logger = logging.getLogger(__name__)
+
+TrainingData = TrainingTransitions | MaskedTrainingTransitions
+
+
+def _parameter_names(data: TrainingData) -> tuple[str, ...]:
+    return (
+        PARAMETER_NAMES
+        if isinstance(data, MaskedTrainingTransitions)
+        else PARAMETER_NAMES[:-1]
+    )
 
 
 @dataclass(frozen=True)
@@ -65,32 +79,43 @@ class BayesianResult:
 
 
 def coupled_area_model(
-    data: TrainingTransitions, empirical: np.ndarray
+    data: TrainingData, empirical: np.ndarray
 ) -> None:
     """Empirical-centered priors and the slope-detrended AR(1) likelihood."""
-    parameters = jnp.stack(
-        [
-            numpyro.sample(
-                name,
-                dist.LogNormal(jnp.log(empirical[index]), 0.5 if index == 4 else 1.0),
+    names = _parameter_names(data)
+    samples = []
+    for index, name in enumerate(names):
+        if name == "sigma_E":
+            samples.append(numpyro.sample(name, dist.HalfNormal(empirical[index])))
+        else:
+            samples.append(
+                numpyro.sample(
+                    name,
+                    dist.LogNormal(
+                        jnp.log(empirical[index]), 0.5 if index == 4 else 1.0
+                    ),
+                )
             )
-            for index, name in enumerate(PARAMETER_NAMES)
-        ]
-    )
+    parameters = jnp.stack(samples)
+    if isinstance(data, MaskedTrainingTransitions):
+        objective = masked_parameter_negative_log_likelihood(parameters, data)
+    else:
+        objective = clean_parameter_negative_log_likelihood(parameters, data)
     numpyro.factor(
         "kalman_marginal_likelihood",
-        -parameter_negative_log_likelihood(parameters, data),
+        -objective,
     )
 
 
 def _run_once(
-    data: TrainingTransitions,
+    data: TrainingData,
     empirical: np.ndarray,
     initial: np.ndarray,
     config: MCMCConfig,
     seed: int,
 ) -> MCMC:
-    initial_values = dict(zip(PARAMETER_NAMES, initial, strict=True))
+    names = _parameter_names(data)
+    initial_values = dict(zip(names, initial, strict=True))
     kernel = NUTS(
         coupled_area_model,
         dense_mass=True,
@@ -107,7 +132,7 @@ def _run_once(
     )
     generator = np.random.default_rng(seed)
     offsets = generator.normal(
-        0.0, 0.02, (config.chains, len(PARAMETER_NAMES))
+        0.0, 0.02, (config.chains, len(names))
     )
     offsets -= offsets.mean(axis=0, keepdims=True)
     unconstrained = np.log(initial)[None, :] + offsets
@@ -117,7 +142,7 @@ def _run_once(
             if config.chains > 1
             else unconstrained[0, index]
         )
-        for index, name in enumerate(PARAMETER_NAMES)
+        for index, name in enumerate(names)
     }
     sampler.run(
         jax.random.key(seed),
@@ -129,18 +154,20 @@ def _run_once(
     return sampler
 
 
-def _diagnostics(idata: az.InferenceData) -> MCMCDiagnostics:
-    summary = az.summary(idata, var_names=list(PARAMETER_NAMES), round_to=None)
+def _diagnostics(
+    idata: az.InferenceData, names: tuple[str, ...]
+) -> MCMCDiagnostics:
+    summary = az.summary(idata, var_names=list(names), round_to=None)
     rhat = {
-        name: float(summary.loc[name, "r_hat"]) for name in PARAMETER_NAMES
+        name: float(summary.loc[name, "r_hat"]) for name in names
     }
     bulk = {
         name: float(summary.loc[name, "ess_bulk"])
-        for name in PARAMETER_NAMES
+        for name in names
     }
     tail = {
         name: float(summary.loc[name, "ess_tail"])
-        for name in PARAMETER_NAMES
+        for name in names
     }
     divergences = int(np.asarray(idata.sample_stats["diverging"]).sum())
     accepted = (
@@ -152,28 +179,30 @@ def _diagnostics(idata: az.InferenceData) -> MCMCDiagnostics:
     return MCMCDiagnostics(rhat, bulk, tail, divergences, accepted)
 
 
-def _physical_idata(sampler: MCMC, scaling: Scaling) -> az.InferenceData:
+def _physical_idata(
+    sampler: MCMC, scaling: Scaling, names: tuple[str, ...]
+) -> az.InferenceData:
     idata = az.from_numpyro(sampler)
     for name, factor in zip(
-        PARAMETER_NAMES, scaling.parameter_factors, strict=True
+        names, scaling.parameter_factors[: len(names)], strict=True
     ):
         idata.posterior[name] = idata.posterior[name] * factor
     idata.posterior.attrs["parameter_units"] = (
         "tau_p: physical time; kappa_T: inverse physical time; "
-        "diffusions: area^2/time; A_T_star: area"
+        "diffusions: area^2/time; A_T_star and sigma_E: area"
     )
     return idata
 
 
-def _normalized_samples(sampler: MCMC) -> np.ndarray:
+def _normalized_samples(sampler: MCMC, names: tuple[str, ...]) -> np.ndarray:
     samples = sampler.get_samples(group_by_chain=True)
     return np.stack(
-        [np.asarray(samples[name]) for name in PARAMETER_NAMES], axis=-1
+        [np.asarray(samples[name]) for name in names], axis=-1
     )
 
 
 def run_bayesian_inference(
-    data: TrainingTransitions,
+    data: TrainingData,
     empirical: np.ndarray,
     initial: np.ndarray,
     scaling: Scaling,
@@ -191,9 +220,10 @@ def run_bayesian_inference(
         config.draws,
         config.target_accept,
     )
+    names = _parameter_names(data)
     sampler = _run_once(data, empirical, initial, config, seed)
-    idata = _physical_idata(sampler, scaling)
-    diagnostics = _diagnostics(idata)
+    idata = _physical_idata(sampler, scaling, names)
+    diagnostics = _diagnostics(idata, names)
     retried = not diagnostics.accepted
     logger.info(
         "NUTS diagnostics: accepted=%s divergences=%d",
@@ -213,8 +243,8 @@ def run_bayesian_inference(
             used_config.target_accept,
         )
         sampler = _run_once(data, empirical, initial, used_config, seed + 1)
-        idata = _physical_idata(sampler, scaling)
-        diagnostics = _diagnostics(idata)
+        idata = _physical_idata(sampler, scaling, names)
+        diagnostics = _diagnostics(idata, names)
         logger.info(
             "NUTS retry diagnostics: accepted=%s divergences=%d",
             diagnostics.accepted,
@@ -222,7 +252,7 @@ def run_bayesian_inference(
         )
     return BayesianResult(
         idata=idata,
-        normalized_samples=_normalized_samples(sampler),
+        normalized_samples=_normalized_samples(sampler, names),
         diagnostics=diagnostics,
         retried=retried,
         config=used_config,

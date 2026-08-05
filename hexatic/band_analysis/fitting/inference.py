@@ -10,16 +10,22 @@ import jax.numpy as jnp
 import numpy as np
 import optimistix as optx
 
+from .masked_model import (
+    MaskedTrainingTransitions,
+    negative_log_likelihood as masked_negative_log_likelihood,
+)
 from .model import (
     PARAMETER_NAMES,
     TrainingTransitions,
-    negative_log_likelihood,
+    negative_log_likelihood as clean_negative_log_likelihood,
     positive_parameters,
     raw_parameters,
 )
 
 
 logger = logging.getLogger(__name__)
+
+TrainingData = TrainingTransitions | MaskedTrainingTransitions
 
 
 @dataclass(frozen=True)
@@ -49,17 +55,164 @@ class OptimizationResult:
     empirical_parameters: np.ndarray
 
 
-def empirical_parameters(data: TrainingTransitions) -> np.ndarray:
+def _total_transitions(
+    data: TrainingData,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    if isinstance(data, TrainingTransitions):
+        return (
+            np.concatenate(
+                [np.asarray(block.current.sum(axis=1)) for block in data.blocks]
+            ),
+            np.concatenate(
+                [np.asarray(block.following.sum(axis=1)) for block in data.blocks]
+            ),
+            np.concatenate([np.asarray(block.dt) for block in data.blocks]),
+            np.concatenate([np.asarray(block.weight) for block in data.blocks]),
+        )
+
+    current_parts = []
+    following_parts = []
+    dt_parts = []
+    weight_parts = []
+    for block in data.blocks:
+        current = np.asarray(block.current)
+        mask = np.asarray(block.mask, dtype=bool)
+        observed = np.asarray(block.o, dtype=bool)
+        observation = np.asarray(block.y) - np.asarray(block.g)
+        coverage = np.einsum("ti,tij->tj", observed, np.asarray(block.C))
+        informative = np.all(np.isclose(coverage, mask), axis=1)
+        current_parts.append(np.sum(current[informative] * mask[informative], axis=1))
+        following_parts.append(
+            np.sum(observation[informative] * observed[informative], axis=1)
+        )
+        dt_parts.append(np.asarray(block.dt)[informative])
+        weight_parts.append(np.asarray(block.weight)[informative])
+    return (
+        np.concatenate(current_parts),
+        np.concatenate(following_parts),
+        np.concatenate(dt_parts),
+        np.concatenate(weight_parts),
+    )
+
+
+def _rate_statistics(
+    data: TrainingData,
+) -> tuple[list[np.ndarray], list[tuple[np.ndarray, np.ndarray]], list[np.ndarray]]:
+    rates: list[np.ndarray] = []
+    pairs: list[tuple[np.ndarray, np.ndarray]] = []
+    intervals: list[np.ndarray] = []
+    if isinstance(data, MaskedTrainingTransitions):
+        for block in data.rate_blocks:
+            initial_mask = np.asarray(block.initial_mask, dtype=bool)
+            mask = np.asarray(block.mask, dtype=bool)
+            rates.extend(
+                (
+                    np.asarray(block.initial)[initial_mask],
+                    np.asarray(block.following)[mask],
+                )
+            )
+            if len(block.current):
+                pairs.append(
+                    (
+                        np.asarray(block.current)[mask],
+                        np.asarray(block.following)[mask],
+                    )
+                )
+                intervals.append(
+                    np.repeat(np.asarray(block.dt), mask.sum(axis=1))
+                )
+    else:
+        for block in data.rate_blocks:
+            rates.extend(
+                (
+                    np.asarray(block.initial).reshape(-1),
+                    np.asarray(block.following).reshape(-1),
+                )
+            )
+            if len(block.current):
+                pairs.append(
+                    (
+                        np.asarray(block.current).reshape(-1),
+                        np.asarray(block.following).reshape(-1),
+                    )
+                )
+                intervals.append(
+                    np.repeat(np.asarray(block.dt), block.current.shape[1])
+                )
+    return rates, pairs, intervals
+
+
+def _masked_rate_variance(data: MaskedTrainingTransitions) -> float:
+    sum_squares = 0.0
+    degrees = 0
+    for block in data.rate_blocks:
+        initial_mask = np.asarray(block.initial_mask, dtype=bool)
+        mask = np.asarray(block.mask, dtype=bool)
+        sum_squares += float(np.sum(np.asarray(block.initial)[initial_mask] ** 2))
+        sum_squares += float(np.sum(np.asarray(block.following)[mask] ** 2))
+        degrees += int(np.sum(initial_mask.sum(axis=1) - 1))
+        degrees += int(np.sum(mask.sum(axis=1) - 1))
+    return sum_squares / degrees if degrees else 0.0
+
+
+def _event_noise_start(
+    data: MaskedTrainingTransitions, parameters: np.ndarray
+) -> float:
+    tau_p, kappa_total, diffusion_u, diffusion_total, area_star = parameters
+    excess_parts = []
+    weight_parts = []
+    for block in data.blocks:
+        rows = np.asarray(block.sigma_e_rows, dtype=bool) & np.asarray(
+            block.o, dtype=bool
+        )
+        if not np.any(rows):
+            continue
+        current = np.asarray(block.current)
+        mask = np.asarray(block.mask, dtype=np.float64)
+        dt = np.asarray(block.dt)
+        counts = mask.sum(axis=1)
+        allocation = mask / counts[:, None]
+        totals = np.sum(mask * current, axis=1)
+        increment = -kappa_total * (totals - area_star) * dt
+        mean = mask * (current + allocation * increment[:, None])
+        projection = (
+            np.eye(mask.shape[1])[None, :, :] * mask[:, :, None]
+            - mask[:, :, None] * mask[:, None, :] / counts[:, None, None]
+        )
+        covariance = (
+            (float(np.asarray(data.sigma_b_squared)) + diffusion_u / tau_p)
+            * dt[:, None, None] ** 2
+            * projection
+            + 2.0
+            * diffusion_total
+            * dt[:, None, None]
+            * allocation[:, :, None]
+            * allocation[:, None, :]
+        )
+        observation = np.asarray(block.C)
+        predicted = np.einsum("tij,tj->ti", observation, mean) + np.asarray(block.g)
+        residual_squared = (np.asarray(block.y) - predicted) ** 2
+        continuous_variance = np.einsum(
+            "tij,tjk,tik->ti", observation, covariance, observation
+        )
+        excess_parts.append(
+            np.maximum(
+                residual_squared[rows] - continuous_variance[rows], 0.0
+            )
+        )
+        weight_parts.append(
+            np.broadcast_to(np.asarray(block.weight)[:, None], rows.shape)[rows]
+        )
+    if not excess_parts:
+        return 1e-2
+    excess = np.concatenate(excess_parts)
+    weights = np.concatenate(weight_parts)
+    return max(float(np.sqrt(np.average(excess, weights=weights))), 1e-4)
+
+
+def empirical_parameters(data: TrainingData) -> np.ndarray:
     """Training-only total OU and persistent-rate starting estimates."""
-    blocks = data.blocks
-    current_totals = np.concatenate(
-        [np.asarray(block.current.sum(axis=1)) for block in blocks]
-    )
-    following_totals = np.concatenate(
-        [np.asarray(block.following.sum(axis=1)) for block in blocks]
-    )
-    dt = np.concatenate([np.asarray(block.dt) for block in blocks])
-    weights = np.concatenate([np.asarray(block.weight) for block in blocks])
+    current_totals, following_totals, dt, weights = _total_transitions(data)
     total_weight = weights.sum()
     area_star = float(np.sum(weights * current_totals) / total_weight)
     centered = current_totals - area_star
@@ -80,27 +233,16 @@ def empirical_parameters(data: TrainingTransitions) -> np.ndarray:
         float(np.sum(weights * total_residual**2 / (2.0 * dt)) / total_weight),
     )
 
-    rates: list[np.ndarray] = []
-    rate_pairs: list[tuple[np.ndarray, np.ndarray]] = []
-    rate_intervals: list[np.ndarray] = []
-    for block in data.rate_blocks:
-        rates.extend(
-            (np.asarray(block.initial).reshape(-1), np.asarray(block.following).reshape(-1))
-        )
-        if len(block.current):
-            rate_pairs.append(
-                (
-                    np.asarray(block.current).reshape(-1),
-                    np.asarray(block.following).reshape(-1),
-                )
-            )
-            rate_intervals.append(
-                np.repeat(np.asarray(block.dt), block.current.shape[1])
-            )
+    rates, rate_pairs, rate_intervals = _rate_statistics(data)
 
     if rates:
         all_rates = np.concatenate(rates)
-        variance_rate = max(float(np.var(all_rates)), 1e-8)
+        variance_rate = max(
+            _masked_rate_variance(data)
+            if isinstance(data, MaskedTrainingTransitions)
+            else float(np.var(all_rates)),
+            1e-8,
+        )
         if rate_pairs:
             previous = np.concatenate([pair[0] for pair in rate_pairs])
             following = np.concatenate([pair[1] for pair in rate_pairs])
@@ -125,7 +267,7 @@ def empirical_parameters(data: TrainingTransitions) -> np.ndarray:
         tau_p = float(np.median(dt))
         diffusion_u = diffusion_total
 
-    return np.asarray(
+    parameters = np.asarray(
         [
             max(tau_p, 1e-6),
             total_rate,
@@ -135,11 +277,20 @@ def empirical_parameters(data: TrainingTransitions) -> np.ndarray:
         ],
         dtype=np.float64,
     )
+    if isinstance(data, MaskedTrainingTransitions):
+        parameters = np.append(parameters, _event_noise_start(data, parameters))
+    return parameters
 
 
-def _hessian_diagnostics(raw: np.ndarray, data: TrainingTransitions) -> HessianDiagnostics:
+def _negative_log_likelihood(raw: jax.Array, data: TrainingData) -> jax.Array:
+    if isinstance(data, MaskedTrainingTransitions):
+        return masked_negative_log_likelihood(raw, data)
+    return clean_negative_log_likelihood(raw, data)
+
+
+def _hessian_diagnostics(raw: np.ndarray, data: TrainingData) -> HessianDiagnostics:
     matrix = np.asarray(
-        jax.hessian(negative_log_likelihood)(jnp.asarray(raw), data)
+        jax.hessian(_negative_log_likelihood)(jnp.asarray(raw), data)
     )
     eigenvalues, eigenvectors = np.linalg.eigh(matrix)
     largest = float(np.max(eigenvalues))
@@ -164,10 +315,13 @@ def _starts(
     empirical_raw = raw_parameters(empirical)
     generator = np.random.default_rng(seed)
     perturbed = tuple(
-        empirical_raw + generator.normal(0.0, 0.75, len(PARAMETER_NAMES))
+        empirical_raw + generator.normal(0.0, 0.75, len(empirical))
         for _ in range(count - 2)
     )
-    generic = raw_parameters(np.asarray([1.0, 0.1, 0.1, 0.1, 1.0]))
+    generic_values = [1.0, 0.1, 0.1, 0.1, 1.0]
+    if len(empirical) == len(PARAMETER_NAMES):
+        generic_values.append(float(empirical[-1]))
+    generic = raw_parameters(np.asarray(generic_values))
     return (empirical_raw, generic, *perturbed)
 
 
@@ -192,14 +346,15 @@ def _same_stationary_optimum(runs: list[OptimizationRun]) -> bool:
 
 
 def optimize_parameters(
-    data: TrainingTransitions, *, seed: int = 0, starts: int = 8
+    data: TrainingData, *, seed: int = 0, starts: int = 8
 ) -> OptimizationResult:
     """Run reproducible empirical, perturbed, and generic BFGS fits."""
     if not data.blocks or not data.rate_blocks:
         raise ValueError("at least one training transition is required")
     empirical = empirical_parameters(data)
     logger.info(
-        "BFGS empirical start [tau_p, kappa_T, D_u, D_T, A_T_star]: %s",
+        "BFGS empirical start %s: %s",
+        PARAMETER_NAMES[: len(empirical)],
         np.array2string(empirical, precision=4),
     )
     solver = optx.BFGS(rtol=1e-8, atol=1e-8)
@@ -207,7 +362,7 @@ def optimize_parameters(
     for index, start in enumerate(_starts(empirical, seed, starts), start=1):
         logger.info("BFGS start %d/%d", index, starts)
         solution = optx.minimise(
-            negative_log_likelihood,
+            _negative_log_likelihood,
             solver,
             jnp.asarray(start),
             args=data,
@@ -216,10 +371,10 @@ def optimize_parameters(
         )
         raw = np.asarray(solution.value)
         objective = float(
-            negative_log_likelihood(jnp.asarray(raw), data)
+            _negative_log_likelihood(jnp.asarray(raw), data)
         )
         gradient = np.asarray(
-            jax.grad(negative_log_likelihood)(jnp.asarray(raw), data)
+            jax.grad(_negative_log_likelihood)(jnp.asarray(raw), data)
         )
         runs.append(
             OptimizationRun(
