@@ -1,892 +1,537 @@
-# Workflow for fitting the coupled stable-band area model
+# Adding dynamic birth/death/split/merge events within the code
 
-## 0. I/O + analysis changes/design principles
+We are not yet predicting when events occur. Event times, event types, and
+participating bands are supplied from the observed data by `BandTracker`.
 
-You will now allow any number of `n` input directories in which you will use each as a sample point or an ensemble mean based on context for the fitting. You also support 1 seed as well. 
+We are transitioning from a continuous SDE fitted only on clean fixed-identity
+segments to an SDE with observed events.
 
-You will also remove any previous analysis in the `band_analysis` that does not directly relate to this, and remove all old plots as well. The only plots that remain will be the new ones detailed in this plan.
+## Scope
 
-In terms of general design principles, yes this is a very complex plan, but keep it as simple as possible. Be concise in your code, unnecessary edge cases which are based on my error (i.e validating that the timesteps are all positive or monotonic) are redundant, the data is already very good. Also don't try for no backwards compatibility, its not needed at this exploratory stage.
+In scope:
 
-Do not create overtly large files but neighter over modulate, like no files except the root `__init__.py` and such with only 10-15 lines. If there are any places here where we could use a python package to simplify some of this, mention it in the plannign stage and I'll confirm/deny whether to use this.
+- masked padded state in raw area space;
+- observed birth, death, split, and merge maps, including k-way and
+  simultaneous events;
+- one new parameter `sigma_E` for event mass-conservation noise;
+- an event-capable forward simulator and a parameter-recovery test.
 
-Add concise comments in the code about the general fitting or math, but not about the code. Create decent variable names such that excessive comments are unnecessary. 
+Not in scope:
 
-## 1. Model definition
+- inferring event rates or event times;
+- non-conservative split/merge fractions as inferred physics (the daughter
+  fraction is exogenous);
+- any Kalman/particle filtering. Every band area is individually observed at
+  every frame, so the chain still conditions on data at each step. Only
+  *pre-event* quantities are ever latent, and those are handled by
+  marginalization, not filtering.
 
-For a stable segment containing \(n\) continuously tracked bands, define
+## Storage
+
+Choose a single global
 
 \[
-\mathbf A=
-\begin{pmatrix}
-A_1,\ldots,A_n
-\end{pmatrix}^{\mathsf T},
+N_{\max}=\max_k n_k
+\]
+
+over all chains, so every chain has one padded shape, one JIT trace, and can be
+`vmap`-ed. Store
+
+\[
+\mathbf A_k\in\mathbb R^{N_{\max}},
 \qquad
-A_T=\sum_{i=1}^n A_i,
-\qquad
-\overline A=\frac{A_T}{n}.
+\mathbf m_k\in\{0,1\}^{N_{\max}},
 \]
 
-Define
+where \(m_{i,k}=1\) means slot \(i\) contains an active band. Set inactive areas
+to zero:
 
 \[
-P_n=I_n-\frac{1}{n}\mathbf 1\mathbf 1^{\mathsf T},
-\]
-
-which projects onto area differences between bands, and define the total-area allocation weights
-
-\[
-\mathbf w(\mathbf A)=\frac{\mathbf A}{A_T}.
-\]
-
-The model has five main parameters:
-
-\[
-\theta=
-\left(
-\kappa_c,\kappa_T,D_A,D_T,A_T^\ast
-\right).
-\]
-
-Their meanings are:
-
-- \(\kappa_c\): relaxation rate of differences between band areas. Should be similar or equal to -r_cons.
-- \(\kappa_T\): mean-reversion rate of the total stable-band area.
-- \(D_A\): stochastic fluctuations that exchange area between bands while preserving \(A_T\).
-- \(D_T\): stochastic fluctuations of the total area.
-- \(A_T^\ast\): stationary mean total area.
-
-All four rate and diffusion parameters should be positive.
-
----
-
-## 2. Continuous form
-
-The total area follows an Ornstein–Uhlenbeck process:
-
-\[
-\boxed{
-dA_T
-=
--\kappa_T(A_T-A_T^\ast)\,d\tau
-+
-\sqrt{2D_T}\,dW_T
-}
-\]
-
-The coupled individual-band dynamics are
-
-\[
-\boxed{
-d\mathbf A
-=
--\kappa_cP_n\mathbf A\,d\tau
-+
-\mathbf w(\mathbf A)\,dA_T
-+
-\sqrt{2D_A}\,P_n\,d\mathbf W
-}
-\]
-
-Substituting the total-area equation gives
-
-\[
-\boxed{
-\begin{aligned}
-d\mathbf A={}&
-\left[
--\kappa_cP_n\mathbf A
--\kappa_T(A_T-A_T^\ast)\mathbf w
-\right]d\tau\\
-&+
-\sqrt{2D_A}\,P_n\,d\mathbf W
-+
-\sqrt{2D_T}\,\mathbf w\,dW_T .
-\end{aligned}
-}
-\]
-
-For one band,
-
-\[
-\begin{aligned}
-dA_i={}&
--\kappa_c(A_i-\overline A)\,d\tau\\
-&-\kappa_T\frac{A_i}{A_T}(A_T-A_T^\ast)\,d\tau\\
-&+
-\sqrt{2D_A}
-\left(
-dW_i-\frac1n\sum_jdW_j
-\right)
-+
-\frac{A_i}{A_T}\sqrt{2D_T}\,dW_T .
-\end{aligned}
-\]
-
-The projected \(D_A\) noise only redistributes area between bands. Summing the equations over \(i\) exactly recovers the \(A_T\) equation.
-
----
-
-## 3. Discrete form used for fitting
-
-For a transition from time \(\tau_k\) to \(\tau_{k+1}\), with
-
-\[
-\Delta\tau_k=\tau_{k+1}-\tau_k,
-\]
-
-Euler–Maruyama gives
-
-\[
-\begin{aligned}
-\mathbf A_{k+1}
-={}&
-\mathbf A_k
-+
-\left[
--\kappa_cP_n\mathbf A_k
--\kappa_T(A_{T,k}-A_T^\ast)\mathbf w_k
-\right]\Delta\tau_k\\
-&+
-\sqrt{2D_A\Delta\tau_k}\,P_n\boldsymbol\eta_k
-+
-\sqrt{2D_T\Delta\tau_k}\,\mathbf w_k\eta_{T,k},
-\end{aligned}
-\]
-
-where
-
-\[
-\boldsymbol\eta_k\sim\mathcal N(0,I_n),
-\qquad
-\eta_{T,k}\sim\mathcal N(0,1).
-\]
-
-Therefore, each observed transition has the conditional distribution
-
-\[
-\boxed{
-\mathbf A_{k+1}\mid\mathbf A_k
-\sim
-\mathcal N(\boldsymbol\mu_k,\Sigma_k)
-}
-\]
-
-with mean
-
-\[
-\boxed{
-\boldsymbol\mu_k
-=
-\mathbf A_k+
-\left[
--\kappa_cP_n\mathbf A_k
--\kappa_T(A_{T,k}-A_T^\ast)\mathbf w_k
-\right]\Delta\tau_k
-}
-\]
-
-and covariance
-
-\[
-\boxed{
-\Sigma_k
-=
-2\Delta\tau_k
-\left[
-D_AP_n+D_T\mathbf w_k\mathbf w_k^{\mathsf T}
-\right].
-}
-\]
-
-This multivariate Gaussian transition is the likelihood used for fitting.
-
-Do not add a second likelihood for \(A_T\) when
-
-\[
-A_T=\sum_i A_i.
-\]
-
-The total-area dynamics are already included in the joint covariance and drift. Fitting both would double-count the same observations.
-
----
-
-# 4. Prepare the data
-
-Divide the trajectories into uninterrupted stable-band segments.
-
-Each segment should satisfy the following:
-
-- Band identities remain continuously tracked, using the cli flag for the stability checks. This means all properties including total area are calculated only for stable bands.
-- The number of bands \(n\) is fixed.
-- No transition crosses a birth, disappearance, merge, split, or tracking failure.
-  - **NOTE**: The defintion of a split should also be changed if possible. Make sure that a split results in two new STABLE bands, i.e start the trackign when it splits, but if the bands split then remerges within the stable tracking peroid then don't count it as a split. Same with a merge, birth, dissapearence, etc.
-- Every band is included in the same order at every frame.
-- Exact physical times are retained, prefer simualation time scales \[\tau\]
-
-For each segment, store:
-
-\[
-\mathbf A^{(s)}
-=
-\left[
-\mathbf A_0,\mathbf A_1,\ldots,\mathbf A_{T_s-1}
-\right],
-\]
-
-and
-
-\[
-\Delta\boldsymbol\tau^{(s)}
-=
-\left[
-\Delta\tau_0,\ldots,\Delta\tau_{T_s-2}
-\right].
-\]
-
-Different segments may contain different numbers of bands. The projection matrix \(P_n\) is constructed separately for each segment.
-
-Do not include short-lived bands in these stable-segment fits. Birth and death events should be modeled separately if they are later included.
-
----
-
-# 5. Implement the transition model in regular JAX
-
-Write one central JAX function that takes
-
-\[
-\mathbf A_k,\quad \Delta\tau_k,\quad \theta
-\]
-
-and returns
-
-\[
-\boldsymbol\mu_k,\quad \Sigma_k.
-\]
-
-Everything else should call this same function:
-
-- the L-BFGS likelihood;
-- the NumPyro model;
-- residual calculations;
-- posterior predictive simulations.
-
-The computational sequence for one transition is:
-
-1. Determine \(n\) from the size of \(\mathbf A_k\).
-2. Construct \(P_n\).
-3. Calculate \(A_{T,k}\).
-4. Calculate \(\mathbf w_k=\mathbf A_k/A_{T,k}\).
-5. Calculate the drift.
-6. Calculate \(\boldsymbol\mu_k\).
-7. Calculate \(\Sigma_k\).
-8. Add a very small diagonal numerical jitter.
-9. Evaluate the multivariate-normal log likelihood.
-
-The conceptual implementation is only:
-
-```python
-theta = transform(raw_parameters)
-mean, covariance = transition(area, dt, theta)
-logp = multivariate_normal_logpdf(next_area, mean, covariance)
-loss = -sum(logp_over_all_transitions)
-```
-
-Use 64-bit JAX precision if possible because covariance matrices and relaxation rates can otherwise become numerically unstable.
-
-Evaluate the Gaussian log density using a Cholesky decomposition rather than explicitly calculating \(\Sigma^{-1}\).
-
----
-
-# 6. Parameter transformations
-
-L-BFGS optimizes unconstrained real numbers, but the physical parameters must satisfy
-
-\[
-\kappa_c,\kappa_T,D_A,D_T,A_T^\ast>0.
-\]
-
-Represent each positive parameter using an unconstrained raw parameter, for example
-
-\[
-x=\operatorname{softplus}(x_{\rm raw})+\epsilon.
-\]
-
-An exponential transformation is also possible, but softplus usually behaves more gently for extreme initial values.
-
-The optimizer should therefore work with
-
-\[
-\boldsymbol\phi\in\mathbb R^5,
-\]
-
-while the likelihood receives the transformed physical parameters
-
-\[
-\theta=T(\boldsymbol\phi).
-\]
-
----
-
-# 7. Construct empirical initial estimates
-
-Use the empirical diagnostics only to initialize the optimizer. They are not the final estimates.
-
-## Total-area parameters
-
-Estimate
-
-\[
-A_T^\ast\approx \langle A_T\rangle.
-\]
-
-Regress
-
-\[
-\frac{\Delta A_T}{\Delta\tau}
-\]
-
-against
-
-\[
-A_T-A_T^\ast.
-\]
-
-The expected relation is
-
-\[
-\mathbb E\left[
-\frac{\Delta A_T}{\Delta\tau}
-\middle| A_T
-\right]
-=
--\kappa_T(A_T-A_T^\ast).
-\]
-
-Therefore, the fitted slope is approximately
-
-\[
--\kappa_T.
-\]
-
-Estimate \(D_T\) from the conditional residual variance:
-
-\[
-D_T
-\approx
-\frac{
-\operatorname{Var}
-\left[
-\Delta A_T+
-\kappa_T(A_T-A_T^\ast)\Delta\tau
-\right]
-}{
-2\Delta\tau
-}.
-\]
-
-## Conservative parameters
-
-Calculate the area deviations
-
-\[
-\delta A_i=A_i-\overline A.
-\]
-
-After subtracting the fitted total-area contribution, regress the conservative increment (the part of the change in band areas that only redistributes area between bands) against \(\delta A_i\). The expected slope is approximately
-
-\[
--\kappa_c.
-\]
-
-Estimate \(D_A\) from the variance of the projected residual increments.
-
-These estimates only need to have the correct order of magnitude, so you can sacrifice some accuracy if it leads to a drastic speedup or memory efficiency, but you don't need to worry about compute too much.
-
----
-
-# 8. Obtain the initial point estimate using JAXopt L-BFGS
-
-Define the objective as the negative total transition log likelihood:
-
-\[
-\boxed{
-\mathcal L_{\rm opt}(\theta)
-=
--\sum_s\sum_k
-\log
-p\left(
-\mathbf A_{k+1}^{(s)}
-\mid
-\mathbf A_k^{(s)},\theta
-\right).
-}
-\]
-
-The procedure is:
-
-1. Convert the empirical initial values into unconstrained raw parameters.
-2. Pass the negative log likelihood to JAXopt L-BFGS.
-3. Use automatic differentiation for the gradient.
-4. Run several initializations rather than relying on one starting point.
-5. Retain the result with the lowest final negative log likelihood.
-
-A reasonable set of starts is:
-
-- one empirical start;
-- several perturbed versions of the empirical start;
-- optionally one broad generic start.
-
-The perturbations should be applied in unconstrained parameter space.
-
-After optimization, check:
-
-- the optimizer reports convergence;
-- the gradient norm is close to zero;
-- different starts converge to similar parameter values;
-- the final likelihoods from the best starts are similar.
-
-The output is the maximum-likelihood point estimate
-
-\[
-\widehat\theta_{\rm ML}.
-\]
-
----
-
-# 9. Check local identifiability after L-BFGS
-
-Evaluate the Hessian of the negative log likelihood at the optimum:
-
-\[
-H
-=
-\nabla_\phi^2
-\mathcal L_{\rm opt}
-\left(
-\widehat{\boldsymbol\phi}
-\right).
-\]
-
-Inspect its eigenvalues.
-
-A very small eigenvalue indicates that a combination of parameters is poorly constrained by the data.
-
-Likely correlations include:
-
-\[
-(\kappa_c,D_A)
-\]
-
-and
-
-\[
-(\kappa_T,D_T).
-\]
-
-Also inspect a profile likelihood for any parameter that appears weakly identifiable. Fix that parameter at a sequence of values, reoptimize the remaining parameters, and examine how much the likelihood changes.
-
-Do not rely only on the inverse Hessian for final uncertainties. It assumes a locally Gaussian likelihood and can fail when parameters are correlated or skewed.
-
-You just report the hessian and the eigenvalues and id weakly idenfiiable , and i'll instruct you later if we need to modify anything or fix anything based on that.
-
----
-
-# 10. Define the NumPyro model
-
-Use the same JAX transition function inside NumPyro.
-
-For each stable segment and each transition, the NumPyro model should construct
-
-\[
-\boldsymbol\mu_k(\theta)
-\]
-
-and
-
-\[
-\Sigma_k(\theta),
-\]
-
-then observe
-
-\[
-\mathbf A_{k+1}
-\]
-
-under the multivariate-normal transition distribution.
-
-The NumPyro model should sample the five physical parameters:
-
-\[
-\kappa_c,\quad
-\kappa_T,\quad
-D_A,\quad
-D_T,\quad
-A_T^\ast.
-\]
-
-Use positive-support priors, normally lognormal or half-normal priors.
-
-A suitable general form is
-
-\[
-\kappa_c\sim \operatorname{LogNormal}(\mu_c,\sigma_c),
-\]
-
-\[
-\kappa_T\sim \operatorname{LogNormal}(\mu_T,\sigma_T),
-\]
-
-\[
-D_A\sim \operatorname{LogNormal}(\mu_A,\sigma_A),
-\]
-
-\[
-D_T\sim \operatorname{LogNormal}(\mu_{DT},\sigma_{DT}),
-\]
-
-\[
-A_T^\ast\sim \operatorname{LogNormal}(\mu_{A_T},\sigma_{A_T}).
-\]
-
-Choose prior scales using physical orders of magnitude:
-
-\[
-\kappa\sim
-\frac{1}{\text{typical relaxation time}},
-\]
-
-\[
-D_A\sim
-\frac{(\text{typical band area})^2}
-{\text{typical time}},
-\]
-
-\[
-D_T\sim
-\frac{(\text{typical total area})^2}
-{\text{typical time}},
-\]
-
-\[
-A_T^\ast\sim
-\text{typical observed total area}.
-\]
-
-The priors should be broad enough that the posterior is controlled mainly by the data, but not so broad that NUTS spends time in physically meaningless scales.
-
----
-
-# 11. Initialize and run NUTS
-
-Initialize the NumPyro sampler at the L-BFGS estimate:
-
-\[
-\theta_{\rm init}
-=
-\widehat\theta_{\rm ML}.
-\]
-
-This improves warmup because the chains begin near a region of high likelihood.
-
-A suitable initial sampling configuration is:
-
-- four chains;
-- approximately 1,000–2,000 warmup iterations;
-- approximately 1,000–2,000 retained samples per chain;
-- target acceptance probability around \(0.9\);
-- dense mass matrix if parameter correlations are strong.
-
-Run the chains from slightly different initial positions near the L-BFGS result rather than using identical states.
-
-The posterior is
-
-\[
-p(\theta\mid\text{data})
-\propto
-p(\text{data}\mid\theta)p(\theta).
-\]
-
-The posterior median or posterior mean can be used as the Bayesian point estimate, while credible intervals quantify uncertainty.
-
----
-
-# 12. Transfer the result to ArviZ
-
-Convert the NumPyro MCMC output into an ArviZ `InferenceData` object.
-
-Use ArviZ to calculate, for every parameter:
-
-- posterior mean;
-- posterior median;
-- posterior standard deviation;
-- 95% highest-density interval;
-- bulk effective sample size;
-- tail effective sample size;
-- rank-normalized \(\widehat R\).
-
-Plot:
-
-- chain traces;
-- marginal posterior distributions;
-- rank plots;
-- pair plots for correlated parameters;
-- energy or Bayesian fraction of missing information diagnostics if necessary.
-
-A small ArviZ call may look conceptually like:
-
-```python
-idata = az.from_numpyro(mcmc)
-az.summary(idata)
-az.plot_trace(idata)
-```
-
----
-
-# 13. MCMC acceptance criteria
-
-The fit should generally satisfy:
-
-\[
-\widehat R<1.01
-\]
-
-for every parameter.
-
-Bulk and tail effective sample sizes should be at least several hundred and preferably much larger.
-
-There should be no persistent separation between chains.
-
-There should ideally be zero divergent transitions. A very small number should still be investigated rather than ignored.
-
-If divergences occur:
-
-1. Increase the target acceptance probability, for example from \(0.90\) to \(0.95\).
-2. Run longer warmup.
-3. Inspect pair plots for funnel-shaped or strongly curved parameter relationships.
-4. Rescale areas and times if the numerical magnitudes differ greatly.
-5. Reconsider overly broad priors.
-6. Consider a more suitable parameterization.
-
-Do not interpret posterior intervals until the MCMC diagnostics are satisfactory.
-
-Report the diagnostics like such
-
----
-
-# 14. One-step residual diagnostics
-
-At each posterior estimate or posterior draw, calculate the conditional residual
-
-\[
-\mathbf r_k
-=
-\mathbf A_{k+1}-\boldsymbol\mu_k.
-\]
-
-Whiten it using the Cholesky decomposition
-
-\[
-\Sigma_k=L_kL_k^{\mathsf T},
+A_{i,k}=0
+\qquad\text{when}\qquad
+m_{i,k}=0,
 \]
 
 so that
 
 \[
-\boxed{
-\mathbf z_k=L_k^{-1}\mathbf r_k.
-}
-\]
-
-Under the fitted model, the pooled whitened residuals should approximately satisfy
-
-\[
-\mathbb E[\mathbf z]=0,
+A_{T,k}=\sum_{i=1}^{N_{\max}}m_{i,k}A_{i,k},
 \qquad
-\operatorname{Cov}(\mathbf z)=I.
+n_k=\mathbf 1^{\mathsf T}\mathbf m_k .
 \]
 
-Check:
+All drift, noise, covariance, and likelihood terms must be masked so padded
+slots contribute nothing.
 
-- residual mean;
-- residual variance;
-- cross-correlations;
-- residual autocorrelation;
-- residual histograms;
-- normal quantile plots.
+### `EventChain`
 
-Also plot residuals against:
+Add a new dataclass alongside `StableSegment`; do **not** modify
+`StableSegment` or `build_stable_segments`. The clean-segment fit remains an
+independently runnable reference path, and the recovery test below compares the
+two directly.
+
+```python
+@dataclass(frozen=True)
+class EventChain:
+    seed_id: str
+    slot_ids: np.ndarray      # (T, N_max) int64, track_id per slot, -1 if empty
+    frame_indices: np.ndarray # (T,)
+    tau: np.ndarray           # (T,)
+    areas: np.ndarray         # (T, N_max), zero where inactive
+    mask: np.ndarray          # (T, N_max) bool
+    events: tuple[EventStep, ...]  # one per transition that carries an event
+```
+
+A chain is broken (and a new chain started with a fresh mask) only by
+`EventCode.UNCERTAIN` and `EventCode.TRANSIENT_GAP`. Slot assignment is a new
+bookkeeping layer: a surviving track keeps its slot; a created track takes the
+lowest free slot; a retired track frees its slot at \(k+1\).
+
+## Masked state space
+
+Work in raw area space in \(\mathbb R^{N_{\max}}\). Replace the
+dimension-specific Helmert basis with the mask projector
 
 \[
-A_T,
+\mathbf P_{\mathbf m}
+=
+\mathbf M-\frac{\mathbf m\mathbf m^{\mathsf T}}{n},
 \qquad
-A_i-\overline A,
+\mathbf M=\operatorname{diag}(\mathbf m),
 \qquad
-n,
+n=\mathbf 1^{\mathsf T}\mathbf m ,
+\]
+
+and the allocation vector
+
+\[
+\mathbf a_k=\frac{\mathbf m_k}{n_k}
+\qquad(\text{uniform allocation, as in the current \texttt{transition}}).
+\]
+
+The one-step covariance is then
+
+\[
+\boldsymbol\Sigma_k
+=
+c_k\mathbf P_{\mathbf m_k}
++
+2D_T\,\Delta\tau_k\,\mathbf a_k\mathbf a_k^{\mathsf T},
 \qquad
-\Delta\tau.
+c_k=\left(\sigma_b^2+\frac{D_u}{\tau_p}\right)\Delta\tau_k^2 .
 \]
 
-Systematic dependence indicates a missing state dependence in the drift or diffusion.
+This reproduces the existing factorization exactly: the conservative subspace
+carries variance \(c_k\) and the total direction carries
+\(\mathbf 1^{\mathsf T}\boldsymbol\Sigma_k\mathbf 1=2D_T\Delta\tau_k\).
 
-Examples include:
+### Numerics: do not use `eigh`
 
-- diffusion increasing with band area;
-- relaxation depending on band count;
-- nonlinear mean reversion;
-- memory remaining at the selected lag.
+Restricted to active slots, \(\boldsymbol\Sigma_k\) has rank
+\((n_k-1)+1=n_k\) and is therefore **full rank on the active block**. It is
+singular only because of the padded rows. Do not eigendecompose:
+\(\mathbf P_{\mathbf m}\) has an \((n-1)\)-fold degenerate eigenvalue, and JAX
+`eigh` gradients are unstable at repeated eigenvalues.
 
----
-
-# 15. Posterior predictive validation
-
-Generate posterior predictive transitions by:
-
-1. Drawing a parameter vector from the posterior.
-2. Taking an observed \(\mathbf A_k\).
-3. Constructing \(\boldsymbol\mu_k\) and \(\Sigma_k\).
-4. Drawing a simulated \(\mathbf A_{k+1}\).
-5. Repeating across all transitions.
-
-Compare observed and posterior predictive distributions for:
+Instead pad the diagonal on inactive slots:
 
 \[
-\Delta A_T,
+\widetilde{\boldsymbol\Sigma}_k
+=
+\boldsymbol\Sigma_k
++
+\operatorname{diag}(\mathbf 1-\mathbf m_k)
++
+\varepsilon\mathbf I ,
 \]
+
+with `JITTER` for \(\varepsilon\). Then `jnp.linalg.cholesky` succeeds at fixed
+padded shape, the residual is masked to zero on inactive slots, and each
+inactive slot contributes the parameter-independent constant
+\(\tfrac12\log 2\pi\). Subtract
+\((N_{\max}-n_k)\tfrac12\log 2\pi\) when reporting absolute log-likelihoods; it
+does not affect optimization or the posterior.
+
+## Continuous prediction
+
+The active-band allocation weights are
 
 \[
-\Delta A_i,
+\widetilde{\mathbf w}_k
+=
+\frac{\mathbf m_k\odot\mathbf w(\mathbf A_k)}
+{\sum_j m_{j,k}w_j(\mathbf A_k)},
+\qquad
+\mathbf 1^{\mathsf T}\widetilde{\mathbf w}_k=1,
 \]
+
+which for the current uniform allocation is \(\widetilde{\mathbf w}_k=\mathbf a_k\).
+
+The continuous total-area increment is
 
 \[
-A_i-\overline A,
+\Delta A_{T,k}^{\mathrm{cont}}
+=
+-\kappa_T\!\left(A_{T,k}-A_T^{\star}\right)\Delta\tau_k .
 \]
 
-and projected conservative increments.
+`A_T_star` stays a single global, band-count-independent parameter. Add a
+diagnostic plotting \(A_T\) against \(n_k\) so the assumption can be checked
+post hoc.
 
-The predicted distributions should reproduce both their central values and their spread.
-
-Posterior predictive intervals should contain approximately the expected fraction of observations. For example, roughly 95% of observations should lie inside 95% predictive intervals, subject to sampling uncertainty.
-
----
-
-# 16. Long-trajectory validation
-
-A good one-step likelihood fit does not guarantee correct long-time dynamics.
-
-For each real stable segment:
-
-1. Start from its observed initial area vector.
-2. Draw one posterior parameter set.
-3. Simulate the discrete model repeatedly using the same timestep sequence.
-4. Repeat for many posterior draws.
-5. Compare the resulting trajectories with the observed segment.
-
-Compare:
-
-## Total area
-
-- stationary distribution of \(A_T\);
-- mean of \(A_T\);
-- variance of \(A_T\);
-- autocorrelation of \(A_T\);
-- relaxation time of \(A_T\).
-
-## Individual bands
-
-- distribution of \(A_i\);
-- distribution of \(A_i-\overline A\);
-- conservative-mode autocorrelation;
-- area increment distributions;
-- area MSD.
-
-## Coupling
-
-- covariance between band increments;
-- covariance between conservative modes;
-- covariance of each band with \(\Delta A_T\).
-
-The model should reproduce these properties without refitting them separately.
-
----
-
-# 17. Check positivity
-
-The Gaussian SDE does not mathematically enforce
+The pre-event predictive mean is
 
 \[
-A_i>0.
+\boldsymbol\mu_k^{-}
+=
+\mathbf A_k
++
+\widetilde{\mathbf w}_k\Delta A_{T,k}^{\mathrm{cont}}
++
+\mathbf M_k\!\left[\mathbf b_k+\mathbf u_k\right]\Delta\tau_k ,
 \]
 
-Count how often posterior predictive simulations produce negative areas.
-
----
-
-# 18. Validate the fitting lag
-
-Repeat the entire fitting procedure for several candidate lags.
-
-For every lag, compare the posterior estimates of
+with redistribution terms conserving total area over the active slots:
 
 \[
-\kappa_c,\quad
-\kappa_T,\quad
-D_A,\quad
-D_T,\quad
-A_T^\ast.
+\mathbf 1^{\mathsf T}\mathbf M_k\mathbf b_k=0,
+\qquad
+\mathbf 1^{\mathsf T}\mathbf M_k\mathbf u_k=0 .
 \]
 
-Look for a lag interval where the inferred parameters are approximately stable within uncertainty.
-
-The selected lag should satisfy both:
-
-1. Short-time tracking and measurement correlations have decayed.
-2. The lag remains short relative to the physical relaxation times.
-
-Also inspect whitened residual autocorrelation. If residuals remain correlated, the state \(\mathbf A\) is not Markovian at that lag.
-
-If \(\kappa_c\) continues changing strongly as the lag increases, do not conceal this by choosing one arbitrary lag. Report that the inferred conservative dynamics are scale dependent and that the simple Markov SDE is only an effective model over a specified lag range.
-
-For our case, select the base lag is 2, but also run for lag 1, 3, 5, 10. 
-
----
-
-# 19. Final fitting sequence
-
-The complete sequence is:
-
-1. Extract uninterrupted stable-band segments.
-2. Choose several candidate fitting lags.
-3. Implement one JAX transition function returning \(\boldsymbol\mu_k\) and \(\Sigma_k\).
-4. Construct the joint multivariate Gaussian transition likelihood.
-5. Obtain empirical starting estimates.
-6. Transform constrained parameters to unconstrained optimizer variables.
-7. Run multi-start JAXopt L-BFGS.
-8. Check convergence, gradients, Hessian eigenvalues, and parameter correlations.
-9. Use the L-BFGS estimate to initialize NumPyro NUTS.
-10. Sample the posterior using several chains.
-11. Convert the result to ArviZ.
-12. Check \(\widehat R\), effective sample sizes, divergences, traces, and rank plots.
-13. Calculate whitened one-step residuals.
-14. Perform posterior predictive transition checks.
-15. Simulate long trajectories.
-16. Check negative-area frequency.
-17. Repeat the fit over several lags.
-18. Test the final model on held-out simulation seeds.
-19. Report the posterior estimates and the lag range over which they are stable.
-
-The final reported parameter table should contain
+Inactive coordinates must satisfy
 
 \[
-\kappa_c,\quad
-\kappa_T,\quad
-D_A,\quad
-D_T,\quad
-A_T^\ast
+m_{i,k}=0
+\quad\Longrightarrow\quad
+\mu_{i,k}^{-}=0 .
 \]
 
-with posterior medians and 95% credible intervals, together with the fitting lag, number of stable segments, number of transitions, number of seeds, and MCMC diagnostics.
+### Latent conservative rate and segment slope across an event
 
+The persistent rate \(\mathbf u\) is treated as an observable (as in the
+current code) via masked conservative differences. Across an event step,
+transform and then re-project:
 
-You should output an variety of new plots giving the validation essentially, so I can interpret them.  
+\[
+\mathbf u_{k+1}
+=
+\frac{1}{\Delta\tau_k}
+\mathbf P_{\mathbf m_{k+1}}
+\!\left[
+\mathbf A_{k+1}^{\mathrm{obs}}
+-
+\left(\mathbf H_k\mathbf A_k^{\mathrm{obs}}+\mathbf g_k\right)
+\right].
+\]
+
+Re-projection is required: \(\mathbf H_k\mathbf u_k\) is not zero-sum in
+general, so the constraint \(\mathbf 1^{\mathsf T}\mathbf M\mathbf u=0\) breaks
+without it. Slots created by a birth or a split start a fresh OU chain drawn
+from the stationary \(\mathcal N(0,D_u/\tau_p)\); this is already the role of
+`PersistentRateBlock.initial` / `initial_weight`.
+
+The per-run slope \(\mathbf b_s\) stays a nuisance estimated per inter-event
+run, with the Helmert projection replaced by \(\mathbf P_{\mathbf m}\) and
+`estimate_slope_variance` counting \(n-1\) degrees of freedom per run using the
+run's active count.
+
+## Event transformation
+
+Separate two objects that the previous draft conflated.
+
+**Propagation.** \(\mathbf H_k,\mathbf g_k\) define the predictive mean after
+the event,
+
+\[
+\boldsymbol\mu_{k+1}
+=
+\mathbf H_k\boldsymbol\mu_k^{-}+\mathbf g_k ,
+\]
+
+and are used for simulation, rollout, and posterior predictive draws.
+
+**Conditioning.** The state carried into the next transition is the *observed*
+post-event vector \(\mathbf A_{k+1}^{\mathrm{obs}}\) placed into slots, not
+\(\mathbf H_k\mathbf A_k+\mathbf g_k\). This keeps the estimator a conditional
+one-step transition model, exactly as `build_transition_blocks` is today.
+
+**Observation.** \(\mathbf C_k\in\mathbb R^{N_{\max}\times N_{\max}}\) maps the
+pre-event state to what is actually measured, \(\mathbf o_k\in\{0,1\}^{N_{\max}}\)
+flags informative rows, and \(\mathbf R_k\) is the event noise. The likelihood
+of one transition is
+
+\[
+\mathbf y_k
+\sim
+\mathcal N\!\left(
+\mathbf C_k\boldsymbol\mu_k^{-}+\mathbf g_k^{\mathrm{obs}},
+\;
+\mathbf C_k\boldsymbol\Sigma_k\mathbf C_k^{\mathsf T}+\mathbf R_k
+\right)
+\quad\text{on the rows }o_{i,k}=1 ,
+\]
+
+with the same \(\operatorname{diag}(\mathbf 1-\mathbf o_k)\) padding trick for
+the unobserved rows. Dropping a row *is* marginalization of the corresponding
+latent pre-event quantity, which is what a death requires.
+
+\(\mathbf H_k\), \(\mathbf g_k\), \(\mathbf C_k\), \(\mathbf o_k\),
+\(\mathbf R_k\), and \(\mathbf m_k\) are all precomputed in NumPy before
+entering the JIT-compiled likelihood.
+
+### No event
+
+\(\mathbf H_k=\mathbf C_k=\mathbf M_k\), \(\mathbf g_k=\mathbf 0\),
+\(\mathbf o_k=\mathbf m_k\), \(\mathbf R_k=\mathbf 0\).
+`EventCode.RESTORED` is treated as no event: the same track IDs are recovered,
+so the preceding gap frames are bridged by one continuous transition with the
+full elapsed \(\Delta\tau\).
+
+### Birth
+
+Place the observed new area into a free slot \(r\):
+
+\[
+A_{r,k+1}=A^{\mathrm{obs}}_{\mathrm{new},k+1},
+\qquad
+m_{r,k+1}=1 .
+\]
+
+All unaffected bands retain their continuous predictions.
+
+Maps: \(g_{r,k}=B_k\); \(o_{r,k}=0\) — the birth area is inserted exactly and
+carries no density, because we are not modelling where new area comes from.
+
+### Death
+
+For the death of band \(i\):
+
+\[
+A_{i,k+1}=0,
+\qquad
+m_{i,k+1}=0 .
+\]
+
+The removed area is the *predicted* pre-death area \(A_{i,k+1}^{-}\), which is
+never observed.
+
+Maps: \(H_{ii}=0\); row \(i\) of \(\mathbf C_k\) is zeroed and \(o_{i,k}=0\).
+The scalar total-area information at a death step therefore enters through the
+joint marginal over the surviving slots, not through a separate \(A_T\)
+residual. Because the joint predictive is Gaussian, marginalizing the latent
+\(A_{i,k+1}^{-}\) is exactly the row deletion above — no integral is needed. A
+temporary fallback, acceptable only if the joint path is not yet wired up, is to
+skip the total-area term for death steps alone.
+
+### Split
+
+Band \(i\) splits into daughters stored in slots \(i\) and \(r\). Use the
+observed daughter fraction
+
+\[
+f_k=\frac{A^{\mathrm{obs}}_{i_1,k+1}}
+{A^{\mathrm{obs}}_{i_1,k+1}+A^{\mathrm{obs}}_{i_2,k+1}}
+\]
+
+as an **exogenous constant**. Propagation:
+
+\[
+A_{i,k+1}=f_kA_{i,k+1}^{-},
+\qquad
+A_{r,k+1}=(1-f_k)A_{i,k+1}^{-},
+\qquad
+m_{r,k+1}=1 ,
+\]
+
+so \(H_{i,i}=f_k\), \(H_{r,i}=1-f_k\), \(m_{r,k+1}=1\).
+
+Observation is **one-dimensional, on the daughter sum**:
+
+\[
+y_{i,k}=A^{\mathrm{obs}}_{i_1,k+1}+A^{\mathrm{obs}}_{i_2,k+1},
+\qquad
+\mathbf C_k\text{ row }i=\mathbf e_i,
+\qquad
+o_{i,k}=1,
+\qquad
+R_{ii}=\sigma_E^2,
+\qquad
+o_{r,k}=0 .
+\]
+
+Rationale: with \(f_k\) defined from the observations, the two-component
+residual
+\(\left(A_1-f_kA^{-},\,A_2-(1-f_k)A^{-}\right)
+=(f_k,1-f_k)\left(A_1+A_2-A^{-}\right)\)
+is exactly rank one. A full \(\boldsymbol\Sigma_S\) would have one
+unidentifiable eigendirection. Splits and merges are therefore the same
+statement: is mass conserved through a topology change?
+
+k-way splits generalize with a simplex weight vector
+\(\mathbf f_k\), \(\sum f_{k,d}=1\), taken from the observed daughter areas;
+the observation row is unchanged.
+
+### Merge
+
+Bands \(i\) and \(j\) merge into slot \(i\):
+
+\[
+A_{i,k+1}=A_{i,k+1}^{-}+A_{j,k+1}^{-},
+\qquad
+A_{j,k+1}=0,
+\qquad
+m_{j,k+1}=0 .
+\]
+
+Merging is conservative: \(H_{i,i}=H_{i,j}=1\) and row \(j\) is zeroed. (The
+earlier draft wrote \(\eta_M\) here while the text asserted conservation; there
+is no \(\eta_M\) parameter — non-conservation is carried by \(\sigma_E\) in the
+likelihood, not by a deterministic gain.)
+
+Observation:
+
+\[
+y_{i,k}=A^{\mathrm{obs}}_{ij,k+1},
+\qquad
+\mathbf C_k\text{ row }i=\mathbf e_i+\mathbf e_j,
+\qquad
+o_{i,k}=1,
+\qquad
+R_{ii}=\sigma_E^2,
+\qquad
+o_{j,k}=0 .
+\]
+
+k-way merges sum the corresponding unit vectors into one row.
+
+### Simultaneous events
+
+One `TrackedFrame` can carry several events; `BandTracker.track` collapses them
+to a single dominant `EventCode`, so **read the bipartite overlap edge
+structure, not `EventRecord.code`**, when building the maps. Row degree \(>1\)
+is a split, column degree \(>1\) is a merge, an unmatched column is a birth, an
+unmatched row is a death. Disjoint events compose by writing into disjoint rows
+and columns of the same \(\mathbf H_k,\mathbf g_k,\mathbf C_k\); assert
+disjointness and fall back to a chain break if it fails.
+
+## Time grid with mandatory event knots
+
+For each lag \(L\) and phase \(p\), begin with the ordinary sampled indices
+\(p,p+L,p+2L,\dots\); then for every event boundary insert the mandatory knots
+\(k\) and \(k+1\); then sort and deduplicate. A transition that contains no
+event uses the ordinary continuous form over its (possibly irregular) interval.
+The exact \(k\to k+1\) step is one frame of continuous evolution producing
+\(\mathbf A_{k+1}^{-}\), followed by the event map producing
+\(\mathbf A_{k+1}\).
+
+There must never be a transition such as \(k-3\to k+4\) spanning an event at
+\(k\to k+1\). Transition weights stay \(1/L\) so lag averaging and
+`stable_lags` keep their present meaning.
+
+## Likelihood
+
+\[
+\log p(\text{data})
+=
+\log p_{\mathrm{cont}}
++
+\log p_{\mathrm{event}} ,
+\]
+
+both realized by the single Gaussian above: unaffected active rows carry the
+ordinary continuous residual, event-affected rows carry the \(\mathbf C_k\)
+reduction with \(\mathbf R_k\), and unobservable rows are marginalized out.
+Event-affected bands are neither treated as ordinary continuous residuals nor
+removed from the fit.
+
+The continuous total-area residual is always evaluated against the **pre-event**
+total \(A_{T,k+1}^{-}\), never against the post-event observed total. Comparing
+against the post-event total would make part of the residual identically zero
+for an exact birth insertion and bias \(D_T\) downward with the birth rate.
+
+The persistent-rate blocks skip event-crossing steps for their AR(1) term and
+restart from stationary in created slots, per the \(\mathbf u\) rule above.
+
+### Parameters
+
+`PARAMETER_NAMES` becomes
+
+```text
+("tau_p", "kappa_T", "D_u", "D_T", "A_T_star", "sigma_E")
+```
+
+with `Scaling.parameter_factors` gaining `self.area` for `sigma_E`, softplus
+positivity as for the rest, and a half-normal prior in `coupled_area_model`
+scaled to the normalized area unit. Splits and merges share one `sigma_E`. If a
+future dataset supplies at least 30 of each event type, splitting it into
+`sigma_S` and `sigma_M` is a one-line change; below that threshold, keep them
+tied.
+
+## Workflow
+
+\[
+A_{T,k}
+\rightarrow
+\Delta A_{T,k}^{\mathrm{cont}}
+\rightarrow
+\mathbf A_{k+1}^{-}
+\rightarrow
+\mathbf A_{k+1}
+\rightarrow
+A_{T,k+1},
+\qquad
+A_{T,k+1}=\sum_i m_{i,k+1}A_{i,k+1}.
+\]
+
+Do not update \(A_T\) independently; the event-induced total-area change is
+determined from the transformed vector. In *simulation* the next state is
+\(\mathbf H_k\boldsymbol\mu_k^{-}+\mathbf g_k\) plus noise; in *inference* the
+next state is the observation. The next transition starts from
+\(\mathbf A_{k+1}\), \(\mathbf m_{k+1}\), \(A_{T,k+1}\), so events propagate
+into all later drift, redistribution, covariance, and MSD behavior.
+
+## Code changes
+
+- `tracking.py`: expose the bipartite edge structure per event frame (currently
+  discarded after `EventCode` collapse) so the map builder can read it.
+- new `events.py`: `EventStep`, edge-structure to
+  \((\mathbf H,\mathbf g,\mathbf C,\mathbf o,\mathbf R,\mathbf m')\), slot
+  allocation, disjointness assertions.
+- new `chains.py`: `EventChain` and its builder; global \(N_{\max}\); knot grid
+  construction. `segments.py` untouched.
+- `model.py`: masked-space `transition`/`transition_log_density` with the
+  \(\operatorname{diag}(\mathbf 1-\mathbf m)\) padding; masked
+  `conservative_projection`; masked slope and \(\sigma_b^2\); padded chain
+  blocks replacing dimension-grouped blocks for the event path; `sigma_E` in
+  the parameter vector.
+- `inference.py` / `bayesian.py`: six-parameter vector, `sigma_E` start value
+  and prior.
+- `validation.py`: event-aware posterior predictive; the forward simulator.
+- `workflow.py` / `reporting.py`: run and report both the clean-segment and
+  event-chain fits side by side.
+
+## Validation
+
+1. Forward simulator: simulate the masked SDE in \(\mathbb R^{N_{\max}}\) with
+   a scripted schedule of frequent births, deaths, splits, and merges.
+2. **Parameter recovery**: fit simulated data and assert known parameters fall
+   inside their posterior credible intervals.
+3. **Bias demonstration**: fit the same simulated data with events ignored
+   (clean-segment path only) and assert a measurable bias in `kappa_T` and
+   `D_T`. Together with (2), this is the only check that the event machinery
+   helps rather than merely runs; the identity checks below would all pass for
+   a sign error in \(\mathbf H_k\) that happens to preserve total area.
+4. Verify inactive slots satisfy \(m_{i,k}=0\Rightarrow A_{i,k}=0\) throughout.
+5. Conservative splits: \(A_{i_1,k+1}+A_{i_2,k+1}=A_{i,k+1}^{-}\).
+6. Conservative merges: \(A_{ij,k+1}=A_{i,k+1}^{-}+A_{j,k+1}^{-}\).
+7. Hence \(A_{T,k+1}=A_{T,k+1}^{-}\) for splits and merges.
+8. Births increase the total area by exactly the inserted birth area.
+9. Deaths decrease the total area by the predicted pre-death area.
+10. Unaffected bands retain their continuous predictions during an event.
+11. Event-affected observations enter through \(\mathbf C_k,\mathbf R_k\)
+    rather than as ordinary continuous residuals, and unobservable rows
+    (\(o_i=0\)) contribute no parameter-dependent term.
+12. No transition in any constructed grid spans an event boundary.
+13. Padded-slot log-density contributions are parameter-independent: perturb
+    every parameter and assert the inactive-slot contribution is unchanged.
