@@ -31,6 +31,7 @@ class _Schedule(NamedTuple):
     o: jax.Array
     sigma_e_rows: jax.Array
     event: jax.Array
+    created: jax.Array
 
 
 @dataclass(frozen=True)
@@ -56,6 +57,11 @@ class _SimulationArrays(NamedTuple):
 
 
 def _schedule(chain: EventChain) -> _Schedule:
+    previous_ids = chain.slot_ids[:-1]
+    following_ids = chain.slot_ids[1:]
+    created = (following_ids >= 0) & ~np.any(
+        following_ids[:, :, None] == previous_ids[:, None, :], axis=2
+    )
     return _Schedule(
         tau=jnp.asarray(chain.tau, dtype=jnp.float64),
         mask=jnp.asarray(chain.mask, dtype=jnp.float64),
@@ -67,6 +73,7 @@ def _schedule(chain: EventChain) -> _Schedule:
             [step.sigma_e_rows for step in chain.events], dtype=jnp.float64
         ),
         event=jnp.asarray(event_transitions(chain)),
+        created=jnp.asarray(created),
     )
 
 
@@ -111,6 +118,7 @@ def _simulate(
         schedule.o,
         schedule.sigma_e_rows,
         schedule.event,
+        schedule.created,
         jax.random.split(initial_keys[2], len(schedule.H)),
     )
 
@@ -119,7 +127,9 @@ def _simulate(
         values: tuple[jax.Array, ...],
     ) -> tuple[tuple[jax.Array, jax.Array, jax.Array], tuple[jax.Array, ...]]:
         area, rate, slope = carry
-        dt, mask, mask_next, H, g, C, o, event_rows, is_event, step_key = values
+        dt, mask, mask_next, H, g, C, o, event_rows, is_event, created, step_key = (
+            values
+        )
         total = jnp.dot(mask, area)
         allocation = mask / jnp.sum(mask)
         total_increment = -kappa_total * (total - area_star) * dt
@@ -143,8 +153,15 @@ def _simulate(
         evolved_rate = decay * rate + _projected_normal(
             rate_key, mask, innovation_scale
         )
-        event_rate = _projected_normal(
-            rate_key, mask_next, jnp.sqrt(diffusion_u / tau_p)
+        transformed_rate = _projection(mask_next) @ (
+            following - (H @ area + g)
+        ) / dt
+        stationary_created = (
+            jnp.sqrt(diffusion_u / tau_p)
+            * jax.random.normal(rate_key, mask.shape)
+        )
+        event_rate = _projection(mask_next) @ jnp.where(
+            created, stationary_created, transformed_rate
         )
         following_rate = jnp.where(is_event, event_rate, evolved_rate)
         new_slope = _projected_normal(
