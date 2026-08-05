@@ -428,7 +428,7 @@ def run_analysis(
                 required = (
                     "training_path_segment_break"
                     if fit == "event"
-                    else "training_transfer_rate_integral_null"
+                    else "training_transfer_rate_discrepancy_null"
                 )
                 if cached.accepted and required not in cached.arrays:
                     logger.info(

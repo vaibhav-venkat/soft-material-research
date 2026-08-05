@@ -362,59 +362,99 @@ def _replicate_acf_quantiles(curves: list[np.ndarray]) -> np.ndarray:
     return np.nanquantile(padded, (0.025, 0.975), axis=0)
 
 
-def _post_decay_integral(
+def _acf_discrepancy(
     observed: np.ndarray,
     curves: list[np.ndarray],
     simulated: np.ndarray,
     counts: np.ndarray,
     lag_time: np.ndarray,
 ) -> tuple[dict[str, float], np.ndarray]:
-    """Integrate the ACF past the fitted model's own decay, against the null.
+    """Score the observed ACF against the same-geometry null past the model's decay.
 
-    The window opens where the fitted model's pooled ACF has fallen below 0.05 and
-    closes at the last lag with at least three contributing segments. Both edges
-    come from the null and the geometry, never from the observed curve, so the
-    statistic is not tuned to the feature it is testing. A sustained excursion
-    counts once here, where a pointwise band counts it at every correlated lag.
+    Two statistics, because a signed integral cancels a damped oscillation against
+    its own rebound and is blind to exactly the alternative of interest:
+
+    ``negative_area`` -- the area below zero only. The fitted model's ACF stays
+    positive through the window, so negativity is pure discrepancy and the rebound
+    contributes nothing. Capped at the last lag with five contributing segments.
+
+    ``shape_chi2`` -- squared deviation from the null mean in units of the null
+    standard deviation, summed over the window. Slow decay, lobe, and rebound all
+    add rather than cancel, and thin long lags are automatically down-weighted by
+    their inflated null variance.
+
+    The window opens where the fitted model's own pooled ACF falls below 0.05, so
+    both edges come from the null and the geometry rather than from the observed
+    curve. The replicates supply both the null moments and the null distribution;
+    with a few hundred of them the reuse is negligible.
     """
     empty = (
         {
-            "transfer_rate_integral": float("nan"),
-            "transfer_rate_integral_p": float("nan"),
+            "transfer_rate_negative_area": float("nan"),
+            "transfer_rate_negative_area_p": float("nan"),
+            "transfer_rate_shape_chi2": float("nan"),
+            "transfer_rate_shape_chi2_p": float("nan"),
         },
-        np.empty(0, dtype=np.float64),
+        np.empty((2, 0), dtype=np.float64),
     )
     decayed = np.flatnonzero(np.abs(simulated) < 0.05)
-    usable = np.flatnonzero(counts >= 3)
-    if not decayed.size or not usable.size:
+    shape_lags = np.flatnonzero(counts >= 3)
+    negative_lags = np.flatnonzero(counts >= 5)
+    if not decayed.size or not shape_lags.size or not curves:
         return empty
-    start, stop = int(decayed[0]), int(usable[-1]) + 1
-    if stop - start < 2 or start >= len(lag_time):
+    start = int(decayed[0])
+    shape_stop = int(shape_lags[-1]) + 1
+    negative_stop = int(negative_lags[-1]) + 1 if negative_lags.size else shape_stop
+    if shape_stop - start < 2 or start >= len(lag_time):
         return empty
 
-    def integral(curve: np.ndarray) -> float:
-        end = min(stop, len(curve), len(lag_time))
+    padded = np.full((len(curves), max(map(len, curves))), np.nan, dtype=np.float64)
+    for index, curve in enumerate(curves):
+        padded[index, : len(curve)] = curve
+    null_mean = np.nanmean(padded, axis=0)
+    null_deviation = np.sqrt(np.nanvar(padded, axis=0))
+
+    def negative_area(curve: np.ndarray) -> float:
+        end = min(negative_stop, len(curve), len(lag_time))
         if end - start < 2:
             return float("nan")
-        return float(np.trapezoid(curve[start:end], lag_time[start:end]))
+        return float(
+            np.trapezoid(np.minimum(curve[start:end], 0.0), lag_time[start:end])
+        )
 
-    statistic = integral(observed)
-    null = np.asarray([integral(curve) for curve in curves], dtype=np.float64)
-    null = null[np.isfinite(null)]
-    if not np.isfinite(statistic) or not null.size:
+    def shape_chi2(curve: np.ndarray) -> float:
+        end = min(shape_stop, len(curve), len(null_mean))
+        if end - start < 2:
+            return float("nan")
+        deviation = curve[start:end] - null_mean[start:end]
+        scale = np.maximum(null_deviation[start:end], 1e-9)
+        return float(np.sum((deviation / scale) ** 2))
+
+    observed_negative, observed_shape = negative_area(observed), shape_chi2(observed)
+    null = np.asarray(
+        [[negative_area(curve), shape_chi2(curve)] for curve in curves],
+        dtype=np.float64,
+    ).T
+    null = null[:, np.all(np.isfinite(null), axis=0)]
+    if not null.size or not np.isfinite(observed_negative + observed_shape):
         return empty
-    low, high = np.quantile(null, (0.025, 0.975))
     return (
         {
-            "transfer_rate_integral": statistic,
-            "transfer_rate_integral_p": float(np.mean(np.abs(null) >= abs(statistic))),
-            "transfer_rate_integral_null_low": float(low),
-            "transfer_rate_integral_null_high": float(high),
-            "transfer_rate_integral_window_start": float(lag_time[start]),
-            "transfer_rate_integral_window_stop": float(
-                lag_time[min(stop, len(lag_time)) - 1]
+            # more negative than the null is the evidence, so both tails are one-sided
+            "transfer_rate_negative_area": observed_negative,
+            "transfer_rate_negative_area_p": float(
+                np.mean(null[0] <= observed_negative)
             ),
-            "transfer_rate_integral_replicates": float(null.size),
+            "transfer_rate_shape_chi2": observed_shape,
+            "transfer_rate_shape_chi2_p": float(np.mean(null[1] >= observed_shape)),
+            "transfer_rate_window_start": float(lag_time[start]),
+            "transfer_rate_negative_window_stop": float(
+                lag_time[min(negative_stop, len(lag_time)) - 1]
+            ),
+            "transfer_rate_shape_window_stop": float(
+                lag_time[min(shape_stop, len(lag_time)) - 1]
+            ),
+            "transfer_rate_discrepancy_replicates": float(null.shape[1]),
         },
         null,
     )
@@ -805,7 +845,7 @@ def _paths(
     simulated_transfer_rate_lag_times = (
         _pooled_lag_times(simulated_transfer_rate_tau) * scaling.time
     )
-    transfer_rate_integral, transfer_rate_integral_null = _post_decay_integral(
+    transfer_rate_discrepancy, transfer_rate_discrepancy_null = _acf_discrepancy(
         observed_transfer_rate_acf,
         replicate_curves,
         simulated_transfer_rate_acf,
@@ -866,7 +906,7 @@ def _paths(
             replicate_curves
         ),
         "observed_transfer_rate_segment_count": transfer_rate_segment_counts,
-        "transfer_rate_integral_null": transfer_rate_integral_null,
+        "transfer_rate_discrepancy_null": transfer_rate_discrepancy_null,
         "observed_lag_time": observed_lag_times,
         "simulated_lag_time": simulated_lag_times,
         "observed_increment_covariance": _concatenate(observed_covariances)
@@ -895,7 +935,7 @@ def _paths(
         ),
     }
     metrics: dict[str, float | int] = {
-        **transfer_rate_integral,
+        **transfer_rate_discrepancy,
         "negative_area_count": negative,
         "generated_area_count": generated,
         "negative_area_fraction": float(negative / generated) if generated else 0.0,

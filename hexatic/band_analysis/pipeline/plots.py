@@ -449,18 +449,22 @@ def _transfer_rate_acf_plot(
     )
     axis.axhline(0.0, color="0.5", linewidth=0.8)
     metrics = _transfer_rate_metrics(outcome)
-    statistic = metrics.get("transfer_rate_integral", float("nan"))
-    probability = metrics.get("transfer_rate_integral_p", float("nan"))
-    window = (
-        metrics.get("transfer_rate_integral_window_start", float("nan")),
-        metrics.get("transfer_rate_integral_window_stop", float("nan")),
-    )
+    negative = metrics.get("transfer_rate_negative_area", float("nan"))
+    negative_p = metrics.get("transfer_rate_negative_area_p", float("nan"))
+    shape = metrics.get("transfer_rate_shape_chi2", float("nan"))
+    shape_p = metrics.get("transfer_rate_shape_chi2_p", float("nan"))
+    start = metrics.get("transfer_rate_window_start", float("nan"))
+    negative_stop = metrics.get("transfer_rate_negative_window_stop", float("nan"))
+    shape_stop = metrics.get("transfer_rate_shape_window_stop", float("nan"))
     title = f"Lag {outcome.lag}: transfer-rate ACF"
-    if np.isfinite(probability):
-        axis.axvspan(*window, color="0.85", alpha=0.4, zorder=0)
+    if np.isfinite(shape_p):
+        axis.axvspan(start, shape_stop, color="0.88", alpha=0.5, zorder=0)
+        axis.axvspan(start, negative_stop, color="0.78", alpha=0.5, zorder=0)
         title += (
-            f"\npost-decay integral over [{window[0]:.0f}, {window[1]:.0f}]: "
-            f"{statistic:.3g}, p={probability:.3f}"
+            f"\nnegative area [{start:.0f}, {negative_stop:.0f}]: "
+            f"{negative:.3g}, p={negative_p:.3f}"
+            f"   |   shape $\\chi^2$ [{start:.0f}, {shape_stop:.0f}]: "
+            f"{shape:.4g}, p={shape_p:.3f}"
         )
     axis.set(xlabel="physical lag time", ylabel=r"transfer-rate ACF", title=title)
     axis.legend(loc="upper right")
