@@ -690,6 +690,12 @@ def _paths(
         "simulated_transfer_rate_lag_time": simulated_transfer_rate_lag_times,
         "observed_area_msd": _pooled_msd(observed_area_series) * scaling.area**2,
         "simulated_area_msd": _pooled_msd(simulated_area_series) * scaling.area**2,
+        "observed_total_msd": _pooled_msd(observed_total_series) * scaling.area**2,
+        "simulated_total_msd": _pooled_msd(simulated_total_series) * scaling.area**2,
+        "observed_conservative_msd": _pooled_msd(observed_conservative_series)
+        * scaling.area**2,
+        "simulated_conservative_msd": _pooled_msd(simulated_conservative_series)
+        * scaling.area**2,
         "observed_lag_time": observed_lag_times,
         "simulated_lag_time": simulated_lag_times,
         "observed_increment_covariance": _concatenate(observed_covariances)

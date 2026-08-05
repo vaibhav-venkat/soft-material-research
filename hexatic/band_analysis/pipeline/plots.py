@@ -263,7 +263,7 @@ def _trajectory_plot(outcome: LagOutcome, arrays: dict[str, np.ndarray], path: P
 
 
 def _long_time_plot(outcome: LagOutcome, arrays: dict[str, np.ndarray], path: Path) -> None:
-    figure, axes = plt.subplots(2, 3, figsize=(14, 8))
+    figure, axes = plt.subplots(2, 4, figsize=(19, 8))
     axes[0, 0].hist(arrays["observed_total"], bins=40, density=True, alpha=0.6, label="observed")
     axes[0, 0].hist(arrays["simulated_total"], bins=40, density=True, alpha=0.5, label="simulated")
     axes[0, 0].set_xlabel(r"$A_T$")
@@ -277,29 +277,36 @@ def _long_time_plot(outcome: LagOutcome, arrays: dict[str, np.ndarray], path: Pa
             values = arrays[key]
             stop = min(800, len(values), len(lag_time))
             target.plot(lag_time[:stop], values[:stop], color=color, label=prefix)
-    observed_msd = arrays["observed_area_msd"]
-    simulated_msd = arrays["simulated_area_msd"]
     observed_lag_time = arrays["observed_lag_time"]
     simulated_lag_time = arrays["simulated_lag_time"]
-    msd_stop = min(
-        800,
-        len(observed_msd),
-        len(simulated_msd),
-        len(observed_lag_time),
-        len(simulated_lag_time),
-    )
-    axes[1, 2].plot(
-        observed_lag_time[:msd_stop],
-        observed_msd[:msd_stop],
-        color="black",
-        label="observed",
-    )
-    axes[1, 2].plot(
-        simulated_lag_time[:msd_stop],
-        simulated_msd[:msd_stop],
-        color="tab:blue",
-        label="simulated",
-    )
+    for axis, suffix, label in (
+        (axes[1, 2], "area", r"band area MSD"),
+        (axes[0, 3], "total", r"$A_T$ MSD"),
+        (axes[1, 3], "conservative", r"$A_i-\bar A$ MSD"),
+    ):
+        observed_msd = arrays[f"observed_{suffix}_msd"]
+        simulated_msd = arrays[f"simulated_{suffix}_msd"]
+        msd_stop = min(
+            800,
+            len(observed_msd),
+            len(simulated_msd),
+            len(observed_lag_time),
+            len(simulated_lag_time),
+        )
+        axis.plot(
+            observed_lag_time[:msd_stop],
+            observed_msd[:msd_stop],
+            color="black",
+            label="observed",
+        )
+        axis.plot(
+            simulated_lag_time[:msd_stop],
+            simulated_msd[:msd_stop],
+            color="tab:blue",
+            label="simulated",
+        )
+        axis.set(xlabel="physical lag time", ylabel=label, xscale="log", yscale="log")
+        axis.legend()
     axes[0, 1].set(xlabel="physical lag time", ylabel=r"$A_T$ ACF")
     axes[0, 1].legend()
     for axis, suffix, label in (
@@ -314,9 +321,7 @@ def _long_time_plot(outcome: LagOutcome, arrays: dict[str, np.ndarray], path: Pa
             axis.legend()
         axis.set_xlabel(label)
     axes[0, 2].set(xlabel="physical lag time", ylabel="conservative-mode ACF")
-    axes[1, 2].set(xlabel="physical lag time", ylabel=r"area MSD")
     axes[0, 2].legend()
-    axes[1, 2].legend()
     figure.suptitle(f"Lag {outcome.lag}: long-time behavior")
     _save(path, figure)
 
