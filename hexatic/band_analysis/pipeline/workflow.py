@@ -383,18 +383,6 @@ def _load_cache(
     if arrays_metadata.get("fingerprint") != expected_fingerprint:
         raise ValueError(f"incompatible lag arrays cache {arrays_path}")
     arrays = load_file(arrays_path)
-    if (
-        fit == "event"
-        and metadata.get("accepted")
-        and "training_path_segment_break" not in arrays
-    ):
-        return None
-    if (
-        fit == "clean"
-        and metadata.get("accepted")
-        and "training_observed_transfer_rate_acf" not in arrays
-    ):
-        return None
     idata = az.from_netcdf(posterior_path, engine="h5netcdf")
     if idata.posterior.attrs.get("band_analysis_fingerprint") != expected_fingerprint:
         raise ValueError(f"incompatible lag posterior cache {posterior_path}")
@@ -434,6 +422,54 @@ def run_analysis(
         if not overwrite:
             cached = _load_cache(output_dir, fit, lag, lag_fingerprint)
             if cached is not None:
+                required = (
+                    "training_path_segment_break"
+                    if fit == "event"
+                    else "training_observed_transfer_rate_acf"
+                )
+                if cached.accepted and required not in cached.arrays:
+                    logger.info(
+                        "%s lag %d: refreshing cached validation arrays",
+                        fit,
+                        lag,
+                    )
+                    prepared = _prepare(training, lag, fit)
+                    validation = _validate(
+                        fit,
+                        training,
+                        lag,
+                        prepared,
+                        cached.arrays["normalized_posterior"],
+                        config,
+                        config.optimizer_seed + lag,
+                    )
+                    arrays = {
+                        **cached.arrays,
+                        **_prefixed(validation, "training_"),
+                    }
+                    metadata = {
+                        **cached.metadata,
+                        "validation": {
+                            **cached.metadata["validation"],
+                            "training": validation.metrics,
+                        },
+                    }
+                    arrays_path, _, metrics_path = _paths(output_dir, fit, lag)
+                    write_arrays(
+                        arrays_path,
+                        arrays,
+                        {"fingerprint": lag_fingerprint, "fit": fit},
+                    )
+                    write_json(metrics_path, metadata)
+                    cached = LagOutcome(
+                        fit,
+                        lag,
+                        cached.accepted,
+                        True,
+                        metadata,
+                        arrays,
+                        cached.idata,
+                    )
                 outcomes.append(cached)
                 continue
         metadata, arrays, idata = _compute_lag(
