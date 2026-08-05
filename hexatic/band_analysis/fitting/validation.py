@@ -323,6 +323,32 @@ def _pooled_msd(series: list[np.ndarray]) -> np.ndarray:
     )
 
 
+def _grouped_msd_quantiles(
+    series: list[np.ndarray], group_sizes: list[int]
+) -> np.ndarray:
+    """MSD per path, reduced to a 2.5/97.5 envelope across paths at every lag."""
+    curves = []
+    start = 0
+    for size in group_sizes:
+        curve = _pooled_msd(series[start : start + size])
+        if len(curve):
+            curves.append(curve)
+        start += size
+    if not curves:
+        return np.empty((2, 0), dtype=np.float64)
+    padded = np.full((len(curves), max(map(len, curves))), np.nan, dtype=np.float64)
+    for index, curve in enumerate(curves):
+        padded[index, : len(curve)] = curve
+    return np.nanquantile(padded, (0.025, 0.975), axis=0)
+
+
+def _per_series_autocorrelation(series: list[np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
+    """Autocorrelate each series alone, flattened with its offsets."""
+    curves = [_pooled_autocorrelation([values]) for values in series]
+    offsets = np.cumsum([0, *(len(curve) for curve in curves)], dtype=np.int64)
+    return _concatenate(curves), offsets
+
+
 def _pooled_lag_times(series: list[np.ndarray]) -> np.ndarray:
     return _pooled_increment_statistic(
         series, lambda increments: float(np.median(increments))
@@ -513,10 +539,13 @@ def _paths(
             parameters = segment_parameters[indices]
             step = sampled_tau[frame + 1] - sampled_tau[frame]
             totals = current[indices].sum(axis=1)
+            total_decay = np.exp(-parameters[:, 2] * step)
             following_totals = (
-                totals
-                - parameters[:, 2] * (totals - parameters[:, 5]) * step
-                + np.sqrt(2.0 * parameters[:, 4] * step)
+                parameters[:, 5]
+                + (totals - parameters[:, 5]) * total_decay
+                + np.sqrt(
+                    parameters[:, 4] / parameters[:, 2] * (1.0 - total_decay**2)
+                )
                 * generator.standard_normal(len(indices))
             )
             weights = current[indices] / totals[:, None]
@@ -642,6 +671,9 @@ def _paths(
     simulated_path_area = simulated_area * scaling.area
     observed_total_acf = _pooled_autocorrelation(observed_total_series)
     simulated_total_acf = _pooled_autocorrelation(simulated_total_series)
+    segment_total_acf, segment_total_acf_offsets = _per_series_autocorrelation(
+        observed_total_series
+    )
     observed_conservative_acf = _pooled_autocorrelation(
         observed_conservative_series
     )
@@ -696,6 +728,20 @@ def _paths(
         * scaling.area**2,
         "simulated_conservative_msd": _pooled_msd(simulated_conservative_series)
         * scaling.area**2,
+        "simulated_area_msd_envelope": _grouped_msd_quantiles(
+            simulated_area_series, path_band_counts
+        )
+        * scaling.area**2,
+        "simulated_total_msd_envelope": _grouped_msd_quantiles(
+            simulated_total_series, [1] * len(simulated_total_series)
+        )
+        * scaling.area**2,
+        "simulated_conservative_msd_envelope": _grouped_msd_quantiles(
+            simulated_conservative_series, path_band_counts
+        )
+        * scaling.area**2,
+        "observed_segment_total_acf": segment_total_acf,
+        "observed_segment_total_acf_offset": segment_total_acf_offsets,
         "observed_lag_time": observed_lag_times,
         "simulated_lag_time": simulated_lag_times,
         "observed_increment_covariance": _concatenate(observed_covariances)

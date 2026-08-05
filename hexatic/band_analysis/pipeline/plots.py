@@ -305,6 +305,18 @@ def _long_time_plot(outcome: LagOutcome, arrays: dict[str, np.ndarray], path: Pa
             color="tab:blue",
             label="simulated",
         )
+        envelope = arrays[f"simulated_{suffix}_msd_envelope"]
+        if envelope.size:
+            stop = min(msd_stop, envelope.shape[1])
+            axis.fill_between(
+                simulated_lag_time[:stop],
+                envelope[0, :stop],
+                envelope[1, :stop],
+                color="tab:blue",
+                alpha=0.2,
+                linewidth=0,
+                label="simulated 95%",
+            )
         axis.set(xlabel="physical lag time", ylabel=label, xscale="log", yscale="log")
         axis.legend()
     axes[0, 1].set(xlabel="physical lag time", ylabel=r"$A_T$ ACF")
@@ -323,6 +335,35 @@ def _long_time_plot(outcome: LagOutcome, arrays: dict[str, np.ndarray], path: Pa
     axes[0, 2].set(xlabel="physical lag time", ylabel="conservative-mode ACF")
     axes[0, 2].legend()
     figure.suptitle(f"Lag {outcome.lag}: long-time behavior")
+    _save(path, figure)
+
+
+def _segment_total_acf_plot(
+    outcome: LagOutcome, arrays: dict[str, np.ndarray], path: Path
+) -> None:
+    """Per-segment A_T autocorrelation, to test whether a pooled shoulder is real."""
+    figure, axis = plt.subplots(figsize=(7, 5))
+    curves = arrays["observed_segment_total_acf"]
+    offsets = arrays["observed_segment_total_acf_offset"]
+    lag_time = arrays["observed_lag_time"]
+    for index in range(len(offsets) - 1):
+        values = curves[offsets[index] : offsets[index + 1]]
+        stop = min(800, len(values), len(lag_time))
+        axis.plot(lag_time[:stop], values[:stop], color="black", alpha=0.35, linewidth=1)
+    for key, color, label in (
+        ("observed_total_acf", "black", "observed (pooled)"),
+        ("simulated_total_acf", "tab:blue", "simulated (pooled)"),
+    ):
+        values = arrays[key]
+        stop = min(800, len(values), len(lag_time))
+        axis.plot(lag_time[:stop], values[:stop], color=color, linewidth=2.5, label=label)
+    axis.axhline(0.0, color="grey", linewidth=0.8, linestyle=":")
+    axis.set(xlabel="physical lag time", ylabel=r"$A_T$ ACF")
+    axis.set_title(
+        f"Lag {outcome.lag}: per-segment $A_T$ ACF "
+        f"({len(offsets) - 1} segments, thin lines)"
+    )
+    axis.legend()
     _save(path, figure)
 
 
@@ -410,6 +451,7 @@ def plot_lag(outcome: LagOutcome, output_dir: Path) -> list[str]:
         "predictive.png": _predictive_plot,
         "trajectory.png": _trajectory_plot,
         "long_time.png": _long_time_plot,
+        "segment_total_acf.png": _segment_total_acf_plot,
         "transfer_rate_acf.png": _transfer_rate_acf_plot,
         "covariance.png": _covariance_plot,
     }

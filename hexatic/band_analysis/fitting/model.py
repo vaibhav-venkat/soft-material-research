@@ -667,14 +667,16 @@ def transition(
     )
     total = jnp.sum(area)
     allocation = area_fraction_allocation(area)
-    drift = -kappa_total * (total - area_star) * allocation
-    mean = area + drift * dt
+    decay = jnp.exp(-kappa_total * dt)
+    total_mean = area_star + (total - area_star) * decay
+    mean = area + (total_mean - total) * allocation
     conservative_variance = integrated_oscillatory_variance(
         dt, gamma, omega, diffusion_u
     ) + sigma_b**2 * dt**2
+    total_variance = oscillatory_process_variance(dt, kappa_total, diffusion_total)
     projection = jnp.asarray(conservative_projection(area.shape[-1]))
-    covariance = conservative_variance * projection + 2.0 * dt * (
-        diffusion_total * jnp.outer(allocation, allocation)
+    covariance = conservative_variance * projection + total_variance * jnp.outer(
+        allocation, allocation
     )
     return mean, covariance + JITTER * jnp.eye(area.shape[-1], dtype=jnp.float64)
 
@@ -707,10 +709,12 @@ def parameter_negative_log_likelihood(
     for block in data.blocks:
         current_total = jnp.sum(block.current, axis=1)
         following_total = jnp.sum(block.following, axis=1)
-        mean = current_total - kappa_total * (
-            current_total - area_star
-        ) * block.dt
-        variance = 2.0 * diffusion_total * block.dt + JITTER
+        decay = jnp.exp(-kappa_total * block.dt)
+        mean = area_star + (current_total - area_star) * decay
+        variance = (
+            oscillatory_process_variance(block.dt, kappa_total, diffusion_total)
+            + JITTER
+        )
         log_density = -0.5 * (
             jnp.log(2.0 * jnp.pi * variance)
             + (following_total - mean) ** 2 / variance
