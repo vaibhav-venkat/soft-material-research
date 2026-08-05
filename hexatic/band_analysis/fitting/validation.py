@@ -785,13 +785,6 @@ def _paths(
     )
     replicate_curves = _replicate_curves(replicate_transfer_series)
     transfer_rate_segment_counts = _contributing_counts(observed_transfer_rate_lengths)
-    transfer_rate_integral, transfer_rate_integral_null = _post_decay_integral(
-        observed_transfer_rate_acf,
-        replicate_curves,
-        simulated_transfer_rate_acf,
-        transfer_rate_segment_counts,
-        observed_transfer_rate_lag_times,
-    )
     observed_conservative_acf = _pooled_autocorrelation(
         observed_conservative_series
     )
@@ -811,6 +804,13 @@ def _paths(
     )
     simulated_transfer_rate_lag_times = (
         _pooled_lag_times(simulated_transfer_rate_tau) * scaling.time
+    )
+    transfer_rate_integral, transfer_rate_integral_null = _post_decay_integral(
+        observed_transfer_rate_acf,
+        replicate_curves,
+        simulated_transfer_rate_acf,
+        transfer_rate_segment_counts,
+        observed_transfer_rate_lag_times,
     )
     arrays = {
         "path_area": simulated_path_area,
