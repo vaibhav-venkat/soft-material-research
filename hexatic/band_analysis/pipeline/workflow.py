@@ -382,11 +382,18 @@ def _load_cache(
         arrays_metadata = dict(handle.metadata())
     if arrays_metadata.get("fingerprint") != expected_fingerprint:
         raise ValueError(f"incompatible lag arrays cache {arrays_path}")
+    arrays = load_file(arrays_path)
+    if (
+        fit == "event"
+        and metadata.get("accepted")
+        and "training_path_segment_break" not in arrays
+    ):
+        return None
     idata = az.from_netcdf(posterior_path, engine="h5netcdf")
     if idata.posterior.attrs.get("band_analysis_fingerprint") != expected_fingerprint:
         raise ValueError(f"incompatible lag posterior cache {posterior_path}")
     return LagOutcome(
-        fit, lag, bool(metadata["accepted"]), True, metadata, load_file(arrays_path), idata
+        fit, lag, bool(metadata["accepted"]), True, metadata, arrays, idata
     )
 
 

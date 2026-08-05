@@ -191,11 +191,12 @@ def _predictive(outcome: LagOutcome, arrays: dict[str, np.ndarray], path: Path) 
 
 def _path_records(
     arrays: dict[str, np.ndarray], prefix: str, n_max: int
-) -> list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+) -> list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
     areas = arrays[f"{prefix}path_area"]
     masks = arrays[f"{prefix}path_mask"].astype(bool)
     slots = arrays[f"{prefix}path_slot_id"].astype(np.int64)
     tau = arrays[f"{prefix}path_tau"]
+    segment_break = arrays[f"{prefix}path_segment_break"].astype(bool)
     offsets = arrays[f"{prefix}path_offset"]
     records = []
     for start, stop in zip(offsets[:-1], offsets[1:], strict=True):
@@ -207,6 +208,7 @@ def _path_records(
                 masks[start:stop].reshape(-1, n_max),
                 slots[start:stop].reshape(-1, n_max),
                 tau[time_start:time_stop],
+                segment_break[time_start:time_stop],
             )
         )
     return records
@@ -233,12 +235,12 @@ def _pooled_acf(series: list[np.ndarray]) -> np.ndarray:
 
 
 def _track_series(
-    records: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]],
+    records: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]],
     *, conservative: bool,
 ) -> tuple[list[np.ndarray], list[np.ndarray]]:
     values = []
     times = []
-    for area, mask, slots, tau in records:
+    for area, mask, slots, tau, segment_break in records:
         row_mean = np.divide(
             (area * mask).sum(axis=1), mask.sum(axis=1),
             out=np.zeros(len(area)), where=mask.sum(axis=1) > 0,
@@ -246,8 +248,11 @@ def _track_series(
         source = area - row_mean[:, None] if conservative else area
         for slot in range(area.shape[1]):
             valid = mask[:, slot] & (slots[:, slot] >= 0)
-            starts = np.flatnonzero(valid & np.r_[True, slots[1:, slot] != slots[:-1, slot]])
-            stops = np.flatnonzero(valid & np.r_[slots[:-1, slot] != slots[1:, slot], True]) + 1
+            boundary = segment_break[1:] | (slots[1:, slot] != slots[:-1, slot])
+            starts = np.flatnonzero(valid & np.r_[True, ~valid[:-1] | boundary])
+            stops = (
+                np.flatnonzero(valid & np.r_[~valid[1:] | boundary, True]) + 1
+            )
             for start, stop in zip(starts, stops, strict=True):
                 values.append(source[start:stop, slot])
                 times.append(tau[start:stop])
@@ -270,6 +275,15 @@ def _pooled_msd(series: list[np.ndarray], maximum: int = 100) -> np.ndarray:
     )
 
 
+def _shared_msd_limit(
+    observed: list[np.ndarray], simulated: list[np.ndarray], maximum: int = 100
+) -> int:
+    """Use one segment-length censor for both observed and simulated MSDs."""
+    if not observed or not simulated:
+        return 0
+    return min(maximum, max(map(len, observed)), max(map(len, simulated)))
+
+
 def _lag_times(times: list[np.ndarray], maximum: int) -> np.ndarray:
     return np.asarray(
         [
@@ -287,32 +301,48 @@ def _long_time(outcome: LagOutcome, arrays: dict[str, np.ndarray], path: Path) -
     n_max = int(outcome.metadata["data"]["n_max"])
     observed = _path_records(arrays, "observed_", n_max)
     simulated = _path_records(arrays, "", n_max)
+    observed_area_series, observed_area_times = _track_series(
+        observed, conservative=False
+    )
+    simulated_area_series, simulated_area_times = _track_series(
+        simulated, conservative=False
+    )
+    msd_limit = _shared_msd_limit(observed_area_series, simulated_area_series)
     figure, axes = plt.subplots(2, 3, figsize=(14, 8))
-    for records, label, color in (
-        (observed, "observed", "black"),
-        (simulated, "simulated", "tab:blue"),
+    for records, area_series, area_times, label, color in (
+        (observed, observed_area_series, observed_area_times, "observed", "black"),
+        (
+            simulated,
+            simulated_area_series,
+            simulated_area_times,
+            "simulated",
+            "tab:blue",
+        ),
     ):
-        totals = [np.sum(area * mask, axis=1) for area, mask, _, _ in records]
+        totals = [np.sum(area * mask, axis=1) for area, mask, _, _, _ in records]
         total_values = np.concatenate(totals)
         axes[0, 0].hist(total_values, bins=40, density=True, alpha=0.5, label=label)
         total_acf = _pooled_acf(totals)
-        total_times = [tau for _, _, _, tau in records]
+        total_times = [tau for _, _, _, tau, _ in records]
         lag_time = _lag_times(total_times, len(total_acf))
         axes[0, 1].plot(lag_time, total_acf, color=color, label=label)
-        area_series, area_times = _track_series(records, conservative=False)
         conservative, _ = _track_series(records, conservative=True)
         conservative_acf = _pooled_acf(conservative)
         conservative_time = _lag_times(area_times, len(conservative_acf))
         axes[0, 2].plot(
             conservative_time, conservative_acf, color=color, label=label
         )
-        active_area = np.concatenate([area[mask] for area, mask, _, _ in records])
-        active_deviation = np.concatenate(conservative) if conservative else np.empty(0)
+        active_area = np.concatenate(
+            [area[mask] for area, mask, _, _, _ in records]
+        )
+        active_deviation = (
+            np.concatenate(conservative) if conservative else np.empty(0)
+        )
         axes[1, 0].hist(active_area, bins=40, density=True, alpha=0.5, label=label)
         axes[1, 1].hist(
             active_deviation, bins=40, density=True, alpha=0.5, label=label
         )
-        msd = _pooled_msd(area_series)
+        msd = _pooled_msd(area_series, maximum=msd_limit)
         axes[1, 2].plot(
             _lag_times(area_times, len(msd)), msd, color=color, label=label
         )
@@ -329,12 +359,12 @@ def _long_time(outcome: LagOutcome, arrays: dict[str, np.ndarray], path: Path) -
 
 
 def _increment_statistics(
-    records: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]
+    records: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]]
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     increments = []
     conservative = []
     totals = []
-    for area, mask, slots, _ in records:
+    for area, mask, slots, _, _ in records:
         if len(area) < 2:
             continue
         valid = mask[1:] & mask[:-1] & (slots[1:] == slots[:-1])

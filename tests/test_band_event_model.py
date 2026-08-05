@@ -29,7 +29,10 @@ from hexatic.band_analysis.detection.tracking import (
     EventCode,
     EventEdges,
 )
-from hexatic.band_analysis.fitting.event_validation import simulate_event_chain
+from hexatic.band_analysis.fitting.event_validation import (
+    _segment_breaks,
+    simulate_event_chain,
+)
 from hexatic.band_analysis.fitting.inference import empirical_parameters
 from hexatic.band_analysis.fitting.masked_model import (
     MaskedTrainingTransitions,
@@ -41,6 +44,11 @@ from hexatic.band_analysis.fitting.model import (
     JITTER,
     parameter_negative_log_likelihood as clean_nll,
     prepare_training_transitions as prepare_clean,
+)
+from hexatic.band_analysis.pipeline.event_plots import (
+    _pooled_msd,
+    _shared_msd_limit,
+    _track_series,
 )
 
 from tests.synthetic_band_events import ignored_event_segments, scripted_schedule
@@ -140,6 +148,43 @@ def _density(
 
 
 class TestEventMapsAndLikelihood(unittest.TestCase):
+    def test_long_time_msd_uses_shared_uninterrupted_segments(self) -> None:
+        area = np.column_stack((np.arange(6.0), 10.0 + np.arange(6.0)))
+        mask = np.ones_like(area, dtype=bool)
+        slots = np.broadcast_to(np.asarray([10, 11]), area.shape).copy()
+        tau = np.arange(6.0)
+        segment_break = np.asarray([False, False, False, True, False, False])
+        record = (area, mask, slots, tau, segment_break)
+
+        observed, observed_times = _track_series([record], conservative=False)
+        simulated, simulated_times = _track_series(
+            [record, record], conservative=False
+        )
+
+        self.assertEqual([len(values) for values in observed], [3, 3, 3, 3])
+        self.assertEqual([len(values) for values in observed_times], [3, 3, 3, 3])
+        limit = _shared_msd_limit(observed, simulated)
+        self.assertEqual(limit, 3)
+        self.assertEqual(len(_pooled_msd(observed, limit)), limit)
+        self.assertEqual(len(_pooled_msd(simulated, limit)), limit)
+        self.assertEqual([len(values) for values in simulated_times], [3] * 8)
+
+        gap_chain = EventChain(
+            seed_id="gap",
+            slot_ids=np.zeros((4, 1), dtype=np.int64),
+            frame_indices=np.asarray([0, 1, 4, 5]),
+            tau=np.asarray([0.0, 1.0, 4.0, 5.0]),
+            areas=np.arange(4.0)[:, None],
+            mask=np.ones((4, 1), dtype=bool),
+            events=tuple(
+                no_event_step(np.ones(1, dtype=bool), np.asarray([value]))
+                for value in range(1, 4)
+            ),
+        )
+        np.testing.assert_array_equal(
+            _segment_breaks(gap_chain), [False, False, True, False]
+        )
+
     def test_continuous_conservative_information_is_scored_once(self) -> None:
         tau = np.arange(30, dtype=np.float64) * 0.2
         areas = np.column_stack(

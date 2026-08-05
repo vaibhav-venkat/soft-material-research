@@ -45,6 +45,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="held-out big-lx analysis directory; repeat for multiple seeds",
     )
     parser.add_argument("--output-dir", type=Path, required=True)
+    fit = parser.add_mutually_exclusive_group()
+    fit.add_argument(
+        "--event",
+        action="store_true",
+        help="run only the masked event-chain fit",
+    )
+    fit.add_argument(
+        "--clean",
+        action="store_true",
+        help="run only the clean fixed-identity-segment fit",
+    )
     parser.add_argument(
         "--lag",
         dest="lags",
@@ -186,6 +197,7 @@ def _configs(args: argparse.Namespace) -> tuple[ExtractionConfig, AnalysisConfig
 
 
 def run(args: argparse.Namespace) -> Path:
+    fits = ("event",) if args.event else ("clean",) if args.clean else ("clean", "event")
     training_paths = [path.resolve() for path in args.input_dir]
     holdout_paths = [path.resolve() for path in args.holdout_dir]
     overlap = set(training_paths) & set(holdout_paths)
@@ -212,6 +224,7 @@ def run(args: argparse.Namespace) -> Path:
         "holdout_inputs": [str(path) for path in holdout_paths],
         "output_dir": str(output_dir),
         "case_compatibility_fingerprint": compatibility,
+        "fits": list(fits),
         "extraction": asdict(extraction_config),
         "analysis": asdict(analysis_config),
     }
@@ -229,39 +242,40 @@ def run(args: argparse.Namespace) -> Path:
         extraction_config,
         args.overwrite,
     )
-    clean_training = [
-        segment
-        for extracted in training_extractions.values()
-        for segment in extracted.segments
-    ]
-    clean_holdouts = {
-        seed_id: extracted.segments
-        for seed_id, extracted in holdout_extractions.items()
-        if extracted.segments
-    }
-    event_training, event_holdouts = _global_event_data(
-        training_extractions, holdout_extractions
-    )
-    clean_outcomes = run_analysis(
-        "clean",
-        clean_training,
-        clean_holdouts,
-        output_dir,
-        config=analysis_config,
-        overwrite=args.overwrite,
-    )
-    event_outcomes = run_analysis(
-        "event",
-        event_training,
-        event_holdouts,
-        output_dir,
-        config=analysis_config,
-        overwrite=args.overwrite,
-    )
-    outcomes: FitOutcomes = {"clean": clean_outcomes, "event": event_outcomes}
+    outcomes: FitOutcomes = {}
+    if "clean" in fits:
+        clean_training = [
+            segment
+            for extracted in training_extractions.values()
+            for segment in extracted.segments
+        ]
+        clean_holdouts = {
+            seed_id: extracted.segments
+            for seed_id, extracted in holdout_extractions.items()
+            if extracted.segments
+        }
+        outcomes["clean"] = run_analysis(
+            "clean",
+            clean_training,
+            clean_holdouts,
+            output_dir,
+            config=analysis_config,
+            overwrite=args.overwrite,
+        )
+    if "event" in fits:
+        event_training, event_holdouts = _global_event_data(
+            training_extractions, holdout_extractions
+        )
+        outcomes["event"] = run_analysis(
+            "event",
+            event_training,
+            event_holdouts,
+            output_dir,
+            config=analysis_config,
+            overwrite=args.overwrite,
+        )
     logger.info("writing configuration, plots, metrics, and report")
     # Imported here so matplotlib is only loaded when a run reaches rendering.
-    from .event_plots import plot_total_area_by_band_count
     from .plots import plot_lag, plot_summary
 
     write_configuration(output_dir, configuration)
@@ -270,7 +284,10 @@ def run(args: argparse.Namespace) -> Path:
             logger.info("rendering %s lag %d plots", outcome.fit, outcome.lag)
             plot_lag(outcome, output_dir)
         plot_summary(fit_outcomes, output_dir)
-    plot_total_area_by_band_count(event_training, event_holdouts, output_dir)
+    if "event" in fits:
+        from .event_plots import plot_total_area_by_band_count
+
+        plot_total_area_by_band_count(event_training, event_holdouts, output_dir)
     write_metrics(output_dir, outcomes, analysis_config)
     return write_report(output_dir, outcomes, analysis_config)
 

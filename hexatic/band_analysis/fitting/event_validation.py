@@ -473,6 +473,16 @@ def _one_step(
     return arrays, metrics
 
 
+def _segment_breaks(chain: EventChain) -> np.ndarray:
+    """Mark topology changes and omitted-frame gaps as stable-track boundaries."""
+    frame_delta = np.diff(chain.frame_indices)
+    ordinary_delta = np.min(frame_delta)
+    return np.r_[
+        False,
+        event_transitions(chain) | (frame_delta != ordinary_delta),
+    ]
+
+
 def _paths(
     chains: list[EventChain],
     posterior: np.ndarray,
@@ -485,19 +495,23 @@ def _paths(
     path_masks = []
     path_tau = []
     path_slot_ids = []
+    path_segment_breaks = []
     offsets = [0]
     observed_areas = []
     observed_masks = []
     observed_tau = []
     observed_slot_ids = []
+    observed_segment_breaks = []
     observed_offsets = [0]
     negative = 0
     generated = 0
     for chain_index, chain in enumerate(chains):
+        segment_break = _segment_breaks(chain)
         observed_areas.append(chain.areas.ravel())
         observed_masks.append(chain.mask.ravel())
         observed_tau.append(chain.tau)
         observed_slot_ids.append(chain.slot_ids.ravel())
+        observed_segment_breaks.append(segment_break)
         observed_offsets.append(observed_offsets[-1] + chain.areas.size)
         indices = generator.choice(
             len(posterior), paths_per_chain, replace=len(posterior) < paths_per_chain
@@ -520,6 +534,7 @@ def _paths(
         path_slot_ids.append(
             np.tile(chain.slot_ids[None], (paths_per_chain, 1, 1)).ravel()
         )
+        path_segment_breaks.append(np.tile(segment_break, paths_per_chain))
         row_size = chain.n_steps * chain.n_max
         offsets.extend(offsets[-1] + row_size * np.arange(1, paths_per_chain + 1))
         negative += int(np.count_nonzero((areas < 0.0) & mask))
@@ -529,11 +544,13 @@ def _paths(
         "path_mask": np.concatenate(path_masks),
         "path_tau": np.concatenate(path_tau),
         "path_slot_id": np.concatenate(path_slot_ids),
+        "path_segment_break": np.concatenate(path_segment_breaks),
         "path_offset": np.asarray(offsets, dtype=np.int64),
         "observed_path_area": np.concatenate(observed_areas),
         "observed_path_mask": np.concatenate(observed_masks),
         "observed_path_tau": np.concatenate(observed_tau),
         "observed_path_slot_id": np.concatenate(observed_slot_ids),
+        "observed_path_segment_break": np.concatenate(observed_segment_breaks),
         "observed_path_offset": np.asarray(observed_offsets, dtype=np.int64),
     }
     metrics: dict[str, float | int] = {

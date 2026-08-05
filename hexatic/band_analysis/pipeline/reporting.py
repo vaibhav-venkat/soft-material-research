@@ -177,8 +177,8 @@ def _stability(fit: FitPath, outcomes: list[LagOutcome], config: AnalysisConfig)
 
 
 def _comparison_table(outcomes: FitOutcomes, lag: int) -> list[str]:
-    clean = next((item for item in outcomes["clean"] if item.lag == lag), None)
-    event = next((item for item in outcomes["event"] if item.lag == lag), None)
+    clean = next((item for item in outcomes.get("clean", ()) if item.lag == lag), None)
+    event = next((item for item in outcomes.get("event", ()) if item.lag == lag), None)
     lines = [
         f"### Lag {lag}",
         "",
@@ -216,27 +216,23 @@ def _lag_overview(outcomes: FitOutcomes) -> list[str]:
 def write_report(
     output_dir: Path, outcomes: FitOutcomes, config: AnalysisConfig
 ) -> Path:
+    fits = tuple(outcomes)
     lines = [
         "# Coupled Band-Area Inference",
         "",
-        "The clean fixed-identity segments and masked event chains are fitted "
-        "independently to the same tracked detections. The event fit conditions on "
-        "observed births, deaths, splits, and merges and additionally infers "
-        "`sigma_E`; the clean fit remains the reference path.",
+        "Requested fits: " + ", ".join(fits) + ".",
         "",
-        _stability("clean", outcomes["clean"], config),
-        "",
-        _stability("event", outcomes["event"], config),
+        *(_stability(fit, outcomes[fit], config) for fit in fits),
         "",
         "## Fit overview",
         "",
         *_lag_overview(outcomes),
         "",
-        "## Side-by-side posterior estimates",
-        "",
     ]
-    for lag in config.lags:
-        lines.extend([*_comparison_table(outcomes, lag), ""])
+    if len(fits) == 2:
+        lines.extend(["## Side-by-side posterior estimates", ""])
+        for lag in config.lags:
+            lines.extend([*_comparison_table(outcomes, lag), ""])
 
     for fit, fit_outcomes in outcomes.items():
         lines.extend([f"## {fit.title()} fit details", ""])
@@ -287,16 +283,17 @@ def write_report(
                 ]
             )
 
-    lines.extend(
-        [
-            "## Diagnostics",
-            "",
-            "The event diagnostic [`A_T` against `n_k`](event/plots/total_area_by_band_count.png) "
-            "checks the global, band-count-independent `A_T_star` assumption post hoc. "
-            "Cross-lag and holdout plots live under each fit's `plots/` directory.",
-            "",
-        ]
-    )
+    lines.extend(["## Diagnostics", ""])
+    if "event" in outcomes:
+        lines.extend(
+            [
+                "The event diagnostic [`A_T` against `n_k`]"
+                "(event/plots/total_area_by_band_count.png) checks the global, "
+                "band-count-independent `A_T_star` assumption post hoc.",
+                "",
+            ]
+        )
+    lines.extend(["Cross-lag and holdout plots live under each fit's `plots/` directory.", ""])
     path = output_dir / "report.md"
     write_text(path, "\n".join(lines))
     return path
