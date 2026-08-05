@@ -20,6 +20,7 @@ from .masked_model import (
     parameter_negative_log_likelihood as masked_parameter_negative_log_likelihood,
 )
 from .model import (
+    EVENT_PARAMETER_NAMES,
     PARAMETER_NAMES,
     Scaling,
     TrainingTransitions,
@@ -35,9 +36,9 @@ TrainingData = TrainingTransitions | MaskedTrainingTransitions
 
 def _parameter_names(data: TrainingData) -> tuple[str, ...]:
     return (
-        PARAMETER_NAMES
+        EVENT_PARAMETER_NAMES
         if isinstance(data, MaskedTrainingTransitions)
-        else PARAMETER_NAMES[:-1]
+        else PARAMETER_NAMES
     )
 
 
@@ -81,7 +82,7 @@ class BayesianResult:
 def coupled_area_model(
     data: TrainingData, empirical: np.ndarray
 ) -> None:
-    """Empirical-centered priors and the slope-detrended AR(1) likelihood."""
+    """Empirical-centered priors and the selected Kalman likelihood."""
     names = _parameter_names(data)
     samples = []
     for index, name in enumerate(names):
@@ -92,7 +93,8 @@ def coupled_area_model(
                 numpyro.sample(
                     name,
                     dist.LogNormal(
-                        jnp.log(empirical[index]), 0.5 if index == 4 else 1.0
+                        jnp.log(empirical[index]),
+                        0.5 if name == "A_T_star" else 1.0,
                     ),
                 )
             )
@@ -183,13 +185,23 @@ def _physical_idata(
     sampler: MCMC, scaling: Scaling, names: tuple[str, ...]
 ) -> az.InferenceData:
     idata = az.from_numpyro(sampler)
+    factors = (
+        scaling.event_parameter_factors
+        if names == EVENT_PARAMETER_NAMES
+        else scaling.parameter_factors
+    )
     for name, factor in zip(
-        names, scaling.parameter_factors[: len(names)], strict=True
+        names, factors[: len(names)], strict=True
     ):
         idata.posterior[name] = idata.posterior[name] * factor
     idata.posterior.attrs["parameter_units"] = (
-        "tau_p: physical time; kappa_T: inverse physical time; "
-        "diffusions: area^2/time; A_T_star and sigma_E: area"
+        "event: tau_p is physical time; kappa_T is inverse physical time; "
+        "diffusions are area^2/time; A_T_star and sigma_E are area"
+        if names == EVENT_PARAMETER_NAMES
+        else "clean: gamma and omega are inverse physical time, "
+        "kappa_T is inverse physical time, D_u is area^2/time^3, "
+        "D_T is area^2/time, A_T_star is area, "
+        "and sigma_b is area/time"
     )
     return idata
 

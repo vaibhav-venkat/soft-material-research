@@ -15,7 +15,7 @@ from .model import (
     Scaling,
     build_state_space_sequences,
     build_transition_blocks,
-    conservative_projection,
+    helmert_basis,
     persistent_innovations,
     transition,
     transition_log_density,
@@ -25,10 +25,10 @@ from ..detection.segments import StableSegment
 
 # Defined once so their trace caches are shared across blocks, validation sets,
 # and lags rather than rebuilt on every loop iteration.
-_transition_rows = jax.vmap(transition, in_axes=(0, 0, None, None))
-_transition_draws = jax.vmap(_transition_rows, in_axes=(None, None, 0, None))
-_density_rows = jax.vmap(transition_log_density, in_axes=(0, 0, 0, None, None))
-_density_draws = jax.vmap(_density_rows, in_axes=(None, None, None, 0, None))
+_transition_rows = jax.vmap(transition, in_axes=(0, 0, None))
+_transition_draws = jax.vmap(_transition_rows, in_axes=(None, None, 0))
+_density_rows = jax.vmap(transition_log_density, in_axes=(0, 0, 0, None))
+_density_draws = jax.vmap(_density_rows, in_axes=(None, None, None, 0))
 
 
 @dataclass(frozen=True)
@@ -46,8 +46,8 @@ def _posterior_matrix(samples: np.ndarray) -> np.ndarray:
     values = np.asarray(samples, dtype=np.float64)
     if values.ndim == 3:
         values = values.reshape(-1, values.shape[-1])
-    if values.ndim != 2 or values.shape[1] != 5:
-        raise ValueError("posterior samples must have shape (..., 5)")
+    if values.ndim != 2 or values.shape[1] != 7:
+        raise ValueError("posterior samples must have shape (..., 7)")
     return values
 
 
@@ -62,7 +62,6 @@ def _one_step(
     lag: int,
     scaling: Scaling,
     posterior: np.ndarray,
-    sigma_b_squared: float,
     draws: int,
     seed: int,
 ) -> tuple[dict[str, np.ndarray], dict[str, float]]:
@@ -100,7 +99,7 @@ def _one_step(
         current = np.asarray(block.current)
         following = np.asarray(block.following)
         means, covariances = _transition_draws(
-            block.current, block.dt, selected_device, sigma_b_squared
+            block.current, block.dt, selected_device
         )
         means_np = np.asarray(means)
         cholesky = np.linalg.cholesky(np.asarray(covariances))
@@ -112,7 +111,6 @@ def _one_step(
                 block.current,
                 block.dt,
                 selected_device,
-                sigma_b_squared,
             )
         )
         predictive_mean = predictions.mean(axis=0)
@@ -122,7 +120,7 @@ def _one_step(
         ]
         low, high = np.quantile(predictions, [0.025, 0.975], axis=0)
         median_means, median_covariances = _transition_rows(
-            block.current, block.dt, median_device, sigma_b_squared
+            block.current, block.dt, median_device
         )
         block_residuals = np.linalg.solve(
             np.linalg.cholesky(np.asarray(median_covariances)),
@@ -166,9 +164,13 @@ def _one_step(
                 - predictive_sample.mean(axis=1, keepdims=True)
             ).ravel()
         )
-        projection = conservative_projection(current.shape[1])
-        observed_exchange_parts.append((observed_delta @ projection).ravel())
-        predicted_exchange_parts.append((predicted_delta @ projection).ravel())
+        weights = current / current.sum(axis=1, keepdims=True)
+        observed_exchange_parts.append(
+            (observed_delta - weights * observed_delta.sum(axis=1, keepdims=True)).ravel()
+        )
+        predicted_exchange_parts.append(
+            (predicted_delta - weights * predicted_delta.sum(axis=1, keepdims=True)).ravel()
+        )
         low_parts.append(low.ravel())
         high_parts.append(high.ravel())
         log_scores.append(
@@ -265,9 +267,9 @@ def _pooled_autocorrelation(series: list[np.ndarray]) -> np.ndarray:
 def _temporal_residual_acf(
     segments: list[StableSegment], lag: int, parameters: np.ndarray
 ) -> np.ndarray:
-    """Pool total-mode and conservative observed-rate innovations without overlap."""
+    """Pool total-mode and Kalman innovations without joining trajectories."""
     series: list[np.ndarray] = []
-    tau_p, kappa_total, diffusion_u, diffusion_total, area_star = parameters
+    _, _, kappa_total, _, diffusion_total, area_star, _ = parameters
     for segment in segments:
         if len(segment.tau) <= lag:
             continue
@@ -288,11 +290,12 @@ def _temporal_residual_acf(
             series.append(total_residual)
         for sequence in build_state_space_sequences([segment], lag):
             innovations = np.asarray(
-                persistent_innovations(
-                    sequence, jnp.asarray(tau_p), jnp.asarray(diffusion_u)
-                )
+                persistent_innovations(sequence, jnp.asarray(parameters))
             )
-            series.extend(innovations[:, component] for component in range(innovations.shape[1]))
+            series.extend(
+                innovations[:, component]
+                for component in range(innovations.shape[1])
+            )
     return _pooled_autocorrelation(series)
 
 
@@ -326,13 +329,17 @@ def _pooled_lag_times(series: list[np.ndarray]) -> np.ndarray:
 
 
 def _increment_statistics(
-    increment: np.ndarray, n_bands: int
+    increment: np.ndarray, left_area: np.ndarray, n_bands: int
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Return flattened band, conservative-mode, and band-total covariances."""
     if len(increment) > 1:
         band = np.cov(increment, rowvar=False)
+        weights = left_area / left_area.sum(axis=1, keepdims=True)
+        conservative_increment = (
+            increment - weights * increment.sum(axis=1, keepdims=True)
+        )
         conservative = np.cov(
-            increment @ conservative_projection(n_bands), rowvar=False
+            conservative_increment, rowvar=False
         )
         total = np.asarray(
             [
@@ -359,13 +366,14 @@ def _relaxation_time(acf: np.ndarray, lag_times: np.ndarray) -> float:
 def _transfer_rate_series(
     areas: np.ndarray, tau: np.ndarray
 ) -> tuple[list[np.ndarray], list[np.ndarray]]:
-    """Estimate b from one sampled segment, then return its componentwise v_i."""
+    """Return area-fraction-weighted redistribution rates."""
     if len(tau) < 2 or tau[-1] <= tau[0]:
         return [], []
-    conservative = areas - areas.mean(axis=1, keepdims=True)
-    slope = (conservative[-1] - conservative[0]) / (tau[-1] - tau[0])
-    transfer = np.diff(conservative, axis=0) / np.diff(tau)[:, None] - slope
-    transfer_tau = 0.5 * (tau[1:] + tau[:-1])
+    increments = np.diff(areas, axis=0)
+    total_increment = increments.sum(axis=1)
+    weights = areas[:-1] / areas[:-1].sum(axis=1, keepdims=True)
+    transfer = (increments - weights * total_increment[:, None]) / np.diff(tau)[:, None]
+    transfer_tau = tau[:-1]
     return (
         [transfer[:, component] for component in range(areas.shape[1])],
         [transfer_tau for _ in range(areas.shape[1])],
@@ -377,7 +385,6 @@ def _paths(
     lag: int,
     scaling: Scaling,
     posterior: np.ndarray,
-    sigma_b_squared: float,
     paths_per_segment: int,
     seed: int,
 ) -> tuple[dict[str, np.ndarray], dict[str, float | int]]:
@@ -455,14 +462,15 @@ def _paths(
         )
         observed_increment = np.diff(sampled_areas, axis=0)
         observed_increment_values.append(observed_increment.ravel())
-        projection = conservative_projection(segment.n_bands)
+        basis = helmert_basis(segment.n_bands)
         band, conservative, total = _increment_statistics(
-            observed_increment, segment.n_bands
+            observed_increment, sampled_areas[:-1], segment.n_bands
         )
         observed_covariances.append(band)
         observed_conservative_covariances.append(conservative)
         observed_total_increment_covariances.append(total)
         simulated_segment_increments: list[np.ndarray] = []
+        simulated_segment_left_areas: list[np.ndarray] = []
         parameter_start = segment_index * paths_per_segment
         segment_parameters = selected[
             parameter_start : parameter_start + paths_per_segment
@@ -471,16 +479,20 @@ def _paths(
             (paths_per_segment, *sampled_areas.shape), np.nan, dtype=np.float64
         )
         paths[:, 0] = sampled_areas[0]
+        component_count = segment.n_bands - 1
         rates = generator.standard_normal(
-            (paths_per_segment, segment.n_bands)
-        ) @ projection
-        rates *= np.sqrt(
-            segment_parameters[:, 2] / segment_parameters[:, 0]
+            (paths_per_segment, component_count)
+        ) * np.sqrt(
+            segment_parameters[:, 3] / segment_parameters[:, 0]
+        )[:, None]
+        oscillatory_rates = generator.standard_normal(
+            (paths_per_segment, component_count)
+        ) * np.sqrt(
+            segment_parameters[:, 3] / segment_parameters[:, 0]
         )[:, None]
         slopes = generator.standard_normal(
-            (paths_per_segment, segment.n_bands)
-        ) @ projection
-        slopes *= np.sqrt(sigma_b_squared)
+            (paths_per_segment, component_count)
+        ) * segment_parameters[:, 6, None]
         stops = np.full(paths_per_segment, len(sampled_areas), dtype=np.int64)
         active = np.ones(paths_per_segment, dtype=bool)
         for frame in range(len(sampled_areas) - 1):
@@ -500,31 +512,42 @@ def _paths(
             parameters = segment_parameters[indices]
             step = sampled_tau[frame + 1] - sampled_tau[frame]
             totals = current[indices].sum(axis=1)
-            conservative = current[indices] - totals[:, None] / segment.n_bands
             following_totals = (
                 totals
-                - parameters[:, 1] * (totals - parameters[:, 4]) * step
-                + np.sqrt(2.0 * parameters[:, 3] * step)
+                - parameters[:, 2] * (totals - parameters[:, 5]) * step
+                + np.sqrt(2.0 * parameters[:, 4] * step)
                 * generator.standard_normal(len(indices))
             )
+            weights = current[indices] / totals[:, None]
+            redistribution = (
+                rates[indices] + slopes[indices]
+            ) @ basis.T * step
             following = (
-                conservative
-                + slopes[indices] * step
-                + rates[indices] * step
-                + following_totals[:, None] / segment.n_bands
+                current[indices]
+                + weights * (following_totals - totals)[:, None]
+                + redistribution
             )
-            decay = np.exp(-step / parameters[:, 0])
-            rate_noise = generator.standard_normal(
-                (len(indices), segment.n_bands)
-            ) @ projection
-            rates[indices] = (
-                decay[:, None] * rates[indices]
-                + np.sqrt(
-                    parameters[:, 2]
-                    / parameters[:, 0]
-                    * (1.0 - decay**2)
-                )[:, None]
-                * rate_noise
+            decay = np.exp(-parameters[:, 0] * step)
+            cosine = np.cos(parameters[:, 1] * step)
+            sine = np.sin(parameters[:, 1] * step)
+            noise_scale = np.sqrt(
+                parameters[:, 3]
+                / parameters[:, 0]
+                * (1.0 - decay**2)
+            )
+            next_rates = decay[:, None] * (
+                cosine[:, None] * rates[indices]
+                + sine[:, None] * oscillatory_rates[indices]
+            )
+            next_oscillatory_rates = decay[:, None] * (
+                -sine[:, None] * rates[indices]
+                + cosine[:, None] * oscillatory_rates[indices]
+            )
+            rates[indices] = next_rates + noise_scale[:, None] * generator.standard_normal(
+                next_rates.shape
+            )
+            oscillatory_rates[indices] = next_oscillatory_rates + noise_scale[:, None] * generator.standard_normal(
+                next_oscillatory_rates.shape
             )
             finite = np.all(np.isfinite(following), axis=1)
             failed_indices = indices[~finite]
@@ -560,14 +583,20 @@ def _paths(
             if len(valid) > 1:
                 increment = np.diff(valid, axis=0)
                 simulated_segment_increments.append(increment)
+                simulated_segment_left_areas.append(valid[:-1])
                 simulated_increment_values.append(increment.ravel())
         combined_increment = (
             np.concatenate(simulated_segment_increments)
             if simulated_segment_increments
             else np.empty((0, segment.n_bands))
         )
+        combined_left_area = (
+            np.concatenate(simulated_segment_left_areas)
+            if simulated_segment_left_areas
+            else np.empty((0, segment.n_bands))
+        )
         band, conservative, total = _increment_statistics(
-            combined_increment, segment.n_bands
+            combined_increment, combined_left_area, segment.n_bands
         )
         simulated_covariances.append(band)
         simulated_conservative_covariances.append(conservative)
@@ -717,21 +746,17 @@ def validate_posterior(
     scaling: Scaling,
     normalized_samples: np.ndarray,
     *,
-    sigma_b_squared: float = 0.0,
     predictive_draws: int = 200,
     paths_per_segment: int = 200,
     seed: int = 0,
 ) -> ValidationResult:
     """Validate with frozen scaling and posterior; this function never refits."""
-    if sigma_b_squared < 0.0 or not np.isfinite(sigma_b_squared):
-        raise ValueError("sigma_b_squared must be finite and nonnegative")
     posterior = _posterior_matrix(normalized_samples)
     one_step_arrays, one_step_metrics = _one_step(
         segments,
         lag,
         scaling,
         posterior,
-        sigma_b_squared,
         predictive_draws,
         seed,
     )
@@ -740,7 +765,6 @@ def validate_posterior(
         lag,
         scaling,
         posterior,
-        sigma_b_squared,
         paths_per_segment,
         seed + 2,
     )

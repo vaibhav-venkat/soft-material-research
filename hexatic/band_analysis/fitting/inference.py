@@ -15,6 +15,7 @@ from .masked_model import (
     negative_log_likelihood as masked_negative_log_likelihood,
 )
 from .model import (
+    EVENT_PARAMETER_NAMES,
     PARAMETER_NAMES,
     TrainingTransitions,
     negative_log_likelihood as clean_negative_log_likelihood,
@@ -122,22 +123,27 @@ def _rate_statistics(
                     np.repeat(np.asarray(block.dt), mask.sum(axis=1))
                 )
     else:
-        for block in data.rate_blocks:
-            rates.extend(
-                (
-                    np.asarray(block.initial).reshape(-1),
-                    np.asarray(block.following).reshape(-1),
-                )
-            )
-            if len(block.current):
+        for batch in data.sequence_batches:
+            batch_rates = np.asarray(batch.y) / np.asarray(batch.dt)[:, :, None]
+            batch_mask = np.asarray(batch.mask, dtype=bool)
+            for row_index, (sequence_rates, valid) in enumerate(
+                zip(batch_rates, batch_mask, strict=True)
+            ):
+                sequence_rates = sequence_rates[valid]
+                rates.append(sequence_rates.reshape(-1))
+                if len(sequence_rates) <= 1:
+                    continue
                 pairs.append(
                     (
-                        np.asarray(block.current).reshape(-1),
-                        np.asarray(block.following).reshape(-1),
+                        sequence_rates[:-1].reshape(-1),
+                        sequence_rates[1:].reshape(-1),
                     )
                 )
                 intervals.append(
-                    np.repeat(np.asarray(block.dt), block.current.shape[1])
+                    np.repeat(
+                        np.asarray(batch.dt[row_index, : len(sequence_rates) - 1]),
+                        sequence_rates.shape[1],
+                    )
                 )
     return rates, pairs, intervals
 
@@ -215,7 +221,7 @@ def _event_noise_start(
 
 
 def empirical_parameters(data: TrainingData) -> np.ndarray:
-    """Training-only total OU and persistent-rate starting estimates."""
+    """Return simple training-only starts for the selected fit path."""
     current_totals, following_totals, dt, weights = _total_transitions(data)
     total_weight = weights.sum()
     area_star = float(np.sum(weights * current_totals) / total_weight)
@@ -239,6 +245,41 @@ def empirical_parameters(data: TrainingData) -> np.ndarray:
 
     rates, rate_pairs, rate_intervals = _rate_statistics(data)
 
+    def clean_omega_start(gamma: float, fallback_dt: float) -> float:
+        """Estimate omega from the first pooled rate-ACF zero crossing."""
+        candidates: list[float] = []
+        if isinstance(data, TrainingTransitions):
+            for batch in data.sequence_batches:
+                batch_rates = np.asarray(batch.y) / np.asarray(batch.dt)[:, :, None]
+                batch_mask = np.asarray(batch.mask, dtype=bool)
+                for row_index, (sequence_rates, valid) in enumerate(
+                    zip(batch_rates, batch_mask, strict=True)
+                ):
+                    values = sequence_rates[valid]
+                    if len(values) < 3:
+                        continue
+                    intervals = np.asarray(
+                        batch.dt[row_index, : len(values) - 1]
+                    )
+                    for component in range(values.shape[1]):
+                        series = values[:, component]
+                        centered = series - series.mean()
+                        denominator = float(np.dot(centered, centered))
+                        if denominator <= 1e-12:
+                            continue
+                        autocorrelation = np.correlate(
+                            centered, centered, mode="full"
+                        )[len(series) - 1 :] / denominator
+                        crossing = np.flatnonzero(autocorrelation[1:] <= 0.0)
+                        if len(crossing):
+                            first = int(crossing[0])
+                            zero_time = float(np.sum(intervals[: first + 1]))
+                            if zero_time > 0.0:
+                                candidates.append(np.pi / (2.0 * zero_time))
+        if candidates:
+            return max(float(np.median(candidates)), 1e-6)
+        return max(0.1 * gamma, 0.25 / max(fallback_dt, 1e-6))
+
     if rates:
         all_rates = np.concatenate(rates)
         variance_rate = max(
@@ -259,31 +300,90 @@ def empirical_parameters(data: TrainingData) -> np.ndarray:
                 )
             )
             representative_dt = float(np.median(np.concatenate(rate_intervals)))
-            tau_p = (
-                -representative_dt / np.log(np.clip(correlation, 0.05, 0.99))
-                if correlation > 0.0
-                else representative_dt
-            )
+            if isinstance(data, MaskedTrainingTransitions):
+                tau_p = (
+                    -representative_dt / np.log(np.clip(correlation, 0.05, 0.99))
+                    if correlation > 0.0
+                    else representative_dt
+                )
+                gamma = 1.0 / max(tau_p, 1e-6)
+                omega = 0.1 * gamma
+            else:
+                gamma = max(
+                    1e-6,
+                    -np.log(np.clip(abs(correlation), 0.05, 0.99))
+                    / max(representative_dt, 1e-6),
+                )
+                omega = clean_omega_start(gamma, representative_dt)
         else:
-            tau_p = float(np.median(dt))
-        diffusion_u = max(variance_rate * tau_p, 1e-8)
+            representative_dt = float(np.median(dt))
+            if isinstance(data, MaskedTrainingTransitions):
+                tau_p = representative_dt
+                gamma = 1.0 / max(tau_p, 1e-6)
+                omega = 0.1 * gamma
+            else:
+                gamma = 1.0 / max(representative_dt, 1e-6)
+                omega = clean_omega_start(gamma, representative_dt)
+        if isinstance(data, MaskedTrainingTransitions):
+            diffusion_u = max(variance_rate * tau_p, 1e-8)
+        else:
+            diffusion_u = max(variance_rate * gamma, 1e-8)
     else:
-        tau_p = float(np.median(dt))
+        representative_dt = float(np.median(dt))
+        gamma = 1.0 / max(representative_dt, 1e-6)
+        omega = 0.25 * gamma
         diffusion_u = diffusion_total
+        variance_rate = max(diffusion_u / gamma, 1e-8)
 
-    parameters = np.asarray(
+    if isinstance(data, MaskedTrainingTransitions):
+        parameters = np.asarray(
+            [
+                max(1.0 / max(gamma, 1e-6), 1e-6),
+                total_rate,
+                diffusion_u,
+                diffusion_total,
+                max(area_star, 1e-6),
+            ],
+            dtype=np.float64,
+        )
+        parameters = np.append(parameters, _event_noise_start(data, parameters))
+        return parameters
+
+    segment_means: list[list[float]] = [
+        [] for _ in range(data.sequence_batches[0].segment_count)
+    ]
+    for batch in data.sequence_batches:
+        batch_rates = np.asarray(batch.y) / np.asarray(batch.dt)[:, :, None]
+        batch_mask = np.asarray(batch.mask, dtype=bool)
+        for rates_row, valid, segment_id in zip(
+            batch_rates,
+            batch_mask,
+            np.asarray(batch.segment_id),
+            strict=True,
+        ):
+            values = rates_row[valid]
+            if len(values):
+                segment_means[int(segment_id)].append(float(values.mean()))
+    sequence_means = np.asarray(
+        [np.mean(values) for values in segment_means if values], dtype=np.float64
+    )
+    sigma_b = (
+        max(float(np.sqrt(max(np.var(sequence_means), 0.0))), 1e-6)
+        if len(sequence_means) > 1
+        else max(0.1 * np.sqrt(variance_rate), 1e-6)
+    )
+    return np.asarray(
         [
-            max(tau_p, 1e-6),
+            max(gamma, 1e-6),
+            max(omega, 1e-6),
             total_rate,
             diffusion_u,
             diffusion_total,
             max(area_star, 1e-6),
+            sigma_b,
         ],
         dtype=np.float64,
     )
-    if isinstance(data, MaskedTrainingTransitions):
-        parameters = np.append(parameters, _event_noise_start(data, parameters))
-    return parameters
 
 
 def _negative_log_likelihood(raw: jax.Array, data: TrainingData) -> jax.Array:
@@ -312,7 +412,11 @@ def _hessian_diagnostics(raw: np.ndarray, data: TrainingData) -> HessianDiagnost
 
 
 def _starts(
-    empirical: np.ndarray, seed: int, count: int = 8
+    empirical: np.ndarray,
+    seed: int,
+    count: int = 8,
+    *,
+    event: bool = False,
 ) -> tuple[np.ndarray, ...]:
     if count < 2:
         raise ValueError("optimizer starts must be at least two")
@@ -322,9 +426,10 @@ def _starts(
         empirical_raw + generator.normal(0.0, 0.75, len(empirical))
         for _ in range(count - 2)
     )
-    generic_values = [1.0, 0.1, 0.1, 0.1, 1.0]
-    if len(empirical) == len(PARAMETER_NAMES):
-        generic_values.append(float(empirical[-1]))
+    if len(empirical) == len(PARAMETER_NAMES) and not event:
+        generic_values = [1.0, 0.25, 0.1, 0.1, 0.1, 1.0, 0.1]
+    else:
+        generic_values = [1.0, 0.1, 0.1, 0.1, 1.0, float(empirical[-1])]
     generic = raw_parameters(np.asarray(generic_values))
     return (empirical_raw, generic, *perturbed)
 
@@ -353,17 +458,35 @@ def optimize_parameters(
     data: TrainingData, *, seed: int = 0, starts: int = 8
 ) -> OptimizationResult:
     """Run reproducible empirical, perturbed, and generic BFGS fits."""
-    if not data.blocks or not data.rate_blocks:
+    if not data.blocks or (
+        isinstance(data, MaskedTrainingTransitions)
+        and not data.rate_blocks
+    ) or (
+        isinstance(data, TrainingTransitions)
+        and not data.sequence_batches
+    ):
         raise ValueError("at least one training transition is required")
     empirical = empirical_parameters(data)
     logger.info(
         "BFGS empirical start %s: %s",
-        PARAMETER_NAMES[: len(empirical)],
+        (
+            EVENT_PARAMETER_NAMES
+            if isinstance(data, MaskedTrainingTransitions)
+            else PARAMETER_NAMES
+        )[: len(empirical)],
         np.array2string(empirical, precision=4),
     )
     solver = optx.BFGS(rtol=1e-8, atol=1e-8)
     runs: list[OptimizationRun] = []
-    for index, start in enumerate(_starts(empirical, seed, starts), start=1):
+    for index, start in enumerate(
+        _starts(
+            empirical,
+            seed,
+            starts,
+            event=isinstance(data, MaskedTrainingTransitions),
+        ),
+        start=1,
+    ):
         logger.info("BFGS start %d/%d", index, starts)
         solution = optx.minimise(
             _negative_log_likelihood,

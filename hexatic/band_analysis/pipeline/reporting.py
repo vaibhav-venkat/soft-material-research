@@ -8,7 +8,7 @@ from typing import Any
 
 import numpy as np
 
-from ..fitting.model import PARAMETER_NAMES
+from ..fitting.model import EVENT_PARAMETER_NAMES, PARAMETER_NAMES
 from .storage import write_json, write_text
 from .workflow import AnalysisConfig, FitPath, LagOutcome, stable_lags
 
@@ -185,9 +185,10 @@ def _comparison_table(outcomes: FitOutcomes, lag: int) -> list[str]:
         "| Parameter | Clean segments: median [95% HDI] | Event chains: median [95% HDI] |",
         "|---|---:|---:|",
     ]
+    names = tuple(dict.fromkeys((*PARAMETER_NAMES, *EVENT_PARAMETER_NAMES)))
     lines.extend(
         f"| {name} | {_interval(clean, name)} | {_interval(event, name)} |"
-        for name in PARAMETER_NAMES
+        for name in names
     )
     return lines
 
@@ -238,24 +239,31 @@ def write_report(
         lines.extend([f"## {fit.title()} fit details", ""])
         for outcome in fit_outcomes:
             optimization = outcome.metadata["optimization"]
-            lines.extend(
-                [
-                    f"### Lag {outcome.lag}: "
-                    f"{'accepted' if outcome.accepted else 'rejected'}",
-                    "",
-                    *_parameter_table(outcome),
-                    "",
-                    "Direct conservative-slope variance: "
-                    "`sigma_b^2 = "
-                    f"{_number(outcome.metadata['conservative_slope']['sigma_b_squared'])}` "
-                    "(area²/time²).",
-                    "",
-                    f"BFGS objective {_number(optimization['best_objective'])}; "
-                    f"gradient norm {_number(optimization['best_gradient_norm'])}; "
-                    f"Hessian condition number {_number(optimization['condition_number'])}; "
-                    f"NUTS retry {outcome.metadata['retried']}.",
-                ]
+            details = [
+                f"### Lag {outcome.lag}: "
+                f"{'accepted' if outcome.accepted else 'rejected'}",
+                "",
+                *_parameter_table(outcome),
+                "",
+            ]
+            slope = outcome.metadata.get("conservative_slope", {})
+            if "sigma_b_squared" in slope:
+                details.extend(
+                    [
+                        "Direct conservative-slope variance: "
+                        "`sigma_b^2 = "
+                        f"{_number(slope['sigma_b_squared'])}` "
+                        "(area²/time²).",
+                        "",
+                    ]
+                )
+            details.append(
+                f"BFGS objective {_number(optimization['best_objective'])}; "
+                f"gradient norm {_number(optimization['best_gradient_norm'])}; "
+                f"Hessian condition number {_number(optimization['condition_number'])}; "
+                f"NUTS retry {outcome.metadata['retried']}."
             )
+            lines.extend(details)
             if outcome.accepted:
                 validation = outcome.metadata["validation"]
                 lines.extend(

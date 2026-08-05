@@ -1,4 +1,4 @@
-"""Define scaling, transitions, and likelihoods for the coupled area SDE."""
+"""Clean-segment model for coupled band-area dynamics."""
 
 from __future__ import annotations
 
@@ -7,16 +7,32 @@ from functools import lru_cache
 from typing import NamedTuple
 
 import jax
-import scipy.linalg as linalg
 import jax.numpy as jnp
 import numpy as np
+from scipy import linalg
 
 from ..detection.segments import StableSegment
 
 
 jax.config.update("jax_enable_x64", True)
 
-PARAMETER_NAMES = ("tau_p", "kappa_T", "D_u", "D_T", "A_T_star", "sigma_E")
+PARAMETER_NAMES = (
+    "gamma",
+    "omega",
+    "kappa_T",
+    "D_u",
+    "D_T",
+    "A_T_star",
+    "sigma_b",
+)
+EVENT_PARAMETER_NAMES = (
+    "tau_p",
+    "kappa_T",
+    "D_u",
+    "D_T",
+    "A_T_star",
+    "sigma_E",
+)
 JITTER = 1e-10
 
 
@@ -27,13 +43,29 @@ class TransitionBlock(NamedTuple):
     weight: jax.Array
 
 
-class PersistentRateBlock(NamedTuple):
-    initial: jax.Array
-    initial_weight: jax.Array
-    current: jax.Array
-    following: jax.Array
+class StateSpaceSequence(NamedTuple):
+    """Redistribution observations belonging to one lagged sequence."""
+
+    y: jax.Array
     dt: jax.Array
+    tau: jax.Array
     weight: jax.Array
+    segment_id: int
+
+    @property
+    def rates(self) -> jax.Array:
+        return self.y / self.dt[:, None]
+
+
+class SequenceBatch(NamedTuple):
+    """Padded same-dimension sequences for one vectorized Kalman scan."""
+
+    y: jax.Array
+    dt: jax.Array
+    mask: jax.Array
+    weight: jax.Array
+    segment_id: jax.Array
+    segment_count: int
 
 
 @jax.tree_util.register_dataclass
@@ -41,15 +73,7 @@ class PersistentRateBlock(NamedTuple):
 class TrainingTransitions:
     scaling: Scaling
     blocks: tuple[TransitionBlock, ...]
-    rate_blocks: tuple[PersistentRateBlock, ...]
-    conservative_slopes: tuple[jax.Array, ...] = ()
-    sigma_b_squared: jax.Array | float = 0.0
-
-
-class StateSpaceSequence(NamedTuple):
-    conservative: jax.Array
-    tau: jax.Array
-    weight: jax.Array
+    sequence_batches: tuple[SequenceBatch, ...]
 
 
 @jax.tree_util.register_dataclass
@@ -75,7 +99,23 @@ class Scaling:
 
     @property
     def parameter_factors(self) -> np.ndarray:
-        """Normalized-to-physical multipliers, ordered as PARAMETER_NAMES."""
+        """Normalized-to-physical multipliers for the clean fit."""
+        return np.asarray(
+            [
+                1.0 / self.time,
+                1.0 / self.time,
+                1.0 / self.time,
+                self.area**2 / self.time**3,
+                self.area**2 / self.time,
+                self.area,
+                self.area / self.time,
+            ],
+            dtype=np.float64,
+        )
+
+    @property
+    def event_parameter_factors(self) -> np.ndarray:
+        """Normalized-to-physical multipliers for the legacy event fit."""
         return np.asarray(
             [
                 self.time,
@@ -92,24 +132,19 @@ class Scaling:
 def prepare_training_transitions(
     segments: list[StableSegment], lag: int
 ) -> TrainingTransitions:
-    """Freeze training scaling before constructing normalized transitions."""
+    """Normalize once, then construct total and redistribution observations."""
     scaling = Scaling.from_training(segments)
     normalized = [scaling.normalize_segment(segment) for segment in segments]
-    slopes = conservative_segment_slopes(normalized)
     sequences = build_state_space_sequences(normalized, lag)
     return TrainingTransitions(
         scaling=scaling,
         blocks=build_transition_blocks(normalized, lag),
-        rate_blocks=build_persistent_rate_blocks(sequences),
-        conservative_slopes=tuple(jnp.asarray(slope) for slope in slopes),
-        sigma_b_squared=jnp.asarray(
-            estimate_slope_variance(slopes), dtype=jnp.float64
-        ),
+        sequence_batches=build_sequence_batches(sequences, len(normalized)),
     )
 
 
 @lru_cache(maxsize=None)
-def _helmert_basis(n_bands: int) -> np.ndarray:
+def helmert_basis(n_bands: int) -> np.ndarray:
     basis = linalg.helmert(n_bands, full=False).T.copy()
     basis.setflags(write=False)
     return basis
@@ -117,149 +152,92 @@ def _helmert_basis(n_bands: int) -> np.ndarray:
 
 @lru_cache(maxsize=None)
 def conservative_projection(n_bands: int) -> np.ndarray:
-    """Return the zero-sum projector P_n = I - 11^T/n."""
-    projection = np.eye(n_bands, dtype=np.float64) - np.ones(
-        (n_bands, n_bands), dtype=np.float64
-    ) / n_bands
+    """Return the zero-sum projector ``Q Q^T``."""
+    basis = helmert_basis(n_bands)
+    projection = basis @ basis.T
     projection.setflags(write=False)
     return projection
 
 
-def conservative_segment_slope(segment: StableSegment) -> np.ndarray:
-    """Estimate the constant, zero-sum conservative slope of one segment."""
-    duration = float(segment.tau[-1] - segment.tau[0])
-    if duration <= 0.0:
-        raise ValueError("segment duration must be positive")
-    delta = np.asarray(segment.areas[-1] - segment.areas[0], dtype=np.float64)
-    return (delta - delta.mean()) / duration
-
-
-def conservative_segment_slopes(
-    segments: list[StableSegment],
-) -> tuple[np.ndarray, ...]:
-    """Return projected endpoint slopes for segments with positive duration."""
-    return tuple(
-        conservative_segment_slope(segment)
-        for segment in segments
-        if len(segment.tau) >= 2 and segment.tau[-1] > segment.tau[0]
-    )
-
-
-def estimate_slope_variance(slopes: tuple[np.ndarray, ...]) -> float:
-    """Estimate sigma_b^2 under b_s ~ N(0, sigma_b^2 P_n)."""
-    degrees_of_freedom = sum(slope.size - 1 for slope in slopes)
-    if degrees_of_freedom == 0:
-        return 0.0
-    sum_squares = sum(float(np.dot(slope, slope)) for slope in slopes)
-    return sum_squares / degrees_of_freedom
+def area_fraction_allocation(area: jax.Array) -> jax.Array:
+    """Allocate a total-area increment using the observed left endpoint."""
+    return area / jnp.sum(area)
 
 
 def build_state_space_sequences(
     segments: list[StableSegment], lag: int
 ) -> tuple[StateSpaceSequence, ...]:
-    sequences = []
-    for segment in segments:
+    """Build non-overlapping redistribution-rate sequences for the Kalman filter."""
+    sequences: list[StateSpaceSequence] = []
+    for segment_id, segment in enumerate(segments):
         if (
-            segment.n_bands == 1
+            segment.n_bands <= 1
             or len(segment.tau) < 2
             or segment.tau[-1] <= segment.tau[0]
         ):
             continue
-        basis = _helmert_basis(segment.n_bands)
-        slope = conservative_segment_slope(segment)
-        slope_coordinates = slope @ basis
+        basis = helmert_basis(segment.n_bands)
         for phase in range(lag):
-            areas = segment.areas[phase::lag]
-            tau = segment.tau[phase::lag]
+            areas = np.asarray(segment.areas[phase::lag], dtype=np.float64)
+            tau = np.asarray(segment.tau[phase::lag], dtype=np.float64)
             if len(tau) < 2:
                 continue
+            increments = areas[1:] - areas[:-1]
+            total_increments = increments.sum(axis=1)
+            weights = areas[:-1] / areas[:-1].sum(axis=1, keepdims=True)
+            redistribution = increments - weights * total_increments[:, None]
             sequences.append(
                 StateSpaceSequence(
-                    conservative=jnp.asarray(
-                        areas @ basis
-                        - (tau - segment.tau[0])[:, None] * slope_coordinates,
-                        dtype=jnp.float64,
-                    ),
+                    y=jnp.asarray(redistribution @ basis, dtype=jnp.float64),
+                    dt=jnp.asarray(np.diff(tau), dtype=jnp.float64),
                     tau=jnp.asarray(tau, dtype=jnp.float64),
                     weight=jnp.asarray(1.0 / lag, dtype=jnp.float64),
+                    segment_id=segment_id,
                 )
             )
     return tuple(sequences)
 
 
-def build_persistent_rate_blocks(
-    sequences: tuple[StateSpaceSequence, ...],
-) -> tuple[PersistentRateBlock, ...]:
-    """Batch observed conservative rates by dimension for a compact JAX graph."""
-    grouped: dict[int, dict[str, list[np.ndarray | float]]] = {}
+def build_sequence_batches(
+    sequences: tuple[StateSpaceSequence, ...], segment_count: int
+) -> tuple[SequenceBatch, ...]:
+    """Pad sequences by redistribution dimension for one vectorized scan per group."""
+    grouped: dict[int, list[StateSpaceSequence]] = {}
     for sequence in sequences:
-        conservative = np.asarray(sequence.conservative)
-        dt = np.diff(np.asarray(sequence.tau))
-        rates = np.diff(conservative, axis=0) / dt[:, None]
-        dimension = rates.shape[1]
-        values = grouped.setdefault(
-            dimension,
-            {
-                "initial": [],
-                "initial_weight": [],
-                "current": [],
-                "following": [],
-                "dt": [],
-                "weight": [],
-            },
-        )
-        sequence_weight = float(sequence.weight)
-        values["initial"].append(rates[0])
-        values["initial_weight"].append(sequence_weight)
-        if len(rates) > 1:
-            values["current"].append(rates[:-1])
-            values["following"].append(rates[1:])
-            values["dt"].append(dt[:-1])
-            values["weight"].append(
-                np.full(len(rates) - 1, sequence_weight, dtype=np.float64)
-            )
+        grouped.setdefault(int(sequence.y.shape[1]), []).append(sequence)
 
-    blocks = []
-    for dimension, values in sorted(grouped.items()):
-        current_parts = values["current"]
-        following_parts = values["following"]
-        dt_parts = values["dt"]
-        weight_parts = values["weight"]
-        blocks.append(
-            PersistentRateBlock(
-                initial=jnp.asarray(values["initial"], dtype=jnp.float64),
-                initial_weight=jnp.asarray(
-                    values["initial_weight"], dtype=jnp.float64
-                ),
-                current=jnp.asarray(
-                    np.concatenate(current_parts)
-                    if current_parts
-                    else np.empty((0, dimension)),
-                    dtype=jnp.float64,
-                ),
-                following=jnp.asarray(
-                    np.concatenate(following_parts)
-                    if following_parts
-                    else np.empty((0, dimension)),
-                    dtype=jnp.float64,
-                ),
-                dt=jnp.asarray(
-                    np.concatenate(dt_parts) if dt_parts else np.empty(0),
-                    dtype=jnp.float64,
-                ),
-                weight=jnp.asarray(
-                    np.concatenate(weight_parts) if weight_parts else np.empty(0),
-                    dtype=jnp.float64,
-                ),
+    batches = []
+    for dimension, group in sorted(grouped.items()):
+        maximum = max(sequence.y.shape[0] for sequence in group)
+        y = np.zeros((len(group), maximum, dimension), dtype=np.float64)
+        dt = np.ones((len(group), maximum), dtype=np.float64)
+        mask = np.zeros((len(group), maximum), dtype=bool)
+        weights = np.empty(len(group), dtype=np.float64)
+        segment_ids = np.empty(len(group), dtype=np.int64)
+        for index, sequence in enumerate(group):
+            length = sequence.y.shape[0]
+            y[index, :length] = np.asarray(sequence.y)
+            dt[index, :length] = np.asarray(sequence.dt)
+            mask[index, :length] = True
+            weights[index] = float(sequence.weight)
+            segment_ids[index] = sequence.segment_id
+        batches.append(
+            SequenceBatch(
+                y=jnp.asarray(y, dtype=jnp.float64),
+                dt=jnp.asarray(dt, dtype=jnp.float64),
+                mask=jnp.asarray(mask),
+                weight=jnp.asarray(weights, dtype=jnp.float64),
+                segment_id=jnp.asarray(segment_ids, dtype=jnp.int64),
+                segment_count=segment_count,
             )
         )
-    return tuple(blocks)
+    return tuple(batches)
 
 
 def build_transition_blocks(
     segments: list[StableSegment], lag: int
 ) -> tuple[TransitionBlock, ...]:
-    """Use every lagged transition wholly contained in a clean segment."""
+    """Use every lagged total-area transition wholly inside a clean segment."""
     grouped: dict[int, list[tuple[np.ndarray, np.ndarray, np.ndarray]]] = {}
     for segment in segments:
         count = len(segment.tau) - lag
@@ -296,25 +274,355 @@ def raw_parameters(parameters: np.ndarray) -> np.ndarray:
     return values + np.log(-np.expm1(-values))
 
 
-def transition(
-    area: jax.Array,
-    dt: jax.Array,
-    parameters: jax.Array,
-    sigma_b_squared: jax.Array | float = 0.0,
+def oscillatory_transition(
+    u: jax.Array,
+    r: jax.Array,
+    dt: jax.Array | float,
+    gamma: jax.Array | float,
+    omega: jax.Array | float,
 ) -> tuple[jax.Array, jax.Array]:
-    """Unconditional one-step moments used by posterior predictive checks."""
-    tau_p, kappa_total, diffusion_u, diffusion_total, area_star = parameters[:5]
-    n_bands = area.shape[-1]
-    projection = jnp.asarray(conservative_projection(n_bands))
+    """Apply the exact two-dimensional OU transition without a large matrix."""
+    decay = jnp.exp(-gamma * dt)
+    cosine = jnp.cos(omega * dt)
+    sine = jnp.sin(omega * dt)
+    return (
+        decay * (cosine * u + sine * r),
+        decay * (-sine * u + cosine * r),
+    )
+
+
+def oscillatory_transition_matrix(
+    dt: jax.Array | float,
+    gamma: jax.Array | float,
+    omega: jax.Array | float,
+) -> jax.Array:
+    """Return the small two-by-two analytic transition matrix."""
+    decay = jnp.exp(-gamma * dt)
+    cosine = jnp.cos(omega * dt)
+    sine = jnp.sin(omega * dt)
+    return decay * jnp.stack(
+        (
+            jnp.stack((cosine, sine), axis=-1),
+            jnp.stack((-sine, cosine), axis=-1),
+        ),
+        axis=-2,
+    )
+
+
+def oscillatory_process_variance(
+    dt: jax.Array | float,
+    gamma: jax.Array | float,
+    diffusion_u: jax.Array | float,
+) -> jax.Array:
+    """Exact per-component innovation variance for the oscillatory OU state."""
+    return diffusion_u / gamma * (1.0 - jnp.exp(-2.0 * gamma * dt))
+
+
+def integrated_oscillatory_variance(
+    dt: jax.Array | float,
+    gamma: jax.Array | float,
+    omega: jax.Array | float,
+    diffusion_u: jax.Array | float,
+) -> jax.Array:
+    """Exact stationary variance of ``∫u(t)dt`` for one redistribution mode."""
+    denominator = gamma**2 + omega**2
+    exponential = jnp.exp(-gamma * dt)
+    cosine = jnp.cos(omega * dt)
+    sine = jnp.sin(omega * dt)
+    real_second_term = (
+        (1.0 - exponential * cosine) * (gamma**2 - omega**2)
+        + 2.0 * gamma * omega * exponential * sine
+    ) / denominator**2
+    integral = gamma * dt / denominator - real_second_term
+    return 2.0 * diffusion_u / gamma * integral
+
+
+class _KalmanResult(NamedTuple):
+    log_likelihood: jax.Array
+    standardized_innovations: jax.Array
+    innovation_variances: jax.Array
+
+
+def _observe(
+    mean: jax.Array, covariance: jax.Array, observation: jax.Array
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+    """Update one independent vector of observations ``u + beta``."""
+    observation_mean = mean[0] + mean[2]
+    covariance_observation = covariance[:, 0] + covariance[:, 2]
+    variance = covariance_observation[0] + covariance_observation[2] + JITTER
+    innovation = observation - observation_mean
+    gain = covariance_observation / variance
+    updated_mean = mean + gain[:, None] * innovation[None, :]
+    updated_covariance = covariance - jnp.outer(
+        covariance_observation, covariance_observation
+    ) / variance
+    updated_covariance = 0.5 * (updated_covariance + updated_covariance.T)
+    standardized = innovation / jnp.sqrt(variance)
+    log_likelihood = -0.5 * (
+        observation.shape[0] * jnp.log(2.0 * jnp.pi * variance)
+        + jnp.sum(innovation**2) / variance
+    )
+    return updated_mean, updated_covariance, standardized, variance, log_likelihood
+
+
+def _kalman_filter(
+    rates: jax.Array, dt: jax.Array, parameters: jax.Array
+) -> _KalmanResult:
+    """Marginalize latent ``r`` and the segment-constant transfer with a scan."""
+    gamma, omega, _, diffusion_u, _, _, sigma_b = parameters
+    stationary_variance = diffusion_u / gamma
+    mean = jnp.zeros((3, rates.shape[1]), dtype=jnp.float64)
+    covariance = jnp.diag(
+        jnp.asarray(
+            [stationary_variance, stationary_variance, sigma_b**2],
+            dtype=jnp.float64,
+        )
+    )
+    mean, covariance, initial_innovation, initial_variance, initial_log_likelihood = _observe(
+        mean, covariance, rates[0]
+    )
+
+    def step(
+        carry: tuple[jax.Array, jax.Array],
+        values: tuple[jax.Array, jax.Array],
+    ) -> tuple[tuple[jax.Array, jax.Array], tuple[jax.Array, jax.Array, jax.Array]]:
+        previous_mean, previous_covariance = carry
+        step_dt, observation = values
+        u, r = oscillatory_transition(
+            previous_mean[0], previous_mean[1], step_dt, gamma, omega
+        )
+        propagated_mean = jnp.stack((u, r, previous_mean[2]))
+        two_state_transition = oscillatory_transition_matrix(
+            step_dt, gamma, omega
+        )
+        transition_matrix = jnp.zeros((3, 3), dtype=jnp.float64)
+        transition_matrix = transition_matrix.at[:2, :2].set(two_state_transition)
+        transition_matrix = transition_matrix.at[2, 2].set(1.0)
+        process_variance = oscillatory_process_variance(
+            step_dt, gamma, diffusion_u
+        )
+        process_covariance = jnp.diag(
+            jnp.asarray([process_variance, process_variance, 0.0])
+        )
+        propagated_covariance = (
+            transition_matrix @ previous_covariance @ transition_matrix.T
+            + process_covariance
+        )
+        updated_mean, updated_covariance, standardized, variance, log_likelihood = _observe(
+            propagated_mean, propagated_covariance, observation
+        )
+        return (
+            updated_mean,
+            updated_covariance,
+        ), (standardized, variance, log_likelihood)
+
+    (_, _), (innovations, variances, log_likelihoods) = jax.lax.scan(
+        step, (mean, covariance), (dt[:-1], rates[1:])
+    )
+    standardized = jnp.concatenate(
+        (initial_innovation[None, :], innovations), axis=0
+    )
+    variances = jnp.concatenate(
+        (
+            jnp.asarray([initial_variance]),
+            variances,
+        )
+    )
+    return _KalmanResult(
+        initial_log_likelihood + jnp.sum(log_likelihoods),
+        standardized,
+        variances,
+    )
+
+
+def kalman_log_likelihood(
+    sequence: StateSpaceSequence, parameters: jax.Array
+) -> jax.Array:
+    """Return one sequence's marginalized redistribution log likelihood."""
+    return _kalman_filter(sequence.rates, sequence.dt, parameters).log_likelihood
+
+
+def persistent_innovations(
+    sequence: StateSpaceSequence, parameters: jax.Array
+) -> jax.Array:
+    """Return the standardized innovations consumed by residual diagnostics."""
+    return _kalman_filter(sequence.rates, sequence.dt, parameters).standardized_innovations
+
+
+class _KalmanCoefficients(NamedTuple):
+    normalizer: jax.Array
+    squared: jax.Array
+    linear: jax.Array
+    curvature: jax.Array
+
+
+def _kalman_coefficients_single(
+    rates: jax.Array,
+    dt: jax.Array,
+    mask: jax.Array,
+    parameters: jax.Array,
+) -> _KalmanCoefficients:
+    """Return the conditional likelihood coefficients for one padded sequence."""
+    gamma, omega, _, diffusion_u, _, _, _ = parameters
+    stationary_variance = diffusion_u / gamma
+    dimension = rates.shape[1]
+    mean = jnp.zeros((2, dimension), dtype=jnp.float64)
+    sensitivity = jnp.zeros((2, dimension), dtype=jnp.float64)
+    covariance = stationary_variance * jnp.eye(2, dtype=jnp.float64)
+
+    def observe(
+        mean: jax.Array,
+        sensitivity: jax.Array,
+        covariance: jax.Array,
+        observation: jax.Array,
+    ) -> tuple[
+        jax.Array,
+        jax.Array,
+        jax.Array,
+        jax.Array,
+        jax.Array,
+        jax.Array,
+        jax.Array,
+    ]:
+        covariance_observation = covariance[:, 0]
+        variance = covariance_observation[0] + JITTER
+        innovation = observation - mean[0]
+        derivative = sensitivity[0] + 1.0
+        gain = covariance_observation / variance
+        updated_mean = mean + gain[:, None] * innovation[None, :]
+        updated_sensitivity = sensitivity - gain[:, None] * derivative[None, :]
+        updated_covariance = covariance - jnp.outer(
+            covariance_observation, covariance_observation
+        ) / variance
+        updated_covariance = 0.5 * (updated_covariance + updated_covariance.T)
+        normalizer = jnp.full(
+            (dimension,), jnp.log(2.0 * jnp.pi * variance), dtype=jnp.float64
+        )
+        squared = innovation**2 / variance
+        linear = innovation * derivative / variance
+        curvature = derivative**2 / variance
+        return (
+            updated_mean,
+            updated_sensitivity,
+            updated_covariance,
+            normalizer,
+            squared,
+            linear,
+            curvature,
+        )
+
+    (
+        updated_mean,
+        updated_sensitivity,
+        updated_covariance,
+        normalizer,
+        squared,
+        linear,
+        curvature,
+    ) = observe(mean, sensitivity, covariance, rates[0])
+    valid = mask[0]
+    mean = jnp.where(valid, updated_mean, mean)
+    sensitivity = jnp.where(valid, updated_sensitivity, sensitivity)
+    covariance = jnp.where(valid, updated_covariance, covariance)
+    normalizer = jnp.where(valid, normalizer, 0.0)
+    squared = jnp.where(valid, squared, 0.0)
+    linear = jnp.where(valid, linear, 0.0)
+    curvature = jnp.where(valid, curvature, 0.0)
+
+    def step(
+        carry: tuple[jax.Array, jax.Array, jax.Array],
+        values: tuple[jax.Array, jax.Array, jax.Array],
+    ) -> tuple[
+        tuple[jax.Array, jax.Array, jax.Array],
+        tuple[jax.Array, jax.Array, jax.Array, jax.Array],
+    ]:
+        previous_mean, previous_sensitivity, previous_covariance = carry
+        step_dt, observation, valid = values
+        transition_matrix = oscillatory_transition_matrix(
+            step_dt, gamma, omega
+        )
+        propagated_mean = transition_matrix @ previous_mean
+        propagated_sensitivity = transition_matrix @ previous_sensitivity
+        process_variance = oscillatory_process_variance(
+            step_dt, gamma, diffusion_u
+        )
+        propagated_covariance = (
+            transition_matrix
+            @ previous_covariance
+            @ transition_matrix.T
+            + process_variance * jnp.eye(2, dtype=jnp.float64)
+        )
+        (
+            updated_mean,
+            updated_sensitivity,
+            updated_covariance,
+            step_normalizer,
+            step_squared,
+            step_linear,
+            step_curvature,
+        ) = observe(
+            propagated_mean,
+            propagated_sensitivity,
+            propagated_covariance,
+            observation,
+        )
+        mean = jnp.where(valid, updated_mean, previous_mean)
+        sensitivity = jnp.where(valid, updated_sensitivity, previous_sensitivity)
+        covariance = jnp.where(valid, updated_covariance, previous_covariance)
+        return (mean, sensitivity, covariance), (
+            jnp.where(valid, step_normalizer, 0.0),
+            jnp.where(valid, step_squared, 0.0),
+            jnp.where(valid, step_linear, 0.0),
+            jnp.where(valid, step_curvature, 0.0),
+        )
+
+    (_, _, _), (normalizers, squared_terms, linear_terms, curvature_terms) = (
+        jax.lax.scan(
+            step,
+            (mean, sensitivity, covariance),
+            (dt[:-1], rates[1:], mask[1:]),
+        )
+    )
+    return _KalmanCoefficients(
+        normalizer + jnp.sum(normalizers, axis=0),
+        squared + jnp.sum(squared_terms, axis=0),
+        linear + jnp.sum(linear_terms, axis=0),
+        curvature + jnp.sum(curvature_terms, axis=0),
+    )
+
+
+def _kalman_coefficients_batch(
+    rates: jax.Array,
+    dt: jax.Array,
+    mask: jax.Array,
+    parameters: jax.Array,
+) -> _KalmanCoefficients:
+    """Run one padded scan over all sequences in a same-dimension batch."""
+    return jax.vmap(
+        _kalman_coefficients_single,
+        in_axes=(0, 0, 0, None),
+    )(rates, dt, mask, parameters)
+
+
+def transition(
+    area: jax.Array, dt: jax.Array, parameters: jax.Array
+) -> tuple[jax.Array, jax.Array]:
+    """Unconditional raw-area moments for posterior predictive checks."""
+    gamma, omega, kappa_total, diffusion_u, diffusion_total, area_star, sigma_b = (
+        parameters
+    )
     total = jnp.sum(area)
-    allocation = jnp.ones(n_bands, dtype=jnp.float64) / n_bands
+    allocation = area_fraction_allocation(area)
     drift = -kappa_total * (total - area_star) * allocation
     mean = area + drift * dt
-    conservative_variance = (sigma_b_squared + diffusion_u / tau_p) * dt**2
+    conservative_variance = integrated_oscillatory_variance(
+        dt, gamma, omega, diffusion_u
+    ) + sigma_b**2 * dt**2
+    projection = jnp.asarray(conservative_projection(area.shape[-1]))
     covariance = conservative_variance * projection + 2.0 * dt * (
         diffusion_total * jnp.outer(allocation, allocation)
     )
-    return mean, covariance + JITTER * jnp.eye(n_bands, dtype=jnp.float64)
+    return mean, covariance + JITTER * jnp.eye(area.shape[-1], dtype=jnp.float64)
 
 
 def transition_log_density(
@@ -322,9 +630,8 @@ def transition_log_density(
     area: jax.Array,
     dt: jax.Array,
     parameters: jax.Array,
-    sigma_b_squared: jax.Array | float = 0.0,
 ) -> jax.Array:
-    mean, covariance = transition(area, dt, parameters, sigma_b_squared)
+    mean, covariance = transition(area, dt, parameters)
     cholesky = jnp.linalg.cholesky(covariance)
     whitened = jax.scipy.linalg.solve_triangular(
         cholesky, following - mean, lower=True
@@ -340,50 +647,64 @@ def transition_log_density(
 def parameter_negative_log_likelihood(
     parameters: jax.Array, data: TrainingTransitions
 ) -> jax.Array:
-    tau_p, kappa_total, diffusion_u, diffusion_total, area_star = parameters[:5]
+    """Score total-area transitions and per-sequence Kalman innovations."""
+    _, _, kappa_total, _, diffusion_total, area_star, _ = parameters
     objective = jnp.asarray(0.0, dtype=jnp.float64)
     for block in data.blocks:
-        current = jnp.sum(block.current, axis=1)
-        following = jnp.sum(block.following, axis=1)
-        mean = current - kappa_total * (current - area_star) * block.dt
+        current_total = jnp.sum(block.current, axis=1)
+        following_total = jnp.sum(block.following, axis=1)
+        mean = current_total - kappa_total * (
+            current_total - area_star
+        ) * block.dt
         variance = 2.0 * diffusion_total * block.dt + JITTER
         log_density = -0.5 * (
-            jnp.log(2.0 * jnp.pi * variance) + (following - mean) ** 2 / variance
+            jnp.log(2.0 * jnp.pi * variance)
+            + (following_total - mean) ** 2 / variance
         )
         objective -= jnp.sum(block.weight * log_density)
-    stationary_variance = diffusion_u / tau_p + JITTER
-    for block in data.rate_blocks:
-        dimension = block.initial.shape[1]
-        initial_log_density = -0.5 * (
-            dimension * jnp.log(2.0 * jnp.pi * stationary_variance)
-            + jnp.sum(block.initial**2, axis=1) / stationary_variance
+    for batch in data.sequence_batches:
+        coefficients = _kalman_coefficients_batch(
+            batch.y / batch.dt[:, :, None], batch.dt, batch.mask, parameters
         )
-        objective -= jnp.sum(block.initial_weight * initial_log_density)
-        decay = jnp.exp(-block.dt / tau_p)
-        variance = diffusion_u / tau_p * (1.0 - decay**2) + JITTER
-        residual = block.following - decay[:, None] * block.current
-        log_density = -0.5 * (
-            dimension * jnp.log(2.0 * jnp.pi * variance)
-            + jnp.sum(residual**2, axis=1) / variance
+        weights = batch.weight
+        segment_count = batch.segment_count
+        weights = weights[:, None]
+        weighted = (
+            coefficients.normalizer * weights,
+            coefficients.squared * weights,
+            coefficients.linear * weights,
+            coefficients.curvature * weights,
         )
-        objective -= jnp.sum(block.weight * log_density)
+        dimension = batch.y.shape[-1]
+        segment_normalizer = jnp.zeros((segment_count, dimension)).at[
+            batch.segment_id
+        ].add(
+            weighted[0]
+        )
+        segment_squared = jnp.zeros((segment_count, dimension)).at[
+            batch.segment_id
+        ].add(
+            weighted[1]
+        )
+        segment_linear = jnp.zeros((segment_count, dimension)).at[
+            batch.segment_id
+        ].add(
+            weighted[2]
+        )
+        segment_curvature = jnp.zeros((segment_count, dimension)).at[
+            batch.segment_id
+        ].add(
+            weighted[3]
+        )
+        sigma_squared = parameters[6] ** 2
+        precision = segment_curvature + 1.0 / sigma_squared
+        objective -= jnp.sum(
+            -0.5 * (segment_normalizer + segment_squared)
+            - 0.5 * jnp.log(sigma_squared)
+            - 0.5 * jnp.log(precision)
+            + 0.5 * segment_linear**2 / precision
+        )
     return objective
-
-
-def persistent_innovations(
-    sequence: StateSpaceSequence, tau_p: jax.Array, diffusion_u: jax.Array
-) -> jax.Array:
-    """Return standardized innovations of the observed conservative rates."""
-    dt = jnp.diff(sequence.tau)
-    rates = jnp.diff(sequence.conservative, axis=0) / dt[:, None]
-    stationary_scale = jnp.sqrt(diffusion_u / tau_p + JITTER)
-    initial = rates[:1] / stationary_scale
-    decay = jnp.exp(-dt[:-1] / tau_p)
-    variance = diffusion_u / tau_p * (1.0 - decay**2) + JITTER
-    following = (rates[1:] - decay[:, None] * rates[:-1]) / jnp.sqrt(
-        variance[:, None]
-    )
-    return jnp.concatenate((initial, following), axis=0)
 
 
 def negative_log_likelihood(raw: jax.Array, data: TrainingTransitions) -> jax.Array:

@@ -24,6 +24,7 @@ from ..fitting.masked_model import (
     prepare_training_transitions as prepare_event_transitions,
 )
 from ..fitting.model import (
+    EVENT_PARAMETER_NAMES,
     PARAMETER_NAMES,
     TrainingTransitions,
     prepare_training_transitions as prepare_clean_transitions,
@@ -73,7 +74,7 @@ class LagOutcome:
 
     @property
     def parameter_names(self) -> tuple[str, ...]:
-        return PARAMETER_NAMES if self.fit == "event" else PARAMETER_NAMES[:-1]
+        return EVENT_PARAMETER_NAMES if self.fit == "event" else PARAMETER_NAMES
 
 
 def _update_array(digest: Any, values: np.ndarray) -> None:
@@ -173,8 +174,9 @@ def _validate(
     config: AnalysisConfig,
     seed: int,
 ) -> ValidationResult:
-    sigma_b_squared = float(np.asarray(prepared.sigma_b_squared))
     if fit == "event":
+        assert isinstance(prepared, MaskedTrainingTransitions)
+        sigma_b_squared = float(np.asarray(prepared.sigma_b_squared))
         return validate_event_posterior(
             cast(list[EventChain], values),
             lag,
@@ -190,7 +192,6 @@ def _validate(
         lag,
         prepared.scaling,
         samples,
-        sigma_b_squared=sigma_b_squared,
         predictive_draws=config.predictive_draws,
         paths_per_segment=config.paths_per_segment,
         seed=seed,
@@ -202,6 +203,8 @@ def _prefixed(validation: ValidationResult, prefix: str) -> dict[str, np.ndarray
 
 
 def _slope_data(prepared: PreparedData) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
+    if isinstance(prepared, TrainingTransitions):
+        return {}, {"fitted_in_likelihood": True}
     slopes = [np.asarray(slope) for slope in prepared.conservative_slopes]
     arrays = {
         "conservative_segment_slope": np.concatenate(slopes)
@@ -311,7 +314,7 @@ def _compute_lag(
     physical_dt = np.concatenate([np.asarray(block.dt) for block in prepared.blocks])
     physical_dt *= prepared.scaling.time
     hessian = optimization.best.hessian
-    names = PARAMETER_NAMES if fit == "event" else PARAMETER_NAMES[:-1]
+    names = EVENT_PARAMETER_NAMES if fit == "event" else PARAMETER_NAMES
     weighted_events = 0.0
     event_rows = 0
     n_max = None
