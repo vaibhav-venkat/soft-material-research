@@ -446,9 +446,10 @@ def _same_stationary_optimum(runs: list[OptimizationRun]) -> bool:
     if len(runs) < 3:
         return False
     recent = runs[-3:]
+    # Gradient norms scale with the log likelihood, so the threshold must too.
     if not all(
         np.isfinite(run.objective)
-        and run.gradient_norm < 1e-3
+        and run.gradient_norm < 1e-6 * max(1.0, abs(run.objective))
         and np.all(np.isfinite(run.parameters))
         for run in recent
     ):
@@ -500,7 +501,7 @@ def optimize_parameters(
             solver,
             jnp.asarray(start),
             args=data,
-            max_steps=2_000,
+            max_steps=10_000,
             throw=False,
         )
         raw = np.asarray(solution.value)

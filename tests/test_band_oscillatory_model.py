@@ -141,9 +141,9 @@ class TestOscillatoryModel(unittest.TestCase):
     def test_integrated_variance_and_total_drift_use_different_rates(self) -> None:
         area = jnp.asarray([0.4, 0.6])
         dt = jnp.asarray(0.2)
-        base = jnp.asarray([0.8, 1.3, 0.25, 0.04, 0.03, 0.9, 0.02])
-        changed_omega = base.at[1].set(2.1)
-        changed_kappa = base.at[2].set(1.1)
+        base = jnp.asarray([0.3, 3.0, 1.3, 0.04, 0.4, 0.25, 0.03, 0.9, 0.02])
+        changed_omega = base.at[2].set(2.1)
+        changed_kappa = base.at[5].set(1.1)
         _, base_covariance = transition(area, dt, base)
         _, omega_covariance = transition(area, dt, changed_omega)
         base_mean, _ = transition(area, dt, base)
@@ -169,7 +169,7 @@ class TestOscillatoryModel(unittest.TestCase):
             (self._total_block(),),
             build_sequence_batches((sequence,), 1),
         )
-        parameters = jnp.asarray([0.8, 1.1, 0.4, 0.2, 0.1, 2.0, 0.05])
+        parameters = jnp.asarray([0.3, 3.0, 1.1, 0.2, 0.5, 0.4, 0.1, 2.0, 0.05])
         value = parameter_negative_log_likelihood(parameters, data)
         gradient = jax.grad(parameter_negative_log_likelihood)(parameters, data)
         self.assertTrue(np.isfinite(float(value)))
@@ -185,84 +185,148 @@ class TestOscillatoryModel(unittest.TestCase):
             atol=1e-10,
         )
 
-    def test_synthetic_oscillatory_parameters_are_recoverable(self) -> None:
-        generator = np.random.default_rng(13)
-        true = np.asarray([0.7, 1.4, 0.4, 0.04, 0.03, 1.0, 0.03])
-        sequences = []
-        for segment_id in range(6):
-            dt = 0.12
-            beta = generator.normal(size=2) * true[6]
-            for _ in range(2):
-                u = generator.normal(size=2) * np.sqrt(true[3] / true[0])
-                r = generator.normal(size=2) * np.sqrt(true[3] / true[0])
-                values = []
-                for _ in range(120):
-                    (
-                        transition_matrix,
-                        integral_coefficients,
-                        state_process_variance,
-                        integral_process_covariance,
-                        integral_process_variance,
-                    ) = (
-                        np.asarray(value)
-                        for value in oscillatory_interval_moments(
-                            dt, true[0], true[1], true[3]
-                        )
-                    )
-                    joint_covariance = np.zeros((3, 3))
-                    joint_covariance[:2, :2] = state_process_variance * np.eye(2)
-                    joint_covariance[:2, 2] = integral_process_covariance
-                    joint_covariance[2, :2] = integral_process_covariance
-                    joint_covariance[2, 2] = integral_process_variance
-                    noise = generator.multivariate_normal(
-                        np.zeros(3), joint_covariance, size=2
-                    )
-                    values.append(
-                        integral_coefficients @ np.asarray([u, r])
-                        + noise[:, 2]
-                        + beta * dt
-                    )
-                    u, r = (
-                        transition_matrix @ np.asarray([u, r])
-                        + noise[:, :2].T
-                    )
-                sequences.append(
-                    StateSpaceSequence(
-                        jnp.asarray(values),
-                        jnp.full(120, dt),
-                        jnp.arange(121, dtype=jnp.float64) * dt,
-                        jnp.asarray(0.5),
-                        segment_id,
+    def test_two_modes_beat_one_on_two_mode_data(self) -> None:
+        """Fit two-mode data with both models and check the second mode earns its keep.
+
+        Data come from fine-grained Euler integration of the two coupled SDEs, so
+        the simulator never touches the analytic interval moments the likelihood
+        uses. The restricted fit pins the fast variance to a negligible constant,
+        leaving the slow mode to carry everything -- that is the single
+        oscillatory mode this model replaced.
+        """
+        true = np.asarray([0.25, 7.0, 1.0, 0.040, 0.25, 0.40, 0.030, 1.0, 0.020])
+        rate_f = true[0] * (1.0 + true[1])
+        variance_f, variance_o = true[3], true[3] * true[4]
+        rows, components, steps, dt, substeps = 12, 2, 600, 0.12, 40
+        generator = np.random.default_rng(11)
+
+        shape = (rows, components)
+        u_f = generator.normal(size=shape) * np.sqrt(variance_f)
+        u_o = generator.normal(size=shape) * np.sqrt(variance_o)
+        r_o = generator.normal(size=shape) * np.sqrt(variance_o)
+        beta = np.repeat(
+            generator.normal(size=(rows // 2, components)) * true[8], 2, axis=0
+        )
+        h = dt / substeps
+        root_f = np.sqrt(2.0 * rate_f * variance_f * h)
+        root_o = np.sqrt(2.0 * true[0] * variance_o * h)
+        observations = np.empty((rows, steps, components))
+        for step in range(steps):
+            integral = np.zeros(shape)
+            for _ in range(substeps):
+                integral += 0.5 * h * (u_f + u_o)
+                next_f = u_f - rate_f * u_f * h + root_f * generator.normal(size=shape)
+                next_o = u_o + (
+                    -true[0] * u_o + true[2] * r_o
+                ) * h + root_o * generator.normal(size=shape)
+                r_o = r_o + (
+                    -true[2] * u_o - true[0] * r_o
+                ) * h + root_o * generator.normal(size=shape)
+                u_f, u_o = next_f, next_o
+                integral += 0.5 * h * (u_f + u_o)
+            observations[:, step] = integral + beta * dt
+
+        decay = np.exp(-true[5] * dt)
+        stationary = np.sqrt(true[6] / true[5])
+        current = true[7] + stationary * generator.normal(size=4_000)
+        following = (
+            true[7]
+            + (current - true[7]) * decay
+            + stationary * np.sqrt(1.0 - decay**2) * generator.normal(size=4_000)
+        )
+        block = TransitionBlock(
+            jnp.asarray(np.column_stack((0.5 * current, 0.5 * current))),
+            jnp.asarray(np.column_stack((0.5 * following, 0.5 * following))),
+            jnp.full(4_000, dt),
+            jnp.ones(4_000),
+        )
+        sequences = tuple(
+            StateSpaceSequence(
+                y=jnp.asarray(observations[row]),
+                dt=jnp.full(steps, dt),
+                tau=jnp.arange(steps + 1, dtype=jnp.float64) * dt,
+                weight=jnp.asarray(0.5),
+                segment_id=row // 2,
+            )
+            for row in range(rows)
+        )
+        data = TrainingTransitions(
+            Scaling(1.0, 1.0), (block,), build_sequence_batches(sequences, rows // 2)
+        )
+
+        def fit(start: np.ndarray, pinned: float | None) -> tuple[np.ndarray, float]:
+            free = [index for index in range(9) if index != 3 or pinned is None]
+            selection = jnp.asarray(free)
+            fixed = jnp.zeros(9).at[3].set(pinned or 0.0)
+            mask = jnp.asarray([pinned is not None and i == 3 for i in range(9)])
+            value_and_grad = jax.jit(
+                jax.value_and_grad(
+                    lambda raw: parameter_negative_log_likelihood(
+                        jnp.where(
+                            mask, fixed, jnp.zeros(9).at[selection].set(jnp.exp(raw))
+                        ),
+                        data,
                     )
                 )
-        data = TrainingTransitions(
-            Scaling(1.0, 1.0),
-            (self._total_block(count=80, kappa=true[2]),),
-            build_sequence_batches(tuple(sequences), 6),
-        )
-        value_and_grad = jax.jit(
-            jax.value_and_grad(
-                lambda raw: parameter_negative_log_likelihood(jnp.exp(raw), data)
             )
+            result = minimize(
+                lambda raw: tuple(
+                    np.asarray(value, dtype=np.float64)
+                    for value in value_and_grad(jnp.asarray(raw))
+                ),
+                np.log(start[free]),
+                jac=True,
+                method="L-BFGS-B",
+                bounds=[(-25.0, 25.0)] * len(free),
+                options={"gtol": 1e-8, "ftol": 1e-14, "maxiter": 3_000},
+            )
+            parameters = np.zeros(9)
+            parameters[free] = np.exp(result.x)
+            if pinned is not None:
+                parameters[3] = pinned
+            return parameters, float(result.fun)
+
+        start = np.asarray([0.3, 5.0, 0.8, 0.03, 0.2, 0.3, 0.02, 1.0, 0.015])
+        two_mode, two_mode_objective = fit(start, None)
+
+        pinned = 1e-4
+        restricted_start = start.copy()
+        restricted_start[3] = pinned
+        restricted_start[4] = (variance_f + variance_o) / pinned
+        restricted_start[[5, 6, 7]] = true[[5, 6, 7]]
+        one_mode, one_mode_objective = fit(restricted_start, pinned)
+
+        # The two-mode fit recovers the rates and the variance split.
+        self.assertAlmostEqual(
+            two_mode[0] * (1.0 + two_mode[1]), rate_f, delta=0.3 * rate_f
+        )
+        self.assertAlmostEqual(two_mode[2], true[2], delta=0.3 * true[2])
+        self.assertAlmostEqual(two_mode[3], variance_f, delta=0.4 * variance_f)
+        self.assertAlmostEqual(
+            two_mode[3] * two_mode[4], variance_o, delta=0.5 * variance_o
         )
 
-        def objective(raw: np.ndarray) -> tuple[float, np.ndarray]:
-            value, gradient = value_and_grad(jnp.asarray(raw))
-            return float(value), np.asarray(gradient)
+        # One mode cannot hold both timescales: it locks onto the fast decay and
+        # abandons the oscillation, collapsing to a small omega/gamma ratio.
+        self.assertGreater(one_mode[0], 3.0 * two_mode[0])
+        self.assertLess(one_mode[2] / one_mode[0], 0.3 * two_mode[2] / two_mode[0])
 
-        result = minimize(
-            objective,
-            np.log([0.8, 1.0, 0.3, 0.03, 0.02, 1.0, 0.02]),
-            jac=True,
-            method="BFGS",
-            options={"gtol": 1e-5, "maxiter": 200},
+        # The extra mode is decisively preferred and tracks the true ACF better.
+        self.assertGreater(one_mode_objective - two_mode_objective, 8.0)
+        lags = np.linspace(0.0, 12.0, 200)
+
+        def autocorrelation(parameters: np.ndarray) -> np.ndarray:
+            return parameters[3] * np.exp(
+                -parameters[0] * (1.0 + parameters[1]) * lags
+            ) + parameters[3] * parameters[4] * np.exp(
+                -parameters[0] * lags
+            ) * np.cos(parameters[2] * lags)
+
+        truth = autocorrelation(true)
+        self.assertLess(
+            np.sqrt(np.mean((autocorrelation(two_mode) - truth) ** 2)),
+            np.sqrt(np.mean((autocorrelation(one_mode) - truth) ** 2)),
         )
-        self.assertTrue(result.success, result.message)
-        fitted = np.exp(result.x)
-        np.testing.assert_allclose(
-            fitted[[0, 1, 3]], true[[0, 1, 3]], rtol=0.3
-        )
-        self.assertGreater(fitted[6], 0.0)
 
 
 if __name__ == "__main__":

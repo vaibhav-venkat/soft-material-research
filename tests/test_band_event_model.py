@@ -92,8 +92,10 @@ def _minimize_log_parameters(
         method="BFGS",
         options={"gtol": 1e-6, "maxiter": 1_000},
     )
+    # Gradient norms scale with the log likelihood, so the tolerance must too.
+    tolerance = max(2e-5, 1e-6 * abs(float(result.fun)))
     if not result.success and (
-        not np.isfinite(result.fun) or np.linalg.norm(result.jac) >= 2e-5
+        not np.isfinite(result.fun) or np.linalg.norm(result.jac) >= tolerance
     ):
         raise AssertionError(result.message)
     return np.asarray(result.x)
@@ -210,7 +212,7 @@ class TestEventMapsAndLikelihood(unittest.TestCase):
         )
         segment = ignored_event_segments(chain)[0]
         clean_data = prepare_clean([segment], 1)
-        parameters = jnp.asarray([0.8, 0.4, 0.5, 0.02, 0.03, 1.0, 0.05])
+        parameters = jnp.asarray([0.3, 3.0, 0.4, 0.02, 0.5, 0.5, 0.03, 1.0, 0.05])
         self.assertTrue(np.isfinite(float(clean_nll(parameters, clean_data))))
 
     def test_event_density_conditions_on_run_slope(self) -> None:
@@ -458,7 +460,7 @@ class TestSyntheticRecoveryAndBias(unittest.TestCase):
         self.assertLess(float(relative_error.max()), 0.12)
 
     def test_clean_fit_uses_oscillatory_parameterization(self) -> None:
-        self.assertEqual(self.clean_center.shape, (7,))
+        self.assertEqual(self.clean_center.shape, (9,))
         self.assertTrue(np.all(np.isfinite(self.clean_center)))
 
 

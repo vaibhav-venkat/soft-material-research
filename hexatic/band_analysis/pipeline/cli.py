@@ -74,6 +74,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--draws", type=int, default=mcmc.draws)
     parser.add_argument("--target-accept", type=float, default=mcmc.target_accept)
     parser.add_argument("--retry-warmup", type=int, default=mcmc.retry_warmup)
+    parser.add_argument("--retry-draws", type=int, default=mcmc.retry_draws)
     parser.add_argument(
         "--retry-target-accept", type=float, default=mcmc.retry_target_accept
     )
@@ -182,6 +183,7 @@ def _configs(args: argparse.Namespace) -> tuple[ExtractionConfig, AnalysisConfig
         draws=args.draws,
         target_accept=args.target_accept,
         retry_warmup=args.retry_warmup,
+        retry_draws=args.retry_draws,
         retry_target_accept=args.retry_target_accept,
     )
     analysis = AnalysisConfig(
