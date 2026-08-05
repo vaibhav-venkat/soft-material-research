@@ -426,6 +426,18 @@ def _transfer_rate_acf_plot(
         len(observed_time),
         len(simulated_time),
     )
+    envelope = arrays["simulated_transfer_rate_acf_envelope"]
+    if envelope.size:
+        band_stop = min(stop, envelope.shape[1])
+        axis.fill_between(
+            simulated_time[:band_stop],
+            envelope[0, :band_stop],
+            envelope[1, :band_stop],
+            color="tab:blue",
+            alpha=0.2,
+            linewidth=0,
+            label="same-geometry 95%",
+        )
     axis.plot(observed_time[:stop], observed[:stop], color="black", label="observed")
     axis.plot(
         simulated_time[:stop], simulated[:stop], color="tab:blue", label="simulated"
@@ -436,7 +448,22 @@ def _transfer_rate_acf_plot(
         ylabel=r"transfer-rate ACF",
         title=f"Lag {outcome.lag}: transfer-rate ACF",
     )
-    axis.legend()
+    axis.legend(loc="upper right")
+    counts = arrays["observed_transfer_rate_segment_count"]
+    if counts.size:
+        count_stop = min(stop, len(counts))
+        counted = axis.twinx()
+        counted.step(
+            observed_time[:count_stop],
+            counts[:count_stop],
+            where="post",
+            color="0.6",
+            linewidth=1,
+            linestyle="--",
+        )
+        counted.set_ylabel("segments contributing", color="0.5")
+        counted.tick_params(axis="y", colors="0.5")
+        counted.set_ylim(0, max(counts[:count_stop]) * 1.05)
     _save(path, figure)
 
 

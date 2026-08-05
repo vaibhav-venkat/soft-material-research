@@ -342,6 +342,32 @@ def _grouped_msd_quantiles(
     return np.nanquantile(padded, (0.025, 0.975), axis=0)
 
 
+def _replicate_acf_quantiles(replicates: list[list[np.ndarray]]) -> np.ndarray:
+    """Pool each replicate dataset exactly as the observed one is pooled, then band it.
+
+    Every replicate holds one simulated path per segment, so the drop-out
+    normalization in ``_pooled_autocorrelation`` biases it the same way it biases
+    the observed estimate and the comparison stays like-for-like.
+    """
+    curves = [_pooled_autocorrelation(series) for series in replicates if series]
+    if not curves:
+        return np.empty((2, 0), dtype=np.float64)
+    padded = np.full((len(curves), max(map(len, curves))), np.nan, dtype=np.float64)
+    for index, curve in enumerate(curves):
+        padded[index, : len(curve)] = curve
+    return np.nanquantile(padded, (0.025, 0.975), axis=0)
+
+
+def _contributing_counts(lengths: list[int]) -> np.ndarray:
+    """Number of segments long enough to contribute at each lag."""
+    if not lengths:
+        return np.empty(0, dtype=np.int64)
+    return np.asarray(
+        [sum(1 for value in lengths if value > lag) for lag in range(max(lengths))],
+        dtype=np.int64,
+    )
+
+
 def _grouped_autocorrelation(
     series: list[np.ndarray], group_sizes: list[int]
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -456,6 +482,12 @@ def _paths(
     simulated_tau_series: list[np.ndarray] = []
     observed_transfer_rate_series: list[np.ndarray] = []
     observed_transfer_rate_counts: list[int] = []
+    observed_transfer_rate_lengths: list[int] = []
+    # Replicate r is one simulated path from every segment: a whole synthetic
+    # dataset with the observed geometry, pooled the way the observed data is.
+    replicate_transfer_series: list[list[np.ndarray]] = [
+        [] for _ in range(paths_per_segment)
+    ]
     simulated_transfer_rate_series: list[np.ndarray] = []
     observed_transfer_rate_tau: list[np.ndarray] = []
     simulated_transfer_rate_tau: list[np.ndarray] = []
@@ -491,6 +523,9 @@ def _paths(
         observed_transfer_rate_series.extend(transfer_rate)
         observed_transfer_rate_tau.extend(transfer_tau)
         observed_transfer_rate_counts.append(len(transfer_rate))
+        observed_transfer_rate_lengths.append(
+            len(transfer_rate[0]) if transfer_rate else 0
+        )
         observed_conservative.append(observed_deviation.ravel())
         observed_conservative_series.extend(
             observed_deviation[:, component] for component in range(segment.n_bands)
@@ -642,6 +677,7 @@ def _paths(
             transfer_rate, transfer_tau = _transfer_rate_series(valid, valid_tau)
             simulated_transfer_rate_series.extend(transfer_rate)
             simulated_transfer_rate_tau.extend(transfer_tau)
+            replicate_transfer_series[path_index].extend(transfer_rate)
             if len(valid) > 1:
                 increment = np.diff(valid, axis=0)
                 simulated_segment_increments.append(increment)
@@ -755,6 +791,12 @@ def _paths(
         "observed_segment_total_acf_offset": segment_total_acf_offsets,
         "observed_segment_transfer_rate_acf": segment_transfer_acf,
         "observed_segment_transfer_rate_acf_offset": segment_transfer_acf_offsets,
+        "simulated_transfer_rate_acf_envelope": _replicate_acf_quantiles(
+            replicate_transfer_series
+        ),
+        "observed_transfer_rate_segment_count": _contributing_counts(
+            observed_transfer_rate_lengths
+        ),
         "observed_lag_time": observed_lag_times,
         "simulated_lag_time": simulated_lag_times,
         "observed_increment_covariance": _concatenate(observed_covariances)
