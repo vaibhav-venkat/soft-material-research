@@ -270,11 +270,33 @@ def _long_time_plot(outcome: LagOutcome, arrays: dict[str, np.ndarray], path: Pa
         for target, key in (
             (axes[0, 1], f"{prefix}_total_acf"),
             (axes[0, 2], f"{prefix}_conservative_acf"),
-            (axes[1, 2], f"{prefix}_area_msd"),
         ):
             values = arrays[key]
             stop = min(100, len(values), len(lag_time))
             target.plot(lag_time[:stop], values[:stop], color=color, label=prefix)
+    observed_msd = arrays["observed_area_msd"]
+    simulated_msd = arrays["simulated_area_msd"]
+    observed_lag_time = arrays["observed_lag_time"]
+    simulated_lag_time = arrays["simulated_lag_time"]
+    msd_stop = min(
+        100,
+        len(observed_msd),
+        len(simulated_msd),
+        len(observed_lag_time),
+        len(simulated_lag_time),
+    )
+    axes[1, 2].plot(
+        observed_lag_time[:msd_stop],
+        observed_msd[:msd_stop],
+        color="black",
+        label="observed",
+    )
+    axes[1, 2].plot(
+        simulated_lag_time[:msd_stop],
+        simulated_msd[:msd_stop],
+        color="tab:blue",
+        label="simulated",
+    )
     axes[0, 1].set(xlabel="physical lag time", ylabel=r"$A_T$ ACF")
     axes[0, 1].legend()
     for axis, suffix, label in (
