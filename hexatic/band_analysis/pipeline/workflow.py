@@ -389,6 +389,12 @@ def _load_cache(
         and "training_path_segment_break" not in arrays
     ):
         return None
+    if (
+        fit == "clean"
+        and metadata.get("accepted")
+        and "training_observed_transfer_rate_acf" not in arrays
+    ):
+        return None
     idata = az.from_netcdf(posterior_path, engine="h5netcdf")
     if idata.posterior.attrs.get("band_analysis_fingerprint") != expected_fingerprint:
         raise ValueError(f"incompatible lag posterior cache {posterior_path}")

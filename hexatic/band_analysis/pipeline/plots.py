@@ -344,6 +344,37 @@ def _covariance_plot(outcome: LagOutcome, arrays: dict[str, np.ndarray], path: P
     _save(path, figure)
 
 
+def _transfer_rate_acf_plot(
+    outcome: LagOutcome, arrays: dict[str, np.ndarray], path: Path
+) -> None:
+    figure, axis = plt.subplots(figsize=(7, 4.5))
+    observed = arrays["observed_transfer_rate_acf"]
+    simulated = arrays["simulated_transfer_rate_acf"]
+    observed_time = arrays["observed_transfer_rate_lag_time"]
+    simulated_time = arrays["simulated_transfer_rate_lag_time"]
+    stop = min(
+        800,
+        len(observed),
+        len(simulated),
+        len(observed_time),
+        len(simulated_time),
+    )
+    axis.plot(observed_time[:stop], observed[:stop], color="black", label="observed")
+    axis.plot(
+        simulated_time[:stop], simulated[:stop], color="tab:blue", label="simulated"
+    )
+    axis.axhline(0.0, color="0.5", linewidth=0.8)
+    axis.set(
+        xlabel="physical lag time",
+        ylabel=r"transfer-rate ACF",
+        title=(
+            rf"Lag {outcome.lag}: $v_i=\Delta(A_i-\bar A)/\Delta t-b_{{s,i}}$"
+        ),
+    )
+    axis.legend()
+    _save(path, figure)
+
+
 def _negative_plot(outcome: LagOutcome, metrics: dict[str, Any], path: Path) -> None:
     count = float(metrics.get("negative_area_count", 0))
     generated = float(metrics.get("generated_area_count", 0))
@@ -373,6 +404,7 @@ def plot_lag(outcome: LagOutcome, output_dir: Path) -> list[str]:
         "predictive.png": _predictive_plot,
         "trajectory.png": _trajectory_plot,
         "long_time.png": _long_time_plot,
+        "transfer_rate_acf.png": _transfer_rate_acf_plot,
         "covariance.png": _covariance_plot,
     }
     arrays = _validation_arrays(outcome, "training_")
