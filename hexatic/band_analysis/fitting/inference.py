@@ -463,7 +463,7 @@ def _same_stationary_optimum(runs: list[OptimizationRun]) -> bool:
 
 
 def optimize_parameters(
-    data: TrainingData, *, seed: int = 0, starts: int = 8
+    data: TrainingData, *, seed: int = 0, starts: int = 8, max_steps: int = 10_000
 ) -> OptimizationResult:
     """Run reproducible empirical, perturbed, and generic BFGS fits."""
     if not data.blocks or (
@@ -501,7 +501,7 @@ def optimize_parameters(
             solver,
             jnp.asarray(start),
             args=data,
-            max_steps=10_000,
+            max_steps=max_steps,
             throw=False,
         )
         raw = np.asarray(solution.value)

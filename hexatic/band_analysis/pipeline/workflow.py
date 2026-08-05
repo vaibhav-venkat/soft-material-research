@@ -47,6 +47,7 @@ class AnalysisConfig:
     base_lag: int = 2
     optimizer_seed: int = 0
     optimizer_starts: int = 8
+    optimizer_max_steps: int = 10_000
     mcmc: MCMCConfig = MCMCConfig()
     predictive_draws: int = 200
     paths_per_segment: int = 200
@@ -60,6 +61,8 @@ class AnalysisConfig:
             raise ValueError("configured lags must be unique")
         if self.optimizer_starts < 2:
             raise ValueError("optimizer starts must be at least two")
+        if self.optimizer_max_steps < 1:
+            raise ValueError("optimizer max steps must be positive")
 
 
 @dataclass(frozen=True)
@@ -248,7 +251,10 @@ def _compute_lag(
     prepared = _prepare(training, lag, fit)
     transition_count = sum(block.current.shape[0] for block in prepared.blocks)
     optimization = optimize_parameters(
-        prepared, seed=config.optimizer_seed + lag, starts=config.optimizer_starts
+        prepared,
+        seed=config.optimizer_seed + lag,
+        starts=config.optimizer_starts,
+        max_steps=config.optimizer_max_steps,
     )
     bayesian = run_bayesian_inference(
         prepared,

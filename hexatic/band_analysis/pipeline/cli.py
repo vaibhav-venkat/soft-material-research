@@ -69,6 +69,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--optimizer-starts", type=int, default=analysis.optimizer_starts
     )
+    parser.add_argument(
+        "--optimizer-max-steps", type=int, default=analysis.optimizer_max_steps
+    )
     parser.add_argument("--chains", type=int, default=mcmc.chains)
     parser.add_argument("--warmup", type=int, default=mcmc.warmup)
     parser.add_argument("--draws", type=int, default=mcmc.draws)
@@ -191,6 +194,7 @@ def _configs(args: argparse.Namespace) -> tuple[ExtractionConfig, AnalysisConfig
         base_lag=args.base_lag,
         optimizer_seed=args.seed,
         optimizer_starts=args.optimizer_starts,
+        optimizer_max_steps=args.optimizer_max_steps,
         mcmc=mcmc,
         predictive_draws=args.predictive_draws,
         paths_per_segment=args.paths_per_segment,
