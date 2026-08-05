@@ -14,9 +14,9 @@ from ..detection.chains import EventChain, event_transitions
 from ..detection.events import EventStep
 from .masked_model import (
     build_transition_blocks,
+    factorized_transition_log_density,
     normalize_event_chain,
     transition,
-    transition_log_density,
 )
 from .model import Scaling
 from .validation import ValidationResult
@@ -311,10 +311,12 @@ def _predict_draw(
 
 _predict_draws = jax.jit(jax.vmap(_predict_draw, in_axes=(0, 0) + (None,) * 10))
 _density_rows = jax.vmap(
-    transition_log_density,
-    in_axes=(0, 0, 0, 0, 0, 0, 0, 0, None, None),
+    factorized_transition_log_density,
+    in_axes=(0,) * 12 + (None,),
 )
-_density_draws = jax.jit(jax.vmap(_density_rows, in_axes=(None,) * 8 + (0, None)))
+_density_draws = jax.jit(
+    jax.vmap(_density_rows, in_axes=(None,) * 12 + (0,))
+)
 
 
 def _one_step(
@@ -365,15 +367,18 @@ def _one_step(
         draw_logp = np.asarray(
             _density_draws(
                 block.y,
+                block.following,
                 block.current,
                 block.mask,
+                block.mask_next,
                 block.dt,
                 block.C,
                 block.g,
                 block.o,
                 block.sigma_e_rows,
+                block.slope,
+                block.event,
                 jnp.asarray(selected),
-                jnp.asarray(sigma_b_squared),
             )
         )
         informative = np.asarray(block.o).sum(axis=1)

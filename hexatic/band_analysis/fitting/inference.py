@@ -174,13 +174,17 @@ def _event_noise_start(
         allocation = mask / counts[:, None]
         totals = np.sum(mask * current, axis=1)
         increment = -kappa_total * (totals - area_star) * dt
-        mean = mask * (current + allocation * increment[:, None])
+        mean = mask * (
+            current
+            + allocation * increment[:, None]
+            + np.asarray(block.slope) * dt[:, None]
+        )
         projection = (
             np.eye(mask.shape[1])[None, :, :] * mask[:, :, None]
             - mask[:, :, None] * mask[:, None, :] / counts[:, None, None]
         )
         covariance = (
-            (float(np.asarray(data.sigma_b_squared)) + diffusion_u / tau_p)
+            (diffusion_u / tau_p)
             * dt[:, None, None] ** 2
             * projection
             + 2.0

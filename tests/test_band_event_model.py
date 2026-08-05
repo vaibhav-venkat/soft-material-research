@@ -11,6 +11,7 @@ import numpy as np
 from scipy.optimize import minimize
 
 from hexatic.band_analysis.detection.chains import (
+    EventChain,
     build_knot_grids,
     event_transitions,
     plan_chains,
@@ -139,6 +140,65 @@ def _density(
 
 
 class TestEventMapsAndLikelihood(unittest.TestCase):
+    def test_continuous_conservative_information_is_scored_once(self) -> None:
+        tau = np.arange(30, dtype=np.float64) * 0.2
+        areas = np.column_stack(
+            (
+                4.0 + 0.15 * np.sin(tau),
+                3.5 + 0.10 * np.cos(0.7 * tau),
+                4.5 - 0.15 * np.sin(tau) - 0.10 * np.cos(0.7 * tau),
+            )
+        )
+        mask = np.ones_like(areas, dtype=bool)
+        events = tuple(
+            no_event_step(mask[index], areas[index + 1])
+            for index in range(len(tau) - 1)
+        )
+        chain = EventChain(
+            seed_id="continuous",
+            slot_ids=np.broadcast_to(np.arange(3), areas.shape).copy(),
+            frame_indices=np.arange(len(tau), dtype=np.int64),
+            tau=tau,
+            areas=areas,
+            mask=mask,
+            events=events,
+        )
+        segment = ignored_event_segments(chain)[0]
+        event_data = prepare_event([chain], 1)
+        clean_data = prepare_clean([segment], 1)
+        parameters = jnp.asarray([2.0, 0.15, 0.04, 0.03, 1.0, 0.2])
+
+        self.assertAlmostEqual(
+            float(event_nll(parameters, event_data)),
+            float(clean_nll(parameters[:5], clean_data)),
+            places=9,
+        )
+
+    def test_event_density_conditions_on_run_slope(self) -> None:
+        simulation = simulate_event_chain(
+            scripted_schedule(cycles=1, continuous_steps=10).chain,
+            TRUE_PARAMETERS,
+            seed=22,
+        )
+        data = prepare_event([simulation.chain], 1)
+        block = data.blocks[0]
+        self.assertGreater(float(jnp.linalg.norm(block.slope[block.event])), 0.0)
+        without_slope = data.__class__(
+            scaling=data.scaling,
+            blocks=(block._replace(slope=jnp.zeros_like(block.slope)),),
+            rate_blocks=data.rate_blocks,
+            conservative_slopes=data.conservative_slopes,
+            slope_masks=data.slope_masks,
+            sigma_b_squared=data.sigma_b_squared,
+        )
+        self.assertGreater(
+            abs(
+                float(event_nll(jnp.asarray(TRUE_PARAMETERS), data))
+                - float(event_nll(jnp.asarray(TRUE_PARAMETERS), without_slope))
+            ),
+            1e-6,
+        )
+
     def test_simultaneous_birth_death_survives_tracking(self) -> None:
         old_a = np.asarray([[1, 0], [0, 0]], dtype=bool)
         old_b = np.asarray([[0, 1], [0, 0]], dtype=bool)

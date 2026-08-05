@@ -1,4 +1,9 @@
-"""Masked padded transitions and likelihoods for observed event chains."""
+"""Masked event likelihood without duplicating conservative increments.
+
+Continuous steps factor into a scalar total-area density and the persistent-rate
+density. Event steps use the mapped padded Gaussian instead and are omitted from
+the rate density; their means condition on the fitted inter-event slope.
+"""
 
 from __future__ import annotations
 
@@ -25,6 +30,7 @@ class MaskedTransitionBlock(NamedTuple):
     o: jax.Array
     sigma_e_rows: jax.Array
     y: jax.Array
+    slope: jax.Array
     dt: jax.Array
     weight: jax.Array
     event: jax.Array
@@ -76,13 +82,19 @@ def _moments(
     dt: jax.Array,
     parameters: jax.Array,
     sigma_b_squared: jax.Array | float,
+    conservative_slope: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     tau_p, kappa_total, diffusion_u, diffusion_total, area_star = parameters[:5]
     active = jnp.asarray(mask, dtype=jnp.float64)
     weights = allocation(active)
     total = jnp.dot(active, area)
     total_increment = -kappa_total * (total - area_star) * dt
-    mean = active * (area + weights * total_increment)
+    slope = (
+        jnp.zeros_like(area)
+        if conservative_slope is None
+        else conservative_slope
+    )
+    mean = active * (area + weights * total_increment + slope * dt)
     conservative_variance = (sigma_b_squared + diffusion_u / tau_p) * dt**2
     covariance = conservative_variance * conservative_projection(active)
     covariance += 2.0 * diffusion_total * dt * jnp.outer(weights, weights)
@@ -157,9 +169,81 @@ def transition_log_density(
     return padded_log_density + padding_constant
 
 
-_density_rows = jax.vmap(
-    transition_log_density,
-    in_axes=(0, 0, 0, 0, 0, 0, 0, 0, None, None),
+def event_transition_log_density(
+    y: jax.Array,
+    area: jax.Array,
+    mask: jax.Array,
+    dt: jax.Array,
+    C: jax.Array,
+    g: jax.Array,
+    o: jax.Array,
+    sigma_e_rows: jax.Array,
+    slope: jax.Array,
+    parameters: jax.Array,
+) -> jax.Array:
+    """Mapped event density conditioned on the fitted inter-event slope."""
+    mean, covariance = _moments(
+        area, mask, dt, parameters, 0.0, conservative_slope=slope
+    )
+    sigma_event = parameters[5]
+    observed = jnp.asarray(o, dtype=jnp.float64)
+    event_variance = (
+        observed
+        * jnp.asarray(sigma_e_rows, dtype=jnp.float64)
+        * sigma_event**2
+    )
+    covariance = C @ covariance @ C.T + jnp.diag(event_variance)
+    covariance += jnp.diag(1.0 - observed)
+    covariance += JITTER * jnp.eye(area.shape[-1], dtype=jnp.float64)
+    residual = observed * (y - (C @ mean + g))
+    cholesky = jnp.linalg.cholesky(covariance)
+    whitened = jax.scipy.linalg.solve_triangular(cholesky, residual, lower=True)
+    padded = -0.5 * (
+        area.shape[-1] * jnp.log(2.0 * jnp.pi)
+        + 2.0 * jnp.sum(jnp.log(jnp.diag(cholesky)))
+        + jnp.dot(whitened, whitened)
+    )
+    padding = area.shape[-1] - jnp.sum(observed)
+    constant = 0.5 * padding * (
+        jnp.log(2.0 * jnp.pi) + jnp.log1p(JITTER)
+    )
+    return padded + constant
+
+
+def factorized_transition_log_density(
+    y: jax.Array,
+    following: jax.Array,
+    area: jax.Array,
+    mask: jax.Array,
+    mask_next: jax.Array,
+    dt: jax.Array,
+    C: jax.Array,
+    g: jax.Array,
+    o: jax.Array,
+    sigma_e_rows: jax.Array,
+    slope: jax.Array,
+    event: jax.Array,
+    parameters: jax.Array,
+) -> jax.Array:
+    """One transition factor: total-only if continuous, mapped if an event."""
+    event_density = event_transition_log_density(
+        y, area, mask, dt, C, g, o, sigma_e_rows, slope, parameters
+    )
+    _, kappa_total, _, diffusion_total, area_star = parameters[:5]
+    current_total = jnp.sum(mask * area)
+    following_total = jnp.sum(mask_next * following)
+    mean = current_total - kappa_total * (current_total - area_star) * dt
+    variance = 2.0 * diffusion_total * dt + JITTER
+    total_density = -0.5 * (
+        jnp.log(2.0 * jnp.pi * variance)
+        + (following_total - mean) ** 2 / variance
+    )
+    return jnp.where(event, event_density, total_density)
+
+
+_factorized_density_rows = jax.vmap(
+    factorized_transition_log_density,
+    in_axes=(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None),
 )
 
 
@@ -236,7 +320,7 @@ def _slope_lookup(chain: EventChain) -> np.ndarray:
     for (start, end), slope in zip(
         _runs(chain), conservative_run_slopes(chain), strict=True
     ):
-        values[start : end - 1] = slope.value
+        values[start : min(end, len(values))] = slope.value
     return values
 
 
@@ -254,6 +338,7 @@ def _as_transition_block(
         o=jnp.asarray(values["o"], dtype=jnp.float64),
         sigma_e_rows=jnp.asarray(values["sigma_e_rows"], dtype=jnp.float64),
         y=jnp.asarray(values["y"], dtype=jnp.float64),
+        slope=jnp.asarray(values["slope"], dtype=jnp.float64),
         dt=jnp.asarray(values["dt"], dtype=jnp.float64),
         weight=jnp.asarray(values["weight"], dtype=jnp.float64),
         event=jnp.asarray(values["event"], dtype=bool),
@@ -313,25 +398,23 @@ def _build_blocks(
                     ("o", step.o),
                     ("sigma_e_rows", step.sigma_e_rows),
                     ("y", step.y),
+                    ("slope", slopes[start]),
                     ("dt", dt),
                     ("weight", grid.weight),
                     ("event", is_event),
                 ):
                     transition_values[name].append(value)
-                if is_event:
-                    mask = step.mask_next
-                    delta = chain.areas[end] - (step.H @ chain.areas[start] + step.g)
-                    rate = _np_projection(mask) @ delta / dt
-                else:
-                    mask = chain.mask[start]
-                    rate = _np_projection(mask) @ (
-                        chain.areas[end] - chain.areas[start]
-                    ) / dt - slopes[start]
+                mask = chain.mask[start]
+                rate = _np_projection(mask) @ (
+                    chain.areas[end] - chain.areas[start]
+                ) / dt - slopes[start]
                 rates.append(rate)
                 rate_masks.append(mask)
                 events.append(is_event)
             for index, (rate, mask) in enumerate(zip(rates, rate_masks, strict=True)):
-                if index == 0 or events[index]:
+                if events[index]:
+                    continue
+                if index == 0 or events[index - 1]:
                     rate_values["initial"].append(rate)
                     rate_values["initial_mask"].append(mask)
                     rate_values["initial_weight"].append(grid.weight)
@@ -385,19 +468,23 @@ def prepare_training_transitions(
 def parameter_negative_log_likelihood(
     parameters: jax.Array, data: MaskedTrainingTransitions
 ) -> jax.Array:
+    """Score each observed degree of freedom once under the factored model."""
     objective = jnp.asarray(0.0, dtype=jnp.float64)
     for block in data.blocks:
-        log_density = _density_rows(
+        log_density = _factorized_density_rows(
             block.y,
+            block.following,
             block.current,
             block.mask,
+            block.mask_next,
             block.dt,
             block.C,
             block.g,
             block.o,
             block.sigma_e_rows,
+            block.slope,
+            block.event,
             parameters,
-            data.sigma_b_squared,
         )
         objective -= jnp.sum(block.weight * log_density)
     tau_p, _, diffusion_u = parameters[:3]
