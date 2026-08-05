@@ -296,13 +296,16 @@ def oscillatory_transition_matrix(
     decay = jnp.exp(-gamma * dt)
     cosine = jnp.cos(omega * dt)
     sine = jnp.sin(omega * dt)
-    return decay * jnp.stack(
+    matrix = jnp.stack(
         (
             jnp.stack((cosine, sine), axis=-1),
             jnp.stack((-sine, cosine), axis=-1),
         ),
         axis=-2,
     )
+    if decay.ndim == 0:
+        return decay * matrix
+    return jnp.expand_dims(jnp.asarray(decay), axis=(-1, -2)) * matrix
 
 
 def oscillatory_process_variance(
@@ -369,16 +372,29 @@ def oscillatory_interval_moments(
         dt, gamma, omega, diffusion_u
     )
     # Under stationarity, Cov(x_{k+1}, I_k) = v [G_0, -G_1].
-    endpoint_integral_covariance = stationary_variance * jnp.stack(
-        (coefficients[..., 0], -coefficients[..., 1]), axis=-1
-    )
-    # Subtract the part explained by the left endpoint to isolate process noise.
-    propagated_integral_covariance = jnp.einsum(
-        "...ij,...j->...i",
-        transition_matrix,
-        jnp.expand_dims(jnp.asarray(stationary_variance), axis=-1)
-        * coefficients,
-    )
+    if transition_matrix.ndim == 2:
+        endpoint_integral_covariance = stationary_variance * jnp.stack(
+            (coefficients[..., 0], -coefficients[..., 1]), axis=-1
+        )
+        propagated_integral_covariance = transition_matrix @ (
+            stationary_variance * coefficients
+        )
+    else:
+        stationary_variance_with_mode_axis = jnp.expand_dims(
+            jnp.asarray(stationary_variance), axis=-1
+        )
+        endpoint_integral_covariance = (
+            stationary_variance_with_mode_axis
+            * jnp.stack(
+                (coefficients[..., 0], -coefficients[..., 1]), axis=-1
+            )
+        )
+        # Subtract the part explained by the left endpoint to isolate process noise.
+        propagated_integral_covariance = jnp.einsum(
+            "...ij,...j->...i",
+            transition_matrix,
+            stationary_variance_with_mode_axis * coefficients,
+        )
     integral_process_covariance = (
         endpoint_integral_covariance - propagated_integral_covariance
     )

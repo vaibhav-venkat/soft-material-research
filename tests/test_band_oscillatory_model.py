@@ -114,6 +114,30 @@ class TestOscillatoryModel(unittest.TestCase):
             atol=1e-12,
         )
 
+    def test_interval_moments_broadcast_over_paths(self) -> None:
+        dt = jnp.asarray([0.07, 0.12, 0.21])
+        gamma = jnp.asarray([0.4, 0.8, 1.3])
+        omega = jnp.asarray([0.9, 1.5, 2.2])
+        diffusion = jnp.asarray([0.02, 0.04, 0.07])
+        batched = tuple(
+            np.asarray(value)
+            for value in oscillatory_interval_moments(
+                dt, gamma, omega, diffusion
+            )
+        )
+        self.assertEqual(batched[0].shape, (3, 2, 2))
+        self.assertEqual(batched[1].shape, (3, 2))
+        self.assertEqual(batched[3].shape, (3, 2))
+        for path in range(3):
+            scalar = tuple(
+                np.asarray(value)
+                for value in oscillatory_interval_moments(
+                    dt[path], gamma[path], omega[path], diffusion[path]
+                )
+            )
+            for actual, expected in zip(batched, scalar, strict=True):
+                np.testing.assert_allclose(actual[path], expected, atol=1e-12)
+
     def test_integrated_variance_and_total_drift_use_different_rates(self) -> None:
         area = jnp.asarray([0.4, 0.6])
         dt = jnp.asarray(0.2)
