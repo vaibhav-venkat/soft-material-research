@@ -40,6 +40,26 @@ from .fitting.model import (
     transition,
     transition_log_density,
 )
+from .fitting.masked_model import (
+    MaskedPersistentRateBlock,
+    MaskedSlope,
+    MaskedTrainingTransitions,
+    MaskedTransitionBlock,
+    allocation as masked_allocation,
+    build_persistent_rate_blocks as build_masked_persistent_rate_blocks,
+    build_transition_blocks as build_masked_transition_blocks,
+    conservative_projection as masked_conservative_projection,
+    conservative_run_slopes,
+    estimate_slope_variance as estimate_masked_slope_variance,
+    negative_log_likelihood as masked_negative_log_likelihood,
+    normalize_event_chain,
+    parameter_negative_log_likelihood as masked_parameter_negative_log_likelihood,
+    prepare_training_transitions as prepare_masked_training_transitions,
+    propagate_event,
+    scaling_from_chains,
+    transition as masked_transition,
+    transition_log_density as masked_transition_log_density,
+)
 from .detection.chains import (
     ChainPlan,
     EventChain,

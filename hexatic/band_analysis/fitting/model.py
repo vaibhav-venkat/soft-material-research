@@ -16,7 +16,7 @@ from ..detection.segments import StableSegment
 
 jax.config.update("jax_enable_x64", True)
 
-PARAMETER_NAMES = ("tau_p", "kappa_T", "D_u", "D_T", "A_T_star")
+PARAMETER_NAMES = ("tau_p", "kappa_T", "D_u", "D_T", "A_T_star", "sigma_E")
 JITTER = 1e-10
 
 
@@ -82,6 +82,7 @@ class Scaling:
                 1.0 / self.time,
                 self.area**2 / self.time,
                 self.area**2 / self.time,
+                self.area,
                 self.area,
             ],
             dtype=np.float64,
@@ -302,7 +303,7 @@ def transition(
     sigma_b_squared: jax.Array | float = 0.0,
 ) -> tuple[jax.Array, jax.Array]:
     """Unconditional one-step moments used by posterior predictive checks."""
-    tau_p, kappa_total, diffusion_u, diffusion_total, area_star = parameters
+    tau_p, kappa_total, diffusion_u, diffusion_total, area_star = parameters[:5]
     n_bands = area.shape[-1]
     projection = jnp.asarray(conservative_projection(n_bands))
     total = jnp.sum(area)
@@ -339,7 +340,7 @@ def transition_log_density(
 def parameter_negative_log_likelihood(
     parameters: jax.Array, data: TrainingTransitions
 ) -> jax.Array:
-    tau_p, kappa_total, diffusion_u, diffusion_total, area_star = parameters
+    tau_p, kappa_total, diffusion_u, diffusion_total, area_star = parameters[:5]
     objective = jnp.asarray(0.0, dtype=jnp.float64)
     for block in data.blocks:
         current = jnp.sum(block.current, axis=1)
