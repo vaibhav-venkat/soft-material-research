@@ -40,6 +40,15 @@ from .fitting.model import (
     transition,
     transition_log_density,
 )
+from .detection.events import (
+    EventCompositionError,
+    EventStep,
+    build_event_step,
+    initial_slots,
+    no_event_step,
+    pack_areas,
+    slot_mask,
+)
 from .detection.segments import StableSegment, build_stable_segments
 from .detection.tracking import (
     BandTracker,
@@ -60,8 +69,10 @@ __all__ = [
     "DetectedBand",
     "DetectionFrame",
     "EventCode",
+    "EventCompositionError",
     "EventEdges",
     "EventRecord",
+    "EventStep",
     "HessianDiagnostics",
     "JITTER",
     "LagOutcome",
@@ -80,6 +91,7 @@ __all__ = [
     "TrackedFrame",
     "TransitionBlock",
     "ValidationResult",
+    "build_event_step",
     "build_transition_blocks",
     "build_stable_segments",
     "characterize_band",
@@ -91,9 +103,13 @@ __all__ = [
     "conservative_segment_slope",
     "conservative_segment_slopes",
     "estimate_slope_variance",
+    "initial_slots",
     "label_dilute_bands",
     "negative_log_likelihood",
+    "no_event_step",
     "optimize_parameters",
+    "pack_areas",
+    "slot_mask",
     "parameter_negative_log_likelihood",
     "persistent_innovations",
     "positive_parameters",
