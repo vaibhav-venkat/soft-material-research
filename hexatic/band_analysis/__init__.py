@@ -92,4 +92,9 @@ from .detection.tracking import (
     TrackedFrame,
 )
 from .fitting.validation import ValidationResult, validate_posterior
+from .fitting.event_validation import (
+    EventSimulation,
+    simulate_event_chain,
+    validate_event_posterior,
+)
 from .pipeline.workflow import AnalysisConfig, LagOutcome, run_analysis, stable_lags
