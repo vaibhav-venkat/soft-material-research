@@ -61,6 +61,12 @@ Physical constants are centralized in `hexatic/constants/` (`cylinder.py`, `sphe
 
 ## Style
 
-From `ARCHITECTURE.md`, applied repo-wide: **be concise, limit comments, keep it clean and simple.** Do not create overcomplicated files, classes, or verbose functions. Prefer SciPy over hand-rolled NumPy for mathematically heavy work, and Numba where it does not add much complexity. Python uses `from __future__ import annotations`, frozen dataclasses, and `pathlib`. Rust lints: `unsafe_code = "warn"`, `clippy::all = "warn"`.
+From `ARCHITECTURE.md`, applied repo-wide: **be concise, limit comments, keep it clean and simple.** Do not create overcomplicated files, classes, or verbose functions. Prefer SciPy and Jax over hand-rolled NumPy for mathematically heavy work, and Numba where it does not add much complexity. Python uses `from __future__ import annotations`, frozen dataclasses, and `pathlib`. Rust lints: `unsafe_code = "warn"`, `clippy::all = "warn"`.
+
+In general, you should aim for simplicity within this complex systems. Of course that means relative, as this entire project isn't trivial. However, that can be done in these ways:
+- STop with the unnecessary backwards-compatiblity. This isn't a public package, only I'm using this, so I can change whatever I want
+- Stop with the useless metadata
+- Do not add a lot of checks on OOB behavior or behavior in general which assumes the input data can be malformed (i.e like the safetensors). Any behavior that happens between the input in the actual analysis can be validated, but prefer not doing it in the code but rather in the testing stage. I'm not referring to stasticial validation which is a differnet thing and SHOULD be done in the code
+- You should always look to make things vectorized and performant. But only do small things here and there on your own like function caching. Larger changes will be directly instructed by me. 
 
 AI-assisted contributions are disclosed in `DISCLOSURE.md`; update it if that changes.
