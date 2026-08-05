@@ -337,6 +337,14 @@ def _one_step(
     event_parts = []
     observation_parts = []
     observation_mask_parts = []
+    observed_delta_parts = []
+    predicted_delta_parts = []
+    observed_total_delta_parts = []
+    predicted_total_delta_parts = []
+    observed_deviation_parts = []
+    predicted_deviation_parts = []
+    observed_conservative_parts = []
+    predicted_conservative_parts = []
     log_scores = []
     informative_parts = []
     covered = 0
@@ -359,6 +367,11 @@ def _one_step(
         prediction = np.asarray(predictions)
         following = np.asarray(block.following)
         active = np.asarray(block.mask_next, dtype=bool)
+        current = np.asarray(block.current)
+        baseline = (
+            np.einsum("tij,tj->ti", np.asarray(block.H), current)
+            + np.asarray(block.g)
+        )
         low, high = np.quantile(prediction, [0.025, 0.975], axis=0)
         covered += int(
             np.count_nonzero(active & (following >= low) & (following <= high))
@@ -396,6 +409,31 @@ def _one_step(
             np.asarray(predicted_observations).mean(axis=0).ravel()
         )
         observation_mask_parts.append(np.asarray(block.o, dtype=bool).ravel())
+        observed_delta = active * (following - baseline)
+        predicted_delta = active * (prediction.mean(axis=0) - baseline)
+        observed_delta_parts.append(observed_delta[active])
+        predicted_delta_parts.append(predicted_delta[active])
+        observed_total_delta_parts.append(observed_delta.sum(axis=1))
+        predicted_total_delta_parts.append(predicted_delta.sum(axis=1))
+        counts = active.sum(axis=1)
+        observed_deviation = active * (
+            following - (active * following).sum(axis=1)[:, None] / counts[:, None]
+        )
+        predicted_mean = prediction.mean(axis=0)
+        predicted_deviation = active * (
+            predicted_mean
+            - (active * predicted_mean).sum(axis=1)[:, None] / counts[:, None]
+        )
+        observed_deviation_parts.append(observed_deviation[active])
+        predicted_deviation_parts.append(predicted_deviation[active])
+        observed_conservative = observed_delta - (
+            observed_delta.sum(axis=1)[:, None] / counts[:, None]
+        ) * active
+        predicted_conservative = predicted_delta - (
+            predicted_delta.sum(axis=1)[:, None] / counts[:, None]
+        ) * active
+        observed_conservative_parts.append(observed_conservative[active])
+        predicted_conservative_parts.append(predicted_conservative[active])
     observed = np.concatenate(observed_parts)
     mean = np.concatenate(mean_parts)
     active = np.concatenate(mask_parts)
@@ -408,6 +446,18 @@ def _one_step(
         "one_step_event": np.concatenate(event_parts),
         "one_step_observation_mean": np.concatenate(observation_parts),
         "one_step_observation_mask": np.concatenate(observation_mask_parts),
+        "observed_delta_area": np.concatenate(observed_delta_parts),
+        "predicted_delta_area": np.concatenate(predicted_delta_parts),
+        "observed_delta_total": np.concatenate(observed_total_delta_parts),
+        "predicted_delta_total": np.concatenate(predicted_total_delta_parts),
+        "observed_area_deviation": np.concatenate(observed_deviation_parts),
+        "predicted_area_deviation": np.concatenate(predicted_deviation_parts),
+        "observed_conservative_increment": np.concatenate(
+            observed_conservative_parts
+        ),
+        "predicted_conservative_increment": np.concatenate(
+            predicted_conservative_parts
+        ),
     }
     metrics = {
         "predictive_log_score": float(np.mean(np.concatenate(log_scores))),
@@ -434,10 +484,21 @@ def _paths(
     path_areas = []
     path_masks = []
     path_tau = []
+    path_slot_ids = []
     offsets = [0]
+    observed_areas = []
+    observed_masks = []
+    observed_tau = []
+    observed_slot_ids = []
+    observed_offsets = [0]
     negative = 0
     generated = 0
     for chain_index, chain in enumerate(chains):
+        observed_areas.append(chain.areas.ravel())
+        observed_masks.append(chain.mask.ravel())
+        observed_tau.append(chain.tau)
+        observed_slot_ids.append(chain.slot_ids.ravel())
+        observed_offsets.append(observed_offsets[-1] + chain.areas.size)
         indices = generator.choice(
             len(posterior), paths_per_chain, replace=len(posterior) < paths_per_chain
         )
@@ -456,6 +517,9 @@ def _paths(
         path_areas.append(areas.ravel())
         path_masks.append(mask.ravel())
         path_tau.append(np.tile(chain.tau, paths_per_chain))
+        path_slot_ids.append(
+            np.tile(chain.slot_ids[None], (paths_per_chain, 1, 1)).ravel()
+        )
         row_size = chain.n_steps * chain.n_max
         offsets.extend(offsets[-1] + row_size * np.arange(1, paths_per_chain + 1))
         negative += int(np.count_nonzero((areas < 0.0) & mask))
@@ -464,7 +528,13 @@ def _paths(
         "path_area": np.concatenate(path_areas),
         "path_mask": np.concatenate(path_masks),
         "path_tau": np.concatenate(path_tau),
+        "path_slot_id": np.concatenate(path_slot_ids),
         "path_offset": np.asarray(offsets, dtype=np.int64),
+        "observed_path_area": np.concatenate(observed_areas),
+        "observed_path_mask": np.concatenate(observed_masks),
+        "observed_path_tau": np.concatenate(observed_tau),
+        "observed_path_slot_id": np.concatenate(observed_slot_ids),
+        "observed_path_offset": np.asarray(observed_offsets, dtype=np.int64),
     }
     metrics: dict[str, float | int] = {
         "negative_area_count": negative,
@@ -502,13 +572,23 @@ def validate_event_posterior(
         "one_step_low",
         "one_step_high",
         "one_step_observation_mean",
+        "observed_delta_area",
+        "predicted_delta_area",
+        "observed_delta_total",
+        "predicted_delta_total",
+        "observed_area_deviation",
+        "predicted_area_deviation",
+        "observed_conservative_increment",
+        "predicted_conservative_increment",
         "path_area",
+        "observed_path_area",
     }
     arrays = {
         name: values * scaling.area if name in area_keys else values
         for name, values in {**one_step_arrays, **path_arrays}.items()
     }
     arrays["path_tau"] *= scaling.time
+    arrays["observed_path_tau"] *= scaling.time
     metrics = {**one_step_metrics, **path_metrics}
     metrics["one_step_rmse"] *= scaling.area
     metrics["inactive_prediction_max_abs"] *= scaling.area
