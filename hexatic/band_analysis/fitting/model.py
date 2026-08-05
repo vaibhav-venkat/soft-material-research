@@ -17,10 +17,12 @@ from ..detection.segments import StableSegment
 jax.config.update("jax_enable_x64", True)
 
 PARAMETER_NAMES = (
-    "gamma",
+    "gamma_o",
+    "delta",
     "omega",
+    "amplitude_f",
+    "amplitude_r",
     "kappa_T",
-    "D_u",
     "D_T",
     "A_T_star",
     "sigma_b",
@@ -99,9 +101,11 @@ class Scaling:
         return np.asarray(
             [
                 1.0 / self.time,
+                1.0,
                 1.0 / self.time,
+                self.area**2 / self.time**2,
+                1.0,
                 1.0 / self.time,
-                self.area**2 / self.time**3,
                 self.area**2 / self.time,
                 self.area,
                 self.area / self.time,
@@ -410,6 +414,81 @@ def oscillatory_interval_moments(
     )
 
 
+def redistribution_rates(
+    parameters: jax.Array,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+    """Unpack the two redistribution modes as ``(lambda_f, gamma_o, omega, D_f, D_o)``."""
+    gamma_o, delta, omega, amplitude_f, amplitude_r = (
+        parameters[0],
+        parameters[1],
+        parameters[2],
+        parameters[3],
+        parameters[4],
+    )
+    lambda_f = gamma_o * (1.0 + delta)
+    return lambda_f, gamma_o, omega, lambda_f * amplitude_f, gamma_o * (
+        amplitude_r * amplitude_f
+    )
+
+
+def stationary_variances(parameters: jax.Array) -> jax.Array:
+    """Stationary variances of ``(u_f, u_o, r_o)``."""
+    variance_f = parameters[3]
+    variance_o = parameters[3] * parameters[4]
+    return jnp.stack((variance_f, variance_o, variance_o))
+
+
+class _IntervalBlocks(NamedTuple):
+    """Joint moments of ``(u_f, u_o, r_o)`` and ``∫(u_f + u_o)dt`` over one interval."""
+
+    transition: jax.Array
+    coefficients: jax.Array
+    process_covariance: jax.Array
+    measurement_covariance: jax.Array
+    measurement_variance: jax.Array
+
+
+def interval_blocks(dt: jax.Array | float, parameters: jax.Array) -> _IntervalBlocks:
+    """Stack the fast and slow mode moments; independence makes them additive."""
+    lambda_f, gamma_o, omega, diffusion_f, diffusion_o = redistribution_rates(
+        parameters
+    )
+    (
+        fast_matrix,
+        fast_coefficients,
+        fast_state_variance,
+        fast_covariance,
+        fast_variance,
+    ) = oscillatory_interval_moments(dt, lambda_f, 0.0, diffusion_f)
+    (
+        slow_matrix,
+        slow_coefficients,
+        slow_state_variance,
+        slow_covariance,
+        slow_variance,
+    ) = oscillatory_interval_moments(dt, gamma_o, omega, diffusion_o)
+    # With omega = 0 the fast pair decouples, so only its first component survives.
+    transition_matrix = (
+        jnp.zeros((3, 3), dtype=jnp.float64)
+        .at[0, 0]
+        .set(fast_matrix[0, 0])
+        .at[1:, 1:]
+        .set(slow_matrix)
+    )
+    process_covariance = jnp.diag(
+        jnp.stack((fast_state_variance, slow_state_variance, slow_state_variance))
+    )
+    return _IntervalBlocks(
+        transition=transition_matrix,
+        coefficients=jnp.concatenate((fast_coefficients[:1], slow_coefficients)),
+        process_covariance=process_covariance,
+        measurement_covariance=jnp.concatenate(
+            (fast_covariance[:1], slow_covariance)
+        ),
+        measurement_variance=fast_variance + slow_variance,
+    )
+
+
 class _KalmanResult(NamedTuple):
     log_likelihood: jax.Array
     standardized_innovations: jax.Array
@@ -458,14 +537,12 @@ def _observe(
 def _kalman_filter(
     observations: jax.Array, dt: jax.Array, parameters: jax.Array
 ) -> _KalmanResult:
-    """Marginalize latent ``r`` and the segment transfer with an exact scan."""
-    gamma, omega, _, diffusion_u, _, _, sigma_b = parameters
-    stationary_variance = diffusion_u / gamma
-    mean = jnp.zeros((3, observations.shape[1]), dtype=jnp.float64)
+    """Marginalize the latent modes and the segment transfer with an exact scan."""
+    sigma_b = parameters[8]
+    mean = jnp.zeros((4, observations.shape[1]), dtype=jnp.float64)
     covariance = jnp.diag(
-        jnp.asarray(
-            [stationary_variance, stationary_variance, sigma_b**2],
-            dtype=jnp.float64,
+        jnp.concatenate(
+            (stationary_variances(parameters), jnp.reshape(sigma_b**2, (1,)))
         )
     )
 
@@ -475,29 +552,24 @@ def _kalman_filter(
     ) -> tuple[tuple[jax.Array, jax.Array], tuple[jax.Array, jax.Array, jax.Array]]:
         previous_mean, previous_covariance = carry
         step_dt, observation = values
-        (
-            transition_matrix_2,
-            integral_coefficients,
-            state_process_variance,
-            integral_process_covariance,
-            integral_process_variance,
-        ) = oscillatory_interval_moments(
-            step_dt, gamma, omega, diffusion_u
+        blocks = interval_blocks(step_dt, parameters)
+        transition_matrix = (
+            jnp.zeros((4, 4), dtype=jnp.float64)
+            .at[:3, :3]
+            .set(blocks.transition)
+            .at[3, 3]
+            .set(1.0)
         )
-        transition_matrix = jnp.zeros((3, 3), dtype=jnp.float64)
-        transition_matrix = transition_matrix.at[:2, :2].set(
-            transition_matrix_2
+        state_process_covariance = (
+            jnp.zeros((4, 4), dtype=jnp.float64)
+            .at[:3, :3]
+            .set(blocks.process_covariance)
         )
-        transition_matrix = transition_matrix.at[2, 2].set(1.0)
-        state_process_covariance = jnp.zeros((3, 3), dtype=jnp.float64)
-        state_process_covariance = state_process_covariance.at[:2, :2].set(
-            state_process_variance * jnp.eye(2, dtype=jnp.float64)
-        )
-        measurement = jnp.stack(
-            (integral_coefficients[0], integral_coefficients[1], step_dt)
+        measurement = jnp.concatenate(
+            (blocks.coefficients, jnp.reshape(step_dt, (1,)))
         )
         state_measurement_covariance = jnp.concatenate(
-            (integral_process_covariance, jnp.zeros(1, dtype=jnp.float64))
+            (blocks.measurement_covariance, jnp.zeros(1, dtype=jnp.float64))
         )
         (
             updated_mean,
@@ -510,7 +582,7 @@ def _kalman_filter(
             previous_covariance,
             observation,
             measurement,
-            integral_process_variance,
+            blocks.measurement_variance,
             transition_matrix,
             state_process_covariance,
             state_measurement_covariance,
@@ -558,12 +630,10 @@ def _kalman_coefficients_single(
     parameters: jax.Array,
 ) -> _KalmanCoefficients:
     """Return coefficients for the conditional likelihood of interval integrals."""
-    gamma, omega, _, diffusion_u, _, _, _ = parameters
-    stationary_variance = diffusion_u / gamma
     dimension = observations.shape[1]
-    mean = jnp.zeros((2, dimension), dtype=jnp.float64)
-    sensitivity = jnp.zeros((2, dimension), dtype=jnp.float64)
-    covariance = stationary_variance * jnp.eye(2, dtype=jnp.float64)
+    mean = jnp.zeros((3, dimension), dtype=jnp.float64)
+    sensitivity = jnp.zeros((3, dimension), dtype=jnp.float64)
+    covariance = jnp.diag(stationary_variances(parameters))
 
     def step(
         carry: tuple[jax.Array, jax.Array, jax.Array],
@@ -574,15 +644,11 @@ def _kalman_coefficients_single(
     ]:
         previous_mean, previous_sensitivity, previous_covariance = carry
         step_dt, observation, valid = values
-        (
-            transition_matrix,
-            integral_coefficients,
-            state_process_variance,
-            integral_process_covariance,
-            integral_process_variance,
-        ) = oscillatory_interval_moments(
-            step_dt, gamma, omega, diffusion_u
-        )
+        blocks = interval_blocks(step_dt, parameters)
+        transition_matrix = blocks.transition
+        integral_coefficients = blocks.coefficients
+        integral_process_covariance = blocks.measurement_covariance
+        integral_process_variance = blocks.measurement_variance
         observation_mean = integral_coefficients @ previous_mean
         covariance_observation = previous_covariance @ integral_coefficients
         variance = (
@@ -598,7 +664,7 @@ def _kalman_coefficients_single(
             transition_matrix
             @ previous_covariance
             @ transition_matrix.T
-            + state_process_variance * jnp.eye(2, dtype=jnp.float64)
+            + blocks.process_covariance
         )
         cross_covariance = (
             transition_matrix @ covariance_observation
@@ -662,17 +728,20 @@ def transition(
     area: jax.Array, dt: jax.Array, parameters: jax.Array
 ) -> tuple[jax.Array, jax.Array]:
     """Unconditional raw-area moments for posterior predictive checks."""
-    gamma, omega, kappa_total, diffusion_u, diffusion_total, area_star, sigma_b = (
+    lambda_f, gamma_o, omega, diffusion_f, diffusion_o = redistribution_rates(
         parameters
     )
+    kappa_total, diffusion_total, area_star, sigma_b = parameters[5:]
     total = jnp.sum(area)
     allocation = area_fraction_allocation(area)
     decay = jnp.exp(-kappa_total * dt)
     total_mean = area_star + (total - area_star) * decay
     mean = area + (total_mean - total) * allocation
-    conservative_variance = integrated_oscillatory_variance(
-        dt, gamma, omega, diffusion_u
-    ) + sigma_b**2 * dt**2
+    conservative_variance = (
+        integrated_oscillatory_variance(dt, lambda_f, 0.0, diffusion_f)
+        + integrated_oscillatory_variance(dt, gamma_o, omega, diffusion_o)
+        + sigma_b**2 * dt**2
+    )
     total_variance = oscillatory_process_variance(dt, kappa_total, diffusion_total)
     projection = jnp.asarray(conservative_projection(area.shape[-1]))
     covariance = conservative_variance * projection + total_variance * jnp.outer(
@@ -704,7 +773,7 @@ def parameter_negative_log_likelihood(
     parameters: jax.Array, data: TrainingTransitions
 ) -> jax.Array:
     """Score total-area transitions and per-sequence Kalman innovations."""
-    _, _, kappa_total, _, diffusion_total, area_star, _ = parameters
+    kappa_total, diffusion_total, area_star, _ = parameters[5:]
     objective = jnp.asarray(0.0, dtype=jnp.float64)
     for block in data.blocks:
         current_total = jnp.sum(block.current, axis=1)
@@ -754,7 +823,7 @@ def parameter_negative_log_likelihood(
         ].add(
             weighted[3]
         )
-        sigma_squared = parameters[6] ** 2
+        sigma_squared = parameters[8] ** 2
         precision = segment_curvature + 1.0 / sigma_squared
         objective -= jnp.sum(
             -0.5 * (segment_normalizer + segment_squared)

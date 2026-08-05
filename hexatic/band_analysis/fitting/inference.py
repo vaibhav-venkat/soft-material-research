@@ -372,12 +372,19 @@ def empirical_parameters(data: TrainingData) -> np.ndarray:
         if len(sequence_means) > 1
         else max(0.1 * np.sqrt(variance_rate), 1e-6)
     )
+    # The lag-1 correlation sees the dominant fast mode; the slow mode is set an
+    # order of magnitude below it, and the empirical zero crossing underestimates
+    # omega because the fast tail delays it.
+    lambda_f = max(gamma, 1e-6)
+    slow_rate = lambda_f / 13.0
     return np.asarray(
         [
-            max(gamma, 1e-6),
-            max(omega, 1e-6),
+            slow_rate,
+            12.0,
+            max(1.5 * omega, 1e-6),
+            max(0.9 * variance_rate, 1e-8),
+            0.11,
             total_rate,
-            diffusion_u,
             diffusion_total,
             max(area_star, 1e-6),
             sigma_b,
@@ -427,7 +434,7 @@ def _starts(
         for _ in range(count - 2)
     )
     if len(empirical) == len(PARAMETER_NAMES) and not event:
-        generic_values = [1.0, 0.25, 0.1, 0.1, 0.1, 1.0, 0.1]
+        generic_values = [0.08, 11.0, 0.25, 0.1, 0.1, 0.1, 0.1, 1.0, 0.1]
     else:
         generic_values = [1.0, 0.1, 0.1, 0.1, 1.0, float(empirical[-1])]
     generic = raw_parameters(np.asarray(generic_values))

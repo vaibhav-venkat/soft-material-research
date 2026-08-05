@@ -19,7 +19,11 @@ from .workflow import LagOutcome
 
 PARAMETER_LABELS = {
     "gamma": r"$\gamma$",
+    "gamma_o": r"$\gamma_o$",
+    "delta": r"$\delta$",
     "omega": r"$\omega$",
+    "amplitude_f": r"$\sigma_f^2$",
+    "amplitude_r": r"$\sigma_o^2/\sigma_f^2$",
     "tau_p": r"$\tau_p$",
     "kappa_T": r"$\kappa_T$",
     "D_u": r"$D_u$",
@@ -263,7 +267,7 @@ def _trajectory_plot(outcome: LagOutcome, arrays: dict[str, np.ndarray], path: P
 
 
 def _long_time_plot(outcome: LagOutcome, arrays: dict[str, np.ndarray], path: Path) -> None:
-    figure, axes = plt.subplots(2, 4, figsize=(19, 8))
+    figure, axes = plt.subplots(2, 3, figsize=(15, 8))
     axes[0, 0].hist(arrays["observed_total"], bins=40, density=True, alpha=0.6, label="observed")
     axes[0, 0].hist(arrays["simulated_total"], bins=40, density=True, alpha=0.5, label="simulated")
     axes[0, 0].set_xlabel(r"$A_T$")
@@ -279,46 +283,47 @@ def _long_time_plot(outcome: LagOutcome, arrays: dict[str, np.ndarray], path: Pa
             target.plot(lag_time[:stop], values[:stop], color=color, label=prefix)
     observed_lag_time = arrays["observed_lag_time"]
     simulated_lag_time = arrays["simulated_lag_time"]
-    for axis, suffix, label in (
-        (axes[1, 2], "area", r"band area MSD"),
-        (axes[0, 3], "total", r"$A_T$ MSD"),
-        (axes[1, 3], "conservative", r"$A_i-\bar A$ MSD"),
-    ):
-        observed_msd = arrays[f"observed_{suffix}_msd"]
-        simulated_msd = arrays[f"simulated_{suffix}_msd"]
-        msd_stop = min(
-            800,
-            len(observed_msd),
-            len(simulated_msd),
-            len(observed_lag_time),
-            len(simulated_lag_time),
-        )
-        axis.plot(
-            observed_lag_time[:msd_stop],
-            observed_msd[:msd_stop],
-            color="black",
-            label="observed",
-        )
-        axis.plot(
-            simulated_lag_time[:msd_stop],
-            simulated_msd[:msd_stop],
+    axis = axes[1, 2]
+    observed_msd = arrays["observed_area_msd"]
+    simulated_msd = arrays["simulated_area_msd"]
+    msd_stop = min(
+        800,
+        len(observed_msd),
+        len(simulated_msd),
+        len(observed_lag_time),
+        len(simulated_lag_time),
+    )
+    axis.plot(
+        observed_lag_time[:msd_stop],
+        observed_msd[:msd_stop],
+        color="black",
+        label="observed",
+    )
+    axis.plot(
+        simulated_lag_time[:msd_stop],
+        simulated_msd[:msd_stop],
+        color="tab:blue",
+        label="simulated",
+    )
+    envelope = arrays["simulated_area_msd_envelope"]
+    if envelope.size:
+        stop = min(msd_stop, envelope.shape[1])
+        axis.fill_between(
+            simulated_lag_time[:stop],
+            envelope[0, :stop],
+            envelope[1, :stop],
             color="tab:blue",
-            label="simulated",
+            alpha=0.2,
+            linewidth=0,
+            label="simulated 95%",
         )
-        envelope = arrays[f"simulated_{suffix}_msd_envelope"]
-        if envelope.size:
-            stop = min(msd_stop, envelope.shape[1])
-            axis.fill_between(
-                simulated_lag_time[:stop],
-                envelope[0, :stop],
-                envelope[1, :stop],
-                color="tab:blue",
-                alpha=0.2,
-                linewidth=0,
-                label="simulated 95%",
-            )
-        axis.set(xlabel="physical lag time", ylabel=label, xscale="log", yscale="log")
-        axis.legend()
+    axis.set(
+        xlabel="physical lag time",
+        ylabel="band area MSD",
+        xscale="log",
+        yscale="log",
+    )
+    axis.legend()
     axes[0, 1].set(xlabel="physical lag time", ylabel=r"$A_T$ ACF")
     axes[0, 1].legend()
     for axis, suffix, label in (
@@ -335,53 +340,6 @@ def _long_time_plot(outcome: LagOutcome, arrays: dict[str, np.ndarray], path: Pa
     axes[0, 2].set(xlabel="physical lag time", ylabel="conservative-mode ACF")
     axes[0, 2].legend()
     figure.suptitle(f"Lag {outcome.lag}: long-time behavior")
-    _save(path, figure)
-
-
-def _segment_total_acf_plot(
-    outcome: LagOutcome, arrays: dict[str, np.ndarray], path: Path
-) -> None:
-    """Per-segment ACFs, to test whether a pooled feature is one segment or many."""
-    figure, axes = plt.subplots(1, 2, figsize=(14, 5))
-    panels = (
-        (axes[0], "segment_total_acf", "total_acf", "observed_lag_time", r"$A_T$ ACF"),
-        (
-            axes[1],
-            "segment_transfer_rate_acf",
-            "transfer_rate_acf",
-            "observed_transfer_rate_lag_time",
-            "transfer-rate ACF",
-        ),
-    )
-    for axis, segment_key, pooled_key, time_key, label in panels:
-        curves = arrays[f"observed_{segment_key}"]
-        offsets = arrays[f"observed_{segment_key}_offset"]
-        lag_time = arrays[time_key]
-        drawn = 0
-        for index in range(len(offsets) - 1):
-            values = curves[offsets[index] : offsets[index + 1]]
-            stop = min(800, len(values), len(lag_time))
-            if stop < 2:
-                continue
-            axis.plot(
-                lag_time[:stop], values[:stop], color="black", alpha=0.35, linewidth=1
-            )
-            drawn += 1
-        for prefix, color in (("observed", "black"), ("simulated", "tab:blue")):
-            values = arrays[f"{prefix}_{pooled_key}"]
-            stop = min(800, len(values), len(lag_time))
-            axis.plot(
-                lag_time[:stop],
-                values[:stop],
-                color=color,
-                linewidth=2.5,
-                label=f"{prefix} (pooled)",
-            )
-        axis.axhline(0.0, color="grey", linewidth=0.8, linestyle=":")
-        axis.set(xlabel="physical lag time", ylabel=label)
-        axis.set_title(f"{drawn} segments (thin lines)")
-        axis.legend()
-    figure.suptitle(f"Lag {outcome.lag}: per-segment autocorrelation")
     _save(path, figure)
 
 
@@ -515,7 +473,6 @@ def plot_lag(outcome: LagOutcome, output_dir: Path) -> list[str]:
         "predictive.png": _predictive_plot,
         "trajectory.png": _trajectory_plot,
         "long_time.png": _long_time_plot,
-        "segment_total_acf.png": _segment_total_acf_plot,
         "transfer_rate_acf.png": _transfer_rate_acf_plot,
         "covariance.png": _covariance_plot,
     }

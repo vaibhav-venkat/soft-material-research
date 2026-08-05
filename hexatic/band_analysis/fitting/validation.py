@@ -470,19 +470,6 @@ def _contributing_counts(lengths: list[int]) -> np.ndarray:
     )
 
 
-def _grouped_autocorrelation(
-    series: list[np.ndarray], group_sizes: list[int]
-) -> tuple[np.ndarray, np.ndarray]:
-    """Autocorrelate each group of series alone, flattened with its offsets."""
-    curves = []
-    start = 0
-    for size in group_sizes:
-        curves.append(_pooled_autocorrelation(series[start : start + size]))
-        start += size
-    offsets = np.cumsum([0, *(len(curve) for curve in curves)], dtype=np.int64)
-    return _concatenate(curves), offsets
-
-
 def _pooled_lag_times(series: list[np.ndarray]) -> np.ndarray:
     return _pooled_increment_statistic(
         series, lambda increments: float(np.median(increments))
@@ -583,7 +570,6 @@ def _paths(
     observed_tau_series: list[np.ndarray] = []
     simulated_tau_series: list[np.ndarray] = []
     observed_transfer_rate_series: list[np.ndarray] = []
-    observed_transfer_rate_counts: list[int] = []
     observed_transfer_rate_lengths: list[int] = []
     # Replicate r is one simulated path from every segment: a whole synthetic
     # dataset with the observed geometry, pooled the way the observed data is.
@@ -624,7 +610,6 @@ def _paths(
         )
         observed_transfer_rate_series.extend(transfer_rate)
         observed_transfer_rate_tau.extend(transfer_tau)
-        observed_transfer_rate_counts.append(len(transfer_rate))
         observed_transfer_rate_lengths.append(
             len(transfer_rate[0]) if transfer_rate else 0
         )
@@ -652,19 +637,25 @@ def _paths(
         )
         paths[:, 0] = sampled_areas[0]
         component_count = segment.n_bands - 1
-        rates = generator.standard_normal(
-            (paths_per_segment, component_count)
-        ) * np.sqrt(
-            segment_parameters[:, 3] / segment_parameters[:, 0]
+        deviation_f = np.sqrt(segment_parameters[:, 3])[:, None]
+        deviation_o = np.sqrt(
+            segment_parameters[:, 3] * segment_parameters[:, 4]
         )[:, None]
-        oscillatory_rates = generator.standard_normal(
-            (paths_per_segment, component_count)
-        ) * np.sqrt(
-            segment_parameters[:, 3] / segment_parameters[:, 0]
-        )[:, None]
+        fast_rates = (
+            generator.standard_normal((paths_per_segment, component_count))
+            * deviation_f
+        )
+        rates = (
+            generator.standard_normal((paths_per_segment, component_count))
+            * deviation_o
+        )
+        oscillatory_rates = (
+            generator.standard_normal((paths_per_segment, component_count))
+            * deviation_o
+        )
         slopes = generator.standard_normal(
             (paths_per_segment, component_count)
-        ) * segment_parameters[:, 6, None]
+        ) * segment_parameters[:, 8, None]
         stops = np.full(paths_per_segment, len(sampled_areas), dtype=np.int64)
         active = np.ones(paths_per_segment, dtype=bool)
         for frame in range(len(sampled_areas) - 1):
@@ -684,16 +675,33 @@ def _paths(
             parameters = segment_parameters[indices]
             step = sampled_tau[frame + 1] - sampled_tau[frame]
             totals = current[indices].sum(axis=1)
-            total_decay = np.exp(-parameters[:, 2] * step)
+            total_decay = np.exp(-parameters[:, 5] * step)
             following_totals = (
-                parameters[:, 5]
-                + (totals - parameters[:, 5]) * total_decay
+                parameters[:, 7]
+                + (totals - parameters[:, 7]) * total_decay
                 + np.sqrt(
-                    parameters[:, 4] / parameters[:, 2] * (1.0 - total_decay**2)
+                    parameters[:, 6] / parameters[:, 5] * (1.0 - total_decay**2)
                 )
                 * generator.standard_normal(len(indices))
             )
             weights = current[indices] / totals[:, None]
+            slow_rate = parameters[:, 0]
+            fast_rate = slow_rate * (1.0 + parameters[:, 1])
+            (
+                fast_matrix,
+                fast_coefficients,
+                fast_state_variance,
+                fast_covariance,
+                fast_variance,
+            ) = (
+                np.asarray(value)
+                for value in oscillatory_interval_moments(
+                    step,
+                    fast_rate,
+                    jnp.zeros(len(indices)),
+                    fast_rate * parameters[:, 3],
+                )
+            )
             (
                 transition_matrix,
                 integral_coefficients,
@@ -704,13 +712,24 @@ def _paths(
                 np.asarray(value)
                 for value in oscillatory_interval_moments(
                     step,
-                    parameters[:, 0],
-                    parameters[:, 1],
-                    parameters[:, 3],
+                    slow_rate,
+                    parameters[:, 2],
+                    slow_rate * parameters[:, 4] * parameters[:, 3],
                 )
             )
+            current_fast_rates = fast_rates[indices].copy()
             current_rates = rates[indices].copy()
             current_oscillatory_rates = oscillatory_rates[indices].copy()
+            fast_joint = np.zeros((len(indices), 2, 2), dtype=np.float64)
+            fast_joint[:, 0, 0] = fast_state_variance
+            fast_joint[:, 0, 1] = fast_covariance[:, 0]
+            fast_joint[:, 1, 0] = fast_covariance[:, 0]
+            fast_joint[:, 1, 1] = fast_variance
+            fast_noise = np.einsum(
+                "pij,pmj->pmi",
+                np.linalg.cholesky(fast_joint),
+                generator.standard_normal((len(indices), component_count, 2)),
+            )
             joint_covariance = np.zeros((len(indices), 3, 3), dtype=np.float64)
             joint_covariance[:, 0, 0] = state_process_variance
             joint_covariance[:, 1, 1] = state_process_variance
@@ -724,7 +743,9 @@ def _paths(
                 generator.standard_normal((len(indices), component_count, 3)),
             )
             integral = (
-                integral_coefficients[:, 0, None] * current_rates
+                fast_coefficients[:, 0, None] * current_fast_rates
+                + fast_noise[:, :, 1]
+                + integral_coefficients[:, 0, None] * current_rates
                 + integral_coefficients[:, 1, None]
                 * current_oscillatory_rates
                 + noise[:, :, 2]
@@ -735,6 +756,10 @@ def _paths(
                 current[indices]
                 + weights * (following_totals - totals)[:, None]
                 + redistribution
+            )
+            fast_rates[indices] = (
+                fast_matrix[:, 0, 0, None] * current_fast_rates
+                + fast_noise[:, :, 0]
             )
             rates[indices] = (
                 transition_matrix[:, 0, 0, None] * current_rates
@@ -817,12 +842,6 @@ def _paths(
     simulated_path_area = simulated_area * scaling.area
     observed_total_acf = _pooled_autocorrelation(observed_total_series)
     simulated_total_acf = _pooled_autocorrelation(simulated_total_series)
-    segment_total_acf, segment_total_acf_offsets = _grouped_autocorrelation(
-        observed_total_series, [1] * len(observed_total_series)
-    )
-    segment_transfer_acf, segment_transfer_acf_offsets = _grouped_autocorrelation(
-        observed_transfer_rate_series, observed_transfer_rate_counts
-    )
     replicate_curves = _replicate_curves(replicate_transfer_series)
     transfer_rate_segment_counts = _contributing_counts(observed_transfer_rate_lengths)
     observed_conservative_acf = _pooled_autocorrelation(
@@ -880,28 +899,10 @@ def _paths(
         "simulated_transfer_rate_lag_time": simulated_transfer_rate_lag_times,
         "observed_area_msd": _pooled_msd(observed_area_series) * scaling.area**2,
         "simulated_area_msd": _pooled_msd(simulated_area_series) * scaling.area**2,
-        "observed_total_msd": _pooled_msd(observed_total_series) * scaling.area**2,
-        "simulated_total_msd": _pooled_msd(simulated_total_series) * scaling.area**2,
-        "observed_conservative_msd": _pooled_msd(observed_conservative_series)
-        * scaling.area**2,
-        "simulated_conservative_msd": _pooled_msd(simulated_conservative_series)
-        * scaling.area**2,
         "simulated_area_msd_envelope": _grouped_msd_quantiles(
             simulated_area_series, path_band_counts
         )
         * scaling.area**2,
-        "simulated_total_msd_envelope": _grouped_msd_quantiles(
-            simulated_total_series, [1] * len(simulated_total_series)
-        )
-        * scaling.area**2,
-        "simulated_conservative_msd_envelope": _grouped_msd_quantiles(
-            simulated_conservative_series, path_band_counts
-        )
-        * scaling.area**2,
-        "observed_segment_total_acf": segment_total_acf,
-        "observed_segment_total_acf_offset": segment_total_acf_offsets,
-        "observed_segment_transfer_rate_acf": segment_transfer_acf,
-        "observed_segment_transfer_rate_acf_offset": segment_transfer_acf_offsets,
         "simulated_transfer_rate_acf_envelope": _replicate_acf_quantiles(
             replicate_curves
         ),

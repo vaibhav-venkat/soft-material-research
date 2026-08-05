@@ -386,6 +386,11 @@ def _load_cache(
     if arrays_metadata.get("fingerprint") != expected_fingerprint:
         raise ValueError(f"incompatible lag arrays cache {arrays_path}")
     arrays = load_file(arrays_path)
+    names = EVENT_PARAMETER_NAMES if fit == "event" else PARAMETER_NAMES
+    posterior = arrays.get("normalized_posterior")
+    if posterior is not None and posterior.shape[-1] != len(names):
+        logger.info("%s lag %d: cached posterior predates the model, refitting", fit, lag)
+        return None
     idata = az.from_netcdf(posterior_path, engine="h5netcdf")
     if idata.posterior.attrs.get("band_analysis_fingerprint") != expected_fingerprint:
         raise ValueError(f"incompatible lag posterior cache {posterior_path}")
