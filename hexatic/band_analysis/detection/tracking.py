@@ -341,7 +341,7 @@ class BandTracker:
                     and old_degree[overlapping_rows[0]] > 1
                 ):
                     code = EventCode.SPLIT
-                elif len(overlapping_rows) == 0 and len(old_ids) < len(frame.bands):
+                elif len(overlapping_rows) == 0:
                     code = EventCode.BIRTH
                 else:
                     code = EventCode.UNCERTAIN

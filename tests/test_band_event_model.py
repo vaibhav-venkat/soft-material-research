@@ -10,14 +10,24 @@ import jax.numpy as jnp
 import numpy as np
 from scipy.optimize import minimize
 
-from hexatic.band_analysis.detection.chains import build_knot_grids, event_transitions
+from hexatic.band_analysis.detection.chains import (
+    build_knot_grids,
+    event_transitions,
+    plan_chains,
+)
+from hexatic.band_analysis.detection.characterization import DetectedBand
 from hexatic.band_analysis.detection.events import (
     EventStep,
     build_event_step,
     initial_slots,
     no_event_step,
 )
-from hexatic.band_analysis.detection.tracking import EventEdges
+from hexatic.band_analysis.detection.tracking import (
+    BandTracker,
+    DetectionFrame,
+    EventCode,
+    EventEdges,
+)
 from hexatic.band_analysis.fitting.event_validation import simulate_event_chain
 from hexatic.band_analysis.fitting.inference import empirical_parameters
 from hexatic.band_analysis.fitting.masked_model import (
@@ -129,6 +139,37 @@ def _density(
 
 
 class TestEventMapsAndLikelihood(unittest.TestCase):
+    def test_simultaneous_birth_death_survives_tracking(self) -> None:
+        old_a = np.asarray([[1, 0], [0, 0]], dtype=bool)
+        old_b = np.asarray([[0, 1], [0, 0]], dtype=bool)
+        newborn = np.asarray([[0, 0], [1, 0]], dtype=bool)
+        frames = [
+            DetectionFrame(
+                0,
+                0,
+                1.0,
+                (DetectedBand(1.0, 0.0, old_a), DetectedBand(1.0, 1.0, old_b)),
+            ),
+            DetectionFrame(
+                1,
+                1,
+                1.0,
+                (DetectedBand(1.0, 0.0, old_a), DetectedBand(1.0, 1.0, newborn)),
+            ),
+        ]
+        tracked = BandTracker(
+            overlap_threshold=0.5, persistence_frames=1
+        ).track(frames)
+
+        self.assertEqual(tracked[1].events[0].code, EventCode.BIRTH)
+        edges = tracked[1].edges
+        self.assertIsNotNone(edges)
+        assert edges is not None
+        np.testing.assert_array_equal(
+            edges.edges, np.asarray([[1, 0], [0, 0]], dtype=bool)
+        )
+        self.assertEqual(len(plan_chains(tracked, seed_id="simultaneous")), 1)
+
     def test_k_way_simultaneous_map_identities(self) -> None:
         step, slots = _simultaneous_step()
         before = np.asarray([10.0, 4.0, 6.0, 8.0, 2.0, 0.0, 0.0])
