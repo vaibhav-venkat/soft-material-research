@@ -342,20 +342,82 @@ def _grouped_msd_quantiles(
     return np.nanquantile(padded, (0.025, 0.975), axis=0)
 
 
-def _replicate_acf_quantiles(replicates: list[list[np.ndarray]]) -> np.ndarray:
-    """Pool each replicate dataset exactly as the observed one is pooled, then band it.
+def _replicate_curves(replicates: list[list[np.ndarray]]) -> list[np.ndarray]:
+    """Pool each replicate dataset exactly as the observed one is pooled.
 
     Every replicate holds one simulated path per segment, so the drop-out
     normalization in ``_pooled_autocorrelation`` biases it the same way it biases
     the observed estimate and the comparison stays like-for-like.
     """
-    curves = [_pooled_autocorrelation(series) for series in replicates if series]
+    return [_pooled_autocorrelation(series) for series in replicates if series]
+
+
+def _replicate_acf_quantiles(curves: list[np.ndarray]) -> np.ndarray:
+    """Reduce pooled replicate ACFs to a 2.5/97.5 envelope at every lag."""
     if not curves:
         return np.empty((2, 0), dtype=np.float64)
     padded = np.full((len(curves), max(map(len, curves))), np.nan, dtype=np.float64)
     for index, curve in enumerate(curves):
         padded[index, : len(curve)] = curve
     return np.nanquantile(padded, (0.025, 0.975), axis=0)
+
+
+def _post_decay_integral(
+    observed: np.ndarray,
+    curves: list[np.ndarray],
+    simulated: np.ndarray,
+    counts: np.ndarray,
+    lag_time: np.ndarray,
+) -> tuple[dict[str, float], np.ndarray]:
+    """Integrate the ACF past the fitted model's own decay, against the null.
+
+    The window opens where the fitted model's pooled ACF has fallen below 0.05 and
+    closes at the last lag with at least three contributing segments. Both edges
+    come from the null and the geometry, never from the observed curve, so the
+    statistic is not tuned to the feature it is testing. A sustained excursion
+    counts once here, where a pointwise band counts it at every correlated lag.
+    """
+    empty = (
+        {
+            "transfer_rate_integral": float("nan"),
+            "transfer_rate_integral_p": float("nan"),
+        },
+        np.empty(0, dtype=np.float64),
+    )
+    decayed = np.flatnonzero(np.abs(simulated) < 0.05)
+    usable = np.flatnonzero(counts >= 3)
+    if not decayed.size or not usable.size:
+        return empty
+    start, stop = int(decayed[0]), int(usable[-1]) + 1
+    if stop - start < 2 or start >= len(lag_time):
+        return empty
+
+    def integral(curve: np.ndarray) -> float:
+        end = min(stop, len(curve), len(lag_time))
+        if end - start < 2:
+            return float("nan")
+        return float(np.trapezoid(curve[start:end], lag_time[start:end]))
+
+    statistic = integral(observed)
+    null = np.asarray([integral(curve) for curve in curves], dtype=np.float64)
+    null = null[np.isfinite(null)]
+    if not np.isfinite(statistic) or not null.size:
+        return empty
+    low, high = np.quantile(null, (0.025, 0.975))
+    return (
+        {
+            "transfer_rate_integral": statistic,
+            "transfer_rate_integral_p": float(np.mean(np.abs(null) >= abs(statistic))),
+            "transfer_rate_integral_null_low": float(low),
+            "transfer_rate_integral_null_high": float(high),
+            "transfer_rate_integral_window_start": float(lag_time[start]),
+            "transfer_rate_integral_window_stop": float(
+                lag_time[min(stop, len(lag_time)) - 1]
+            ),
+            "transfer_rate_integral_replicates": float(null.size),
+        },
+        null,
+    )
 
 
 def _contributing_counts(lengths: list[int]) -> np.ndarray:
@@ -721,6 +783,15 @@ def _paths(
     segment_transfer_acf, segment_transfer_acf_offsets = _grouped_autocorrelation(
         observed_transfer_rate_series, observed_transfer_rate_counts
     )
+    replicate_curves = _replicate_curves(replicate_transfer_series)
+    transfer_rate_segment_counts = _contributing_counts(observed_transfer_rate_lengths)
+    transfer_rate_integral, transfer_rate_integral_null = _post_decay_integral(
+        observed_transfer_rate_acf,
+        replicate_curves,
+        simulated_transfer_rate_acf,
+        transfer_rate_segment_counts,
+        observed_transfer_rate_lag_times,
+    )
     observed_conservative_acf = _pooled_autocorrelation(
         observed_conservative_series
     )
@@ -792,11 +863,10 @@ def _paths(
         "observed_segment_transfer_rate_acf": segment_transfer_acf,
         "observed_segment_transfer_rate_acf_offset": segment_transfer_acf_offsets,
         "simulated_transfer_rate_acf_envelope": _replicate_acf_quantiles(
-            replicate_transfer_series
+            replicate_curves
         ),
-        "observed_transfer_rate_segment_count": _contributing_counts(
-            observed_transfer_rate_lengths
-        ),
+        "observed_transfer_rate_segment_count": transfer_rate_segment_counts,
+        "transfer_rate_integral_null": transfer_rate_integral_null,
         "observed_lag_time": observed_lag_times,
         "simulated_lag_time": simulated_lag_times,
         "observed_increment_covariance": _concatenate(observed_covariances)
@@ -825,6 +895,7 @@ def _paths(
         ),
     }
     metrics: dict[str, float | int] = {
+        **transfer_rate_integral,
         "negative_area_count": negative,
         "generated_area_count": generated,
         "negative_area_fraction": float(negative / generated) if generated else 0.0,

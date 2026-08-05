@@ -411,6 +411,11 @@ def _covariance_plot(outcome: LagOutcome, arrays: dict[str, np.ndarray], path: P
     _save(path, figure)
 
 
+def _transfer_rate_metrics(outcome: LagOutcome) -> dict[str, Any]:
+    validation = outcome.metadata.get("validation", {})
+    return validation.get("training") or {}
+
+
 def _transfer_rate_acf_plot(
     outcome: LagOutcome, arrays: dict[str, np.ndarray], path: Path
 ) -> None:
@@ -443,11 +448,21 @@ def _transfer_rate_acf_plot(
         simulated_time[:stop], simulated[:stop], color="tab:blue", label="simulated"
     )
     axis.axhline(0.0, color="0.5", linewidth=0.8)
-    axis.set(
-        xlabel="physical lag time",
-        ylabel=r"transfer-rate ACF",
-        title=f"Lag {outcome.lag}: transfer-rate ACF",
+    metrics = _transfer_rate_metrics(outcome)
+    statistic = metrics.get("transfer_rate_integral", float("nan"))
+    probability = metrics.get("transfer_rate_integral_p", float("nan"))
+    window = (
+        metrics.get("transfer_rate_integral_window_start", float("nan")),
+        metrics.get("transfer_rate_integral_window_stop", float("nan")),
     )
+    title = f"Lag {outcome.lag}: transfer-rate ACF"
+    if np.isfinite(probability):
+        axis.axvspan(*window, color="0.85", alpha=0.4, zorder=0)
+        title += (
+            f"\npost-decay integral over [{window[0]:.0f}, {window[1]:.0f}]: "
+            f"{statistic:.3g}, p={probability:.3f}"
+        )
+    axis.set(xlabel="physical lag time", ylabel=r"transfer-rate ACF", title=title)
     axis.legend(loc="upper right")
     counts = arrays["observed_transfer_rate_segment_count"]
     if counts.size:
