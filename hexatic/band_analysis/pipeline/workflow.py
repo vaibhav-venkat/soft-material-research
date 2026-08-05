@@ -1,4 +1,4 @@
-"""Coordinate sequential lag inference with resumable cached artifacts."""
+"""Coordinate clean-segment and event-chain inference with isolated caches."""
 
 from __future__ import annotations
 
@@ -7,25 +7,37 @@ import hashlib
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
 
 import arviz as az
 import numpy as np
 from safetensors import safe_open
 from safetensors.numpy import load_file
 
-from ..fitting.bayesian import MCMCConfig, run_bayesian_inference, save_inference_data
-from ..fitting.inference import (
-    OptimizationResult,
-    optimize_parameters,
-)
-from ..fitting.model import PARAMETER_NAMES, prepare_training_transitions
+from ..detection.chains import EventChain
 from ..detection.segments import StableSegment
-from .storage import fingerprint, write_arrays, write_json
+from ..fitting.bayesian import MCMCConfig, run_bayesian_inference, save_inference_data
+from ..fitting.event_validation import validate_event_posterior
+from ..fitting.inference import OptimizationResult, optimize_parameters
+from ..fitting.masked_model import (
+    MaskedTrainingTransitions,
+    prepare_training_transitions as prepare_event_transitions,
+)
+from ..fitting.model import (
+    PARAMETER_NAMES,
+    TrainingTransitions,
+    prepare_training_transitions as prepare_clean_transitions,
+)
 from ..fitting.validation import ValidationResult, validate_posterior
+from .storage import fingerprint, write_arrays, write_json
 
 
 logger = logging.getLogger(__name__)
+
+FitPath = Literal["clean", "event"]
+AnalysisData = list[StableSegment] | list[EventChain]
+HoldoutData = dict[str, list[StableSegment]] | dict[str, list[EventChain]]
+PreparedData = TrainingTransitions | MaskedTrainingTransitions
 
 
 @dataclass(frozen=True)
@@ -51,6 +63,7 @@ class AnalysisConfig:
 
 @dataclass(frozen=True)
 class LagOutcome:
+    fit: FitPath
     lag: int
     accepted: bool
     cached: bool
@@ -58,22 +71,52 @@ class LagOutcome:
     arrays: dict[str, np.ndarray]
     idata: az.InferenceData
 
+    @property
+    def parameter_names(self) -> tuple[str, ...]:
+        return PARAMETER_NAMES if self.fit == "event" else PARAMETER_NAMES[:-1]
 
-def segments_fingerprint(segments: list[StableSegment]) -> str:
-    digest = hashlib.sha256()
-    for segment in segments:
-        digest.update(segment.seed_id.encode())
-        digest.update(np.asarray(segment.track_ids, dtype=np.int64).tobytes())
-        for values in (segment.frame_indices, segment.tau, segment.areas):
-            contiguous = np.ascontiguousarray(values)
-            digest.update(str(contiguous.dtype).encode())
-            digest.update(np.asarray(contiguous.shape, dtype=np.int64).tobytes())
-            digest.update(contiguous.tobytes())
+
+def _update_array(digest: Any, values: np.ndarray) -> None:
+    contiguous = np.ascontiguousarray(values)
+    digest.update(str(contiguous.dtype).encode())
+    digest.update(np.asarray(contiguous.shape, dtype=np.int64).tobytes())
+    digest.update(contiguous.tobytes())
+
+
+def data_fingerprint(values: AnalysisData, fit: FitPath) -> str:
+    digest = hashlib.sha256(fit.encode())
+    for value in values:
+        digest.update(value.seed_id.encode())
+        if isinstance(value, StableSegment):
+            digest.update(np.asarray(value.track_ids, dtype=np.int64).tobytes())
+            arrays = (value.frame_indices, value.tau, value.areas)
+        else:
+            arrays = (
+                value.slot_ids,
+                value.frame_indices,
+                value.tau,
+                value.areas,
+                value.mask,
+            )
+        for array in arrays:
+            _update_array(digest, array)
+        if isinstance(value, EventChain):
+            for step in value.events:
+                for name in (
+                    "H",
+                    "g",
+                    "C",
+                    "o",
+                    "sigma_e_rows",
+                    "mask_next",
+                    "y",
+                ):
+                    _update_array(digest, getattr(step, name))
     return digest.hexdigest()
 
 
-def _paths(output_dir: Path, lag: int) -> tuple[Path, Path, Path]:
-    directory = output_dir / f"lag_{lag}"
+def _paths(output_dir: Path, fit: FitPath, lag: int) -> tuple[Path, Path, Path]:
+    directory = output_dir / fit / f"lag_{lag}"
     return (
         directory / "arrays.safetensors",
         directory / "posterior.nc",
@@ -81,9 +124,11 @@ def _paths(output_dir: Path, lag: int) -> tuple[Path, Path, Path]:
     )
 
 
-def _posterior_intervals(idata: az.InferenceData) -> dict[str, dict[str, float]]:
-    intervals: dict[str, dict[str, float]] = {}
-    for name in PARAMETER_NAMES:
+def _posterior_intervals(
+    idata: az.InferenceData, names: tuple[str, ...]
+) -> dict[str, dict[str, float]]:
+    intervals = {}
+    for name in names:
         values = np.asarray(idata.posterior[name]).reshape(-1)
         hdi = np.asarray(az.hdi(values, prob=0.95))
         intervals[name] = {
@@ -113,24 +158,94 @@ def _optimization_arrays(result: OptimizationResult) -> dict[str, np.ndarray]:
     return arrays
 
 
+def _prepare(training: AnalysisData, lag: int, fit: FitPath) -> PreparedData:
+    if fit == "event":
+        return prepare_event_transitions(cast(list[EventChain], training), lag)
+    return prepare_clean_transitions(cast(list[StableSegment], training), lag)
+
+
+def _validate(
+    fit: FitPath,
+    values: AnalysisData,
+    lag: int,
+    prepared: PreparedData,
+    samples: np.ndarray,
+    config: AnalysisConfig,
+    seed: int,
+) -> ValidationResult:
+    sigma_b_squared = float(np.asarray(prepared.sigma_b_squared))
+    if fit == "event":
+        return validate_event_posterior(
+            cast(list[EventChain], values),
+            lag,
+            prepared.scaling,
+            samples,
+            sigma_b_squared=sigma_b_squared,
+            predictive_draws=config.predictive_draws,
+            paths_per_chain=config.paths_per_segment,
+            seed=seed,
+        )
+    return validate_posterior(
+        cast(list[StableSegment], values),
+        lag,
+        prepared.scaling,
+        samples,
+        sigma_b_squared=sigma_b_squared,
+        predictive_draws=config.predictive_draws,
+        paths_per_segment=config.paths_per_segment,
+        seed=seed,
+    )
+
+
 def _prefixed(validation: ValidationResult, prefix: str) -> dict[str, np.ndarray]:
     return {f"{prefix}{key}": value for key, value in validation.arrays.items()}
 
 
+def _slope_data(prepared: PreparedData) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
+    slopes = [np.asarray(slope) for slope in prepared.conservative_slopes]
+    arrays = {
+        "conservative_segment_slope": np.concatenate(slopes)
+        * prepared.scaling.area
+        / prepared.scaling.time
+        if slopes
+        else np.empty(0),
+        "conservative_segment_slope_offset": np.cumsum(
+            [0, *(len(slope) for slope in slopes)], dtype=np.int64
+        ),
+    }
+    if isinstance(prepared, MaskedTrainingTransitions):
+        masks = [np.asarray(mask, dtype=bool) for mask in prepared.slope_masks]
+        arrays["conservative_segment_slope_mask"] = (
+            np.concatenate(masks) if masks else np.empty(0, dtype=bool)
+        )
+        degrees = sum(int(mask.sum()) - 1 for mask in masks)
+        informative = sum(int(mask.sum()) > 1 for mask in masks)
+    else:
+        degrees = sum(len(slope) - 1 for slope in slopes)
+        informative = sum(len(slope) > 1 for slope in slopes)
+    normalized_variance = float(np.asarray(prepared.sigma_b_squared))
+    metadata = {
+        "sigma_b_squared": normalized_variance
+        * (prepared.scaling.area / prepared.scaling.time) ** 2,
+        "normalized_sigma_b_squared": normalized_variance,
+        "informative_runs": informative,
+        "degrees_of_freedom": degrees,
+    }
+    return arrays, metadata
+
+
 def _compute_lag(
+    fit: FitPath,
     lag: int,
-    training: list[StableSegment],
-    holdouts: dict[str, list[StableSegment]],
+    training: AnalysisData,
+    holdouts: HoldoutData,
     config: AnalysisConfig,
 ) -> tuple[dict[str, Any], dict[str, np.ndarray], az.InferenceData]:
-    logger.info("lag %d: preparing normalized transitions", lag)
-    prepared = prepare_training_transitions(training, lag)
+    logger.info("%s lag %d: preparing normalized transitions", fit, lag)
+    prepared = _prepare(training, lag, fit)
     transition_count = sum(block.current.shape[0] for block in prepared.blocks)
-    logger.info("lag %d: optimizing %d transitions", lag, transition_count)
     optimization = optimize_parameters(
-        prepared,
-        seed=config.optimizer_seed + lag,
-        starts=config.optimizer_starts,
+        prepared, seed=config.optimizer_seed + lag, starts=config.optimizer_starts
     )
     bayesian = run_bayesian_inference(
         prepared,
@@ -142,98 +257,84 @@ def _compute_lag(
     )
     arrays = _optimization_arrays(optimization)
     arrays["normalized_posterior"] = bayesian.normalized_samples
-    slope_offsets = np.cumsum(
-        [0, *(len(slope) for slope in prepared.conservative_slopes)],
-        dtype=np.int64,
-    )
-    arrays["conservative_segment_slope"] = (
-        np.concatenate([np.asarray(slope) for slope in prepared.conservative_slopes])
-        * prepared.scaling.area
-        / prepared.scaling.time
-        if prepared.conservative_slopes
-        else np.empty(0)
-    )
-    arrays["conservative_segment_slope_offset"] = slope_offsets
-    sigma_b_squared = float(np.asarray(prepared.sigma_b_squared))
+    slope_arrays, slope_metadata = _slope_data(prepared)
+    arrays.update(slope_arrays)
     validation_metrics: dict[str, Any] = {}
     if bayesian.diagnostics.accepted:
-        logger.info("lag %d: validating training posterior", lag)
-        training_validation = validate_posterior(
+        result = _validate(
+            fit,
             training,
             lag,
-            prepared.scaling,
+            prepared,
             bayesian.normalized_samples,
-            sigma_b_squared=sigma_b_squared,
-            predictive_draws=config.predictive_draws,
-            paths_per_segment=config.paths_per_segment,
-            seed=config.optimizer_seed + lag,
+            config,
+            config.optimizer_seed + lag,
         )
-        arrays.update(_prefixed(training_validation, "training_"))
-        validation_metrics["training"] = training_validation.metrics
-        holdout_metrics: dict[str, Any] = {}
-        for index, (seed_id, segments) in enumerate(holdouts.items()):
-            logger.info(
-                "lag %d: validating holdout %d/%d (%s)",
+        arrays.update(_prefixed(result, "training_"))
+        validation_metrics["training"] = result.metrics
+        holdout_metrics = {}
+        for index, (seed_id, values) in enumerate(holdouts.items()):
+            result = _validate(
+                fit,
+                values,
                 lag,
-                index + 1,
-                len(holdouts),
-                seed_id,
-            )
-            result = validate_posterior(
-                segments,
-                lag,
-                prepared.scaling,
+                prepared,
                 bayesian.normalized_samples,
-                sigma_b_squared=sigma_b_squared,
-                predictive_draws=config.predictive_draws,
-                paths_per_segment=config.paths_per_segment,
-                seed=config.optimizer_seed + lag + index + 1,
+                config,
+                config.optimizer_seed + lag + index + 1,
             )
             arrays.update(_prefixed(result, f"holdout_{index}_"))
             holdout_metrics[seed_id] = result.metrics
         if holdouts:
-            logger.info("lag %d: validating aggregate holdout", lag)
-            aggregate = validate_posterior(
-                [segment for segments in holdouts.values() for segment in segments],
-                lag,
-                prepared.scaling,
-                bayesian.normalized_samples,
-                sigma_b_squared=sigma_b_squared,
-                predictive_draws=config.predictive_draws,
-                paths_per_segment=config.paths_per_segment,
-                seed=config.optimizer_seed + lag + len(holdouts) + 1,
+            aggregate = cast(
+                AnalysisData,
+                [value for values in holdouts.values() for value in values],
             )
-            arrays.update(_prefixed(aggregate, "holdout_aggregate_"))
-            validation_metrics["holdout"] = {
-                "aggregate": aggregate.metrics,
-                "per_seed": holdout_metrics,
-            }
+            result = _validate(
+                fit,
+                aggregate,
+                lag,
+                prepared,
+                bayesian.normalized_samples,
+                config,
+                config.optimizer_seed + lag + len(holdouts) + 1,
+            )
+            arrays.update(_prefixed(result, "holdout_aggregate_"))
+            aggregate_metrics: dict[str, Any] | None = result.metrics
         else:
-            validation_metrics["holdout"] = {"aggregate": None, "per_seed": {}}
-    else:
-        logger.info("lag %d: skipping predictive validation after MCMC rejection", lag)
+            aggregate_metrics = None
+        validation_metrics["holdout"] = {
+            "aggregate": aggregate_metrics,
+            "per_seed": holdout_metrics,
+        }
+
+    physical_dt = np.concatenate([np.asarray(block.dt) for block in prepared.blocks])
+    physical_dt *= prepared.scaling.time
     hessian = optimization.best.hessian
-    physical_dt = np.concatenate(
-        [np.asarray(block.dt) for block in prepared.blocks]
-    ) * prepared.scaling.time
+    names = PARAMETER_NAMES if fit == "event" else PARAMETER_NAMES[:-1]
+    weighted_events = 0.0
+    event_rows = 0
+    n_max = None
+    if isinstance(prepared, MaskedTrainingTransitions):
+        weighted_events = float(
+            sum(
+                np.sum(np.asarray(block.weight) * np.asarray(block.event))
+                for block in prepared.blocks
+            )
+        )
+        event_rows = int(
+            sum(np.asarray(block.sigma_e_rows, dtype=bool).sum() for block in prepared.blocks)
+        )
+        n_max = int(prepared.blocks[0].current.shape[1])
     metadata: dict[str, Any] = {
+        "fit": fit,
         "accepted": bayesian.diagnostics.accepted,
         "retried": bayesian.retried,
         "mcmc_config": asdict(bayesian.config),
         "diagnostics": bayesian.diagnostics.to_dict(),
-        "posterior": _posterior_intervals(bayesian.idata),
+        "posterior": _posterior_intervals(bayesian.idata, names),
         "scaling": asdict(prepared.scaling),
-        "conservative_slope": {
-            "sigma_b_squared": sigma_b_squared
-            * (prepared.scaling.area / prepared.scaling.time) ** 2,
-            "normalized_sigma_b_squared": sigma_b_squared,
-            "informative_segments": sum(
-                len(slope) > 1 for slope in prepared.conservative_slopes
-            ),
-            "degrees_of_freedom": int(
-                sum(len(slope) - 1 for slope in prepared.conservative_slopes)
-            ),
-        },
+        "conservative_slope": slope_metadata,
         "optimization": {
             "best_objective": optimization.best.objective,
             "best_gradient_norm": optimization.best.gradient_norm,
@@ -244,12 +345,15 @@ def _compute_lag(
         },
         "validation": validation_metrics,
         "data": {
-            "training_seeds": len({segment.seed_id for segment in training}),
-            "training_segments": len(training),
+            "training_seeds": len({value.seed_id for value in training}),
+            "training_units": len(training),
             "training_transitions": int(transition_count),
             "weighted_training_transitions": float(
                 sum(np.asarray(block.weight).sum() for block in prepared.blocks)
             ),
+            "weighted_event_transitions": weighted_events,
+            "event_mass_rows": event_rows,
+            "n_max": n_max,
             "physical_dt_min": float(np.min(physical_dt)),
             "physical_dt_median": float(np.median(physical_dt)),
             "physical_dt_max": float(np.max(physical_dt)),
@@ -260,9 +364,9 @@ def _compute_lag(
 
 
 def _load_cache(
-    output_dir: Path, lag: int, expected_fingerprint: str
+    output_dir: Path, fit: FitPath, lag: int, expected_fingerprint: str
 ) -> LagOutcome | None:
-    arrays_path, posterior_path, metrics_path = _paths(output_dir, lag)
+    arrays_path, posterior_path, metrics_path = _paths(output_dir, fit, lag)
     if not metrics_path.exists():
         return None
     metadata = json.loads(metrics_path.read_text())
@@ -279,69 +383,56 @@ def _load_cache(
     if arrays_metadata.get("fingerprint") != expected_fingerprint:
         raise ValueError(f"incompatible lag arrays cache {arrays_path}")
     idata = az.from_netcdf(posterior_path, engine="h5netcdf")
-    if (
-        idata.posterior.attrs.get("band_analysis_fingerprint")
-        != expected_fingerprint
-    ):
+    if idata.posterior.attrs.get("band_analysis_fingerprint") != expected_fingerprint:
         raise ValueError(f"incompatible lag posterior cache {posterior_path}")
     return LagOutcome(
-        lag=lag,
-        accepted=bool(metadata["accepted"]),
-        cached=True,
-        metadata=metadata,
-        arrays=load_file(arrays_path),
-        idata=idata,
+        fit, lag, bool(metadata["accepted"]), True, metadata, load_file(arrays_path), idata
     )
 
 
 def run_analysis(
-    training: list[StableSegment],
-    holdouts: dict[str, list[StableSegment]],
+    fit: FitPath,
+    training: AnalysisData,
+    holdouts: HoldoutData,
     output_dir: Path,
     *,
     config: AnalysisConfig = AnalysisConfig(),
     overwrite: bool = False,
 ) -> list[LagOutcome]:
-    """Process and atomically cache lags sequentially in configured order."""
+    """Run one independently usable fit path under its own output namespace."""
     if not training:
-        raise ValueError("at least one training segment is required")
-    settings = asdict(config)
-    data_fingerprint = fingerprint(
+        raise ValueError(f"at least one training {fit} unit is required")
+    analysis_fingerprint = fingerprint(
         {
-            "training": segments_fingerprint(training),
+            "fit": fit,
+            "training": data_fingerprint(training, fit),
             "holdouts": {
-                seed_id: segments_fingerprint(segments)
-                for seed_id, segments in holdouts.items()
+                seed_id: data_fingerprint(values, fit)
+                for seed_id, values in holdouts.items()
             },
-            "settings": settings,
+            "settings": asdict(config),
         }
     )
-    outcomes: list[LagOutcome] = []
+    outcomes = []
     for lag in config.lags:
-        logger.info("lag %d: checking cache", lag)
-        lag_fingerprint = fingerprint({"analysis": data_fingerprint, "lag": lag})
+        lag_fingerprint = fingerprint(
+            {"fit": fit, "analysis": analysis_fingerprint, "lag": lag}
+        )
         if not overwrite:
-            cached = _load_cache(output_dir, lag, lag_fingerprint)
+            cached = _load_cache(output_dir, fit, lag, lag_fingerprint)
             if cached is not None:
-                logger.info("lag %d: reusing completed cache", lag)
                 outcomes.append(cached)
                 continue
-        logger.info("lag %d: starting inference", lag)
-        metadata, arrays, idata = _compute_lag(lag, training, holdouts, config)
-        arrays_path, posterior_path, metrics_path = _paths(output_dir, lag)
-        logger.info("lag %d: saving inference artifacts", lag)
+        metadata, arrays, idata = _compute_lag(
+            fit, lag, training, holdouts, config
+        )
+        arrays_path, posterior_path, metrics_path = _paths(output_dir, fit, lag)
         write_json(
             metrics_path,
-            {
-                "status": "incomplete",
-                "lag": lag,
-                "fingerprint": lag_fingerprint,
-            },
+            {"status": "incomplete", "fit": fit, "lag": lag, "fingerprint": lag_fingerprint},
         )
-        write_arrays(arrays_path, arrays, {"fingerprint": lag_fingerprint})
-        save_inference_data(
-            posterior_path, idata, fingerprint=lag_fingerprint
-        )
+        write_arrays(arrays_path, arrays, {"fingerprint": lag_fingerprint, "fit": fit})
+        save_inference_data(posterior_path, idata, fingerprint=lag_fingerprint)
         completed = {
             **metadata,
             "status": "complete",
@@ -350,43 +441,32 @@ def run_analysis(
         }
         write_json(metrics_path, completed)
         outcomes.append(
-            LagOutcome(
-                lag,
-                bool(metadata["accepted"]),
-                False,
-                completed,
-                arrays,
-                idata,
-            )
-        )
-        logger.info(
-            "lag %d: complete (accepted=%s)", lag, bool(metadata["accepted"])
+            LagOutcome(fit, lag, bool(metadata["accepted"]), False, completed, arrays, idata)
         )
     return outcomes
 
 
 def stable_lags(outcomes: list[LagOutcome], base_lag: int = 2) -> tuple[int, ...]:
-    """Apply the symmetric median-in-HDI stability rule to accepted lags."""
+    """Apply the symmetric median-in-HDI stability rule within one fit path."""
+    fits = {outcome.fit for outcome in outcomes}
+    if len(fits) > 1:
+        raise ValueError("lag stability must be evaluated within one fit path")
     by_lag = {outcome.lag: outcome for outcome in outcomes}
     base = by_lag.get(base_lag)
     if base is None or not base.accepted:
         return ()
-    stable: list[int] = []
+    stable = []
     for outcome in outcomes:
         if not outcome.accepted:
             continue
-        pair_stable = True
-        for name in PARAMETER_NAMES:
-            reference = base.metadata["posterior"][name]
-            candidate = outcome.metadata["posterior"][name]
-            pair_stable &= (
-                reference["hdi_low"]
-                <= candidate["median"]
-                <= reference["hdi_high"]
-                and candidate["hdi_low"]
-                <= reference["median"]
-                <= candidate["hdi_high"]
-            )
-        if pair_stable:
+        if all(
+            base.metadata["posterior"][name]["hdi_low"]
+            <= outcome.metadata["posterior"][name]["median"]
+            <= base.metadata["posterior"][name]["hdi_high"]
+            and outcome.metadata["posterior"][name]["hdi_low"]
+            <= base.metadata["posterior"][name]["median"]
+            <= outcome.metadata["posterior"][name]["hdi_high"]
+            for name in outcome.parameter_names
+        ):
             stable.append(outcome.lag)
     return tuple(stable)

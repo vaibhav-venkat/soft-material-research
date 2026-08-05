@@ -12,12 +12,18 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from .chains import EventChain, build_chains
 from .characterization import characterize_band
 from .components import label_dilute_bands
 from .density import SurfaceGrid, make_density_batch_kernel, validate_gpu
 from ..pipeline.io import InputMetadata, frame_numbers, iter_frames
 from .segments import StableSegment, build_stable_segments
-from ..pipeline.storage import load_seed_segments, save_seed_segments
+from ..pipeline.storage import (
+    load_seed_event_chains,
+    load_seed_segments,
+    save_seed_event_chains,
+    save_seed_segments,
+)
 from .tracking import BandTracker, DetectionFrame
 
 
@@ -50,6 +56,12 @@ class ExtractionConfig:
             raise ValueError("persistence and stride must be positive")
 
 
+@dataclass(frozen=True)
+class SeedExtraction:
+    segments: list[StableSegment]
+    event_chains: list[EventChain]
+
+
 def extraction_settings(
     metadata: InputMetadata, config: ExtractionConfig, grid: SurfaceGrid | None = None
 ) -> dict[str, object]:
@@ -79,25 +91,31 @@ def _grid(metadata: InputMetadata, config: ExtractionConfig) -> SurfaceGrid:
     )
 
 
-def extract_seed_segments(
+def extract_seed_data(
     metadata: InputMetadata,
-    cache_path: Path,
+    segment_cache: Path,
+    event_cache: Path,
     *,
     seed_id: str,
     config: ExtractionConfig,
     overwrite: bool = False,
-) -> list[StableSegment]:
-    """Extract or reuse one seed without modifying its input directory."""
+) -> SeedExtraction:
+    """Detect once, then preserve the clean and event-aware reference data."""
     grid = _grid(metadata, config)
     settings = extraction_settings(metadata, config, grid)
-    if cache_path.exists() and not overwrite:
-        logger.info("reusing segment cache: %s", cache_path)
+    if segment_cache.exists() and event_cache.exists() and not overwrite:
+        logger.info("reusing clean and event extraction caches for %s", seed_id)
         segments, _ = load_seed_segments(
-            cache_path,
+            segment_cache,
             source_fingerprint=metadata.source_fingerprint,
             settings=settings,
         )
-        return segments
+        chains = load_seed_event_chains(
+            event_cache,
+            source_fingerprint=metadata.source_fingerprint,
+            settings=settings,
+        )
+        return SeedExtraction(segments, chains)
 
     selected = frame_numbers(metadata, config.start, config.stop, config.stride)
     if not selected:
@@ -160,17 +178,26 @@ def extract_seed_segments(
         overlap_threshold=config.overlap_threshold,
         persistence_frames=config.persistence_frames,
     )
+    tracked = tracker.track(detections)
     segments = build_stable_segments(
-        tracker.track(detections),
+        tracked,
         seed_id=seed_id,
         persistence_frames=config.persistence_frames,
     )
+    chains = build_chains({seed_id: tracked})
     save_seed_segments(
-        cache_path,
+        segment_cache,
         segments,
         seed_id=seed_id,
         source_fingerprint=metadata.source_fingerprint,
         settings=settings,
     )
-    logger.info("saved segment cache: %s", cache_path)
-    return segments
+    save_seed_event_chains(
+        event_cache,
+        chains,
+        seed_id=seed_id,
+        source_fingerprint=metadata.source_fingerprint,
+        settings=settings,
+    )
+    logger.info("saved clean/event extraction caches for %s", seed_id)
+    return SeedExtraction(segments, chains)

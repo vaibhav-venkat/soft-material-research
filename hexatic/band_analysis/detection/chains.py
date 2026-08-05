@@ -176,6 +176,52 @@ def build_chains(tracked: Mapping[str, Sequence[TrackedFrame]]) -> list[EventCha
     return [chain for plan in plans for chain in build_event_chains(plan, n_max)]
 
 
+def pad_event_chain(chain: EventChain, n_max: int) -> EventChain:
+    """Resize trailing padding so independently cached seeds share one width."""
+    width = n_max - chain.n_max
+    if width == 0:
+        return chain
+    if width < 0:
+        raise ValueError("event-chain padding cannot remove slots")
+
+    def vector(values: np.ndarray, fill: int | float | bool = 0) -> np.ndarray:
+        return np.pad(values, (0, width), constant_values=fill)
+
+    def matrix(values: np.ndarray) -> np.ndarray:
+        return np.pad(values, ((0, width), (0, width)))
+
+    events = tuple(
+        EventStep(
+            H=matrix(step.H),
+            g=vector(step.g),
+            C=matrix(step.C),
+            o=vector(step.o),
+            sigma_e_rows=vector(step.sigma_e_rows),
+            mask_next=vector(step.mask_next),
+            y=vector(step.y),
+        )
+        for step in chain.events
+    )
+    return EventChain(
+        seed_id=chain.seed_id,
+        slot_ids=np.pad(chain.slot_ids, ((0, 0), (0, width)), constant_values=-1),
+        frame_indices=chain.frame_indices,
+        tau=chain.tau,
+        areas=np.pad(chain.areas, ((0, 0), (0, width))),
+        mask=np.pad(chain.mask, ((0, 0), (0, width))),
+        events=events,
+    )
+
+
+def globally_pad_chains(chains: Iterable[EventChain]) -> list[EventChain]:
+    """Apply the observed global ``N_max`` to cached per-seed chains."""
+    values = list(chains)
+    if not values:
+        return []
+    n_max = max(int(chain.n_active.max()) for chain in values)
+    return [pad_event_chain(chain, n_max) for chain in values]
+
+
 def _is_event(step: EventStep, mask: np.ndarray) -> bool:
     """Compare against the ordinary transition; a birth only moves ``g``, not ``H``."""
     plain = no_event_step(mask, step.y)

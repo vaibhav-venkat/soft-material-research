@@ -1,9 +1,7 @@
-"""Write consolidated metrics and Markdown analysis reports."""
+"""Write side-by-side clean-segment and event-chain inference reports."""
 
 from __future__ import annotations
 
-from dataclasses import asdict
-import json
 import math
 from pathlib import Path
 from typing import Any
@@ -12,13 +10,15 @@ import numpy as np
 
 from ..fitting.model import PARAMETER_NAMES
 from .storage import write_json, write_text
-from .workflow import AnalysisConfig, LagOutcome, stable_lags
+from .workflow import AnalysisConfig, FitPath, LagOutcome, stable_lags
+
+
+FitOutcomes = dict[FitPath, list[LagOutcome]]
 
 
 def _base_and_stable(
     outcomes: list[LagOutcome], config: AnalysisConfig
 ) -> tuple[LagOutcome | None, tuple[int, ...]]:
-    """Resolve the base-lag outcome and the lags stable against it."""
     base = next(
         (outcome for outcome in outcomes if outcome.lag == config.base_lag), None
     )
@@ -43,15 +43,14 @@ def write_configuration(output_dir: Path, configuration: dict[str, Any]) -> Path
     return path
 
 
-def consolidated_metrics(
+def _fit_metrics(
     outcomes: list[LagOutcome], config: AnalysisConfig
 ) -> dict[str, Any]:
-    accepted = [outcome.lag for outcome in outcomes if outcome.accepted]
     base, stable = _base_and_stable(outcomes, config)
     return {
         "base_lag": config.base_lag,
         "base_lag_accepted": bool(base and base.accepted),
-        "accepted_lags": accepted,
+        "accepted_lags": [outcome.lag for outcome in outcomes if outcome.accepted],
         "rejected_lags": [
             outcome.lag for outcome in outcomes if not outcome.accepted
         ],
@@ -59,29 +58,40 @@ def consolidated_metrics(
         "stable_range": [min(stable), max(stable)] if stable else None,
         "lags": {
             str(outcome.lag): {
-                "accepted": outcome.accepted,
-                "cached": outcome.cached,
-                "posterior": outcome.metadata["posterior"],
-                "diagnostics": outcome.metadata["diagnostics"],
-                "optimization": outcome.metadata["optimization"],
-                "scaling": outcome.metadata["scaling"],
-                "conservative_slope": outcome.metadata.get(
-                    "conservative_slope", {}
-                ),
-                "data": outcome.metadata.get("data", {}),
-                "validation": outcome.metadata.get("validation", {}),
+                key: outcome.metadata.get(key, {})
+                for key in (
+                    "accepted",
+                    "posterior",
+                    "diagnostics",
+                    "optimization",
+                    "scaling",
+                    "conservative_slope",
+                    "data",
+                    "validation",
+                )
             }
+            | {"cached": outcome.cached}
             for outcome in outcomes
         },
     }
 
 
+def consolidated_metrics(
+    outcomes: FitOutcomes, config: AnalysisConfig
+) -> dict[str, Any]:
+    return {
+        "fits": {
+            fit: _fit_metrics(fit_outcomes, config)
+            for fit, fit_outcomes in outcomes.items()
+        }
+    }
+
+
 def write_metrics(
-    output_dir: Path, outcomes: list[LagOutcome], config: AnalysisConfig
+    output_dir: Path, outcomes: FitOutcomes, config: AnalysisConfig
 ) -> Path:
     path = output_dir / "metrics.json"
-    value = consolidated_metrics(outcomes, config)
-    write_json(path, _json_value(value))
+    write_json(path, _json_value(consolidated_metrics(outcomes, config)))
     return path
 
 
@@ -95,13 +105,23 @@ def _number(value: Any) -> str:
     return f"{number:.5g}" if math.isfinite(number) else "—"
 
 
+def _interval(outcome: LagOutcome | None, name: str) -> str:
+    if outcome is None or name not in outcome.metadata.get("posterior", {}):
+        return "—"
+    values = outcome.metadata["posterior"][name]
+    return (
+        f"{_number(values['median'])} "
+        f"[{_number(values['hdi_low'])}, {_number(values['hdi_high'])}]"
+    )
+
+
 def _parameter_table(outcome: LagOutcome) -> list[str]:
     lines = [
         "| Parameter | Median | 95% HDI | R-hat | ESS bulk | ESS tail |",
         "|---|---:|---:|---:|---:|---:|",
     ]
     diagnostics = outcome.metadata["diagnostics"]
-    for name in PARAMETER_NAMES:
+    for name in outcome.parameter_names:
         posterior = outcome.metadata["posterior"][name]
         interval = (
             f"[{_number(posterior['hdi_low'])}, "
@@ -122,10 +142,11 @@ def _validation_lines(title: str, metrics: dict[str, Any] | None) -> list[str]:
     keys = (
         "predictive_log_score",
         "coverage_95",
+        "one_step_rmse",
         "residual_mean",
         "residual_variance",
         "residual_lag1_autocorrelation",
-        "one_step_rmse",
+        "inactive_prediction_max_abs",
         "negative_area_fraction",
         "terminated_path_count",
         "observed_total_mean",
@@ -137,161 +158,142 @@ def _validation_lines(title: str, metrics: dict[str, Any] | None) -> list[str]:
         "observed_conservative_relaxation_time",
         "simulated_conservative_relaxation_time",
     )
+    available = [key for key in keys if key in metrics]
     lines = [f"#### {title}", "", "| Metric | Value |", "|---|---:|"]
+    lines.extend(f"| {key} | {_number(metrics[key])} |" for key in available)
+    return lines
+
+
+def _stability(fit: FitPath, outcomes: list[LagOutcome], config: AnalysisConfig) -> str:
+    base, stable = _base_and_stable(outcomes, config)
+    if base is None or not base.accepted:
+        return f"{fit.title()}: base lag {config.base_lag} failed MCMC acceptance."
+    if stable:
+        return (
+            f"{fit.title()}: lags {', '.join(map(str, stable))} satisfy the "
+            f"median-in-HDI rule (span {min(stable)}–{max(stable)})."
+        )
+    return f"{fit.title()}: no lag is stable against base lag {config.base_lag}."
+
+
+def _comparison_table(outcomes: FitOutcomes, lag: int) -> list[str]:
+    clean = next((item for item in outcomes["clean"] if item.lag == lag), None)
+    event = next((item for item in outcomes["event"] if item.lag == lag), None)
+    lines = [
+        f"### Lag {lag}",
+        "",
+        "| Parameter | Clean segments: median [95% HDI] | Event chains: median [95% HDI] |",
+        "|---|---:|---:|",
+    ]
     lines.extend(
-        f"| {key} | {_number(metrics.get(key))} |" for key in keys
+        f"| {name} | {_interval(clean, name)} | {_interval(event, name)} |"
+        for name in PARAMETER_NAMES
     )
     return lines
 
 
-def _matrix_table(matrix: np.ndarray) -> list[str]:
-    headings = " | ".join(str(index + 1) for index in range(matrix.shape[1]))
-    lines = [f"| Mode | {headings} |", "|---|" + "---:|" * matrix.shape[1]]
-    for index, row in enumerate(matrix):
-        lines.append(
-            f"| {index + 1} | "
-            + " | ".join(_number(value) for value in row)
-            + " |"
-        )
+def _lag_overview(outcomes: FitOutcomes) -> list[str]:
+    lines = [
+        "| Fit | Lag | Median physical Δτ | Status | Units | Transitions | "
+        "Events | N_max | Divergences | Cached |",
+        "|---|---:|---:|---|---:|---:|---:|---:|---:|---|",
+    ]
+    for fit, fit_outcomes in outcomes.items():
+        for outcome in fit_outcomes:
+            data = outcome.metadata["data"]
+            lines.append(
+                f"| {fit} | {outcome.lag} | {_number(data['physical_dt_median'])} | "
+                f"{'accepted' if outcome.accepted else 'rejected'} | "
+                f"{data['training_units']} | {data['training_transitions']} | "
+                f"{_number(data.get('weighted_event_transitions'))} | "
+                f"{_number(data.get('n_max'))} | "
+                f"{outcome.metadata['diagnostics']['divergences']} | "
+                f"{'yes' if outcome.cached else 'no'} |"
+            )
     return lines
 
 
 def write_report(
-    output_dir: Path, outcomes: list[LagOutcome], config: AnalysisConfig
+    output_dir: Path, outcomes: FitOutcomes, config: AnalysisConfig
 ) -> Path:
-    base, stable = _base_and_stable(outcomes, config)
-    if base is None or not base.accepted:
-        stability = (
-            f"No stable range is reported because base lag {config.base_lag} "
-            "failed MCMC acceptance."
-        )
-    elif stable:
-        stability = (
-            f"Lags {', '.join(map(str, stable))} satisfy the symmetric "
-            f"median-in-HDI rule relative to base lag {config.base_lag}. "
-            f"The stable span is {min(stable)}–{max(stable)}."
-        )
-    else:
-        stability = (
-            f"No lag satisfies the stability rule relative to accepted base lag "
-            f"{config.base_lag}."
-        )
-
     lines = [
-        "# Coupled Stable-Band Area Inference",
+        "# Coupled Band-Area Inference",
         "",
-        stability,
+        "The clean fixed-identity segments and masked event chains are fitted "
+        "independently to the same tracked detections. The event fit conditions on "
+        "observed births, deaths, splits, and merges and additionally infers "
+        "`sigma_E`; the clean fit remains the reference path.",
         "",
-        "Conservative transfer is decomposed into one constant, zero-sum "
-        "Gaussian slope per stable segment plus the existing AR(1) rate process. "
-        "Segment slopes and their variance are estimated directly from endpoints; "
-        "NUTS samples only the five global AR(1)/total-mode parameters.",
+        _stability("clean", outcomes["clean"], config),
         "",
-        "Rejected lags retain posterior and sampler diagnostics, but are excluded "
-        "from predictive, holdout, and lag-stability conclusions.",
+        _stability("event", outcomes["event"], config),
         "",
-        "## Lag overview",
+        "## Fit overview",
         "",
-        "| Lag | Median physical Δτ | Status | Segments | Transitions | Seeds | Divergences | Cached |",
-        "|---:|---:|---|---:|---:|---:|---:|---|",
+        *_lag_overview(outcomes),
+        "",
+        "## Side-by-side posterior estimates",
+        "",
     ]
-    for outcome in outcomes:
-        data = outcome.metadata.get("data", {})
-        diagnostics = outcome.metadata["diagnostics"]
-        physical_dt = data.get(
-            "physical_dt_median",
-            outcome.lag * outcome.metadata["scaling"]["time"],
-        )
-        lines.append(
-            f"| {outcome.lag} | {_number(physical_dt)} | "
-            f"{'accepted' if outcome.accepted else 'rejected'} | "
-            f"{data.get('training_segments', '—')} | "
-            f"{data.get('training_transitions', '—')} | "
-            f"{data.get('training_seeds', '—')} | "
-            f"{diagnostics['divergences']} | "
-            f"{'yes' if outcome.cached else 'no'} |"
-        )
+    for lag in config.lags:
+        lines.extend([*_comparison_table(outcomes, lag), ""])
 
-    for outcome in outcomes:
-        optimization = outcome.metadata["optimization"]
-        diagnostics = outcome.metadata["diagnostics"]
-        lines.extend(
-            [
-                "",
-                f"## Lag {outcome.lag}: "
-                f"{'accepted' if outcome.accepted else 'rejected'}",
-                "",
-                *(_parameter_table(outcome)),
-                "",
-                "Direct conservative-slope estimate: "
-                f"sigma_b^2 = {_number(outcome.metadata.get('conservative_slope', {}).get('sigma_b_squared'))} "
-                "(area^2/time^2).",
-                "",
-                f"BFGS objective: {_number(optimization['best_objective'])}; "
-                f"gradient norm: {_number(optimization['best_gradient_norm'])}; "
-                f"raw-Hessian condition number: "
-                f"{_number(optimization['condition_number'])}. "
-                f"Nonpositive eigenvalue: {optimization['nonpositive_hessian']}; "
-                f"weak mode: {optimization['weak_hessian']}. "
-                f"NUTS retry used: {outcome.metadata['retried']}; "
-                f"divergences: {diagnostics['divergences']}.",
-            ]
-        )
-        hessian = outcome.arrays.get("hessian")
-        eigenvalues = outcome.arrays.get("hessian_eigenvalues")
-        eigenvectors = outcome.arrays.get("hessian_eigenvectors")
-        if hessian is not None and eigenvalues is not None and eigenvectors is not None:
+    for fit, fit_outcomes in outcomes.items():
+        lines.extend([f"## {fit.title()} fit details", ""])
+        for outcome in fit_outcomes:
+            optimization = outcome.metadata["optimization"]
             lines.extend(
                 [
+                    f"### Lag {outcome.lag}: "
+                    f"{'accepted' if outcome.accepted else 'rejected'}",
                     "",
-                    "<details><summary>Raw-parameter Hessian diagnostics</summary>",
+                    *_parameter_table(outcome),
                     "",
-                    "Hessian:",
+                    "Direct conservative-slope variance: "
+                    "`sigma_b^2 = "
+                    f"{_number(outcome.metadata['conservative_slope']['sigma_b_squared'])}` "
+                    "(area²/time²).",
                     "",
-                    *_matrix_table(hessian),
-                    "",
-                    "Eigenvalues: "
-                    + ", ".join(_number(value) for value in eigenvalues),
-                    "",
-                    "Eigenvectors (columns are ordered modes):",
-                    "",
-                    *_matrix_table(eigenvectors),
-                    "",
-                    "</details>",
+                    f"BFGS objective {_number(optimization['best_objective'])}; "
+                    f"gradient norm {_number(optimization['best_gradient_norm'])}; "
+                    f"Hessian condition number {_number(optimization['condition_number'])}; "
+                    f"NUTS retry {outcome.metadata['retried']}.",
                 ]
             )
-        if outcome.accepted:
-            validation = outcome.metadata["validation"]
-            lines.extend(["", *_validation_lines("Training", validation["training"])])
-            holdout = validation["holdout"]
-            lines.extend(
-                ["", *_validation_lines("Aggregate holdout", holdout["aggregate"])]
-            )
-            for seed_id, seed_metrics in holdout["per_seed"].items():
+            if outcome.accepted:
+                validation = outcome.metadata["validation"]
                 lines.extend(
-                    ["", *_validation_lines(f"Holdout `{seed_id}`", seed_metrics)]
+                    ["", *_validation_lines("Training", validation["training"])]
                 )
-        else:
+                holdout = validation["holdout"]
+                lines.extend(
+                    [
+                        "",
+                        *_validation_lines("Aggregate holdout", holdout["aggregate"]),
+                    ]
+                )
+                for seed_id, metrics in holdout["per_seed"].items():
+                    lines.extend(
+                        ["", *_validation_lines(f"Holdout `{seed_id}`", metrics)]
+                    )
+            else:
+                lines.extend(["", "Predictive validation was excluded for this lag."])
             lines.extend(
                 [
                     "",
-                    "Predictive and holdout validation were not used for this lag.",
+                    f"Plots: [`{fit}/lag_{outcome.lag}/plots/`]"
+                    f"({fit}/lag_{outcome.lag}/plots/)",
+                    "",
                 ]
             )
-        lines.extend(
-            [
-                "",
-                f"Plots: [`lag_{outcome.lag}/plots/`](lag_{outcome.lag}/plots/)",
-            ]
-        )
 
     lines.extend(
         [
+            "## Diagnostics",
             "",
-            "## Cross-lag and holdout plots",
-            "",
-            "See [`plots/`](plots/) for accepted posterior HDIs, physical cadence, "
-            "and aggregate/per-seed holdout panels.",
+            "The event diagnostic [`A_T` against `n_k`](event/plots/total_area_by_band_count.png) "
+            "checks the global, band-count-independent `A_T_star` assumption post hoc. "
+            "Cross-lag and holdout plots live under each fit's `plots/` directory.",
             "",
         ]
     )

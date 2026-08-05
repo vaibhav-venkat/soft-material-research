@@ -10,11 +10,11 @@ from typing import Sequence
 
 from hexatic.constants import cylinder
 
+from ..detection.chains import EventChain, globally_pad_chains
 from ..fitting.bayesian import MCMCConfig
-from ..detection.extraction import ExtractionConfig, extract_seed_segments
+from ..detection.extraction import ExtractionConfig, SeedExtraction, extract_seed_data
 from .io import InputMetadata, load_metadata, require_compatible_seeds
-from .reporting import write_configuration, write_metrics, write_report
-from ..detection.segments import StableSegment
+from .reporting import FitOutcomes, write_configuration, write_metrics, write_report
 from .workflow import AnalysisConfig, run_analysis
 
 
@@ -28,7 +28,7 @@ def build_parser() -> argparse.ArgumentParser:
         timestep=float(cylinder.SIMULATION.timestep)
     )
     parser = argparse.ArgumentParser(
-        description="Fit the coupled stable-band area SDE across simulation seeds."
+        description="Fit clean-segment and event-chain band-area SDEs side by side."
     )
     parser.add_argument(
         "--input-dir",
@@ -103,11 +103,16 @@ def _extract_all(
     output_dir: Path,
     config: ExtractionConfig,
     overwrite: bool,
-) -> dict[str, list[StableSegment]]:
+) -> dict[str, SeedExtraction]:
     extracted = {}
     for index, item in enumerate(metadata):
         seed_id = _seed_id(item, role, index)
-        cache = output_dir / "segments" / f"{seed_id}.safetensors"
+        segment_cache = (
+            output_dir / "extraction" / "clean" / f"{seed_id}.safetensors"
+        )
+        event_cache = (
+            output_dir / "extraction" / "event" / f"{seed_id}.safetensors"
+        )
         logger.info(
             "extracting %s seed %d/%d: %s",
             role,
@@ -115,21 +120,45 @@ def _extract_all(
             len(metadata),
             item.input_dir,
         )
-        extracted[seed_id] = extract_seed_segments(
+        extracted[seed_id] = extract_seed_data(
             item,
-            cache,
+            segment_cache,
+            event_cache,
             seed_id=seed_id,
             config=config,
             overwrite=overwrite,
         )
         logger.info(
-            "%s seed %d/%d ready: %d stable segments",
+            "%s seed %d/%d ready: %d clean segments, %d event chains",
             role,
             index + 1,
             len(metadata),
-            len(extracted[seed_id]),
+            len(extracted[seed_id].segments),
+            len(extracted[seed_id].event_chains),
         )
     return extracted
+
+
+def _global_event_data(
+    training: dict[str, SeedExtraction],
+    holdouts: dict[str, SeedExtraction],
+) -> tuple[list[EventChain], dict[str, list[EventChain]]]:
+    chains = [
+        chain
+        for extracted in (*training.values(), *holdouts.values())
+        for chain in extracted.event_chains
+    ]
+    padded = globally_pad_chains(chains)
+    by_seed: dict[str, list[EventChain]] = {
+        seed_id: [] for seed_id in (*training, *holdouts)
+    }
+    for chain in padded:
+        by_seed[chain.seed_id].append(chain)
+    training_chains = [chain for seed_id in training for chain in by_seed[seed_id]]
+    holdout_chains = {
+        seed_id: by_seed[seed_id] for seed_id in holdouts if by_seed[seed_id]
+    }
+    return training_chains, holdout_chains
 
 
 def _configs(args: argparse.Namespace) -> tuple[ExtractionConfig, AnalysisConfig]:
@@ -186,40 +215,62 @@ def run(args: argparse.Namespace) -> Path:
         "extraction": asdict(extraction_config),
         "analysis": asdict(analysis_config),
     }
-    training_by_seed = _extract_all(
+    training_extractions = _extract_all(
         training_metadata,
         "training",
         output_dir,
         extraction_config,
         args.overwrite,
     )
-    holdouts = _extract_all(
+    holdout_extractions = _extract_all(
         holdout_metadata,
         "holdout",
         output_dir,
         extraction_config,
         args.overwrite,
     )
-    training = [
-        segment for segments in training_by_seed.values() for segment in segments
+    clean_training = [
+        segment
+        for extracted in training_extractions.values()
+        for segment in extracted.segments
     ]
-    outcomes = run_analysis(
-        training,
-        holdouts,
+    clean_holdouts = {
+        seed_id: extracted.segments
+        for seed_id, extracted in holdout_extractions.items()
+        if extracted.segments
+    }
+    event_training, event_holdouts = _global_event_data(
+        training_extractions, holdout_extractions
+    )
+    clean_outcomes = run_analysis(
+        "clean",
+        clean_training,
+        clean_holdouts,
         output_dir,
         config=analysis_config,
         overwrite=args.overwrite,
     )
+    event_outcomes = run_analysis(
+        "event",
+        event_training,
+        event_holdouts,
+        output_dir,
+        config=analysis_config,
+        overwrite=args.overwrite,
+    )
+    outcomes: FitOutcomes = {"clean": clean_outcomes, "event": event_outcomes}
     logger.info("writing configuration, plots, metrics, and report")
     # Imported here so matplotlib is only loaded when a run reaches rendering.
+    from .event_plots import plot_total_area_by_band_count
     from .plots import plot_lag, plot_summary
 
     write_configuration(output_dir, configuration)
-    for outcome in outcomes:
-        logger.info("rendering lag %d plots", outcome.lag)
-        plot_lag(outcome, output_dir)
-    logger.info("rendering cross-lag and holdout plots")
-    plot_summary(outcomes, output_dir)
+    for fit_outcomes in outcomes.values():
+        for outcome in fit_outcomes:
+            logger.info("rendering %s lag %d plots", outcome.fit, outcome.lag)
+            plot_lag(outcome, output_dir)
+        plot_summary(fit_outcomes, output_dir)
+    plot_total_area_by_band_count(event_training, event_holdouts, output_dir)
     write_metrics(output_dir, outcomes, analysis_config)
     return write_report(output_dir, outcomes, analysis_config)
 

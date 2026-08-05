@@ -69,7 +69,9 @@ from .detection.chains import (
     build_knot_grid,
     build_knot_grids,
     event_transitions,
+    globally_pad_chains,
     global_n_max,
+    pad_event_chain,
     plan_chains,
 )
 from .detection.events import (

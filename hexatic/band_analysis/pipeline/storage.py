@@ -13,6 +13,8 @@ import numpy as np
 from safetensors import safe_open
 from safetensors.numpy import load_file, save_file
 
+from ..detection.chains import EventChain
+from ..detection.events import EventStep
 from ..detection.segments import StableSegment
 
 
@@ -157,3 +159,112 @@ def load_seed_segments(
             )
         )
     return segments, metadata
+
+
+def save_seed_event_chains(
+    path: Path,
+    chains: list[EventChain],
+    *,
+    seed_id: str,
+    source_fingerprint: str,
+    settings: dict[str, Any],
+) -> None:
+    """Store locally padded chains; collection-wide padding happens after load."""
+    n_max = chains[0].n_max if chains else 0
+    lengths = np.asarray([chain.n_steps for chain in chains], dtype=np.int64)
+    rows = int(lengths.sum())
+    steps = int(np.maximum(lengths - 1, 0).sum())
+
+    def row_array(name: str, *, dtype: np.dtype[Any]) -> np.ndarray:
+        return (
+            np.concatenate([getattr(chain, name) for chain in chains])
+            if chains
+            else np.empty((0, n_max), dtype=dtype)
+        )
+
+    def step_array(name: str, *, matrix: bool = False) -> np.ndarray:
+        values = [getattr(step, name) for chain in chains for step in chain.events]
+        shape = (steps, n_max, n_max) if matrix else (steps, n_max)
+        return np.asarray(values) if values else np.empty(shape)
+
+    tensors = {
+        "chain_length": lengths,
+        "row_offset": np.concatenate(([0], np.cumsum(lengths))).astype(np.int64),
+        "event_offset": np.concatenate(
+            ([0], np.cumsum(np.maximum(lengths - 1, 0)))
+        ).astype(np.int64),
+        "slot_id": row_array("slot_ids", dtype=np.dtype(np.int64)),
+        "frame_index": np.concatenate([chain.frame_indices for chain in chains])
+        if rows
+        else np.empty(0, dtype=np.int64),
+        "tau": np.concatenate([chain.tau for chain in chains])
+        if rows
+        else np.empty(0),
+        "area": row_array("areas", dtype=np.dtype(np.float64)),
+        "mask": row_array("mask", dtype=np.dtype(bool)),
+        "event_H": step_array("H", matrix=True),
+        "event_g": step_array("g"),
+        "event_C": step_array("C", matrix=True),
+        "event_o": step_array("o"),
+        "event_sigma_e_rows": step_array("sigma_e_rows"),
+        "event_mask_next": step_array("mask_next"),
+        "event_y": step_array("y"),
+    }
+    write_arrays(
+        path,
+        tensors,
+        {
+            "seed_id": seed_id,
+            "source_fingerprint": source_fingerprint,
+            "settings_fingerprint": fingerprint(settings),
+        },
+    )
+
+
+def load_seed_event_chains(
+    path: Path,
+    *,
+    source_fingerprint: str,
+    settings: dict[str, Any],
+) -> list[EventChain]:
+    with safe_open(path, framework="numpy") as handle:
+        metadata = dict(handle.metadata())
+    if metadata.get("source_fingerprint") != source_fingerprint:
+        raise ValueError(f"input changed for event cache {path}; rerun with --overwrite")
+    if metadata.get("settings_fingerprint") != fingerprint(settings):
+        raise ValueError(f"settings changed for event cache {path}; rerun with --overwrite")
+    tensors = load_file(path)
+    chains = []
+    seed_id = metadata.get("seed_id", "")
+    for index, length_value in enumerate(tensors["chain_length"]):
+        length = int(length_value)
+        row_start, row_stop = tensors["row_offset"][index : index + 2]
+        event_start, event_stop = tensors["event_offset"][index : index + 2]
+        events = tuple(
+            EventStep(
+                H=tensors["event_H"][step].copy(),
+                g=tensors["event_g"][step].copy(),
+                C=tensors["event_C"][step].copy(),
+                o=tensors["event_o"][step].astype(bool),
+                sigma_e_rows=tensors["event_sigma_e_rows"][step].astype(bool),
+                mask_next=tensors["event_mask_next"][step].astype(bool),
+                y=tensors["event_y"][step].copy(),
+            )
+            for step in range(int(event_start), int(event_stop))
+        )
+        chains.append(
+            EventChain(
+                seed_id=seed_id,
+                slot_ids=tensors["slot_id"][row_start:row_stop].astype(np.int64),
+                frame_indices=tensors["frame_index"][row_start:row_stop].astype(
+                    np.int64
+                ),
+                tau=tensors["tau"][row_start:row_stop].copy(),
+                areas=tensors["area"][row_start:row_stop].copy(),
+                mask=tensors["mask"][row_start:row_stop].astype(bool),
+                events=events,
+            )
+        )
+        if len(events) != length - 1:
+            raise ValueError(f"incomplete event cache {path}")
+    return chains

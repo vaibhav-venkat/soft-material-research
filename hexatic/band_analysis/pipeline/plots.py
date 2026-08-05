@@ -14,7 +14,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy import stats
 
-from ..fitting.model import PARAMETER_NAMES
 from .workflow import LagOutcome
 
 
@@ -24,6 +23,7 @@ PARAMETER_LABELS = {
     "D_u": r"$D_u$",
     "D_T": r"$D_T$",
     "A_T_star": r"$A_T^*$",
+    "sigma_E": r"$\sigma_E$",
 }
 
 
@@ -59,7 +59,7 @@ def _arviz_plot(
 
 
 def _posterior_plots(outcome: LagOutcome, directory: Path) -> None:
-    names = list(PARAMETER_NAMES)
+    names = list(outcome.parameter_names)
     _arviz_plot(
         directory / "posterior_trace.png",
         f"Lag {outcome.lag}: posterior and trace",
@@ -113,14 +113,15 @@ def _hessian_plot(outcome: LagOutcome, path: Path) -> None:
         _placeholder(path, f"Lag {outcome.lag}: Hessian", "Hessian unavailable")
         return
     figure, axes = plt.subplots(1, 2, figsize=(10, 4))
+    names = outcome.parameter_names
     image = axes[0].imshow(matrix, cmap="coolwarm", aspect="auto")
     axes[0].set_xticks(
-        range(len(PARAMETER_NAMES)),
-        [PARAMETER_LABELS[name] for name in PARAMETER_NAMES],
+        range(len(names)),
+        [PARAMETER_LABELS[name] for name in names],
     )
     axes[0].set_yticks(
-        range(len(PARAMETER_NAMES)),
-        [PARAMETER_LABELS[name] for name in PARAMETER_NAMES],
+        range(len(names)),
+        [PARAMETER_LABELS[name] for name in names],
     )
     figure.colorbar(image, ax=axes[0], shrink=0.8)
     axes[1].plot(np.arange(1, len(eigenvalues) + 1), eigenvalues, "o-")
@@ -336,10 +337,15 @@ def _negative_plot(outcome: LagOutcome, metrics: dict[str, Any], path: Path) -> 
 
 
 def plot_lag(outcome: LagOutcome, output_dir: Path) -> list[str]:
-    directory = output_dir / f"lag_{outcome.lag}" / "plots"
+    directory = output_dir / outcome.fit / f"lag_{outcome.lag}" / "plots"
     directory.mkdir(parents=True, exist_ok=True)
     _posterior_plots(outcome, directory)
     _hessian_plot(outcome, directory / "hessian.png")
+    if outcome.fit == "event":
+        from .event_plots import plot_event_validation
+
+        plot_event_validation(outcome, directory)
+        return sorted(path.name for path in directory.glob("*.png"))
     validation_paths = {
         "whitened_residual.png": _whitened_plot,
         "predictive.png": _predictive_plot,
@@ -364,7 +370,8 @@ def plot_lag(outcome: LagOutcome, output_dir: Path) -> list[str]:
 def _cross_lag_parameters(outcomes: list[LagOutcome], path: Path) -> None:
     figure, axes = plt.subplots(2, 3, figsize=(13, 8))
     accepted = [outcome for outcome in outcomes if outcome.accepted]
-    for axis, name in zip(axes.ravel(), PARAMETER_NAMES, strict=False):
+    names = outcomes[0].parameter_names
+    for axis, name in zip(axes.ravel(), names, strict=False):
         if accepted:
             lag = np.asarray([outcome.lag for outcome in accepted])
             intervals = [outcome.metadata["posterior"][name] for outcome in accepted]
@@ -373,7 +380,8 @@ def _cross_lag_parameters(outcomes: list[LagOutcome], path: Path) -> None:
             high = np.asarray([item["hdi_high"] for item in intervals])
             axis.errorbar(lag, median, yerr=(median - low, high - median), fmt="o")
         axis.set(xlabel="frame lag", ylabel=PARAMETER_LABELS[name])
-    axes.ravel()[-1].axis("off")
+    for axis in axes.ravel()[len(names) :]:
+        axis.axis("off")
     figure.suptitle("Accepted posterior medians and 95% HDIs")
     _save(path, figure)
 
@@ -438,7 +446,7 @@ def _slug(value: str) -> str:
 
 
 def plot_summary(outcomes: list[LagOutcome], output_dir: Path) -> list[str]:
-    plots = output_dir / "plots"
+    plots = output_dir / outcomes[0].fit / "plots"
     plots.mkdir(parents=True, exist_ok=True)
     _cross_lag_parameters(outcomes, plots / "cross_lag_parameters.png")
     _physical_dt(outcomes, plots / "physical_dt.png")
