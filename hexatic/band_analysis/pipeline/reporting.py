@@ -10,7 +10,7 @@ from typing import Any
 
 import numpy as np
 
-from .model import PARAMETER_NAMES
+from ..fitting.model import PARAMETER_NAMES
 from .storage import write_json, write_text
 from .workflow import AnalysisConfig, LagOutcome, stable_lags
 

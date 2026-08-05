@@ -14,15 +14,15 @@ import numpy as np
 from safetensors import safe_open
 from safetensors.numpy import load_file
 
-from .bayesian import MCMCConfig, run_bayesian_inference, save_inference_data
-from .inference import (
+from ..fitting.bayesian import MCMCConfig, run_bayesian_inference, save_inference_data
+from ..fitting.inference import (
     OptimizationResult,
     optimize_parameters,
 )
-from .model import PARAMETER_NAMES, prepare_training_transitions
-from .segments import StableSegment
+from ..fitting.model import PARAMETER_NAMES, prepare_training_transitions
+from ..detection.segments import StableSegment
 from .storage import fingerprint, write_arrays, write_json
-from .validation import ValidationResult, validate_posterior
+from ..fitting.validation import ValidationResult, validate_posterior
 
 
 logger = logging.getLogger(__name__)

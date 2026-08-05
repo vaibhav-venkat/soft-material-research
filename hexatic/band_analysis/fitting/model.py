@@ -11,7 +11,7 @@ import scipy.linalg as linalg
 import jax.numpy as jnp
 import numpy as np
 
-from .segments import StableSegment
+from ..detection.segments import StableSegment
 
 
 jax.config.update("jax_enable_x64", True)

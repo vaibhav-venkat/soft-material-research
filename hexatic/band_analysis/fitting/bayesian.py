@@ -21,7 +21,7 @@ from .model import (
     TrainingTransitions,
     parameter_negative_log_likelihood,
 )
-from .storage import atomic_path
+from ..pipeline.storage import atomic_path
 
 
 logger = logging.getLogger(__name__)

@@ -1,23 +1,23 @@
 """Stable dilute-band area extraction and inference."""
 
-from .components import BandComponent, label_dilute_bands
-from .bayesian import (
+from .detection.components import BandComponent, label_dilute_bands
+from .fitting.bayesian import (
     BayesianResult,
     MCMCConfig,
     MCMCDiagnostics,
     coupled_area_model,
     run_bayesian_inference,
 )
-from .characterization import DetectedBand, characterize_band
-from .density import SurfaceGrid
-from .inference import (
+from .detection.characterization import DetectedBand, characterize_band
+from .detection.density import SurfaceGrid
+from .fitting.inference import (
     HessianDiagnostics,
     OptimizationResult,
     OptimizationRun,
     empirical_parameters,
     optimize_parameters,
 )
-from .model import (
+from .fitting.model import (
     PARAMETER_NAMES,
     JITTER,
     PersistentRateBlock,
@@ -40,8 +40,8 @@ from .model import (
     transition,
     transition_log_density,
 )
-from .segments import StableSegment, build_stable_segments
-from .tracking import (
+from .detection.segments import StableSegment, build_stable_segments
+from .detection.tracking import (
     BandTracker,
     DetectionFrame,
     EventCode,
@@ -49,8 +49,8 @@ from .tracking import (
     TrackedBand,
     TrackedFrame,
 )
-from .validation import ValidationResult, validate_posterior
-from .workflow import AnalysisConfig, LagOutcome, run_analysis, stable_lags
+from .fitting.validation import ValidationResult, validate_posterior
+from .pipeline.workflow import AnalysisConfig, LagOutcome, run_analysis, stable_lags
 
 __all__ = [
     "BandComponent",

@@ -20,7 +20,7 @@ from .model import (
     transition,
     transition_log_density,
 )
-from .segments import StableSegment
+from ..detection.segments import StableSegment
 
 
 # Defined once so their trace caches are shared across blocks, validation sets,

@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy import stats
 
-from .model import PARAMETER_NAMES
+from ..fitting.model import PARAMETER_NAMES
 from .workflow import LagOutcome
 
 

@@ -10,11 +10,11 @@ from typing import Sequence
 
 from hexatic.constants import cylinder
 
-from .bayesian import MCMCConfig
-from .extraction import ExtractionConfig, extract_seed_segments
+from ..fitting.bayesian import MCMCConfig
+from ..detection.extraction import ExtractionConfig, extract_seed_segments
 from .io import InputMetadata, load_metadata, require_compatible_seeds
 from .reporting import write_configuration, write_metrics, write_report
-from .segments import StableSegment
+from ..detection.segments import StableSegment
 from .workflow import AnalysisConfig, run_analysis
 
 

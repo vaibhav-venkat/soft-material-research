@@ -13,7 +13,7 @@ import numpy as np
 from safetensors import safe_open
 from safetensors.numpy import load_file, save_file
 
-from .segments import StableSegment
+from ..detection.segments import StableSegment
 
 
 def fingerprint(value: Any) -> str:
