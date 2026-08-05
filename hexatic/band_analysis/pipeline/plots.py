@@ -272,14 +272,14 @@ def _long_time_plot(outcome: LagOutcome, arrays: dict[str, np.ndarray], path: Pa
             (axes[0, 2], f"{prefix}_conservative_acf"),
         ):
             values = arrays[key]
-            stop = min(100, len(values), len(lag_time))
+            stop = min(800, len(values), len(lag_time))
             target.plot(lag_time[:stop], values[:stop], color=color, label=prefix)
     observed_msd = arrays["observed_area_msd"]
     simulated_msd = arrays["simulated_area_msd"]
     observed_lag_time = arrays["observed_lag_time"]
     simulated_lag_time = arrays["simulated_lag_time"]
     msd_stop = min(
-        100,
+        800,
         len(observed_msd),
         len(simulated_msd),
         len(observed_lag_time),

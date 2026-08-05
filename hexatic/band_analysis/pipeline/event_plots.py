@@ -221,7 +221,7 @@ def _pooled_acf(series: list[np.ndarray]) -> np.ndarray:
     mean = float(np.mean(np.concatenate(usable)))
     centered = [values - mean for values in usable]
     denominator = sum(float(np.dot(values, values)) for values in centered)
-    maximum = min(100, max(len(values) for values in centered))
+    maximum = min(800, max(len(values) for values in centered))
     return np.asarray(
         [
             sum(
@@ -259,7 +259,7 @@ def _track_series(
     return values, times
 
 
-def _pooled_msd(series: list[np.ndarray], maximum: int = 100) -> np.ndarray:
+def _pooled_msd(series: list[np.ndarray], maximum: int = 800) -> np.ndarray:
     if not series:
         return np.empty(0)
     stop = min(maximum, max(len(values) for values in series))
@@ -276,7 +276,7 @@ def _pooled_msd(series: list[np.ndarray], maximum: int = 100) -> np.ndarray:
 
 
 def _shared_msd_limit(
-    observed: list[np.ndarray], simulated: list[np.ndarray], maximum: int = 100
+    observed: list[np.ndarray], simulated: list[np.ndarray], maximum: int = 800
 ) -> int:
     """Use one segment-length censor for both observed and simulated MSDs."""
     if not observed or not simulated:
