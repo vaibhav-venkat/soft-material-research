@@ -44,17 +44,13 @@ class TransitionBlock(NamedTuple):
 
 
 class StateSpaceSequence(NamedTuple):
-    """Redistribution observations belonging to one lagged sequence."""
+    """Redistribution interval increments belonging to one lagged sequence."""
 
     y: jax.Array
     dt: jax.Array
     tau: jax.Array
     weight: jax.Array
     segment_id: int
-
-    @property
-    def rates(self) -> jax.Array:
-        return self.y / self.dt[:, None]
 
 
 class SequenceBatch(NamedTuple):
@@ -167,7 +163,7 @@ def area_fraction_allocation(area: jax.Array) -> jax.Array:
 def build_state_space_sequences(
     segments: list[StableSegment], lag: int
 ) -> tuple[StateSpaceSequence, ...]:
-    """Build non-overlapping redistribution-rate sequences for the Kalman filter."""
+    """Build increment sequences for the Kalman filter."""
     sequences: list[StateSpaceSequence] = []
     for segment_id, segment in enumerate(segments):
         if (
@@ -337,6 +333,67 @@ def integrated_oscillatory_variance(
     return 2.0 * diffusion_u / gamma * integral
 
 
+def oscillatory_integral_coefficients(
+    dt: jax.Array | float,
+    gamma: jax.Array | float,
+    omega: jax.Array | float,
+) -> jax.Array:
+    """Coefficients mapping the left-endpoint state to ``∫u(t)dt``."""
+    denominator = gamma**2 + omega**2
+    decay = jnp.exp(-gamma * dt)
+    cosine = jnp.cos(omega * dt)
+    sine = jnp.sin(omega * dt)
+    cosine_integral = (
+        gamma + decay * (-gamma * cosine + omega * sine)
+    ) / denominator
+    sine_integral = (
+        omega - decay * (gamma * sine + omega * cosine)
+    ) / denominator
+    return jnp.stack((cosine_integral, sine_integral), axis=-1)
+
+
+def oscillatory_interval_moments(
+    dt: jax.Array | float,
+    gamma: jax.Array | float,
+    omega: jax.Array | float,
+    diffusion_u: jax.Array | float,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+    """Return exact state, integral, and cross-process moments for one interval."""
+    transition_matrix = oscillatory_transition_matrix(dt, gamma, omega)
+    coefficients = oscillatory_integral_coefficients(dt, gamma, omega)
+    stationary_variance = diffusion_u / gamma
+    state_process_variance = oscillatory_process_variance(
+        dt, gamma, diffusion_u
+    )
+    integral_variance = integrated_oscillatory_variance(
+        dt, gamma, omega, diffusion_u
+    )
+    # Under stationarity, Cov(x_{k+1}, I_k) = v [G_0, -G_1].
+    endpoint_integral_covariance = stationary_variance * jnp.stack(
+        (coefficients[..., 0], -coefficients[..., 1]), axis=-1
+    )
+    # Subtract the part explained by the left endpoint to isolate process noise.
+    propagated_integral_covariance = jnp.einsum(
+        "...ij,...j->...i",
+        transition_matrix,
+        jnp.expand_dims(jnp.asarray(stationary_variance), axis=-1)
+        * coefficients,
+    )
+    integral_process_covariance = (
+        endpoint_integral_covariance - propagated_integral_covariance
+    )
+    integral_process_variance = integral_variance - stationary_variance * jnp.sum(
+        coefficients**2, axis=-1
+    )
+    return (
+        transition_matrix,
+        coefficients,
+        state_process_variance,
+        integral_process_covariance,
+        integral_process_variance,
+    )
+
+
 class _KalmanResult(NamedTuple):
     log_likelihood: jax.Array
     standardized_innovations: jax.Array
@@ -344,17 +401,34 @@ class _KalmanResult(NamedTuple):
 
 
 def _observe(
-    mean: jax.Array, covariance: jax.Array, observation: jax.Array
+    mean: jax.Array,
+    covariance: jax.Array,
+    observation: jax.Array,
+    measurement: jax.Array,
+    measurement_noise: jax.Array,
+    transition_matrix: jax.Array,
+    state_process_covariance: jax.Array,
+    state_measurement_covariance: jax.Array,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
-    """Update one independent vector of observations ``u + beta``."""
-    observation_mean = mean[0] + mean[2]
-    covariance_observation = covariance[:, 0] + covariance[:, 2]
-    variance = covariance_observation[0] + covariance_observation[2] + JITTER
+    """Update the state at the right endpoint of an observed interval."""
+    observation_mean = measurement @ mean
+    covariance_observation = covariance @ measurement
+    variance = (
+        measurement @ covariance_observation + measurement_noise + JITTER
+    )
+    propagated_mean = transition_matrix @ mean
+    propagated_covariance = (
+        transition_matrix @ covariance @ transition_matrix.T
+        + state_process_covariance
+    )
+    cross_covariance = (
+        transition_matrix @ covariance_observation + state_measurement_covariance
+    )
     innovation = observation - observation_mean
-    gain = covariance_observation / variance
-    updated_mean = mean + gain[:, None] * innovation[None, :]
-    updated_covariance = covariance - jnp.outer(
-        covariance_observation, covariance_observation
+    gain = cross_covariance / variance
+    updated_mean = propagated_mean + gain[:, None] * innovation[None, :]
+    updated_covariance = propagated_covariance - jnp.outer(
+        cross_covariance, cross_covariance
     ) / variance
     updated_covariance = 0.5 * (updated_covariance + updated_covariance.T)
     standardized = innovation / jnp.sqrt(variance)
@@ -366,20 +440,17 @@ def _observe(
 
 
 def _kalman_filter(
-    rates: jax.Array, dt: jax.Array, parameters: jax.Array
+    observations: jax.Array, dt: jax.Array, parameters: jax.Array
 ) -> _KalmanResult:
-    """Marginalize latent ``r`` and the segment-constant transfer with a scan."""
+    """Marginalize latent ``r`` and the segment transfer with an exact scan."""
     gamma, omega, _, diffusion_u, _, _, sigma_b = parameters
     stationary_variance = diffusion_u / gamma
-    mean = jnp.zeros((3, rates.shape[1]), dtype=jnp.float64)
+    mean = jnp.zeros((3, observations.shape[1]), dtype=jnp.float64)
     covariance = jnp.diag(
         jnp.asarray(
             [stationary_variance, stationary_variance, sigma_b**2],
             dtype=jnp.float64,
         )
-    )
-    mean, covariance, initial_innovation, initial_variance, initial_log_likelihood = _observe(
-        mean, covariance, rates[0]
     )
 
     def step(
@@ -388,28 +459,45 @@ def _kalman_filter(
     ) -> tuple[tuple[jax.Array, jax.Array], tuple[jax.Array, jax.Array, jax.Array]]:
         previous_mean, previous_covariance = carry
         step_dt, observation = values
-        u, r = oscillatory_transition(
-            previous_mean[0], previous_mean[1], step_dt, gamma, omega
-        )
-        propagated_mean = jnp.stack((u, r, previous_mean[2]))
-        two_state_transition = oscillatory_transition_matrix(
-            step_dt, gamma, omega
+        (
+            transition_matrix_2,
+            integral_coefficients,
+            state_process_variance,
+            integral_process_covariance,
+            integral_process_variance,
+        ) = oscillatory_interval_moments(
+            step_dt, gamma, omega, diffusion_u
         )
         transition_matrix = jnp.zeros((3, 3), dtype=jnp.float64)
-        transition_matrix = transition_matrix.at[:2, :2].set(two_state_transition)
+        transition_matrix = transition_matrix.at[:2, :2].set(
+            transition_matrix_2
+        )
         transition_matrix = transition_matrix.at[2, 2].set(1.0)
-        process_variance = oscillatory_process_variance(
-            step_dt, gamma, diffusion_u
+        state_process_covariance = jnp.zeros((3, 3), dtype=jnp.float64)
+        state_process_covariance = state_process_covariance.at[:2, :2].set(
+            state_process_variance * jnp.eye(2, dtype=jnp.float64)
         )
-        process_covariance = jnp.diag(
-            jnp.asarray([process_variance, process_variance, 0.0])
+        measurement = jnp.stack(
+            (integral_coefficients[0], integral_coefficients[1], step_dt)
         )
-        propagated_covariance = (
-            transition_matrix @ previous_covariance @ transition_matrix.T
-            + process_covariance
+        state_measurement_covariance = jnp.concatenate(
+            (integral_process_covariance, jnp.zeros(1, dtype=jnp.float64))
         )
-        updated_mean, updated_covariance, standardized, variance, log_likelihood = _observe(
-            propagated_mean, propagated_covariance, observation
+        (
+            updated_mean,
+            updated_covariance,
+            standardized,
+            variance,
+            log_likelihood,
+        ) = _observe(
+            previous_mean,
+            previous_covariance,
+            observation,
+            measurement,
+            integral_process_variance,
+            transition_matrix,
+            state_process_covariance,
+            state_measurement_covariance,
         )
         return (
             updated_mean,
@@ -417,20 +505,11 @@ def _kalman_filter(
         ), (standardized, variance, log_likelihood)
 
     (_, _), (innovations, variances, log_likelihoods) = jax.lax.scan(
-        step, (mean, covariance), (dt[:-1], rates[1:])
-    )
-    standardized = jnp.concatenate(
-        (initial_innovation[None, :], innovations), axis=0
-    )
-    variances = jnp.concatenate(
-        (
-            jnp.asarray([initial_variance]),
-            variances,
-        )
+        step, (mean, covariance), (dt, observations)
     )
     return _KalmanResult(
-        initial_log_likelihood + jnp.sum(log_likelihoods),
-        standardized,
+        jnp.sum(log_likelihoods),
+        innovations,
         variances,
     )
 
@@ -439,14 +518,14 @@ def kalman_log_likelihood(
     sequence: StateSpaceSequence, parameters: jax.Array
 ) -> jax.Array:
     """Return one sequence's marginalized redistribution log likelihood."""
-    return _kalman_filter(sequence.rates, sequence.dt, parameters).log_likelihood
+    return _kalman_filter(sequence.y, sequence.dt, parameters).log_likelihood
 
 
 def persistent_innovations(
     sequence: StateSpaceSequence, parameters: jax.Array
 ) -> jax.Array:
     """Return the standardized innovations consumed by residual diagnostics."""
-    return _kalman_filter(sequence.rates, sequence.dt, parameters).standardized_innovations
+    return _kalman_filter(sequence.y, sequence.dt, parameters).standardized_innovations
 
 
 class _KalmanCoefficients(NamedTuple):
@@ -457,77 +536,18 @@ class _KalmanCoefficients(NamedTuple):
 
 
 def _kalman_coefficients_single(
-    rates: jax.Array,
+    observations: jax.Array,
     dt: jax.Array,
     mask: jax.Array,
     parameters: jax.Array,
 ) -> _KalmanCoefficients:
-    """Return the conditional likelihood coefficients for one padded sequence."""
+    """Return coefficients for the conditional likelihood of interval integrals."""
     gamma, omega, _, diffusion_u, _, _, _ = parameters
     stationary_variance = diffusion_u / gamma
-    dimension = rates.shape[1]
+    dimension = observations.shape[1]
     mean = jnp.zeros((2, dimension), dtype=jnp.float64)
     sensitivity = jnp.zeros((2, dimension), dtype=jnp.float64)
     covariance = stationary_variance * jnp.eye(2, dtype=jnp.float64)
-
-    def observe(
-        mean: jax.Array,
-        sensitivity: jax.Array,
-        covariance: jax.Array,
-        observation: jax.Array,
-    ) -> tuple[
-        jax.Array,
-        jax.Array,
-        jax.Array,
-        jax.Array,
-        jax.Array,
-        jax.Array,
-        jax.Array,
-    ]:
-        covariance_observation = covariance[:, 0]
-        variance = covariance_observation[0] + JITTER
-        innovation = observation - mean[0]
-        derivative = sensitivity[0] + 1.0
-        gain = covariance_observation / variance
-        updated_mean = mean + gain[:, None] * innovation[None, :]
-        updated_sensitivity = sensitivity - gain[:, None] * derivative[None, :]
-        updated_covariance = covariance - jnp.outer(
-            covariance_observation, covariance_observation
-        ) / variance
-        updated_covariance = 0.5 * (updated_covariance + updated_covariance.T)
-        normalizer = jnp.full(
-            (dimension,), jnp.log(2.0 * jnp.pi * variance), dtype=jnp.float64
-        )
-        squared = innovation**2 / variance
-        linear = innovation * derivative / variance
-        curvature = derivative**2 / variance
-        return (
-            updated_mean,
-            updated_sensitivity,
-            updated_covariance,
-            normalizer,
-            squared,
-            linear,
-            curvature,
-        )
-
-    (
-        updated_mean,
-        updated_sensitivity,
-        updated_covariance,
-        normalizer,
-        squared,
-        linear,
-        curvature,
-    ) = observe(mean, sensitivity, covariance, rates[0])
-    valid = mask[0]
-    mean = jnp.where(valid, updated_mean, mean)
-    sensitivity = jnp.where(valid, updated_sensitivity, sensitivity)
-    covariance = jnp.where(valid, updated_covariance, covariance)
-    normalizer = jnp.where(valid, normalizer, 0.0)
-    squared = jnp.where(valid, squared, 0.0)
-    linear = jnp.where(valid, linear, 0.0)
-    curvature = jnp.where(valid, curvature, 0.0)
 
     def step(
         carry: tuple[jax.Array, jax.Array, jax.Array],
@@ -538,61 +558,79 @@ def _kalman_coefficients_single(
     ]:
         previous_mean, previous_sensitivity, previous_covariance = carry
         step_dt, observation, valid = values
-        transition_matrix = oscillatory_transition_matrix(
-            step_dt, gamma, omega
+        (
+            transition_matrix,
+            integral_coefficients,
+            state_process_variance,
+            integral_process_covariance,
+            integral_process_variance,
+        ) = oscillatory_interval_moments(
+            step_dt, gamma, omega, diffusion_u
         )
+        observation_mean = integral_coefficients @ previous_mean
+        covariance_observation = previous_covariance @ integral_coefficients
+        variance = (
+            integral_coefficients @ covariance_observation
+            + integral_process_variance
+            + JITTER
+        )
+        innovation = observation - observation_mean
+        derivative = integral_coefficients @ previous_sensitivity + step_dt
         propagated_mean = transition_matrix @ previous_mean
         propagated_sensitivity = transition_matrix @ previous_sensitivity
-        process_variance = oscillatory_process_variance(
-            step_dt, gamma, diffusion_u
-        )
         propagated_covariance = (
             transition_matrix
             @ previous_covariance
             @ transition_matrix.T
-            + process_variance * jnp.eye(2, dtype=jnp.float64)
+            + state_process_variance * jnp.eye(2, dtype=jnp.float64)
         )
-        (
-            updated_mean,
-            updated_sensitivity,
-            updated_covariance,
-            step_normalizer,
-            step_squared,
-            step_linear,
-            step_curvature,
-        ) = observe(
-            propagated_mean,
-            propagated_sensitivity,
-            propagated_covariance,
-            observation,
+        cross_covariance = (
+            transition_matrix @ covariance_observation
+            + integral_process_covariance
         )
+        gain = cross_covariance / variance
+        updated_mean = propagated_mean + gain[:, None] * innovation[None, :]
+        updated_sensitivity = propagated_sensitivity - gain[:, None] * derivative[
+            None, :
+        ]
+        updated_covariance = propagated_covariance - jnp.outer(
+            cross_covariance, cross_covariance
+        ) / variance
+        updated_covariance = 0.5 * (updated_covariance + updated_covariance.T)
         mean = jnp.where(valid, updated_mean, previous_mean)
         sensitivity = jnp.where(valid, updated_sensitivity, previous_sensitivity)
         covariance = jnp.where(valid, updated_covariance, previous_covariance)
         return (mean, sensitivity, covariance), (
-            jnp.where(valid, step_normalizer, 0.0),
-            jnp.where(valid, step_squared, 0.0),
-            jnp.where(valid, step_linear, 0.0),
-            jnp.where(valid, step_curvature, 0.0),
+            jnp.where(
+                valid,
+                jnp.full(
+                    (dimension,), jnp.log(2.0 * jnp.pi * variance),
+                    dtype=jnp.float64,
+                ),
+                0.0,
+            ),
+            jnp.where(valid, innovation**2 / variance, 0.0),
+            jnp.where(valid, innovation * derivative / variance, 0.0),
+            jnp.where(valid, derivative**2 / variance, 0.0),
         )
 
     (_, _, _), (normalizers, squared_terms, linear_terms, curvature_terms) = (
         jax.lax.scan(
             step,
             (mean, sensitivity, covariance),
-            (dt[:-1], rates[1:], mask[1:]),
+            (dt, observations, mask),
         )
     )
     return _KalmanCoefficients(
-        normalizer + jnp.sum(normalizers, axis=0),
-        squared + jnp.sum(squared_terms, axis=0),
-        linear + jnp.sum(linear_terms, axis=0),
-        curvature + jnp.sum(curvature_terms, axis=0),
+        jnp.sum(normalizers, axis=0),
+        jnp.sum(squared_terms, axis=0),
+        jnp.sum(linear_terms, axis=0),
+        jnp.sum(curvature_terms, axis=0),
     )
 
 
 def _kalman_coefficients_batch(
-    rates: jax.Array,
+    observations: jax.Array,
     dt: jax.Array,
     mask: jax.Array,
     parameters: jax.Array,
@@ -601,7 +639,7 @@ def _kalman_coefficients_batch(
     return jax.vmap(
         _kalman_coefficients_single,
         in_axes=(0, 0, 0, None),
-    )(rates, dt, mask, parameters)
+    )(observations, dt, mask, parameters)
 
 
 def transition(
@@ -664,7 +702,7 @@ def parameter_negative_log_likelihood(
         objective -= jnp.sum(block.weight * log_density)
     for batch in data.sequence_batches:
         coefficients = _kalman_coefficients_batch(
-            batch.y / batch.dt[:, :, None], batch.dt, batch.mask, parameters
+            batch.y, batch.dt, batch.mask, parameters
         )
         weights = batch.weight
         segment_count = batch.segment_count

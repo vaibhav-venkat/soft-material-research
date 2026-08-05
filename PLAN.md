@@ -195,17 +195,17 @@ But be more explicit in the variable names of course
 
 ### 1. `r` is latent — the likelihood needs a Kalman filter
 
-**Problem.** Today `u_k` *is* the measured rate `Δ(Qᵀ A)/Δt`, so the AR(1) likelihood
-factorizes into independent one-step Gaussian terms — that is what
-`PersistentRateBlock` / `parameter_negative_log_likelihood` in
-`fitting/model.py` exploit (all sequences of equal dimension are concatenated
-into one batched block). In the 2D model only `u` is observed; `r` is latent, so
-`u` alone is no longer Markov and the batched one-step form is wrong.
+**Problem.** The observed value is the interval increment
+`y_k = Δ(Qᵀ A) = ∫[t_k,t_{k+1}] (u(t) + β_s) dt`, not an instantaneous rate.
+In the 2D model only `u` is observed; `r` is latent, so `u` alone is no longer
+Markov and the old batched one-step form is wrong.
 
-**Decision.** Marginalize `r` with an exact Gaussian Kalman filter: `u` observed
-(exactly, or with a tiny jitter for numerical conditioning), `r` latent, state
-propagated with the analytic `Φ_k` above. Implement as a `jax.lax.scan` per
-sequence, initialized from the stationary covariance `(D_u/γ) I`.
+**Decision.** Marginalize `r` with an exact Gaussian Kalman filter. For each
+interval, use the analytic integral coefficients `G_k` and the exact joint
+covariance of the endpoint state and the integrated process noise; the
+observation is `G_kᵀ(u_k, r_k) + β_s Δt_k` with a tiny jitter for numerical
+conditioning. Implement as a `jax.lax.scan` per sequence, initialized from the
+stationary covariance `(D_u/γ) I`.
 
 **Consequence.** `PersistentRateBlock` and the batched rate likelihood are
 replaced by per-sequence scans. Sequences must keep their per-sequence identity
@@ -213,7 +213,9 @@ replaced by per-sequence scans. Sequences must keep their per-sequence identity
 zeroing padded steps), rather than being concatenated across sequences as they
 are now in `build_persistent_rate_blocks`. `persistent_innovations` becomes the
 filter's standardized innovation sequence, which is what
-`_temporal_residual_acf` in `fitting/validation.py` should consume.
+`_temporal_residual_acf` in `fitting/validation.py` should consume. Keep the
+raw interval increments in `StateSpaceSequence`; divide by `dt` only for
+empirical initialization or rate plots.
 
 ### 2. `w_k` is area-fraction weighted
 
@@ -273,8 +275,8 @@ Parameters become `(gamma, omega, kappa_T, D_u, D_T, A_T_star, sigma_b)`;
   index-based `0.5 if index == 4` special case must be re-pointed at
   `A_T_star`.
 - **`fitting/validation.py` + plots** — the forward simulator `_paths`
-  propagates a scalar `rates` AR(1) today; it must carry `(u, r)` with the
-  analytic rotation. `_posterior_matrix` hardcodes 5 columns. The
+  carries `(u, r)` with the analytic rotation and generates the matching
+  interval integral. `_posterior_matrix` hardcodes 5 columns. The
   transfer-rate ACF plot (`_transfer_rate_series`, `pipeline/plots.py`) is the
   diagnostic this whole change targets, so it must reflect the new model.
 - **`tests/`** — synthetic recovery + the regression tests listed above

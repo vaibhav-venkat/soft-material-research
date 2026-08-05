@@ -34,6 +34,8 @@ from .fitting.model import (
     integrated_oscillatory_variance,
     kalman_log_likelihood,
     negative_log_likelihood,
+    oscillatory_integral_coefficients,
+    oscillatory_interval_moments,
     oscillatory_transition,
     oscillatory_transition_matrix,
     oscillatory_process_variance,

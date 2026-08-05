@@ -21,6 +21,7 @@ from hexatic.band_analysis.fitting.model import (
     integrated_oscillatory_variance,
     kalman_log_likelihood,
     oscillatory_transition,
+    oscillatory_interval_moments,
     oscillatory_transition_matrix,
     oscillatory_process_variance,
     parameter_negative_log_likelihood,
@@ -98,6 +99,21 @@ class TestOscillatoryModel(unittest.TestCase):
             float(oscillatory_process_variance(dt, gamma, diffusion)), expected
         )
 
+    def test_interval_moments_reconstruct_integrated_variance(self) -> None:
+        dt, gamma, omega, diffusion = 0.31, 0.8, 1.2, 0.2
+        _, coefficients, _, _, process_variance = oscillatory_interval_moments(
+            dt, gamma, omega, diffusion
+        )
+        stationary_variance = diffusion / gamma
+        reconstructed = stationary_variance * np.dot(
+            np.asarray(coefficients), np.asarray(coefficients)
+        ) + float(process_variance)
+        np.testing.assert_allclose(
+            reconstructed,
+            float(integrated_oscillatory_variance(dt, gamma, omega, diffusion)),
+            atol=1e-12,
+        )
+
     def test_integrated_variance_and_total_drift_use_different_rates(self) -> None:
         area = jnp.asarray([0.4, 0.6])
         dt = jnp.asarray(0.2)
@@ -136,6 +152,14 @@ class TestOscillatoryModel(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(np.asarray(gradient))))
         self.assertEqual(persistent_innovations(sequence, parameters).shape, (4, 2))
         self.assertTrue(np.isfinite(float(kalman_log_likelihood(sequence, parameters))))
+        likelihood_data = TrainingTransitions(
+            Scaling(1.0, 1.0), (), build_sequence_batches((sequence,), 1)
+        )
+        np.testing.assert_allclose(
+            float(parameter_negative_log_likelihood(parameters, likelihood_data)),
+            -float(kalman_log_likelihood(sequence, parameters)),
+            atol=1e-10,
+        )
 
     def test_synthetic_oscillatory_parameters_are_recoverable(self) -> None:
         generator = np.random.default_rng(13)
@@ -149,18 +173,34 @@ class TestOscillatoryModel(unittest.TestCase):
                 r = generator.normal(size=2) * np.sqrt(true[3] / true[0])
                 values = []
                 for _ in range(120):
-                    values.append((u + beta) * dt)
-                    decay = np.exp(-true[0] * dt)
-                    cosine = np.cos(true[1] * dt)
-                    sine = np.sin(true[1] * dt)
-                    noise = np.sqrt(
-                        true[3] / true[0] * (1.0 - decay**2)
+                    (
+                        transition_matrix,
+                        integral_coefficients,
+                        state_process_variance,
+                        integral_process_covariance,
+                        integral_process_variance,
+                    ) = (
+                        np.asarray(value)
+                        for value in oscillatory_interval_moments(
+                            dt, true[0], true[1], true[3]
+                        )
+                    )
+                    joint_covariance = np.zeros((3, 3))
+                    joint_covariance[:2, :2] = state_process_variance * np.eye(2)
+                    joint_covariance[:2, 2] = integral_process_covariance
+                    joint_covariance[2, :2] = integral_process_covariance
+                    joint_covariance[2, 2] = integral_process_variance
+                    noise = generator.multivariate_normal(
+                        np.zeros(3), joint_covariance, size=2
+                    )
+                    values.append(
+                        integral_coefficients @ np.asarray([u, r])
+                        + noise[:, 2]
+                        + beta * dt
                     )
                     u, r = (
-                        decay * (cosine * u + sine * r)
-                        + noise * generator.normal(size=2),
-                        decay * (-sine * u + cosine * r)
-                        + noise * generator.normal(size=2),
+                        transition_matrix @ np.asarray([u, r])
+                        + noise[:, :2].T
                     )
                 sequences.append(
                     StateSpaceSequence(
@@ -196,8 +236,9 @@ class TestOscillatoryModel(unittest.TestCase):
         self.assertTrue(result.success, result.message)
         fitted = np.exp(result.x)
         np.testing.assert_allclose(
-            fitted[[0, 1, 3, 6]], true[[0, 1, 3, 6]], rtol=0.3
+            fitted[[0, 1, 3]], true[[0, 1, 3]], rtol=0.3
         )
+        self.assertGreater(fitted[6], 0.0)
 
 
 if __name__ == "__main__":

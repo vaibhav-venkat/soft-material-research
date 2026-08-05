@@ -16,6 +16,7 @@ from .model import (
     build_state_space_sequences,
     build_transition_blocks,
     helmert_basis,
+    oscillatory_interval_moments,
     persistent_innovations,
     transition,
     transition_log_density,
@@ -519,35 +520,59 @@ def _paths(
                 * generator.standard_normal(len(indices))
             )
             weights = current[indices] / totals[:, None]
-            redistribution = (
-                rates[indices] + slopes[indices]
-            ) @ basis.T * step
+            (
+                transition_matrix,
+                integral_coefficients,
+                state_process_variance,
+                integral_process_covariance,
+                integral_process_variance,
+            ) = (
+                np.asarray(value)
+                for value in oscillatory_interval_moments(
+                    step,
+                    parameters[:, 0],
+                    parameters[:, 1],
+                    parameters[:, 3],
+                )
+            )
+            current_rates = rates[indices].copy()
+            current_oscillatory_rates = oscillatory_rates[indices].copy()
+            joint_covariance = np.zeros((len(indices), 3, 3), dtype=np.float64)
+            joint_covariance[:, 0, 0] = state_process_variance
+            joint_covariance[:, 1, 1] = state_process_variance
+            joint_covariance[:, :2, 2] = integral_process_covariance
+            joint_covariance[:, 2, :2] = integral_process_covariance
+            joint_covariance[:, 2, 2] = integral_process_variance
+            cholesky = np.linalg.cholesky(joint_covariance)
+            noise = np.einsum(
+                "pij,pmj->pmi",
+                cholesky,
+                generator.standard_normal((len(indices), component_count, 3)),
+            )
+            integral = (
+                integral_coefficients[:, 0, None] * current_rates
+                + integral_coefficients[:, 1, None]
+                * current_oscillatory_rates
+                + noise[:, :, 2]
+                + slopes[indices] * step
+            )
+            redistribution = integral @ basis.T
             following = (
                 current[indices]
                 + weights * (following_totals - totals)[:, None]
                 + redistribution
             )
-            decay = np.exp(-parameters[:, 0] * step)
-            cosine = np.cos(parameters[:, 1] * step)
-            sine = np.sin(parameters[:, 1] * step)
-            noise_scale = np.sqrt(
-                parameters[:, 3]
-                / parameters[:, 0]
-                * (1.0 - decay**2)
+            rates[indices] = (
+                transition_matrix[:, 0, 0, None] * current_rates
+                + transition_matrix[:, 0, 1, None]
+                * current_oscillatory_rates
+                + noise[:, :, 0]
             )
-            next_rates = decay[:, None] * (
-                cosine[:, None] * rates[indices]
-                + sine[:, None] * oscillatory_rates[indices]
-            )
-            next_oscillatory_rates = decay[:, None] * (
-                -sine[:, None] * rates[indices]
-                + cosine[:, None] * oscillatory_rates[indices]
-            )
-            rates[indices] = next_rates + noise_scale[:, None] * generator.standard_normal(
-                next_rates.shape
-            )
-            oscillatory_rates[indices] = next_oscillatory_rates + noise_scale[:, None] * generator.standard_normal(
-                next_oscillatory_rates.shape
+            oscillatory_rates[indices] = (
+                transition_matrix[:, 1, 0, None] * current_rates
+                + transition_matrix[:, 1, 1, None]
+                * current_oscillatory_rates
+                + noise[:, :, 1]
             )
             finite = np.all(np.isfinite(following), axis=1)
             failed_indices = indices[~finite]
@@ -663,7 +688,6 @@ def _paths(
         "simulated_transfer_rate_acf": simulated_transfer_rate_acf,
         "observed_transfer_rate_lag_time": observed_transfer_rate_lag_times,
         "simulated_transfer_rate_lag_time": simulated_transfer_rate_lag_times,
-        "transfer_rate_acf_reestimated": np.asarray([True]),
         "observed_area_msd": _pooled_msd(observed_area_series) * scaling.area**2,
         "simulated_area_msd": _pooled_msd(simulated_area_series) * scaling.area**2,
         "observed_lag_time": observed_lag_times,
