@@ -15,7 +15,6 @@ from .model import (
     Scaling,
     build_state_space_sequences,
     build_transition_blocks,
-    conservative_segment_slope,
     conservative_projection,
     persistent_innovations,
     transition,
@@ -357,6 +356,22 @@ def _relaxation_time(acf: np.ndarray, lag_times: np.ndarray) -> float:
     return float(lag_times[crossing[0]]) if len(crossing) else float("nan")
 
 
+def _transfer_rate_series(
+    areas: np.ndarray, tau: np.ndarray
+) -> tuple[list[np.ndarray], list[np.ndarray]]:
+    """Estimate b from one sampled segment, then return its componentwise v_i."""
+    if len(tau) < 2 or tau[-1] <= tau[0]:
+        return [], []
+    conservative = areas - areas.mean(axis=1, keepdims=True)
+    slope = (conservative[-1] - conservative[0]) / (tau[-1] - tau[0])
+    transfer = np.diff(conservative, axis=0) / np.diff(tau)[:, None] - slope
+    transfer_tau = 0.5 * (tau[1:] + tau[:-1])
+    return (
+        [transfer[:, component] for component in range(areas.shape[1])],
+        [transfer_tau for _ in range(areas.shape[1])],
+    )
+
+
 def _paths(
     segments: list[StableSegment],
     lag: int,
@@ -429,18 +444,11 @@ def _paths(
             sampled_areas[:, component] for component in range(segment.n_bands)
         )
         observed_deviation = sampled_areas - sampled_areas.mean(axis=1, keepdims=True)
-        if len(sampled_tau) > 1 and normalized.tau[-1] > normalized.tau[0]:
-            slope = conservative_segment_slope(normalized)
-            transfer_rate = np.diff(observed_deviation, axis=0) / np.diff(
-                sampled_tau
-            )[:, None] - slope
-            transfer_tau = 0.5 * (sampled_tau[1:] + sampled_tau[:-1])
-            observed_transfer_rate_series.extend(
-                transfer_rate[:, component] for component in range(segment.n_bands)
-            )
-            observed_transfer_rate_tau.extend(
-                transfer_tau for _ in range(segment.n_bands)
-            )
+        transfer_rate, transfer_tau = _transfer_rate_series(
+            sampled_areas, sampled_tau
+        )
+        observed_transfer_rate_series.extend(transfer_rate)
+        observed_transfer_rate_tau.extend(transfer_tau)
         observed_conservative.append(observed_deviation.ravel())
         observed_conservative_series.extend(
             observed_deviation[:, component] for component in range(segment.n_bands)
@@ -545,19 +553,10 @@ def _paths(
             simulated_conservative_series.extend(
                 deviation[:, component] for component in range(segment.n_bands)
             )
-            if len(valid) > 1:
-                valid_tau = sampled_tau[: len(valid)]
-                transfer_rate = np.diff(deviation, axis=0) / np.diff(
-                    valid_tau
-                )[:, None] - slopes[path_index]
-                transfer_tau = 0.5 * (valid_tau[1:] + valid_tau[:-1])
-                simulated_transfer_rate_series.extend(
-                    transfer_rate[:, component]
-                    for component in range(segment.n_bands)
-                )
-                simulated_transfer_rate_tau.extend(
-                    transfer_tau for _ in range(segment.n_bands)
-                )
+            valid_tau = sampled_tau[: len(valid)]
+            transfer_rate, transfer_tau = _transfer_rate_series(valid, valid_tau)
+            simulated_transfer_rate_series.extend(transfer_rate)
+            simulated_transfer_rate_tau.extend(transfer_tau)
             if len(valid) > 1:
                 increment = np.diff(valid, axis=0)
                 simulated_segment_increments.append(increment)
@@ -635,6 +634,7 @@ def _paths(
         "simulated_transfer_rate_acf": simulated_transfer_rate_acf,
         "observed_transfer_rate_lag_time": observed_transfer_rate_lag_times,
         "simulated_transfer_rate_lag_time": simulated_transfer_rate_lag_times,
+        "transfer_rate_acf_reestimated": np.asarray([True]),
         "observed_area_msd": _pooled_msd(observed_area_series) * scaling.area**2,
         "simulated_area_msd": _pooled_msd(simulated_area_series) * scaling.area**2,
         "observed_lag_time": observed_lag_times,

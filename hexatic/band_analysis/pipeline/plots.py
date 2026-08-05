@@ -368,7 +368,8 @@ def _transfer_rate_acf_plot(
         xlabel="physical lag time",
         ylabel=r"transfer-rate ACF",
         title=(
-            rf"Lag {outcome.lag}: $v_i=\Delta(A_i-\bar A)/\Delta t-b_{{s,i}}$"
+            rf"Lag {outcome.lag}: re-estimated $b_s$, "
+            rf"$v_i=\Delta(A_i-\bar A)/\Delta t-b_{{s,i}}$"
         ),
     )
     axis.legend()
