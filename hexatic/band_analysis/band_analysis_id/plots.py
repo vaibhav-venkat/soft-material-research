@@ -68,18 +68,18 @@ def plot_area_dynamics(stats: BandStatistics, output_dir: Path) -> Path:
     _points(
         second_axis,
         area,
-        second / np.sqrt(area),
+        second,
         "blue",
-        r"$\langle\Delta A^2\rangle/\sqrt{A}$",
+        r"$\langle\Delta A^2\rangle$",
     )
-    second_axis.set_ylabel(r"$\langle\Delta A^2\rangle/\sqrt{A}$")
+    second_axis.set_ylabel(r"$\langle\Delta A^2\rangle/\sigma^4$")
     axes[1].get_legend().remove()
     second_axis.get_legend().remove()
     axes[1].legend(
         [axes[1].collections[0], second_axis.collections[0]],
         [
             r"$\langle\Delta A\rangle$",
-            r"$\langle\Delta A^2\rangle/\sqrt{A}$",
+            r"$\langle\Delta A^2\rangle$",
         ],
     )
     path = output_dir / "band_area_dynamics.svg"
