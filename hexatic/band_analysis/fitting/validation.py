@@ -273,7 +273,7 @@ def _temporal_residual_acf(
 ) -> np.ndarray:
     """Pool total-mode and Kalman innovations without joining trajectories."""
     series: list[np.ndarray] = []
-    _, _, kappa_total, _, diffusion_total, area_star, _ = parameters
+    kappa_total, diffusion_total, area_star, _ = parameters[5:]
     for segment in segments:
         if len(segment.tau) <= lag:
             continue
