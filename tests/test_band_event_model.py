@@ -10,42 +10,42 @@ import jax.numpy as jnp
 import numpy as np
 from scipy.optimize import minimize
 
-from hexatic.band_analysis.detection.chains import (
+from hexatic.band_analysis.band_analysis_id.chains import (
     EventChain,
     build_knot_grids,
     event_transitions,
     plan_chains,
 )
-from hexatic.band_analysis.detection.characterization import DetectedBand
-from hexatic.band_analysis.detection.events import (
+from hexatic.band_analysis.band_analysis_id.characterization import DetectedBand
+from hexatic.band_analysis.band_analysis_id.events import (
     EventStep,
     build_event_step,
     initial_slots,
     no_event_step,
 )
-from hexatic.band_analysis.detection.tracking import (
+from hexatic.band_analysis.band_analysis_id.tracking import (
     BandTracker,
     DetectionFrame,
     EventCode,
     EventEdges,
 )
-from hexatic.band_analysis.fitting.event_validation import (
+from hexatic.band_analysis.band_analysis_fitting.event_validation import (
     _segment_breaks,
     simulate_event_chain,
 )
-from hexatic.band_analysis.fitting.inference import empirical_parameters
-from hexatic.band_analysis.fitting.masked_model import (
+from hexatic.band_analysis.band_analysis_fitting.inference import empirical_parameters
+from hexatic.band_analysis.band_analysis_fitting.masked_model import (
     MaskedTrainingTransitions,
     parameter_negative_log_likelihood as event_nll,
     prepare_training_transitions as prepare_event,
     transition_log_density,
 )
-from hexatic.band_analysis.fitting.model import (
+from hexatic.band_analysis.band_analysis_fitting.model import (
     JITTER,
     parameter_negative_log_likelihood as clean_nll,
     prepare_training_transitions as prepare_clean,
 )
-from hexatic.band_analysis.pipeline.event_plots import (
+from hexatic.band_analysis.band_analysis_fitting.event_plots import (
     _pooled_msd,
     _shared_msd_limit,
     _track_series,

@@ -7,17 +7,17 @@ from pathlib import Path
 
 import numpy as np
 
-from hexatic.band_analysis.detection.segments import StableSegment
-from hexatic.band_analysis.fitting.bayesian import MCMCConfig
-from hexatic.band_analysis.fitting.model import (
+from hexatic.band_analysis.band_analysis_id.segments import StableSegment
+from hexatic.band_analysis.band_analysis_fitting.bayesian import MCMCConfig
+from hexatic.band_analysis.band_analysis_fitting.model import (
     helmert_basis,
     ou_interval_moments,
     prepare_training_transitions,
 )
-from hexatic.band_analysis.fitting.validation import validate_posterior
-from hexatic.band_analysis.pipeline.plots import plot_lag, plot_summary
-from hexatic.band_analysis.pipeline.reporting import write_metrics, write_report
-from hexatic.band_analysis.pipeline.workflow import (
+from hexatic.band_analysis.band_analysis_fitting.validation import validate_posterior
+from hexatic.band_analysis.band_analysis_fitting.plots import plot_lag, plot_summary
+from hexatic.band_analysis.band_analysis_fitting.reporting import write_metrics, write_report
+from hexatic.band_analysis.band_analysis_fitting.workflow import (
     AnalysisConfig,
     LagOutcome,
     run_analysis,

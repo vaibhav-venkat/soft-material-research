@@ -6,9 +6,9 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from hexatic.band_analysis.detection.chains import EventChain
-from hexatic.band_analysis.detection.events import EventStep, no_event_step
-from hexatic.band_analysis.detection.segments import StableSegment
+from hexatic.band_analysis.band_analysis_id.chains import EventChain
+from hexatic.band_analysis.band_analysis_id.events import EventStep, no_event_step
+from hexatic.band_analysis.band_analysis_id.segments import StableSegment
 
 
 @dataclass(frozen=True)

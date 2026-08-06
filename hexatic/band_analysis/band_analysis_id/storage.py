@@ -13,9 +13,9 @@ import numpy as np
 from safetensors import safe_open
 from safetensors.numpy import load_file, save_file
 
-from ..detection.chains import EventChain
-from ..detection.events import EventStep
-from ..detection.segments import StableSegment
+from .chains import EventChain
+from .events import EventStep
+from .segments import StableSegment
 
 
 def fingerprint(value: Any) -> str:

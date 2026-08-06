@@ -26,7 +26,7 @@ from .model import (
     TrainingTransitions,
     parameter_negative_log_likelihood as clean_parameter_negative_log_likelihood,
 )
-from ..pipeline.storage import atomic_path
+from ..band_analysis_id.storage import atomic_path
 
 
 logger = logging.getLogger(__name__)

@@ -8,8 +8,8 @@ from typing import Any
 
 import numpy as np
 
-from ..fitting.model import EVENT_PARAMETER_NAMES, PARAMETER_NAMES
-from .storage import write_json, write_text
+from .model import EVENT_PARAMETER_NAMES, PARAMETER_NAMES
+from ..band_analysis_id.storage import write_json, write_text
 from .workflow import AnalysisConfig, FitPath, LagOutcome, stable_lags
 
 

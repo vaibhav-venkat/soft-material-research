@@ -16,9 +16,9 @@ from .chains import EventChain, build_chains
 from .characterization import characterize_band
 from .components import label_dilute_bands
 from .density import SurfaceGrid, make_density_batch_kernel, validate_gpu
-from ..pipeline.io import InputMetadata, frame_numbers, iter_frames
+from .io import InputMetadata, frame_numbers, iter_frames
 from .segments import StableSegment, build_stable_segments
-from ..pipeline.storage import (
+from .storage import (
     load_seed_event_chains,
     load_seed_segments,
     save_seed_event_chains,

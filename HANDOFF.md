@@ -10,7 +10,7 @@ decisions that are not in `PLAN.md`, and the constraints on the remaining work.
 
 | Step | Work | Commit |
 |---|---|---|
-| 0 | Reorganize `band_analysis/` into `detection/`, `fitting/`, `pipeline/` | `effcfec` |
+| 0 | Reorganize `band_analysis/` by identification and fitting responsibility | `effcfec` |
 | 1 | Expose bipartite edge structure per event frame | `4ae1313` |
 | 2 | `events.py` — `EventStep`, maps, slot allocation | `082cca1` |
 | 3 | `chains.py` — `EventChain`, global N_max, knot grids | `12e73ee` |
@@ -24,20 +24,20 @@ decisions that are not in `PLAN.md`, and the constraints on the remaining work.
 
 ```
 hexatic/band_analysis/
-  __init__.py          # single re-export surface; add new public names here + __all__
+  __init__.py
   __main__.py
-  detection/  components, characterization, density, extraction,
-              tracking, segments, events, chains
-  fitting/    model, inference, bayesian, validation
-  pipeline/   workflow, storage, io, reporting, plots, cli
+  band_analysis_id/       components, characterization, density, extraction,
+                          tracking, segments, events, chains, io, storage
+  band_analysis_fitting/  model, inference, bayesian, validation, workflow,
+                          reporting, plots, event_plots, cli
 ```
 
-Max 3 subpackages at one depth, by request. Keep every file under 600 lines —
+Keep every file under 600 lines —
 if something is heading past that, the content is wrong, not the file.
 
 ## What steps 1–3 built
 
-### `detection/tracking.py` — `EventEdges`
+### `band_analysis_id/tracking.py` — `EventEdges`
 
 `BandTracker.track` used to collapse each event frame to one dominant
 `EventCode`, discarding the overlap structure. `TrackedFrame.edges` now carries
@@ -54,7 +54,7 @@ instead of implied. Non-`None` only on event frames — `None` for no-event,
 
 `EventRecord` / `EventCode` are untouched; the clean-segment path still uses them.
 
-### `detection/events.py` — the map builder (218 lines, NumPy)
+### `band_analysis_id/events.py` — the map builder (218 lines, NumPy)
 
 `build_event_step(edges, slots, observed, n_max) -> (EventStep, next_slots)`.
 
@@ -82,7 +82,7 @@ Verified numerically: split `(HA)[i] + (HA)[r] == A[i]`; merge
 death total `-A[i]`; unaffected rows keep their continuous prediction;
 `m'=0 => A=0`.
 
-### `detection/chains.py` — `EventChain` (248 lines, NumPy)
+### `band_analysis_id/chains.py` — `EventChain` (248 lines, NumPy)
 
 Two passes, because N_max is global across **all** seeds:
 
@@ -134,12 +134,12 @@ Everything JIT-compiled, vmap-ed, or differentiated uses `jnp`: transition and
 covariance algebra, the Cholesky path, the likelihood, inference, the forward
 simulator, posterior predictive. Convert **once**, where `TrainingTransitions` is
 assembled — the same place `build_transition_blocks` already calls `jnp.asarray`.
-Step 4 should also audit `fitting/model.py` for hand-rolled NumPy sitting inside
+Step 4 should also audit `band_analysis_fitting/model.py` for hand-rolled NumPy sitting inside
 the traced path and move it to `jnp`.
 
 ### Step 4 — masked state space
 
-New file `fitting/masked_model.py`, **not** an extension of `model.py`.
+New file `band_analysis_fitting/masked_model.py`, **not** an extension of `model.py`.
 `PLAN.md` requires the clean-segment fit to remain independently runnable (its
 validation step 3 fits both paths and compares the bias), so the separation
 should be structural. `model.py` is 389 lines and would blow the 600-line limit

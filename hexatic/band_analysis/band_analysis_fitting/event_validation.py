@@ -10,8 +10,8 @@ import jax.numpy as jnp
 import numpy as np
 from scipy.special import logsumexp
 
-from ..detection.chains import EventChain, event_transitions
-from ..detection.events import EventStep
+from ..band_analysis_id.chains import EventChain, event_transitions
+from ..band_analysis_id.events import EventStep
 from .masked_model import (
     build_transition_blocks,
     factorized_transition_log_density,

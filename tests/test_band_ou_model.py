@@ -8,8 +8,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from hexatic.band_analysis.detection.segments import StableSegment
-from hexatic.band_analysis.fitting.model import (
+from hexatic.band_analysis.band_analysis_id.segments import StableSegment
+from hexatic.band_analysis.band_analysis_fitting.model import (
     Scaling,
     StateSpaceSequence,
     TrainingTransitions,

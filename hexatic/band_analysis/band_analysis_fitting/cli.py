@@ -10,10 +10,10 @@ from typing import Sequence
 
 from hexatic.constants import cylinder
 
-from ..detection.chains import EventChain, globally_pad_chains
-from ..fitting.bayesian import MCMCConfig
-from ..detection.extraction import ExtractionConfig, SeedExtraction, extract_seed_data
-from .io import InputMetadata, load_metadata, require_compatible_seeds
+from ..band_analysis_id.chains import EventChain, globally_pad_chains
+from .bayesian import MCMCConfig
+from ..band_analysis_id.extraction import ExtractionConfig, SeedExtraction, extract_seed_data
+from ..band_analysis_id.io import InputMetadata, load_metadata, require_compatible_seeds
 from .reporting import FitOutcomes, write_configuration, write_metrics, write_report
 from .workflow import AnalysisConfig, run_analysis
 

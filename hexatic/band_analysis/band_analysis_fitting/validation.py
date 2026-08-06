@@ -21,7 +21,7 @@ from .model import (
     transition,
     transition_log_density,
 )
-from ..detection.segments import StableSegment
+from ..band_analysis_id.segments import StableSegment
 
 
 # Defined once so their trace caches are shared across blocks, validation sets,

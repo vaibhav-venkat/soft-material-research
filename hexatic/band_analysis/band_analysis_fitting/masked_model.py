@@ -14,8 +14,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from ..detection.chains import EventChain, build_knot_grids, event_transitions
-from ..detection.events import EventStep, no_event_step
+from ..band_analysis_id.chains import EventChain, build_knot_grids, event_transitions
+from ..band_analysis_id.events import EventStep, no_event_step
 from .model import JITTER, Scaling, positive_parameters
 
 

@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy import stats
 
-from ..detection.chains import EventChain
+from ..band_analysis_id.chains import EventChain
 from .workflow import LagOutcome
 
 

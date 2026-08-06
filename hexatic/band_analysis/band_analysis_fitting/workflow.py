@@ -14,23 +14,23 @@ import numpy as np
 from safetensors import safe_open
 from safetensors.numpy import load_file
 
-from ..detection.chains import EventChain
-from ..detection.segments import StableSegment
-from ..fitting.bayesian import MCMCConfig, run_bayesian_inference, save_inference_data
-from ..fitting.event_validation import validate_event_posterior
-from ..fitting.inference import OptimizationResult, optimize_parameters
-from ..fitting.masked_model import (
+from ..band_analysis_id.chains import EventChain
+from ..band_analysis_id.segments import StableSegment
+from .bayesian import MCMCConfig, run_bayesian_inference, save_inference_data
+from .event_validation import validate_event_posterior
+from .inference import OptimizationResult, optimize_parameters
+from .masked_model import (
     MaskedTrainingTransitions,
     prepare_training_transitions as prepare_event_transitions,
 )
-from ..fitting.model import (
+from .model import (
     EVENT_PARAMETER_NAMES,
     PARAMETER_NAMES,
     TrainingTransitions,
     prepare_training_transitions as prepare_clean_transitions,
 )
-from ..fitting.validation import ValidationResult, validate_posterior
-from .storage import fingerprint, write_arrays, write_json
+from .validation import ValidationResult, validate_posterior
+from ..band_analysis_id.storage import fingerprint, write_arrays, write_json
 
 
 logger = logging.getLogger(__name__)
