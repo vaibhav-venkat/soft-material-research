@@ -130,10 +130,13 @@ def plot_lifetimes(stats: BandStatistics, output_dir: Path) -> Path:
     lifetime, probability = probability_points(stats.lifetimes)
     _points(axes[1, 1], lifetime, probability, "red", r"$P(\tau)$")
     axes[1, 1].set(xlabel=r"lifetime $\tau$", ylabel=r"$P(\tau)$")
+    axes[1, 1].set_yscale("log")
     survival_axis = axes[1, 1].twinx()
     tau, survival = survival_points(stats.lifetimes)
-    _points(survival_axis, tau, survival, "blue", r"$S(\tau)$")
+    positive = survival > 0.0
+    _points(survival_axis, tau[positive], survival[positive], "blue", r"$S(\tau)$")
     survival_axis.set_ylabel(r"$S(\tau)=P(T>\tau)$")
+    survival_axis.set_yscale("log")
     handles_left, labels_left = axes[1, 1].get_legend_handles_labels()
     handles_right, labels_right = survival_axis.get_legend_handles_labels()
     axes[1, 1].get_legend().remove()
@@ -156,10 +159,20 @@ def _topology_lifetime_plot(
     lifetime, probability = probability_points(values)
     _points(axis, lifetime, probability, "red", rf"$P_{{{event}}}(\tau)$", marker)
     axis.set(xlabel=r"lifetime $\tau$", ylabel=rf"$P_{{{event}}}(\tau)$")
+    axis.set_yscale("log")
     survival_axis = axis.twinx()
     tau, survival = survival_points(values)
-    _points(survival_axis, tau, survival, "blue", rf"$S_{{{event}}}(\tau)$", marker)
+    positive = survival > 0.0
+    _points(
+        survival_axis,
+        tau[positive],
+        survival[positive],
+        "blue",
+        rf"$S_{{{event}}}(\tau)$",
+        marker,
+    )
     survival_axis.set_ylabel(rf"$S_{{{event}}}(\tau)$")
+    survival_axis.set_yscale("log")
     left_handles, left_labels = axis.get_legend_handles_labels()
     right_handles, right_labels = survival_axis.get_legend_handles_labels()
     if legend := axis.get_legend():
