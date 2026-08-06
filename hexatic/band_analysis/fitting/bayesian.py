@@ -209,8 +209,8 @@ def _physical_idata(
         "event: tau_p is physical time; kappa_T is inverse physical time; "
         "diffusions are area^2/time; A_T_star and sigma_E are area"
         if names == EVENT_PARAMETER_NAMES
-        else "clean: gamma and omega are inverse physical time, "
-        "kappa_T is inverse physical time, D_u is area^2/time^3, "
+        else "clean: gamma and kappa_T are inverse physical time, "
+        "D_u is area^2/time^3, "
         "D_T is area^2/time, A_T_star is area, "
         "and sigma_b is area/time"
     )

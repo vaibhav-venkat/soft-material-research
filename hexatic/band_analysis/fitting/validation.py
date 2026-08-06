@@ -12,12 +12,11 @@ import numpy as np
 from scipy.special import logsumexp
 
 from .model import (
-    PARAMETER_NAMES,
     Scaling,
     build_state_space_sequences,
     build_transition_blocks,
     helmert_basis,
-    oscillatory_interval_moments,
+    ou_interval_moments,
     persistent_innovations,
     transition,
     transition_log_density,
@@ -48,10 +47,6 @@ def _posterior_matrix(samples: np.ndarray) -> np.ndarray:
     values = np.asarray(samples, dtype=np.float64)
     if values.ndim == 3:
         values = values.reshape(-1, values.shape[-1])
-    if values.ndim != 2 or values.shape[1] != len(PARAMETER_NAMES):
-        raise ValueError(
-            f"posterior samples must have shape (..., {len(PARAMETER_NAMES)})"
-        )
     return values
 
 
@@ -273,7 +268,7 @@ def _temporal_residual_acf(
 ) -> np.ndarray:
     """Pool total-mode and Kalman innovations without joining trajectories."""
     series: list[np.ndarray] = []
-    kappa_total, diffusion_total, area_star, _ = parameters[5:]
+    _, kappa_total, _, diffusion_total, area_star, _ = parameters
     for segment in segments:
         if len(segment.tau) <= lag:
             continue
@@ -285,11 +280,10 @@ def _temporal_residual_acf(
             current_total = areas[:-1].sum(axis=1)
             following_total = areas[1:].sum(axis=1)
             intervals = np.diff(tau)
-            total_mean = current_total - kappa_total * (
-                current_total - area_star
-            ) * intervals
+            decay = np.exp(-kappa_total * intervals)
+            total_mean = area_star + (current_total - area_star) * decay
             total_residual = (following_total - total_mean) / np.sqrt(
-                2.0 * diffusion_total * intervals
+                diffusion_total / kappa_total * (1.0 - decay**2)
             )
             series.append(total_residual)
         for sequence in build_state_space_sequences([segment], lag):
@@ -374,8 +368,8 @@ def _acf_discrepancy(
 ) -> tuple[dict[str, float], np.ndarray]:
     """Score the observed ACF against the same-geometry null past the model's decay.
 
-    Two statistics, because a signed integral cancels a damped oscillation against
-    its own rebound and is blind to exactly the alternative of interest:
+    Negative correlation and general shape mismatch are kept as separate
+    statistics:
 
     ``negative_area`` -- the area below zero only. The fitted model's ACF stays
     positive through the window, so negativity is pure discrepancy and the rebound
@@ -640,25 +634,13 @@ def _paths(
         )
         paths[:, 0] = sampled_areas[0]
         component_count = segment.n_bands - 1
-        deviation_f = np.sqrt(segment_parameters[:, 3])[:, None]
-        deviation_o = np.sqrt(
-            segment_parameters[:, 3] * segment_parameters[:, 4]
-        )[:, None]
-        fast_rates = (
-            generator.standard_normal((paths_per_segment, component_count))
-            * deviation_f
-        )
         rates = (
             generator.standard_normal((paths_per_segment, component_count))
-            * deviation_o
-        )
-        oscillatory_rates = (
-            generator.standard_normal((paths_per_segment, component_count))
-            * deviation_o
+            * np.sqrt(segment_parameters[:, 2] / segment_parameters[:, 0])[:, None]
         )
         slopes = generator.standard_normal(
             (paths_per_segment, component_count)
-        ) * segment_parameters[:, 8, None]
+        ) * segment_parameters[:, 5, None]
         stops = np.full(paths_per_segment, len(sampled_areas), dtype=np.int64)
         active = np.ones(paths_per_segment, dtype=bool)
         for frame in range(len(sampled_areas) - 1):
@@ -678,80 +660,40 @@ def _paths(
             parameters = segment_parameters[indices]
             step = sampled_tau[frame + 1] - sampled_tau[frame]
             totals = current[indices].sum(axis=1)
-            total_decay = np.exp(-parameters[:, 5] * step)
+            total_decay = np.exp(-parameters[:, 1] * step)
             following_totals = (
-                parameters[:, 7]
-                + (totals - parameters[:, 7]) * total_decay
+                parameters[:, 4]
+                + (totals - parameters[:, 4]) * total_decay
                 + np.sqrt(
-                    parameters[:, 6] / parameters[:, 5] * (1.0 - total_decay**2)
+                    parameters[:, 3] / parameters[:, 1] * (1.0 - total_decay**2)
                 )
                 * generator.standard_normal(len(indices))
             )
             weights = current[indices] / totals[:, None]
-            slow_rate = parameters[:, 0]
-            fast_rate = slow_rate * (1.0 + parameters[:, 1])
-            (
-                fast_matrix,
-                fast_coefficients,
-                fast_state_variance,
-                fast_covariance,
-                fast_variance,
-            ) = (
-                np.asarray(value)
-                for value in oscillatory_interval_moments(
-                    step,
-                    fast_rate,
-                    jnp.zeros(len(indices)),
-                    fast_rate * parameters[:, 3],
-                )
+            moments = ou_interval_moments(
+                step, parameters[:, 0], parameters[:, 2]
             )
-            (
-                transition_matrix,
-                integral_coefficients,
-                state_process_variance,
-                integral_process_covariance,
-                integral_process_variance,
-            ) = (
-                np.asarray(value)
-                for value in oscillatory_interval_moments(
-                    step,
-                    slow_rate,
-                    parameters[:, 2],
-                    slow_rate * parameters[:, 4] * parameters[:, 3],
-                )
-            )
-            current_fast_rates = fast_rates[indices].copy()
             current_rates = rates[indices].copy()
-            current_oscillatory_rates = oscillatory_rates[indices].copy()
-            fast_joint = np.zeros((len(indices), 2, 2), dtype=np.float64)
-            fast_joint[:, 0, 0] = fast_state_variance
-            fast_joint[:, 0, 1] = fast_covariance[:, 0]
-            fast_joint[:, 1, 0] = fast_covariance[:, 0]
-            fast_joint[:, 1, 1] = fast_variance
-            fast_noise = np.einsum(
-                "pij,pmj->pmi",
-                np.linalg.cholesky(fast_joint),
-                generator.standard_normal((len(indices), component_count, 2)),
+            joint_covariance = np.zeros((len(indices), 2, 2), dtype=np.float64)
+            joint_covariance[:, 0, 0] = np.asarray(moments.process_variance)
+            joint_covariance[:, 0, 1] = np.asarray(
+                moments.process_integral_covariance
             )
-            joint_covariance = np.zeros((len(indices), 3, 3), dtype=np.float64)
-            joint_covariance[:, 0, 0] = state_process_variance
-            joint_covariance[:, 1, 1] = state_process_variance
-            joint_covariance[:, :2, 2] = integral_process_covariance
-            joint_covariance[:, 2, :2] = integral_process_covariance
-            joint_covariance[:, 2, 2] = integral_process_variance
+            joint_covariance[:, 1, 0] = np.asarray(
+                moments.process_integral_covariance
+            )
+            joint_covariance[:, 1, 1] = np.asarray(
+                moments.integral_process_variance
+            )
             cholesky = np.linalg.cholesky(joint_covariance)
             noise = np.einsum(
                 "pij,pmj->pmi",
                 cholesky,
-                generator.standard_normal((len(indices), component_count, 3)),
+                generator.standard_normal((len(indices), component_count, 2)),
             )
             integral = (
-                fast_coefficients[:, 0, None] * current_fast_rates
-                + fast_noise[:, :, 1]
-                + integral_coefficients[:, 0, None] * current_rates
-                + integral_coefficients[:, 1, None]
-                * current_oscillatory_rates
-                + noise[:, :, 2]
+                np.asarray(moments.coefficient)[:, None] * current_rates
+                + noise[:, :, 1]
                 + slopes[indices] * step
             )
             redistribution = integral @ basis.T
@@ -760,21 +702,9 @@ def _paths(
                 + weights * (following_totals - totals)[:, None]
                 + redistribution
             )
-            fast_rates[indices] = (
-                fast_matrix[:, 0, 0, None] * current_fast_rates
-                + fast_noise[:, :, 0]
-            )
             rates[indices] = (
-                transition_matrix[:, 0, 0, None] * current_rates
-                + transition_matrix[:, 0, 1, None]
-                * current_oscillatory_rates
+                np.asarray(moments.transition)[:, None] * current_rates
                 + noise[:, :, 0]
-            )
-            oscillatory_rates[indices] = (
-                transition_matrix[:, 1, 0, None] * current_rates
-                + transition_matrix[:, 1, 1, None]
-                * current_oscillatory_rates
-                + noise[:, :, 1]
             )
             finite = np.all(np.isfinite(following), axis=1)
             failed_indices = indices[~finite]

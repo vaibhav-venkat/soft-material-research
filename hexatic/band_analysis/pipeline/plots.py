@@ -19,11 +19,6 @@ from .workflow import LagOutcome
 
 PARAMETER_LABELS = {
     "gamma": r"$\gamma$",
-    "gamma_o": r"$\gamma_o$",
-    "delta": r"$\delta$",
-    "omega": r"$\omega$",
-    "amplitude_f": r"$\sigma_f^2$",
-    "amplitude_r": r"$\sigma_o^2/\sigma_f^2$",
     "tau_p": r"$\tau_p$",
     "kappa_T": r"$\kappa_T$",
     "D_u": r"$D_u$",

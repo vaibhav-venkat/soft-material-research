@@ -210,16 +210,6 @@ def simulate_event_chain(
     distributes the scalar noise with its exogenous daughter fractions.
     """
     values = np.asarray(parameters, dtype=np.float64)
-    if (
-        values.shape != (6,)
-        or not np.all(np.isfinite(values))
-        or values[0] <= 0.0
-        or values[4] <= 0.0
-        or np.any(values[[1, 2, 3, 5]] < 0.0)
-    ):
-        raise ValueError("parameters must contain valid nonnegative SDE values")
-    if sigma_b_squared < 0.0 or not np.isfinite(sigma_b_squared):
-        raise ValueError("sigma_b_squared must be finite and nonnegative")
     simulated = _simulate(
         jnp.asarray(schedule.areas[0], dtype=jnp.float64),
         _schedule(schedule),
@@ -264,8 +254,6 @@ def _posterior_matrix(samples: np.ndarray) -> np.ndarray:
     values = np.asarray(samples, dtype=np.float64)
     if values.ndim == 3:
         values = values.reshape(-1, values.shape[-1])
-    if values.ndim != 2 or values.shape[1] != 6:
-        raise ValueError("event posterior samples must have shape (..., 6)")
     return values
 
 
@@ -572,9 +560,7 @@ def validate_event_posterior(
     paths_per_chain: int = 200,
     seed: int = 0,
 ) -> ValidationResult:
-    """Validate a frozen six-parameter posterior on observed event schedules."""
-    if sigma_b_squared < 0.0 or not np.isfinite(sigma_b_squared):
-        raise ValueError("sigma_b_squared must be finite and nonnegative")
+    """Validate a frozen posterior on observed event schedules."""
     posterior = _posterior_matrix(normalized_samples)
     normalized = [normalize_event_chain(chain, scaling) for chain in chains]
     one_step_arrays, one_step_metrics = _one_step(

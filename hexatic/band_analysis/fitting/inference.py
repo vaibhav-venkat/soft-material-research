@@ -245,41 +245,6 @@ def empirical_parameters(data: TrainingData) -> np.ndarray:
 
     rates, rate_pairs, rate_intervals = _rate_statistics(data)
 
-    def clean_omega_start(gamma: float, fallback_dt: float) -> float:
-        """Estimate omega from the first pooled rate-ACF zero crossing."""
-        candidates: list[float] = []
-        if isinstance(data, TrainingTransitions):
-            for batch in data.sequence_batches:
-                batch_rates = np.asarray(batch.y) / np.asarray(batch.dt)[:, :, None]
-                batch_mask = np.asarray(batch.mask, dtype=bool)
-                for row_index, (sequence_rates, valid) in enumerate(
-                    zip(batch_rates, batch_mask, strict=True)
-                ):
-                    values = sequence_rates[valid]
-                    if len(values) < 3:
-                        continue
-                    intervals = np.asarray(
-                        batch.dt[row_index, : len(values) - 1]
-                    )
-                    for component in range(values.shape[1]):
-                        series = values[:, component]
-                        centered = series - series.mean()
-                        denominator = float(np.dot(centered, centered))
-                        if denominator <= 1e-12:
-                            continue
-                        autocorrelation = np.correlate(
-                            centered, centered, mode="full"
-                        )[len(series) - 1 :] / denominator
-                        crossing = np.flatnonzero(autocorrelation[1:] <= 0.0)
-                        if len(crossing):
-                            first = int(crossing[0])
-                            zero_time = float(np.sum(intervals[: first + 1]))
-                            if zero_time > 0.0:
-                                candidates.append(np.pi / (2.0 * zero_time))
-        if candidates:
-            return max(float(np.median(candidates)), 1e-6)
-        return max(0.1 * gamma, 0.25 / max(fallback_dt, 1e-6))
-
     if rates:
         all_rates = np.concatenate(rates)
         variance_rate = max(
@@ -307,23 +272,19 @@ def empirical_parameters(data: TrainingData) -> np.ndarray:
                     else representative_dt
                 )
                 gamma = 1.0 / max(tau_p, 1e-6)
-                omega = 0.1 * gamma
             else:
                 gamma = max(
                     1e-6,
                     -np.log(np.clip(abs(correlation), 0.05, 0.99))
                     / max(representative_dt, 1e-6),
                 )
-                omega = clean_omega_start(gamma, representative_dt)
         else:
             representative_dt = float(np.median(dt))
             if isinstance(data, MaskedTrainingTransitions):
                 tau_p = representative_dt
                 gamma = 1.0 / max(tau_p, 1e-6)
-                omega = 0.1 * gamma
             else:
                 gamma = 1.0 / max(representative_dt, 1e-6)
-                omega = clean_omega_start(gamma, representative_dt)
         if isinstance(data, MaskedTrainingTransitions):
             diffusion_u = max(variance_rate * tau_p, 1e-8)
         else:
@@ -331,7 +292,6 @@ def empirical_parameters(data: TrainingData) -> np.ndarray:
     else:
         representative_dt = float(np.median(dt))
         gamma = 1.0 / max(representative_dt, 1e-6)
-        omega = 0.25 * gamma
         diffusion_u = diffusion_total
         variance_rate = max(diffusion_u / gamma, 1e-8)
 
@@ -372,19 +332,11 @@ def empirical_parameters(data: TrainingData) -> np.ndarray:
         if len(sequence_means) > 1
         else max(0.1 * np.sqrt(variance_rate), 1e-6)
     )
-    # The lag-1 correlation sees the dominant fast mode; the slow mode is set an
-    # order of magnitude below it, and the empirical zero crossing underestimates
-    # omega because the fast tail delays it.
-    lambda_f = max(gamma, 1e-6)
-    slow_rate = lambda_f / 13.0
     return np.asarray(
         [
-            slow_rate,
-            12.0,
-            max(1.5 * omega, 1e-6),
-            max(0.9 * variance_rate, 1e-8),
-            0.11,
+            max(gamma, 1e-6),
             total_rate,
+            diffusion_u,
             diffusion_total,
             max(area_star, 1e-6),
             sigma_b,
@@ -433,8 +385,8 @@ def _starts(
         empirical_raw + generator.normal(0.0, 0.75, len(empirical))
         for _ in range(count - 2)
     )
-    if len(empirical) == len(PARAMETER_NAMES) and not event:
-        generic_values = [0.08, 11.0, 0.25, 0.1, 0.1, 0.1, 0.1, 1.0, 0.1]
+    if not event:
+        generic_values = [1.0, 0.1, 0.1, 0.1, 1.0, 0.1]
     else:
         generic_values = [1.0, 0.1, 0.1, 0.1, 1.0, float(empirical[-1])]
     generic = raw_parameters(np.asarray(generic_values))

@@ -187,7 +187,7 @@ class TestEventMapsAndLikelihood(unittest.TestCase):
             _segment_breaks(gap_chain), [False, False, True, False]
         )
 
-    def test_clean_oscillatory_likelihood_is_finite(self) -> None:
+    def test_clean_ou_likelihood_is_finite(self) -> None:
         tau = np.arange(30, dtype=np.float64) * 0.2
         areas = np.column_stack(
             (
@@ -212,7 +212,7 @@ class TestEventMapsAndLikelihood(unittest.TestCase):
         )
         segment = ignored_event_segments(chain)[0]
         clean_data = prepare_clean([segment], 1)
-        parameters = jnp.asarray([0.3, 3.0, 0.4, 0.02, 0.5, 0.5, 0.03, 1.0, 0.05])
+        parameters = jnp.asarray([0.3, 0.5, 0.02, 0.03, 1.0, 0.05])
         self.assertTrue(np.isfinite(float(clean_nll(parameters, clean_data))))
 
     def test_event_density_conditions_on_run_slope(self) -> None:
@@ -437,32 +437,12 @@ class TestSyntheticRecoveryAndBias(unittest.TestCase):
             cls.event_data
         )
 
-        segments = [
-            segment
-            for chain in cls.chains
-            for segment in ignored_event_segments(chain)
-        ]
-        cls.clean_data = prepare_clean(segments, 1)
-        empirical = empirical_parameters(cls.clean_data)
-
-        def objective(log_parameters: jax.Array) -> jax.Array:
-            return clean_nll(jnp.exp(log_parameters), cls.clean_data)
-
-        clean_log = _minimize_log_parameters(objective, empirical)
-        cls.clean_center = (
-            np.exp(clean_log) * cls.clean_data.scaling.parameter_factors
-        )
 
     def test_known_parameters_lie_in_laplace_credible_rectangle(self) -> None:
         np.testing.assert_array_less(self.event_low, TRUE_PARAMETERS)
         np.testing.assert_array_less(TRUE_PARAMETERS, self.event_high)
         relative_error = np.abs(self.event_center - TRUE_PARAMETERS) / TRUE_PARAMETERS
         self.assertLess(float(relative_error.max()), 0.12)
-
-    def test_clean_fit_uses_oscillatory_parameterization(self) -> None:
-        self.assertEqual(self.clean_center.shape, (9,))
-        self.assertTrue(np.all(np.isfinite(self.clean_center)))
-
 
 if __name__ == "__main__":
     unittest.main()
