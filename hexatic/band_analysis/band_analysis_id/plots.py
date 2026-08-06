@@ -102,10 +102,17 @@ def plot_lifetimes(stats: BandStatistics, output_dir: Path) -> Path:
     axes[0, 0].get_legend().remove()
 
     logger.info("plotting mean first-passage time by band area")
-    area, passage = binned_moment(stats.passage_areas, stats.passage_times)
-    _points(axes[0, 1], area, passage, "red", "bands")
+    passage_outcomes = (
+        ("disappearance", stats.passage_areas, stats.passage_times, "o"),
+        ("split", stats.split_passage_areas, stats.split_passage_times, "^"),
+        ("merge", stats.merge_passage_areas, stats.merge_passage_times, "s"),
+    )
+    for name, event_areas, event_times, marker in passage_outcomes:
+        if event_areas.size == 0:
+            continue
+        area, passage = binned_moment(event_areas, event_times)
+        _points(axes[0, 1], area, passage, "red", name, marker)
     axes[0, 1].set(xlabel=r"$A/\sigma^2$", ylabel=r"$T(A)$")
-    axes[0, 1].get_legend().remove()
 
     logger.info("plotting lifetime distributions by birth-area quartile")
     quartiles = np.quantile(stats.initial_areas, [0.25, 0.5, 0.75])

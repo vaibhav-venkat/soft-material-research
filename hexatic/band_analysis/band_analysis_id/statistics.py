@@ -31,6 +31,10 @@ class BandStatistics:
     delta_areas: np.ndarray
     passage_areas: np.ndarray
     passage_times: np.ndarray
+    split_passage_areas: np.ndarray
+    split_passage_times: np.ndarray
+    merge_passage_areas: np.ndarray
+    merge_passage_times: np.ndarray
     initial_areas: np.ndarray
     lifetimes: np.ndarray
     split_lifetimes: np.ndarray
@@ -126,6 +130,10 @@ def calculate_statistics(
     delta: list[np.ndarray] = []
     passage_area: list[np.ndarray] = []
     passage_time: list[np.ndarray] = []
+    split_passage_area: list[np.ndarray] = []
+    split_passage_time: list[np.ndarray] = []
+    merge_passage_area: list[np.ndarray] = []
+    merge_passage_time: list[np.ndarray] = []
     initial_area: list[float] = []
     lifetimes: list[float] = []
     split_lifetimes: list[float] = []
@@ -146,6 +154,16 @@ def calculate_statistics(
             passage_area.append(history.areas[observed] / area_scale)
             assert history.terminal_tau is not None
             passage_time.append(history.terminal_tau - history.tau[observed])
+        elif terminal_included and history.terminal_event == EventCode.SPLIT:
+            observed = history.tau >= include_from
+            split_passage_area.append(history.areas[observed] / area_scale)
+            assert history.terminal_tau is not None
+            split_passage_time.append(history.terminal_tau - history.tau[observed])
+        elif terminal_included and history.terminal_event == EventCode.MERGE:
+            observed = history.tau >= include_from
+            merge_passage_area.append(history.areas[observed] / area_scale)
+            assert history.terminal_tau is not None
+            merge_passage_time.append(history.terminal_tau - history.tau[observed])
         lifetime = history.lifetime
         if terminal_included and lifetime is not None and lifetime > 0.0:
             if history.terminal_event == EventCode.DISAPPEARANCE:
@@ -161,6 +179,18 @@ def calculate_statistics(
         delta_areas=np.concatenate(delta) if delta else np.empty(0),
         passage_areas=np.concatenate(passage_area) if passage_area else np.empty(0),
         passage_times=np.concatenate(passage_time) if passage_time else np.empty(0),
+        split_passage_areas=(
+            np.concatenate(split_passage_area) if split_passage_area else np.empty(0)
+        ),
+        split_passage_times=(
+            np.concatenate(split_passage_time) if split_passage_time else np.empty(0)
+        ),
+        merge_passage_areas=(
+            np.concatenate(merge_passage_area) if merge_passage_area else np.empty(0)
+        ),
+        merge_passage_times=(
+            np.concatenate(merge_passage_time) if merge_passage_time else np.empty(0)
+        ),
         initial_areas=np.asarray(initial_area),
         lifetimes=np.asarray(lifetimes),
         split_lifetimes=np.asarray(split_lifetimes),
