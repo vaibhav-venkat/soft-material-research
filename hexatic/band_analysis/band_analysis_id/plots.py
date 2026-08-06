@@ -102,17 +102,10 @@ def plot_lifetimes(stats: BandStatistics, output_dir: Path) -> Path:
     axes[0, 0].get_legend().remove()
 
     logger.info("plotting mean first-passage time by band area")
-    passage_outcomes = (
-        ("disappearance", stats.passage_areas, stats.passage_times, "o"),
-        ("split", stats.split_passage_areas, stats.split_passage_times, "^"),
-        ("merge", stats.merge_passage_areas, stats.merge_passage_times, "s"),
-    )
-    for name, event_areas, event_times, marker in passage_outcomes:
-        if event_areas.size == 0:
-            continue
-        area, passage = binned_moment(event_areas, event_times)
-        _points(axes[0, 1], area, passage, "red", name, marker)
+    area, passage = binned_moment(stats.passage_areas, stats.passage_times)
+    _points(axes[0, 1], area, passage, "red", "disappearance")
     axes[0, 1].set(xlabel=r"$A/\sigma^2$", ylabel=r"$T(A)$")
+    axes[0, 1].get_legend().remove()
 
     logger.info("plotting lifetime distributions by birth-area quartile")
     quartiles = np.quantile(stats.initial_areas, [0.25, 0.5, 0.75])
@@ -133,26 +126,14 @@ def plot_lifetimes(stats: BandStatistics, output_dir: Path) -> Path:
         )
     axes[1, 0].set(xlabel=r"lifetime $\tau$", ylabel=r"$P(\tau\mid A_0)$")
 
-    logger.info("plotting disappearance, split, and merge lifetime distributions")
-    outcomes = (
-        ("disappearance", stats.lifetimes, "o"),
-        ("split", stats.split_lifetimes, "^"),
-        ("merge", stats.merge_lifetimes, "s"),
-    )
-    for name, values, marker in outcomes:
-        if values.size == 0:
-            continue
-        lifetime, probability = probability_points(values)
-        _points(axes[1, 1], lifetime, probability, "red", rf"$P_{{{name}}}(\tau)$", marker)
+    logger.info("plotting disappearance lifetime distribution and survival")
+    lifetime, probability = probability_points(stats.lifetimes)
+    _points(axes[1, 1], lifetime, probability, "red", r"$P(\tau)$")
     axes[1, 1].set(xlabel=r"lifetime $\tau$", ylabel=r"$P(\tau)$")
     survival_axis = axes[1, 1].twinx()
-    for name, values, marker in outcomes:
-        if values.size == 0:
-            continue
-        tau, survival = survival_points(values)
-        _points(survival_axis, tau, survival, "blue", rf"$S_{{{name}}}(\tau)$", marker)
+    tau, survival = survival_points(stats.lifetimes)
+    _points(survival_axis, tau, survival, "blue", r"$S(\tau)$")
     survival_axis.set_ylabel(r"$S(\tau)=P(T>\tau)$")
-    survival_axis.set_ylim(-0.02, 1.02)
     handles_left, labels_left = axes[1, 1].get_legend_handles_labels()
     handles_right, labels_right = survival_axis.get_legend_handles_labels()
     axes[1, 1].get_legend().remove()
@@ -163,4 +144,61 @@ def plot_lifetimes(stats: BandStatistics, output_dir: Path) -> Path:
     figure.savefig(path, format="svg", bbox_inches="tight")
     plt.close(figure)
     logger.info("saved lifetime plots: %s", path)
+    return path
+
+
+def _topology_lifetime_plot(
+    axis: plt.Axes,
+    values: np.ndarray,
+    marker: str,
+    event: str,
+) -> None:
+    lifetime, probability = probability_points(values)
+    _points(axis, lifetime, probability, "red", rf"$P_{{{event}}}(\tau)$", marker)
+    axis.set(xlabel=r"lifetime $\tau$", ylabel=rf"$P_{{{event}}}(\tau)$")
+    survival_axis = axis.twinx()
+    tau, survival = survival_points(values)
+    _points(survival_axis, tau, survival, "blue", rf"$S_{{{event}}}(\tau)$", marker)
+    survival_axis.set_ylabel(rf"$S_{{{event}}}(\tau)$")
+    left_handles, left_labels = axis.get_legend_handles_labels()
+    right_handles, right_labels = survival_axis.get_legend_handles_labels()
+    if legend := axis.get_legend():
+        legend.remove()
+    if legend := survival_axis.get_legend():
+        legend.remove()
+    axis.legend(left_handles + right_handles, left_labels + right_labels)
+
+
+def plot_topology_events(stats: BandStatistics, output_dir: Path) -> Path:
+    sns.set_theme(style="ticks")
+    figure, axes = plt.subplots(2, 2, figsize=(12, 10), constrained_layout=True)
+    logger.info("plotting split first-passage time")
+    if stats.split_passage_areas.size:
+        area, passage = binned_moment(
+            stats.split_passage_areas, stats.split_passage_times
+        )
+        _points(axes[0, 0], area, passage, "red", "split", "^")
+        axes[0, 0].get_legend().remove()
+    axes[0, 0].set(xlabel=r"$A/\sigma^2$", ylabel=r"$T_{split}(A)$")
+
+    logger.info("plotting merge first-passage time")
+    if stats.merge_passage_areas.size:
+        area, passage = binned_moment(
+            stats.merge_passage_areas, stats.merge_passage_times
+        )
+        _points(axes[0, 1], area, passage, "red", "merge", "s")
+        axes[0, 1].get_legend().remove()
+    axes[0, 1].set(xlabel=r"$A/\sigma^2$", ylabel=r"$T_{merge}(A)$")
+
+    logger.info("plotting split lifetime distribution and survival")
+    if stats.split_lifetimes.size:
+        _topology_lifetime_plot(axes[1, 0], stats.split_lifetimes, "^", "split")
+    logger.info("plotting merge lifetime distribution and survival")
+    if stats.merge_lifetimes.size:
+        _topology_lifetime_plot(axes[1, 1], stats.merge_lifetimes, "s", "merge")
+
+    path = output_dir / "band_topology_events.svg"
+    figure.savefig(path, format="svg", bbox_inches="tight")
+    plt.close(figure)
+    logger.info("saved topology-event plots: %s", path)
     return path

@@ -12,7 +12,7 @@ from hexatic.constants import cylinder
 
 from .extraction import ExtractionConfig, detect_bands, track_bands
 from .io import InputMetadata, load_gsd_metadata
-from .plots import plot_area_dynamics, plot_lifetimes
+from .plots import plot_area_dynamics, plot_lifetimes, plot_topology_events
 from .statistics import TrackingSeries, calculate_statistics
 from .tracking import DetectionFrame, TrackedFrame
 
@@ -147,7 +147,7 @@ def _group_series(
     return series
 
 
-def run(args: argparse.Namespace) -> tuple[Path, Path]:
+def run(args: argparse.Namespace) -> tuple[Path, Path, Path]:
     if args.max_frame is not None and args.max_frame < 1:
         raise ValueError("--max-frame must be positive")
     if args.base_persistence < 1:
@@ -178,10 +178,14 @@ def run(args: argparse.Namespace) -> tuple[Path, Path]:
     )
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    return plot_area_dynamics(stats, output_dir), plot_lifetimes(stats, output_dir)
+    return (
+        plot_area_dynamics(stats, output_dir),
+        plot_lifetimes(stats, output_dir),
+        plot_topology_events(stats, output_dir),
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> None:
     logging.basicConfig(level=logging.INFO, format="[band_analysis_id] %(message)s")
     outputs = run(build_parser().parse_args(argv))
-    logger.info("complete: %s, %s", *outputs)
+    logger.info("complete: %s, %s, %s", *outputs)
