@@ -35,30 +35,49 @@ class BandStatistics:
     lifetimes: np.ndarray
     split_lifetimes: np.ndarray
     merge_lifetimes: np.ndarray
+    raw_splits: int
+    raw_merges: int
 
 
-def track_histories(frames: list[TrackedFrame]) -> list[TrackHistory]:
+@dataclass(frozen=True)
+class TrackingSeries:
+    frames: list[TrackedFrame]
+    include_from_tau: float = 0.0
+    initial_bands_are_born: bool = False
+
+
+def track_histories(
+    frames: list[TrackedFrame], *, initial_bands_are_born: bool = False
+) -> list[TrackHistory]:
     if not frames:
         return []
     samples: dict[int, list[tuple[float, float]]] = {}
     born: set[int] = set()
     terminals: dict[int, tuple[float, EventCode]] = {}
     first_frame = frames[0].frame_index
+    if initial_bands_are_born:
+        born.update(band.track_id for band in frames[0].bands)
     for frame in frames:
         for band in frame.bands:
             samples.setdefault(band.track_id, []).append((frame.tau, band.area))
+        retired = {
+            track_id for event in frame.events for track_id in event.old_track_ids
+        }
+        if frame.edges is not None:
+            row_degree = np.sum(frame.edges.edges, axis=1)
+            column_degree = np.sum(frame.edges.edges, axis=0)
+            for row, track_id in enumerate(frame.edges.old_track_ids):
+                if track_id not in retired:
+                    continue
+                columns = np.flatnonzero(frame.edges.edges[row])
+                if row_degree[row] > 1:
+                    event_code = EventCode.SPLIT
+                elif np.any(column_degree[columns] > 1):
+                    event_code = EventCode.MERGE
+                else:
+                    event_code = EventCode.DISAPPEARANCE
+                terminals[track_id] = (frame.tau, event_code)
         for event in frame.events:
-            if event.code in {
-                EventCode.DISAPPEARANCE,
-                EventCode.SPLIT,
-                EventCode.MERGE,
-            }:
-                terminals.update(
-                    {
-                        track_id: (frame.tau, event.code)
-                        for track_id in event.old_track_ids
-                    }
-                )
             if frame.frame_index != first_frame:
                 born.update(event.new_track_ids)
     return [
@@ -74,11 +93,35 @@ def track_histories(frames: list[TrackedFrame]) -> list[TrackHistory]:
 
 
 def calculate_statistics(
-    seed_frames: list[list[TrackedFrame]], particle_diameter: float, lag: float = 1.0
+    series: list[TrackingSeries], particle_diameter: float, lag: float = 1.0
 ) -> BandStatistics:
-    histories = [history for frames in seed_frames for history in track_histories(frames)]
+    histories = [
+        (history, item.include_from_tau)
+        for item in series
+        for history in track_histories(
+            item.frames, initial_bands_are_born=item.initial_bands_are_born
+        )
+    ]
+    event_edges = [
+        frame.edges
+        for item in series
+        for frame in item.frames
+        if frame.edges is not None and frame.tau >= item.include_from_tau
+    ]
+    raw_splits = sum(
+        int(np.count_nonzero(np.sum(edges.edges, axis=1) > 1))
+        for edges in event_edges
+    )
+    raw_merges = sum(
+        int(np.count_nonzero(np.sum(edges.edges, axis=0) > 1))
+        for edges in event_edges
+    )
     area_scale = particle_diameter**2
-    areas = np.concatenate([history.areas for history in histories]) / area_scale
+    included_areas = [
+        history.areas[history.tau >= include_from]
+        for history, include_from in histories
+    ]
+    areas = np.concatenate(included_areas) / area_scale
     delta_start: list[np.ndarray] = []
     delta: list[np.ndarray] = []
     passage_area: list[np.ndarray] = []
@@ -87,19 +130,24 @@ def calculate_statistics(
     lifetimes: list[float] = []
     split_lifetimes: list[float] = []
     merge_lifetimes: list[float] = []
-    for history in histories:
+    for history, include_from in histories:
         target = history.tau + lag
-        valid = target <= history.tau[-1]
+        valid = (history.tau >= include_from) & (target <= history.tau[-1])
         if np.any(valid):
             future = np.interp(target[valid], history.tau, history.areas)
             delta_start.append(history.areas[valid] / area_scale)
             delta.append((future - history.areas[valid]) / area_scale)
-        if history.terminal_event == EventCode.DISAPPEARANCE:
-            passage_area.append(history.areas / area_scale)
+        terminal_included = (
+            history.terminal_tau is not None
+            and history.terminal_tau >= include_from
+        )
+        if terminal_included and history.terminal_event == EventCode.DISAPPEARANCE:
+            observed = history.tau >= include_from
+            passage_area.append(history.areas[observed] / area_scale)
             assert history.terminal_tau is not None
-            passage_time.append(history.terminal_tau - history.tau)
+            passage_time.append(history.terminal_tau - history.tau[observed])
         lifetime = history.lifetime
-        if lifetime is not None and lifetime > 0.0:
+        if terminal_included and lifetime is not None and lifetime > 0.0:
             if history.terminal_event == EventCode.DISAPPEARANCE:
                 initial_area.append(float(history.areas[0] / area_scale))
                 lifetimes.append(lifetime)
@@ -117,6 +165,8 @@ def calculate_statistics(
         lifetimes=np.asarray(lifetimes),
         split_lifetimes=np.asarray(split_lifetimes),
         merge_lifetimes=np.asarray(merge_lifetimes),
+        raw_splits=raw_splits,
+        raw_merges=raw_merges,
     )
 
 

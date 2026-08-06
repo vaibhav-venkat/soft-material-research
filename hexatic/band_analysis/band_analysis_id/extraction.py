@@ -203,12 +203,12 @@ def extract_seed_data(
     return SeedExtraction(segments, chains)
 
 
-def identify_bands(
+def detect_bands(
     metadata: InputMetadata,
     *,
     config: ExtractionConfig,
-) -> list[TrackedFrame]:
-    """Identify and track bands without writing fitting caches."""
+) -> list[DetectionFrame]:
+    """Identify bands without assigning persistent identities."""
     selected = frame_numbers(metadata, config.start, config.stop, config.stride)
     if not selected:
         return []
@@ -258,11 +258,29 @@ def identify_bands(
             logger.info("identification progress: %d/%d frames", processed, len(selected))
             while next_progress <= processed:
                 next_progress += progress_interval
-    logger.info("tracking bands across identified frames")
+    return detections
+
+
+def track_bands(detections: list[DetectionFrame], persistence_frames: int, overlap_threshold: float) -> list[TrackedFrame]:
+    """Track one continuous sequence of detected bands."""
+    logger.info("tracking bands across %d identified frames", len(detections))
     tracked = BandTracker(
-        overlap_threshold=config.overlap_threshold,
-        persistence_frames=config.persistence_frames,
+        overlap_threshold=overlap_threshold,
+        persistence_frames=persistence_frames,
     ).track(detections)
     track_ids = {band.track_id for frame in tracked for band in frame.bands}
     logger.info("identification complete: %d persistent band tracks", len(track_ids))
     return tracked
+
+
+def identify_bands(
+    metadata: InputMetadata,
+    *,
+    config: ExtractionConfig,
+) -> list[TrackedFrame]:
+    """Identify and track bands without writing fitting caches."""
+    return track_bands(
+        detect_bands(metadata, config=config),
+        config.persistence_frames,
+        config.overlap_threshold,
+    )

@@ -27,10 +27,15 @@ class DetectionFrame:
     step: int
     timestep: float
     bands: tuple[DetectedBand, ...]
+    tau_override: float | None = None
 
     @property
     def tau(self) -> float:
-        return float(self.step) * self.timestep
+        return (
+            self.tau_override
+            if self.tau_override is not None
+            else float(self.step) * self.timestep
+        )
 
 
 @dataclass(frozen=True)
