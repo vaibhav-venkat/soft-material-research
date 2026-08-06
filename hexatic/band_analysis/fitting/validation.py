@@ -12,6 +12,7 @@ import numpy as np
 from scipy.special import logsumexp
 
 from .model import (
+    PARAMETER_NAMES,
     Scaling,
     build_state_space_sequences,
     build_transition_blocks,
@@ -47,8 +48,10 @@ def _posterior_matrix(samples: np.ndarray) -> np.ndarray:
     values = np.asarray(samples, dtype=np.float64)
     if values.ndim == 3:
         values = values.reshape(-1, values.shape[-1])
-    if values.ndim != 2 or values.shape[1] != 7:
-        raise ValueError("posterior samples must have shape (..., 7)")
+    if values.ndim != 2 or values.shape[1] != len(PARAMETER_NAMES):
+        raise ValueError(
+            f"posterior samples must have shape (..., {len(PARAMETER_NAMES)})"
+        )
     return values
 
 
