@@ -165,10 +165,11 @@ class BandTracker:
         frames: list[DetectionFrame],
         index: int,
         initial_edges: np.ndarray,
+        persistence_frames: int,
     ) -> tuple[str, int | None, dict[int, int] | None]:
         """Follow one proposed topology through its confirmation window."""
         candidate_bands = frames[index].bands
-        for candidate_index in range(index + 1, index + self.persistence_frames):
+        for candidate_index in range(index + 1, index + persistence_frames):
             if candidate_index >= len(frames):
                 return "incomplete", None, None
 
@@ -227,7 +228,12 @@ class BandTracker:
             next_active[track_id] = band
         return tracked, next_active
 
-    def track(self, frames: list[DetectionFrame]) -> list[TrackedFrame]:
+    def track(
+        self,
+        frames: list[DetectionFrame],
+        *,
+        persistence_before: tuple[float, int] | None = None,
+    ) -> list[TrackedFrame]:
         if not frames:
             return []
         self._next_track_id = 0
@@ -270,8 +276,14 @@ class BandTracker:
                 index += 1
                 continue
 
+            persistence_frames = (
+                persistence_before[1]
+                if persistence_before is not None
+                and frame.tau < persistence_before[0]
+                else self.persistence_frames
+            )
             outcome, outcome_at, restore_mapping = self._candidate_outcome(
-                active, frames, index, edges
+                active, frames, index, edges, persistence_frames
             )
             if outcome == "restored":
                 assert outcome_at is not None and restore_mapping is not None

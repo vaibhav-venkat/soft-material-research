@@ -11,7 +11,7 @@ from typing import Sequence
 from hexatic.constants import cylinder
 
 from .extraction import ExtractionConfig, detect_bands, track_bands
-from .io import InputMetadata, load_gsd_metadata, load_metadata
+from .io import InputMetadata, load_gsd_metadata
 from .plots import plot_area_dynamics, plot_lifetimes
 from .statistics import TrackingSeries, calculate_statistics
 from .tracking import DetectionFrame, TrackedFrame
@@ -33,13 +33,19 @@ def build_parser() -> argparse.ArgumentParser:
             type=Path,
             action="append",
             required=True,
-            help=f"continuation of --gsd-{group}; repeat for independent seeds",
+            help=f"GSD continuation of --gsd-{group}; repeat for independent seeds",
         )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument(
         "--max-frame", type=int, help="exclusive maximum continuation frame index"
     )
     parser.add_argument("--time-increment", type=float, default=1.0)
+    parser.add_argument(
+        "--base-persistence",
+        type=int,
+        default=defaults.persistence_frames,
+        help="persistence window for events beginning in gsd-0 or gsd-1",
+    )
     extraction = parser.add_argument_group("band identification")
     for name, value in asdict(defaults).items():
         if name in {"start", "stop"}:
@@ -86,19 +92,22 @@ def _continuation_time(
 
 
 def _track(
-    detections: list[DetectionFrame], config: ExtractionConfig
+    detections: list[DetectionFrame],
+    config: ExtractionConfig,
+    base_persistence: int,
 ) -> list[TrackedFrame]:
     return track_bands(
         detections,
         config.persistence_frames,
         config.overlap_threshold,
+        base_persistence=base_persistence,
     )
 
 
 def _group_series(
     group: int,
     gsd_path: Path,
-    input_dirs: list[Path],
+    input_gsds: list[Path],
     geometry: InputMetadata,
     args: argparse.Namespace,
 ) -> list[TrackingSeries]:
@@ -107,17 +116,22 @@ def _group_series(
     prefix_metadata = load_gsd_metadata(gsd_path, geometry)
     logger.info("group %d: identifying shared GSD prefix", group)
     prefix = _prefix_time(detect_bands(prefix_metadata, config=prefix_config))
-    series = [TrackingSeries(_track(prefix, prefix_config), initial_bands_are_born=True)]
-    for index, input_dir in enumerate(input_dirs, start=1):
+    series = [
+        TrackingSeries(
+            _track(prefix, prefix_config, args.base_persistence),
+            initial_bands_are_born=True,
+        )
+    ]
+    for index, input_gsd in enumerate(input_gsds, start=1):
         logger.info(
             "group %d: identifying continuation %d/%d: %s",
             group,
             index,
-            len(input_dirs),
-            input_dir,
+            len(input_gsds),
+            input_gsd,
         )
         continuation = detect_bands(
-            load_metadata(input_dir, geometry), config=continuation_config
+            load_gsd_metadata(input_gsd, geometry), config=continuation_config
         )
         combined = [
             *prefix,
@@ -125,7 +139,7 @@ def _group_series(
         ]
         series.append(
             TrackingSeries(
-                _track(combined, continuation_config),
+                _track(combined, continuation_config, args.base_persistence),
                 include_from_tau=PREFIX_DURATION,
                 initial_bands_are_born=True,
             )
@@ -136,6 +150,8 @@ def _group_series(
 def run(args: argparse.Namespace) -> tuple[Path, Path]:
     if args.max_frame is not None and args.max_frame < 1:
         raise ValueError("--max-frame must be positive")
+    if args.base_persistence < 1:
+        raise ValueError("--base-persistence must be positive")
     geometry = load_gsd_metadata(args.gsd_0)
     series = [
         *_group_series(0, args.gsd_0, args.input_dir_0, geometry, args),

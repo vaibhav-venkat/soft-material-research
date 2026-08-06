@@ -261,13 +261,24 @@ def detect_bands(
     return detections
 
 
-def track_bands(detections: list[DetectionFrame], persistence_frames: int, overlap_threshold: float) -> list[TrackedFrame]:
+def track_bands(
+    detections: list[DetectionFrame],
+    persistence_frames: int,
+    overlap_threshold: float,
+    *,
+    base_persistence: int | None = None,
+) -> list[TrackedFrame]:
     """Track one continuous sequence of detected bands."""
     logger.info("tracking bands across %d identified frames", len(detections))
     tracked = BandTracker(
         overlap_threshold=overlap_threshold,
         persistence_frames=persistence_frames,
-    ).track(detections)
+    ).track(
+        detections,
+        persistence_before=(100.0, base_persistence)
+        if base_persistence is not None
+        else None,
+    )
     track_ids = {band.track_id for frame in tracked for band in frame.bands}
     logger.info("identification complete: %d persistent band tracks", len(track_ids))
     return tracked
