@@ -11,6 +11,7 @@ import seaborn as sns
 
 from .statistics import (
     BandStatistics,
+    binned_counts,
     binned_moment,
     probability_points,
     survival_points,
@@ -42,6 +43,20 @@ def _points(
     )
 
 
+def _sample_counts(axis: plt.Axes, areas: np.ndarray) -> None:
+    centers, count = binned_counts(areas)
+    count_axis = axis.twinx()
+    sns.lineplot(
+        x=centers,
+        y=count,
+        color="0.35",
+        linewidth=1.5,
+        legend=False,
+        ax=count_axis,
+    )
+    count_axis.set_ylabel("sample count")
+
+
 def plot_area_dynamics(stats: BandStatistics, output_dir: Path) -> Path:
     if stats.delta_areas.size == 0:
         raise ValueError("no tracked band survives for the requested time increment")
@@ -68,18 +83,18 @@ def plot_area_dynamics(stats: BandStatistics, output_dir: Path) -> Path:
     _points(
         second_axis,
         area,
-        second,
+        second / np.sqrt(area),
         "blue",
-        r"$\langle\Delta A^2\rangle$",
+        r"$\langle\Delta A^2\rangle/\sqrt{A}$",
     )
-    second_axis.set_ylabel(r"$\langle\Delta A^2\rangle/\sigma^4$")
+    second_axis.set_ylabel(r"$\langle\Delta A^2\rangle/\sqrt{A}$")
     axes[1].get_legend().remove()
     second_axis.get_legend().remove()
     axes[1].legend(
         [axes[1].collections[0], second_axis.collections[0]],
         [
             r"$\langle\Delta A\rangle$",
-            r"$\langle\Delta A^2\rangle$",
+            r"$\langle\Delta A^2\rangle/\sqrt{A}$",
         ],
     )
     path = output_dir / "band_area_dynamics.svg"
@@ -101,12 +116,14 @@ def plot_lifetimes(stats: BandStatistics, output_dir: Path) -> Path:
     axes[0, 0].set(xlabel=r"$A/\sigma^2$", ylabel=r"$P(A)$")
     axes[0, 0].set_yscale("log")
     axes[0, 0].get_legend().remove()
+    _sample_counts(axes[0, 0], stats.areas)
 
     logger.info("plotting mean first-passage time by band area")
     area, passage = binned_moment(stats.passage_areas, stats.passage_times)
     _points(axes[0, 1], area, passage, "red", "disappearance")
     axes[0, 1].set(xlabel=r"$A/\sigma^2$", ylabel=r"$T(A)$")
     axes[0, 1].get_legend().remove()
+    _sample_counts(axes[0, 1], stats.passage_areas)
 
     logger.info("plotting lifetime distributions by birth-area quartile")
     quartiles = np.quantile(stats.initial_areas, [0.25, 0.5, 0.75])
@@ -193,6 +210,7 @@ def plot_topology_events(stats: BandStatistics, output_dir: Path) -> Path:
         )
         _points(axes[0, 0], area, passage, "red", "split", "^")
         axes[0, 0].get_legend().remove()
+        _sample_counts(axes[0, 0], stats.split_passage_areas)
     axes[0, 0].set(xlabel=r"$A/\sigma^2$", ylabel=r"$T_{split}(A)$")
 
     logger.info("plotting merge first-passage time")
@@ -202,6 +220,7 @@ def plot_topology_events(stats: BandStatistics, output_dir: Path) -> Path:
         )
         _points(axes[0, 1], area, passage, "red", "merge", "s")
         axes[0, 1].get_legend().remove()
+        _sample_counts(axes[0, 1], stats.merge_passage_areas)
     axes[0, 1].set(xlabel=r"$A/\sigma^2$", ylabel=r"$T_{merge}(A)$")
 
     logger.info("plotting split lifetime distribution and survival")

@@ -220,6 +220,14 @@ def probability_points(
     return centers[density > 0.0], density[density > 0.0]
 
 
+def binned_counts(
+    values: np.ndarray, *, bins: int = 30
+) -> tuple[np.ndarray, np.ndarray]:
+    count, edges = np.histogram(values, bins=bins)
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    return centers, count
+
+
 def survival_points(lifetimes: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     tau = np.concatenate(([0.0], np.unique(np.sort(lifetimes))))
     survival = np.asarray([np.mean(lifetimes > value) for value in tau])
