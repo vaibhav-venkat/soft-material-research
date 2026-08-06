@@ -93,10 +93,13 @@ def run(args: argparse.Namespace) -> tuple[Path, Path]:
         lag=args.time_increment,
     )
     logger.info(
-        "statistics ready: %d area samples, %d increments, %d complete lifetimes",
+        "statistics ready: %d area samples, %d increments, "
+        "%d deaths, %d splits, %d merges",
         stats.areas.size,
         stats.delta_areas.size,
         stats.lifetimes.size,
+        stats.split_lifetimes.size,
+        stats.merge_lifetimes.size,
     )
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)

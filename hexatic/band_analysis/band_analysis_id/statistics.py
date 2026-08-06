@@ -14,13 +14,14 @@ class TrackHistory:
     areas: np.ndarray
     tau: np.ndarray
     born: bool
-    death_tau: float | None
+    terminal_tau: float | None
+    terminal_event: EventCode | None
 
     @property
     def lifetime(self) -> float | None:
-        if not self.born or self.death_tau is None:
+        if not self.born or self.terminal_tau is None:
             return None
-        return self.death_tau - float(self.tau[0])
+        return self.terminal_tau - float(self.tau[0])
 
 
 @dataclass(frozen=True)
@@ -32,6 +33,8 @@ class BandStatistics:
     passage_times: np.ndarray
     initial_areas: np.ndarray
     lifetimes: np.ndarray
+    split_lifetimes: np.ndarray
+    merge_lifetimes: np.ndarray
 
 
 def track_histories(frames: list[TrackedFrame]) -> list[TrackHistory]:
@@ -39,14 +42,23 @@ def track_histories(frames: list[TrackedFrame]) -> list[TrackHistory]:
         return []
     samples: dict[int, list[tuple[float, float]]] = {}
     born: set[int] = set()
-    deaths: dict[int, float] = {}
+    terminals: dict[int, tuple[float, EventCode]] = {}
     first_frame = frames[0].frame_index
     for frame in frames:
         for band in frame.bands:
             samples.setdefault(band.track_id, []).append((frame.tau, band.area))
         for event in frame.events:
-            if event.code == EventCode.DISAPPEARANCE:
-                deaths.update({track_id: frame.tau for track_id in event.old_track_ids})
+            if event.code in {
+                EventCode.DISAPPEARANCE,
+                EventCode.SPLIT,
+                EventCode.MERGE,
+            }:
+                terminals.update(
+                    {
+                        track_id: (frame.tau, event.code)
+                        for track_id in event.old_track_ids
+                    }
+                )
             if frame.frame_index != first_frame:
                 born.update(event.new_track_ids)
     return [
@@ -54,7 +66,8 @@ def track_histories(frames: list[TrackedFrame]) -> list[TrackHistory]:
             areas=np.asarray([area for _, area in values]),
             tau=np.asarray([tau for tau, _ in values]),
             born=track_id in born,
-            death_tau=deaths.get(track_id),
+            terminal_tau=(terminals[track_id][0] if track_id in terminals else None),
+            terminal_event=(terminals[track_id][1] if track_id in terminals else None),
         )
         for track_id, values in samples.items()
     ]
@@ -72,6 +85,8 @@ def calculate_statistics(
     passage_time: list[np.ndarray] = []
     initial_area: list[float] = []
     lifetimes: list[float] = []
+    split_lifetimes: list[float] = []
+    merge_lifetimes: list[float] = []
     for history in histories:
         target = history.tau + lag
         valid = target <= history.tau[-1]
@@ -79,13 +94,19 @@ def calculate_statistics(
             future = np.interp(target[valid], history.tau, history.areas)
             delta_start.append(history.areas[valid] / area_scale)
             delta.append((future - history.areas[valid]) / area_scale)
-        if history.death_tau is not None:
+        if history.terminal_event == EventCode.DISAPPEARANCE:
             passage_area.append(history.areas / area_scale)
-            passage_time.append(history.death_tau - history.tau)
+            assert history.terminal_tau is not None
+            passage_time.append(history.terminal_tau - history.tau)
         lifetime = history.lifetime
         if lifetime is not None and lifetime > 0.0:
-            initial_area.append(float(history.areas[0] / area_scale))
-            lifetimes.append(lifetime)
+            if history.terminal_event == EventCode.DISAPPEARANCE:
+                initial_area.append(float(history.areas[0] / area_scale))
+                lifetimes.append(lifetime)
+            elif history.terminal_event == EventCode.SPLIT:
+                split_lifetimes.append(lifetime)
+            elif history.terminal_event == EventCode.MERGE:
+                merge_lifetimes.append(lifetime)
     return BandStatistics(
         areas=areas,
         delta_start_areas=np.concatenate(delta_start) if delta_start else np.empty(0),
@@ -94,6 +115,8 @@ def calculate_statistics(
         passage_times=np.concatenate(passage_time) if passage_time else np.empty(0),
         initial_areas=np.asarray(initial_area),
         lifetimes=np.asarray(lifetimes),
+        split_lifetimes=np.asarray(split_lifetimes),
+        merge_lifetimes=np.asarray(merge_lifetimes),
     )
 
 

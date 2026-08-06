@@ -20,12 +20,19 @@ from .statistics import (
 logger = logging.getLogger(__name__)
 
 
-def _points(axis: plt.Axes, x: np.ndarray, y: np.ndarray, color: str, label: str) -> None:
+def _points(
+    axis: plt.Axes,
+    x: np.ndarray,
+    y: np.ndarray,
+    color: str,
+    label: str,
+    marker: str = "o",
+) -> None:
     sns.scatterplot(
         x=x,
         y=y,
         color=color,
-        marker="o",
+        marker=marker,
         s=48,
         facecolor="none",
         edgecolor=color,
@@ -119,13 +126,24 @@ def plot_lifetimes(stats: BandStatistics, output_dir: Path) -> Path:
         )
     axes[1, 0].set(xlabel=r"lifetime $\tau$", ylabel=r"$P(\tau\mid A_0)$")
 
-    logger.info("plotting aggregate band-lifetime distribution")
-    lifetime, probability = probability_points(stats.lifetimes)
-    _points(axes[1, 1], lifetime, probability, "red", r"$P(\tau)$")
+    logger.info("plotting disappearance, split, and merge lifetime distributions")
+    outcomes = (
+        ("disappearance", stats.lifetimes, "o"),
+        ("split", stats.split_lifetimes, "^"),
+        ("merge", stats.merge_lifetimes, "s"),
+    )
+    for name, values, marker in outcomes:
+        if values.size == 0:
+            continue
+        lifetime, probability = probability_points(values)
+        _points(axes[1, 1], lifetime, probability, "red", rf"$P_{{{name}}}(\tau)$", marker)
     axes[1, 1].set(xlabel=r"lifetime $\tau$", ylabel=r"$P(\tau)$")
     survival_axis = axes[1, 1].twinx()
-    tau, survival = survival_points(stats.lifetimes)
-    _points(survival_axis, tau, survival, "blue", r"$S(\tau)$")
+    for name, values, marker in outcomes:
+        if values.size == 0:
+            continue
+        tau, survival = survival_points(values)
+        _points(survival_axis, tau, survival, "blue", rf"$S_{{{name}}}(\tau)$", marker)
     survival_axis.set_ylabel(r"$S(\tau)=P(T>\tau)$")
     survival_axis.set_ylim(-0.02, 1.02)
     handles_left, labels_left = axes[1, 1].get_legend_handles_labels()
