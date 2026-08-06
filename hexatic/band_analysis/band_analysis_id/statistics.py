@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .tracking import TrackedFrame
+from .tracking import EventCode, TrackedFrame
 
 
 @dataclass(frozen=True)
@@ -45,7 +45,8 @@ def track_histories(frames: list[TrackedFrame]) -> list[TrackHistory]:
         for band in frame.bands:
             samples.setdefault(band.track_id, []).append((frame.tau, band.area))
         for event in frame.events:
-            deaths.update({track_id: frame.tau for track_id in event.old_track_ids})
+            if event.code == EventCode.DISAPPEARANCE:
+                deaths.update({track_id: frame.tau for track_id in event.old_track_ids})
             if frame.frame_index != first_frame:
                 born.update(event.new_track_ids)
     return [
