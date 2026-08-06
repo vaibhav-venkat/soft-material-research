@@ -9,14 +9,30 @@ import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
 
-from .statistics import BandStatistics, binned_moment, probability_points
+from .statistics import (
+    BandStatistics,
+    binned_moment,
+    probability_points,
+    survival_points,
+)
 
 
 logger = logging.getLogger(__name__)
 
 
 def _points(axis: plt.Axes, x: np.ndarray, y: np.ndarray, color: str, label: str) -> None:
-    sns.scatterplot(x=x, y=y, color=color, marker="o", s=28, label=label, ax=axis)
+    sns.scatterplot(
+        x=x,
+        y=y,
+        color=color,
+        marker="o",
+        s=48,
+        facecolor="none",
+        edgecolor=color,
+        linewidth=1.4,
+        label=label,
+        ax=axis,
+    )
 
 
 def plot_area_dynamics(stats: BandStatistics, output_dir: Path) -> Path:
@@ -49,27 +65,14 @@ def plot_area_dynamics(stats: BandStatistics, output_dir: Path) -> Path:
         "blue",
         r"$\langle\Delta A^2\rangle/\sqrt{A}$",
     )
-    sns.lineplot(
-        x=area,
-        y=np.sqrt(area),
-        color="blue",
-        linestyle="--",
-        label=r"$\sqrt{A}$",
-        ax=second_axis,
-    )
     second_axis.set_ylabel(r"$\langle\Delta A^2\rangle/\sqrt{A}$")
     axes[1].get_legend().remove()
     second_axis.get_legend().remove()
     axes[1].legend(
-        [
-            axes[1].collections[0],
-            second_axis.collections[0],
-            second_axis.lines[0],
-        ],
+        [axes[1].collections[0], second_axis.collections[0]],
         [
             r"$\langle\Delta A\rangle$",
             r"$\langle\Delta A^2\rangle/\sqrt{A}$",
-            r"$\sqrt{A}$",
         ],
     )
     path = output_dir / "band_area_dynamics.svg"
@@ -118,9 +121,18 @@ def plot_lifetimes(stats: BandStatistics, output_dir: Path) -> Path:
 
     logger.info("plotting aggregate band-lifetime distribution")
     lifetime, probability = probability_points(stats.lifetimes)
-    _points(axes[1, 1], lifetime, probability, "red", "bands")
+    _points(axes[1, 1], lifetime, probability, "red", r"$P(\tau)$")
     axes[1, 1].set(xlabel=r"lifetime $\tau$", ylabel=r"$P(\tau)$")
+    survival_axis = axes[1, 1].twinx()
+    tau, survival = survival_points(stats.lifetimes)
+    _points(survival_axis, tau, survival, "blue", r"$S(\tau)$")
+    survival_axis.set_ylabel(r"$S(\tau)=P(T>\tau)$")
+    survival_axis.set_ylim(-0.02, 1.02)
+    handles_left, labels_left = axes[1, 1].get_legend_handles_labels()
+    handles_right, labels_right = survival_axis.get_legend_handles_labels()
     axes[1, 1].get_legend().remove()
+    survival_axis.get_legend().remove()
+    axes[1, 1].legend(handles_left + handles_right, labels_left + labels_right)
 
     path = output_dir / "band_lifetimes.svg"
     figure.savefig(path, format="svg", bbox_inches="tight")
