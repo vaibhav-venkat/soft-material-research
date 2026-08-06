@@ -24,7 +24,7 @@ from .storage import (
     save_seed_event_chains,
     save_seed_segments,
 )
-from .tracking import BandTracker, DetectionFrame
+from .tracking import BandTracker, DetectionFrame, TrackedFrame
 
 
 logger = logging.getLogger(__name__)
@@ -201,3 +201,68 @@ def extract_seed_data(
     )
     logger.info("saved clean/event extraction caches for %s", seed_id)
     return SeedExtraction(segments, chains)
+
+
+def identify_bands(
+    metadata: InputMetadata,
+    *,
+    config: ExtractionConfig,
+) -> list[TrackedFrame]:
+    """Identify and track bands without writing fitting caches."""
+    selected = frame_numbers(metadata, config.start, config.stop, config.stride)
+    if not selected:
+        return []
+    logger.info("identifying bands in %d selected frames", len(selected))
+    grid = _grid(metadata, config)
+    validate_gpu()
+    density_for = make_density_batch_kernel(
+        grid,
+        radius=metadata.radius,
+        particle_diameter=metadata.particle_diameter,
+        shell_epsilon=config.shell_epsilon_d * metadata.particle_diameter,
+        smoothing_sigma=config.smoothing_sigma,
+    )
+    detections: list[DetectionFrame] = []
+    frames = iter_frames(metadata, set(selected))
+    processed = 0
+    progress_interval = max(config.frame_batch_size, math.ceil(len(selected) / 10))
+    next_progress = progress_interval
+    while batch := list(islice(frames, config.frame_batch_size)):
+        coordinates = np.stack([item[2] for item in batch])
+        densities_device, _, outside_device = density_for(
+            jnp.asarray(coordinates, dtype=jnp.float32)
+        )
+        densities, outside = jax.device_get((densities_device, outside_device))
+        for (frame_index, step, _), density, is_outside in zip(
+            batch, densities, outside, strict=True
+        ):
+            if bool(is_outside):
+                raise ValueError("particle outside the cylindrical extraction shell")
+            labels, components = label_dilute_bands(
+                np.asarray(density) < config.density_threshold,
+                minimum_area=config.minimum_area_cells,
+            )
+            detections.append(
+                DetectionFrame(
+                    frame_index,
+                    step,
+                    config.timestep,
+                    tuple(
+                        characterize_band(component, labels, grid)
+                        for component in components
+                    ),
+                )
+            )
+        processed += len(batch)
+        if processed >= next_progress or processed == len(selected):
+            logger.info("identification progress: %d/%d frames", processed, len(selected))
+            while next_progress <= processed:
+                next_progress += progress_interval
+    logger.info("tracking bands across identified frames")
+    tracked = BandTracker(
+        overlap_threshold=config.overlap_threshold,
+        persistence_frames=config.persistence_frames,
+    ).track(detections)
+    track_ids = {band.track_id for frame in tracked for band in frame.bands}
+    logger.info("identification complete: %d persistent band tracks", len(track_ids))
+    return tracked

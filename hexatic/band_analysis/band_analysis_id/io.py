@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 from typing import Any, Iterator
 
+import gsd.hoomd
 import numpy as np
 from safetensors import safe_open
 
@@ -23,6 +24,7 @@ class InputMetadata:
     particle_diameter: float
     run_steps: int
     trajectory_write_period: int
+    gsd_path: Path | None = None
 
     @property
     def source_fingerprint(self) -> str:
@@ -65,6 +67,21 @@ def load_metadata(input_dir: Path) -> InputMetadata:
     )
 
 
+def load_gsd_metadata(base_dir: Path, gsd_path: Path) -> InputMetadata:
+    metadata = load_metadata(base_dir)
+    return InputMetadata(
+        input_dir=base_dir,
+        manifest=metadata.manifest,
+        lx=metadata.lx,
+        circumference=metadata.circumference,
+        radius=metadata.radius,
+        particle_diameter=metadata.particle_diameter,
+        run_steps=metadata.run_steps,
+        trajectory_write_period=metadata.trajectory_write_period,
+        gsd_path=gsd_path,
+    )
+
+
 def require_compatible_seeds(metadata: list[InputMetadata]) -> str:
     if not metadata:
         raise ValueError("at least one input directory is required")
@@ -88,7 +105,13 @@ def frame_numbers(
     stop: int | None,
     stride: int,
 ) -> list[int]:
-    available_stop = max(int(shard["frame_stop"]) for shard in metadata.manifest["shards"])
+    if metadata.gsd_path is None:
+        available_stop = max(
+            int(shard["frame_stop"]) for shard in metadata.manifest["shards"]
+        )
+    else:
+        with gsd.hoomd.open(name=str(metadata.gsd_path), mode="r") as trajectory:
+            available_stop = len(trajectory)
     selected_stop = available_stop if stop is None else min(stop, available_stop)
     return list(range(start, selected_stop, stride))
 
@@ -98,6 +121,20 @@ def iter_frames(
     selected: set[int],
 ) -> Iterator[tuple[int, int, np.ndarray]]:
     """Yield frame index, simulation step, and saved cylindrical coordinates."""
+    if metadata.gsd_path is not None:
+        with gsd.hoomd.open(name=str(metadata.gsd_path), mode="r") as trajectory:
+            for frame in sorted(selected):
+                snapshot = trajectory[frame]
+                positions = np.asarray(snapshot.particles.position)
+                cylindrical = np.column_stack(
+                    (
+                        positions[:, 0],
+                        np.arctan2(positions[:, 2], positions[:, 1]),
+                        np.hypot(positions[:, 1], positions[:, 2]),
+                    )
+                )
+                yield frame, int(snapshot.configuration.step), cylindrical
+        return
     for shard in metadata.manifest["shards"]:
         shard_start = int(shard["frame_start"])
         shard_stop = int(shard["frame_stop"])
