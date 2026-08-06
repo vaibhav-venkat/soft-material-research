@@ -99,6 +99,7 @@ def plot_lifetimes(stats: BandStatistics, output_dir: Path) -> Path:
     area, probability = probability_points(stats.areas)
     _points(axes[0, 0], area, probability, "red", "bands")
     axes[0, 0].set(xlabel=r"$A/\sigma^2$", ylabel=r"$P(A)$")
+    axes[0, 0].set_yscale("log")
     axes[0, 0].get_legend().remove()
 
     logger.info("plotting mean first-passage time by band area")
