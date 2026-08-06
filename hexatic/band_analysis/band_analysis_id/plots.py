@@ -49,12 +49,28 @@ def plot_area_dynamics(stats: BandStatistics, output_dir: Path) -> Path:
         "blue",
         r"$\langle\Delta A^2\rangle/\sqrt{A}$",
     )
+    sns.lineplot(
+        x=area,
+        y=np.sqrt(area),
+        color="blue",
+        linestyle="--",
+        label=r"$\sqrt{A}$",
+        ax=second_axis,
+    )
     second_axis.set_ylabel(r"$\langle\Delta A^2\rangle/\sqrt{A}$")
     axes[1].get_legend().remove()
     second_axis.get_legend().remove()
     axes[1].legend(
-        [axes[1].collections[0], second_axis.collections[0]],
-        [r"$\langle\Delta A\rangle$", r"$\langle\Delta A^2\rangle/\sqrt{A}$"],
+        [
+            axes[1].collections[0],
+            second_axis.collections[0],
+            second_axis.lines[0],
+        ],
+        [
+            r"$\langle\Delta A\rangle$",
+            r"$\langle\Delta A^2\rangle/\sqrt{A}$",
+            r"$\sqrt{A}$",
+        ],
     )
     path = output_dir / "band_area_dynamics.svg"
     figure.savefig(path, format="svg", bbox_inches="tight")
